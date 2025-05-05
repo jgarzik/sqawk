@@ -128,11 +128,7 @@ impl Table {
         }
     }
 
-    /// Get the table name
-    #[allow(dead_code)]
-    pub fn name(&self) -> &str {
-        &self.name
-    }
+
 
     /// Get the columns of the table
     pub fn columns(&self) -> &[String] {
@@ -154,11 +150,7 @@ impl Table {
         self.rows.len()
     }
 
-    /// Get a reference to a row by index
-    #[allow(dead_code)]
-    pub fn row(&self, index: usize) -> Option<&Row> {
-        self.rows.get(index)
-    }
+
 
     /// Add a row to the table
     pub fn add_row(&mut self, row: Row) -> SqawkResult<()> {
@@ -181,11 +173,7 @@ impl Table {
         self.source_file.as_ref()
     }
 
-    /// Check if the table was modified
-    #[allow(dead_code)]
-    pub fn is_modified(&self) -> bool {
-        self.modified
-    }
+
 
     /// Get the index of a column by name
     pub fn column_index(&self, name: &str) -> Option<usize> {

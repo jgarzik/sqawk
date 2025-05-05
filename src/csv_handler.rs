@@ -125,15 +125,7 @@ impl CsvHandler {
             .ok_or_else(|| SqawkError::TableNotFound(name.to_string()))
     }
 
-    /// Add a table to the collection
-    ///
-    /// This method is not currently used but kept for future extensibility
-    #[allow(dead_code)]
-    pub fn add_table(&mut self, table: Table) -> SqawkResult<()> {
-        let name = table.name().to_string();
-        self.tables.insert(name, table);
-        Ok(())
-    }
+
 
     /// Get the names of all tables
     pub fn table_names(&self) -> Vec<String> {
