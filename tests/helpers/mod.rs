@@ -161,6 +161,16 @@ pub fn prepare_test_file(dir: &Path) -> Result<PathBuf, Box<dyn std::error::Erro
     Ok(file_path)
 }
 
+/// Helper function to create a test CSV file with people data including category_id
+/// Note: Currently not used, but keeping for potential future tests
+#[allow(dead_code)]
+pub fn prepare_test_file_with_category(dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let file_path = dir.join("people.csv");
+    let content = "id,name,age,category_id\n1,Alice,30,1\n2,Bob,25,2\n3,Charlie,35,1\n";
+    fs::write(&file_path, content)?;
+    Ok(file_path)
+}
+
 /// Helper function to get the path to the static sample.csv test file
 pub fn get_static_sample_file() -> PathBuf {
     PathBuf::from("tests/data/sample.csv")
