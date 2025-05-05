@@ -62,6 +62,18 @@ pub enum SqawkError {
     /// Error for division by zero in arithmetic operations
     #[error("Division by zero")]
     DivideByZero,
+    
+    /// Error for function calls with incorrect number of arguments
+    #[error("Function {function} expected {expected} arguments, got {actual}")]
+    InvalidArgumentCount {
+        expected: usize,
+        actual: usize,
+        function: String,
+    },
+    
+    /// Error for function calls with invalid argument values
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
 }
 
 /// Result type alias for operations that can produce a SqawkError
