@@ -866,9 +866,6 @@ impl SqlExecutor {
                 eprintln!("Looking for qualified column in row evaluation: {}", qualified_name);
                 
                 // Try to find an exact match for the qualified column
-                let mut found = false;
-                let mut matched_value = Value::Null;
-                
                 for (i, col) in table.columns().iter().enumerate() {
                     eprintln!("Comparing with column: {}", col);
                     if col == &qualified_name {

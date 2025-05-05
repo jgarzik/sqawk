@@ -19,29 +19,7 @@ pub struct ColumnRef {
 }
 
 impl ColumnRef {
-    /// Create a new column reference
-    pub fn new(column_name: &str) -> Self {
-        Self {
-            table_name: None,
-            column_name: column_name.to_string(),
-        }
-    }
-
-    /// Create a new qualified column reference
-    pub fn qualified(table_name: &str, column_name: &str) -> Self {
-        Self {
-            table_name: Some(table_name.to_string()),
-            column_name: column_name.to_string(),
-        }
-    }
-
-    /// Get the fully qualified name (table.column)
-    pub fn qualified_name(&self) -> String {
-        match &self.table_name {
-            Some(table) => format!("{}.{}", table, self.column_name),
-            None => self.column_name.clone(),
-        }
-    }
+    // Removed unused methods
 }
 
 use crate::error::{SqawkError, SqawkResult};
@@ -165,11 +143,6 @@ impl Table {
 
 
 
-    /// Get the name of the table
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
     /// Get the columns of the table
     pub fn columns(&self) -> &[String] {
         &self.columns
@@ -188,16 +161,6 @@ impl Table {
     /// Get the row count
     pub fn row_count(&self) -> usize {
         self.rows.len()
-    }
-    
-    /// Get value at specific row and column
-    pub fn get_value(&self, row_idx: usize, col_idx: usize) -> Option<&Value> {
-        self.rows.get(row_idx).and_then(|row| row.get(col_idx))
-    }
-    
-    /// Check if the table has been modified
-    pub fn is_modified(&self) -> bool {
-        self.modified
     }
 
 
@@ -346,47 +309,7 @@ impl Table {
         Ok(result)
     }
     
-    /// Create a new table with fully qualified column names (table.column)
-    ///
-    /// This is useful for join operations where columns from different tables
-    /// need to be distinguishable.
-    pub fn with_qualified_columns(&self) -> Self {
-        let qualified_columns = self
-            .columns
-            .iter()
-            .map(|col| format!("{}.{}", self.name, col))
-            .collect();
-            
-        let mut result = Table::new(&self.name, qualified_columns, None);
-        
-        // Copy rows
-        for row in &self.rows {
-            // Safe to unwrap since we're just copying rows
-            result.add_row(row.clone()).unwrap();
-        }
-        
-        result
-    }
-    
-    /// Get a column's index, handling qualified names ("table.column")
-    ///
-    /// This allows lookup of columns using both simple names and qualified names.
-    /// For example, both "name" and "users.name" would match the "name" column
-    /// in a table named "users".
-    ///
-    /// # Arguments
-    /// * `column_ref` - The column reference, which may be qualified
-    ///
-    /// # Returns
-    /// * The column index if found, or None if not found
-    pub fn get_column_index(&self, column_ref: &ColumnRef) -> Option<usize> {
-        match &column_ref.table_name {
-            // If qualified, check table name matches
-            Some(table_name) if table_name != &self.name => None,
-            // Either matching table name or no table qualification
-            _ => self.column_index(&column_ref.column_name),
-        }
-    }
+
     
     /// Execute a CROSS JOIN with another table
     ///

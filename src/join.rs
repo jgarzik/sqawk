@@ -5,7 +5,7 @@
 use sqlparser::ast::{Expr, JoinOperator};
 
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::{Table, Value};
+use crate::table::Table;
 
 /// Join types supported by sqawk
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -142,78 +142,6 @@ impl JoinExecutor {
                 
                 // Add the combined row to the result table
                 // TODO: Evaluate ON condition here
-                let _ = result.add_row(new_row);
-            }
-        }
-        
-        Ok(result)
-    }
-    
-    /// Execute a left outer join
-    ///
-    /// # Arguments
-    /// * `left` - The left table
-    /// * `right` - The right table
-    /// * `on_expr` - The ON condition expression
-    ///
-    /// # Returns
-    /// * The resulting left-joined table
-    fn execute_left_join(&self, left: &Table, right: &Table, _on_expr: &Expr) -> SqawkResult<Table> {
-        // Create a new table with combined columns
-        let mut result_columns = Vec::with_capacity(left.column_count() + right.column_count());
-        
-        // Add qualified columns from left table
-        for col in left.columns() {
-            result_columns.push(format!("left.{}", col));
-        }
-        
-        // Add qualified columns from right table
-        for col in right.columns() {
-            result_columns.push(format!("right.{}", col));
-        }
-        
-        let mut result = Table::new("joined", result_columns, None);
-        
-        // Left outer join logic:
-        // 1. Match rows from left and right based on the join condition
-        // 2. Include all rows from the left table, with NULL values for the right table if no match
-        
-        for left_row in left.rows().iter() {
-            let mut matched = false;
-            
-            for right_row in right.rows().iter() {
-                // TODO: Check if rows match based on the join condition
-                // For now, we'll just add all combinations
-                let mut new_row = Vec::with_capacity(left_row.len() + right_row.len());
-                
-                // Add values from left row
-                for value in left_row {
-                    new_row.push(value.clone());
-                }
-                
-                // Add values from right row
-                for value in right_row {
-                    new_row.push(value.clone());
-                }
-                
-                let _ = result.add_row(new_row);
-                matched = true;
-            }
-            
-            // If no match was found, add the left row with NULL values for the right side
-            if !matched {
-                let mut new_row = Vec::with_capacity(left_row.len() + right.column_count());
-                
-                // Add values from left row
-                for value in left_row {
-                    new_row.push(value.clone());
-                }
-                
-                // Add NULL values for the right side
-                for _ in 0..right.column_count() {
-                    new_row.push(Value::Null);
-                }
-                
                 let _ = result.add_row(new_row);
             }
         }
