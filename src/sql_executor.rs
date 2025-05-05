@@ -362,15 +362,40 @@ impl SqlExecutor {
     ///
     /// # Returns
     /// * A new table resulting from applying all join operations sequentially
+    /// Process explicit JOIN clauses in a SQL statement
+    ///
+    /// This function handles the various types of JOIN operations in a SQL statement,
+    /// including INNER JOIN with ON conditions and implicit CROSS JOINs.
+    ///
+    /// # Arguments
+    /// * `left_table` - The left (base) table for the join operations
+    /// * `joins` - Array of JOIN clauses to process sequentially
+    ///
+    /// # Returns
+    /// * A new table containing the results of all join operations
+    /// * `Err` if any JOIN syntax is unsupported or tables can't be found
+    ///
+    /// # Implementation Details
+    /// Joins are processed sequentially, with each join building on the result
+    /// of the previous one. The implementation follows these steps:
+    /// 1. Clone the left table as the starting point
+    /// 2. For each join specification:
+    ///    a. Extract the right table name
+    ///    b. Retrieve the right table from the file handler
+    ///    c. Apply the appropriate join algorithm based on the join type
     fn process_table_joins(&self, left_table: &Table, joins: &[SqlJoin]) -> SqawkResult<Table> {
+        // Start with a clone of the left table as our working result
         let mut result_table = left_table.clone();
         
+        // Process each join clause sequentially
         for join in joins {
+            // Log join type in verbose mode for debugging
             if self.verbose {
                 eprintln!("DEBUG - Join type: {:?}", join.join_operator);
             }
             
-            // Get the right table
+            // Extract the right table name from the join specification
+            // This handles simple table references like "TableName" but not complex expressions
             let right_table_name = match &join.relation {
                 TableFactor::Table { name, .. } => name
                     .0
@@ -385,32 +410,38 @@ impl SqlExecutor {
                 }
             };
             
+            // Fetch the right table from the loaded tables collection
             let right_table = self.file_handler.get_table(&right_table_name)?;
             
-            // Handle different join types
+            // Apply different join algorithms based on join type and constraints
             match &join.join_operator {
-                // CROSS JOIN (no ON condition)
-                // In sqlparser 0.36, CrossJoin is separate enum variant, not part of JoinOperator
-                // JoinOperator with None constraint indicates no ON clause (effectively a CROSS JOIN)
+                // Handle JOINs without ON conditions (CROSS JOINs)
+                // Note: In sqlparser 0.36, the lack of a constraint (JoinConstraint::None)
+                // indicates the absence of an ON clause, which we treat as a CROSS JOIN
                 JoinOperator::FullOuter(JoinConstraint::None) | 
-                JoinOperator::Inner(JoinConstraint::None) | JoinOperator::LeftOuter(JoinConstraint::None) | 
+                JoinOperator::Inner(JoinConstraint::None) | 
+                JoinOperator::LeftOuter(JoinConstraint::None) | 
                 JoinOperator::RightOuter(JoinConstraint::None) => {
+                    // Create a Cartesian product of the tables (all possible row combinations)
                     result_table = result_table.cross_join(right_table)?;
                 }
                 
-                // INNER JOIN with ON condition
+                // Handle INNER JOIN with ON condition
                 JoinOperator::Inner(JoinConstraint::On(expr)) => {
                     if self.verbose {
                         eprintln!("Processing INNER JOIN with ON condition: {:?}", expr);
                     }
                     
-                    // Create a closure to evaluate the join condition for each combined row
+                    // Use inner_join with a closure that evaluates the ON condition
+                    // for each potential row combination from the Cartesian product
                     result_table = result_table.inner_join(right_table, |row, table| {
+                        // This closure evaluates the ON condition for each row in the cross-join result
                         self.evaluate_condition(expr, row, table)
                     })?;
                 }
                 
-                // Other JOIN types with ON conditions are not supported yet
+                // Handle JOIN types that are not yet supported
+                // Future enhancement: Implement LEFT, RIGHT, and FULL OUTER JOINs
                 JoinOperator::LeftOuter(JoinConstraint::On(_)) | 
                 JoinOperator::RightOuter(JoinConstraint::On(_)) | 
                 JoinOperator::FullOuter(JoinConstraint::On(_)) => {
@@ -1348,13 +1379,25 @@ impl SqlExecutor {
     
     /// Apply aggregate functions with GROUP BY clause
     ///
-    /// This function applies aggregate functions like COUNT, SUM, AVG, MIN, MAX
-    /// to groups of data defined by the GROUP BY clause.
+    /// This function implements SQL's GROUP BY functionality, which groups rows based on
+    /// specified columns and applies aggregate functions to each group. This is a key
+    /// component of analytical queries that need to summarize data across groups.
     ///
     /// # Arguments
-    /// * `items` - The SELECT items from the SQL query, which may contain aggregate functions
-    /// * `table` - The source table to apply aggregate functions to
-    /// * `group_by` - The GROUP BY expressions from the SQL query
+    /// * `items` - The SELECT items from the SQL query (columns and expressions to include)
+    /// * `table` - The source table to apply grouping and aggregation to
+    /// * `group_by` - The GROUP BY expressions defining how to group the rows
+    ///
+    /// # Returns
+    /// 
+    /// # Implementation Details
+    /// The GROUP BY implementation follows these steps:
+    /// 1. Identify the columns to group by
+    /// 2. Build a HashMap that groups row indices by their group key values
+    /// 3. Process each SELECT item to determine which outputs to include
+    /// 4. For each group, generate one output row with:
+    ///    - The GROUP BY column values
+    ///    - The results of aggregate functions applied to that group
     ///
     /// # Returns
     /// * A new table containing the results of all aggregate functions, one row per group

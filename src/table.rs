@@ -581,15 +581,44 @@ impl Table {
     ///
     /// # Returns
     /// * A new table containing the inner join result
+    /// Perform an INNER JOIN between two tables with a custom condition
+    ///
+    /// This method implements the SQL INNER JOIN operation, which combines rows from
+    /// two tables that satisfy a join condition. The implementation follows a
+    /// two-step approach: first creating a cross join (Cartesian product), then
+    /// filtering the combined rows based on the provided condition.
+    ///
+    /// # Arguments
+    /// * `right` - The right-hand table to join with
+    /// * `join_condition` - A closure that evaluates whether a combined row should be included
+    ///   The closure receives:
+    ///   - A combined row from both tables
+    ///   - A reference to the combined table (for column lookups)
+    ///   The closure returns a boolean indicating whether the row satisfies the join condition
+    ///
+    /// # Returns
+    /// * A new table containing only the rows that satisfy the join condition
+    /// * `Err` if there was an error evaluating the condition or adding rows
+    ///
+    /// # Usage Example
+    /// 
+    /// This method is typically used to implement SQL's INNER JOIN operation
+    /// with an ON condition. For example, implementing:
+    /// 
+    /// SELECT * FROM employees INNER JOIN departments 
+    /// ON employees.dept_id = departments.id
+    /// 
+    /// The implementation first finds the column indexes for the join keys,
+    /// then compares the values in those columns for each row combination.
     pub fn inner_join<F>(&self, right: &Self, join_condition: F) -> SqawkResult<Self> 
     where 
         F: Fn(&[Value], &Self) -> SqawkResult<bool>
     {
-        // Create result columns with proper prefixes
+        // Step 1: Create the output columns structure - this must be done before creating
+        // the result table to ensure columns from both tables are properly qualified
         let columns = self.create_joined_columns(right);
         
-        // Create a new table to hold the join result
-        // Convert the String to &str with as_str() to fix type mismatch
+        // Step 2: Create a new table to hold the join result
         let name = format!("{}_inner_join", self.name());
         let mut result = Table::new(
             &name, 
@@ -597,14 +626,17 @@ impl Table {
             None
         );
         
-        // First create the cross join to evaluate conditions against
+        // Step 3: First create the cross join (Cartesian product) to evaluate conditions against
+        // This creates every possible combination of rows from both tables
         let combined_tables = self.cross_join(right)?;
         
-        // Then filter the rows based on the join condition
+        // Step 4: Filter the cross join result based on the join condition
+        // This is effectively the ON clause in SQL's "INNER JOIN ... ON" syntax
         for row in combined_tables.rows().iter() {
-            // Evaluate the condition for this row
+            // Evaluate the condition for this row, which comes from the closure
+            // provided by the SQL executor based on the ON condition
             if join_condition(row, &combined_tables)? {
-                // Add matching row to result
+                // Add matching rows to the result table
                 result.add_row(row.clone())?;
             }
         }
