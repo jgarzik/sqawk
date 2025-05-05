@@ -18,6 +18,7 @@ Sqawk provides a powerful SQL-like query language for processing delimiter-separ
    - [Column Aliases](#column-aliases)
    - [WHERE Clause](#where-clause)
    - [ORDER BY Clause](#order-by-clause)
+   - [LIMIT and OFFSET Clauses](#limit-and-offset-clauses)
    - [Aggregate Functions](#aggregate-functions)
    - [GROUP BY Clause](#group-by-clause)
 7. [Multi-Table Operations (Joins)](#multi-table-operations-joins)
@@ -164,7 +165,9 @@ Sqawk currently supports the following SQL statement types:
 SELECT [DISTINCT] [column_list | *]
 FROM table_name [, table_name2, ...]
 [WHERE condition]
+[GROUP BY column_list]
 [ORDER BY column [ASC|DESC], ...]
+[LIMIT count [OFFSET skip_count]]
 ```
 
 ### DISTINCT Keyword
@@ -273,6 +276,34 @@ SELECT * FROM users ORDER BY age ASC, name DESC
 -- Order by aliased columns
 SELECT name AS employee_name, age AS years FROM users ORDER BY years DESC
 ```
+
+### LIMIT and OFFSET Clauses
+
+The `LIMIT` and `OFFSET` clauses control the number of rows returned by a query:
+
+```sql
+-- Return only the first 10 rows
+SELECT * FROM users LIMIT 10
+
+-- Skip the first 5 rows and return the next 10
+SELECT * FROM users LIMIT 10 OFFSET 5
+
+-- Combine with ORDER BY for pagination
+SELECT * FROM users ORDER BY age DESC LIMIT 10 OFFSET 20
+```
+
+LIMIT and OFFSET are particularly useful for:
+- Pagination of large result sets
+- Retrieving "top N" results when combined with ORDER BY
+- Sampling data from large tables
+- Creating efficient user interfaces that load data incrementally
+
+Important characteristics:
+- LIMIT accepts a positive integer specifying the maximum number of rows to return
+- OFFSET (optional) specifies the number of rows to skip before starting to return rows
+- Both clauses are applied after all other query operations (WHERE, GROUP BY, ORDER BY, etc.)
+- If OFFSET is greater than or equal to the number of rows after filtering, an empty result set is returned
+- LIMIT with a value of 0 will return an empty result set
 
 ### Aggregate Functions
 
@@ -498,6 +529,7 @@ Current limitations of Sqawk's SQL implementation:
 - Column aliases (AS keyword)
 - DISTINCT keyword for removing duplicate rows
 - ORDER BY with ascending/descending sorting
+- LIMIT and OFFSET for pagination and result set control
 - Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
 - GROUP BY clause for data aggregation
 - Multi-column sorting

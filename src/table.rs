@@ -825,4 +825,36 @@ impl Table {
 
         Ok(result)
     }
+
+    /// Limits the number of rows in the table
+    ///
+    /// This method applies LIMIT and OFFSET to the table, returning a new table
+    /// containing at most `limit` rows, starting from the `offset` position.
+    /// This is used to implement the SQL LIMIT and OFFSET clauses.
+    ///
+    /// # Arguments
+    /// * `limit` - The maximum number of rows to include
+    /// * `offset` - The number of rows to skip before starting to include rows (default: 0)
+    ///
+    /// # Returns
+    /// * A new table with the specified limit and offset applied
+    pub fn limit(&self, limit: usize, offset: usize) -> SqawkResult<Self> {
+        // Create a new table with the same structure
+        let mut result = Table::new(&self.name, self.columns.clone(), self.source_file.clone());
+        
+        // If offset is greater than or equal to the number of rows, return an empty table
+        if offset >= self.rows.len() {
+            return Ok(result);
+        }
+        
+        // Calculate the end index, capped at the table size
+        let end = std::cmp::min(offset + limit, self.rows.len());
+        
+        // Add rows from offset to end
+        for row in &self.rows[offset..end] {
+            result.add_row(row.clone())?;
+        }
+        
+        Ok(result)
+    }
 }

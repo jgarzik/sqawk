@@ -161,10 +161,6 @@ args = "Test DISTINCT Basic"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "Test DISTINCT with WHERE"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
 args = "Test DISTINCT with ORDER BY"
 
 [[workflows.workflow.tasks]]
@@ -178,6 +174,38 @@ args = "Test DISTINCT with SELECT *"
 [[workflows.workflow.tasks]]
 task = "workflow.run"
 args = "Test DISTINCT without id"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test DISTINCT with WHERE"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test LIMIT Feature"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test LIMIT with OFFSET"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test LIMIT with ORDER BY"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test LIMIT with Aggregates"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test DISTINCT with LIMIT"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Run LIMIT/OFFSET Tests"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Run All Tests"
 
 [[workflows.workflow]]
 name = "sqawk-build-and-run"
@@ -478,14 +506,6 @@ task = "shell.exec"
 args = "cd $(pwd) && cargo run -- -s \"SELECT DISTINCT name, department FROM duplicates\" tests/data/duplicates.csv -v"
 
 [[workflows.workflow]]
-name = "Test DISTINCT with WHERE"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "cd $(pwd) && cargo run -- -s \"SELECT DISTINCT name, role FROM duplicates WHERE department = 'Engineering'\" tests/data/duplicates.csv -v"
-
-[[workflows.workflow]]
 name = "Test DISTINCT with ORDER BY"
 author = "agent"
 
@@ -516,6 +536,70 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "cd $(pwd) && cargo run -- -s \"SELECT DISTINCT name, department, role FROM duplicates\" tests/data/duplicates.csv -v"
+
+[[workflows.workflow]]
+name = "Test DISTINCT with WHERE"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run --bin sqawk -- -s \"SELECT DISTINCT name, role FROM duplicates WHERE department = 'Engineering'\" tests/data/duplicates.csv -v"
+
+[[workflows.workflow]]
+name = "Test LIMIT Feature"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT * FROM sample LIMIT 2\" tests/data/sample.csv -v"
+
+[[workflows.workflow]]
+name = "Test LIMIT with OFFSET"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT * FROM sample LIMIT 2 OFFSET 1\" tests/data/sample.csv -v"
+
+[[workflows.workflow]]
+name = "Test LIMIT with ORDER BY"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT * FROM sample ORDER BY age DESC LIMIT 2\" tests/data/sample.csv -v"
+
+[[workflows.workflow]]
+name = "Test LIMIT with Aggregates"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT department, COUNT(*) AS count, AVG(salary) AS avg_salary FROM departments GROUP BY department ORDER BY avg_salary DESC LIMIT 2\" tests/data/departments.csv -v"
+
+[[workflows.workflow]]
+name = "Test DISTINCT with LIMIT"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT DISTINCT department, role FROM duplicates ORDER BY department ASC LIMIT 3 OFFSET 1\" tests/data/duplicates.csv -v"
+
+[[workflows.workflow]]
+name = "Run LIMIT/OFFSET Tests"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && RUST_TEST_THREADS=1 cargo test limit_offset"
+
+[[workflows.workflow]]
+name = "Run All Tests"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && RUST_TEST_THREADS=1 cargo test"
 
 [deployment]
 run = ["sh", "-c", "cargo build && echo \"Testing Sqawk with sample data:\" && cargo run -- -s \"SELECT * FROM sample\" tests/data/sample.csv -v"]

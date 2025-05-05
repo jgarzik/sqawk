@@ -7,6 +7,7 @@
 //! - Support for multi-table operations including cross joins and inner joins
 //! - Column alias handling and resolution for both regular columns and aggregate functions
 //! - ORDER BY implementation with multi-column support and configurable sort direction
+//! - LIMIT and OFFSET support for pagination and result set control
 //! - WHERE clause evaluation using a robust type system with SQL-like comparison semantics
 //! - Tracking of modified tables for selective write-back to their original files
 //!
@@ -123,7 +124,7 @@ impl SqlExecutor {
     /// Execute a SELECT query
     fn execute_query(&self, query: Query) -> SqawkResult<Option<Table>> {
         match *query.body {
-            SetExpr::Select(select) => {
+            SetExpr::Select(ref select) => {
                 if select.from.is_empty() {
                     return Err(SqawkError::InvalidSqlQuery(
                         "SELECT query must have at least one table".to_string(),
@@ -187,6 +188,14 @@ impl SqlExecutor {
                         final_result_table =
                             self.apply_order_by(final_result_table, &query.order_by)?;
                     }
+                    
+                    // Apply LIMIT and OFFSET if present
+                    if query.limit.is_some() || query.offset.is_some() {
+                        if self.verbose {
+                            eprintln!("Applying LIMIT/OFFSET");
+                        }
+                        final_result_table = self.apply_limit_offset(final_result_table, &query)?;
+                    }
 
                     Ok(Some(final_result_table))
                 } else {
@@ -229,6 +238,14 @@ impl SqlExecutor {
                         }
                         result_table = self.apply_order_by(result_table, &query.order_by)?;
                     }
+                    
+                    // Apply LIMIT and OFFSET if present
+                    if query.limit.is_some() || query.offset.is_some() {
+                        if self.verbose {
+                            eprintln!("Applying LIMIT/OFFSET");
+                        }
+                        result_table = self.apply_limit_offset(result_table, &query)?;
+                    }
 
                     Ok(Some(result_table))
                 }
@@ -237,6 +254,71 @@ impl SqlExecutor {
                 "Only simple SELECT statements are supported".to_string(),
             )),
         }
+    }
+    
+    /// Apply LIMIT and OFFSET clauses to a table
+    ///
+    /// This function extracts limit and offset values from the SQL query,
+    /// and applies them to the table using the Table.limit() method.
+    ///
+    /// # Arguments
+    /// * `table` - The table to apply limit and offset to
+    /// * `query` - The SQL query containing limit and offset clauses
+    ///
+    /// # Returns
+    /// * A new table with limit and offset applied
+    fn apply_limit_offset(&self, table: Table, query: &Query) -> SqawkResult<Table> {
+        // Extract LIMIT value (default to all rows if not specified)
+        let limit = if let Some(limit_expr) = &query.limit {
+            match limit_expr {
+                // Parse the limit value from the SQL expression
+                sqlparser::ast::Expr::Value(SqlValue::Number(n, _)) => {
+                    match n.parse::<usize>() {
+                        Ok(val) => val,
+                        Err(_) => {
+                            return Err(SqawkError::InvalidSqlQuery(
+                                format!("Invalid LIMIT value: {}", n)
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Only constant numeric values are supported for LIMIT".to_string(),
+                    ));
+                }
+            }
+        } else {
+            // If no LIMIT is specified, use usize::MAX to effectively get all rows
+            usize::MAX
+        };
+
+        // Extract OFFSET value (default to 0 if not specified)
+        let offset = if let Some(offset_clause) = &query.offset {
+            match &offset_clause.value {
+                sqlparser::ast::Expr::Value(SqlValue::Number(n, _)) => {
+                    match n.parse::<usize>() {
+                        Ok(val) => val,
+                        Err(_) => {
+                            return Err(SqawkError::InvalidSqlQuery(
+                                format!("Invalid OFFSET value: {}", n)
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Only constant numeric values are supported for OFFSET".to_string(),
+                    ));
+                }
+            }
+        } else {
+            // If no OFFSET is specified, use 0
+            0
+        };
+
+        // Apply the limit and offset to the table
+        table.limit(limit, offset)
     }
 
     /// Apply an ORDER BY clause to sort the result table

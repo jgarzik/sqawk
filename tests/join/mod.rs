@@ -24,20 +24,46 @@ fn test_cross_join() -> Result<(), Box<dyn std::error::Error>> {
     // Test a basic cross join between two tables
     let mut cmd = Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
-        .arg("SELECT * FROM users, orders LIMIT 3")
+        .arg("SELECT * FROM users, orders")
         .arg(get_users_file().to_str().unwrap())
         .arg(get_orders_file().to_str().unwrap())
         .arg("-v");
 
-    // Check output - should have combined columns and first 3 rows of cross join
+    // Check output - should have combined columns for a complete cross join
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("users.id,users.name,users.email,orders.id,orders.user_id,orders.product_id,orders.date"))
-        .stdout(predicate::str::contains("Processing multiple tables in FROM clause as CROSS JOINs").not());
+        .stderr(predicate::str::contains("Processing multiple tables in FROM clause as CROSS JOINs"));
 
-    // Verify we have a proper cross join with first user repeated for multiple orders
+    // Verify we have a proper cross join with both users appearing in the result
     cmd.assert()
         .stdout(predicate::str::contains("John,john@example.com"))
+        .stdout(predicate::str::contains("Jane,jane@example.com"));
+
+    // Test with LIMIT separately - this will only show the first user due to how cross join ordering works
+    let mut cmd2 = Command::cargo_bin("sqawk")?;
+    cmd2.arg("-s")
+        .arg("SELECT * FROM users, orders LIMIT 5")
+        .arg(get_users_file().to_str().unwrap())
+        .arg(get_orders_file().to_str().unwrap())
+        .arg("-v");
+
+    // With LIMIT 5, we should see all rows containing John but none with Jane
+    cmd2.assert()
+        .success()
+        .stdout(predicate::str::contains("John,john@example.com"))
+        .stderr(predicate::str::contains("Applying LIMIT/OFFSET"));
+
+    // Test a filtered query to specifically get Jane's data
+    let mut cmd3 = Command::cargo_bin("sqawk")?;
+    cmd3.arg("-s")
+        .arg("SELECT users.name, users.email FROM users, orders WHERE users.id = 2 LIMIT 1")
+        .arg(get_users_file().to_str().unwrap())
+        .arg(get_orders_file().to_str().unwrap());
+
+    // This specific query should include Jane
+    cmd3.assert()
+        .success()
         .stdout(predicate::str::contains("Jane,jane@example.com"));
 
     Ok(())

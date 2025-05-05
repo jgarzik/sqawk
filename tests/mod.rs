@@ -17,6 +17,7 @@ mod delimiter; // Tests for delimiter options (-F flag)
 mod group_by; // Tests for GROUP BY functionality
 mod join_on; // Tests for JOIN ON syntax (as opposed to WHERE for joins)
 mod advanced; // Tests for advanced SQL features and edge cases
+mod limit_offset; // Tests for LIMIT and OFFSET clauses
 
 // Support modules
 mod helpers; // Test helpers and utilities
