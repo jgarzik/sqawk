@@ -35,9 +35,13 @@ fn test_basic_select() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_filtered_select() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a temporary directory for test files
+    // Create a temporary directory for test files using CARGO_TARGET_TMPDIR if available
     let temp_dir = TempDir::new()?;
     let test_file = prepare_test_file(temp_dir.path())?;
+    
+    println!("Created test file at: {}", test_file.display());
+    println!("Test file content:");
+    println!("{}", fs::read_to_string(&test_file)?);
     
     // Run sqawk with a SELECT query with WHERE clause
     let mut cmd = Command::cargo_bin("sqawk")?;
@@ -45,7 +49,21 @@ fn test_filtered_select() -> Result<(), Box<dyn std::error::Error>> {
         .arg("SELECT name FROM people WHERE age = 30")
         .arg(test_file.to_str().unwrap());
     
-    // Check output
+    println!("Running command: {:?}", cmd);
+    
+    // Run the command manually to see the output
+    let output = cmd.output()?;
+    println!("Command exit status: {}", output.status);
+    println!("Command stdout: {}", String::from_utf8_lossy(&output.stdout));
+    println!("Command stderr: {}", String::from_utf8_lossy(&output.stderr));
+    
+    // Reset the command
+    let mut cmd = Command::cargo_bin("sqawk")?;
+    cmd.arg("-s")
+        .arg("SELECT name FROM people WHERE age = 30")
+        .arg(test_file.to_str().unwrap());
+    
+    // Check output with assertions
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("name"))

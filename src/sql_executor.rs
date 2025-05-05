@@ -91,13 +91,15 @@ impl SqlExecutor {
                 // Determine which columns to include in the result
                 let column_indices = self.resolve_select_items(&select.projection, source_table)?;
                 
-                // Apply projection to get only the requested columns
-                let mut result_table = source_table.project(&column_indices)?;
+                // First filter rows if WHERE clause is present
+                let filtered_table = if let Some(where_clause) = &select.selection {
+                    self.apply_where_clause(source_table.clone(), where_clause)?
+                } else {
+                    source_table.clone()
+                };
                 
-                // Apply WHERE clause if present
-                if let Some(where_clause) = &select.selection {
-                    result_table = self.apply_where_clause(result_table, where_clause)?;
-                }
+                // Then apply projection to get only the requested columns
+                let result_table = filtered_table.project(&column_indices)?;
                 
                 Ok(Some(result_table))
             },
@@ -279,6 +281,54 @@ impl SqlExecutor {
                         Ok(result)
                     },
                     sqlparser::ast::BinaryOperator::NotEq => Ok(left_val != right_val),
+                    sqlparser::ast::BinaryOperator::Gt => {
+                        match (&left_val, &right_val) {
+                            (Value::Integer(a), Value::Integer(b)) => Ok(a > b),
+                            (Value::Float(a), Value::Float(b)) => Ok(a > b),
+                            (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) > *b),
+                            (Value::Float(a), Value::Integer(b)) => Ok(*a > (*b as f64)),
+                            (Value::String(a), Value::String(b)) => Ok(a > b),
+                            _ => Err(SqawkError::TypeError(
+                                format!("Cannot compare {:?} and {:?} with >", left_val, right_val)
+                            )),
+                        }
+                    },
+                    sqlparser::ast::BinaryOperator::Lt => {
+                        match (&left_val, &right_val) {
+                            (Value::Integer(a), Value::Integer(b)) => Ok(a < b),
+                            (Value::Float(a), Value::Float(b)) => Ok(a < b),
+                            (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) < *b),
+                            (Value::Float(a), Value::Integer(b)) => Ok(*a < (*b as f64)),
+                            (Value::String(a), Value::String(b)) => Ok(a < b),
+                            _ => Err(SqawkError::TypeError(
+                                format!("Cannot compare {:?} and {:?} with <", left_val, right_val)
+                            )),
+                        }
+                    },
+                    sqlparser::ast::BinaryOperator::GtEq => {
+                        match (&left_val, &right_val) {
+                            (Value::Integer(a), Value::Integer(b)) => Ok(a >= b),
+                            (Value::Float(a), Value::Float(b)) => Ok(a >= b),
+                            (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) >= *b),
+                            (Value::Float(a), Value::Integer(b)) => Ok(*a >= (*b as f64)),
+                            (Value::String(a), Value::String(b)) => Ok(a >= b),
+                            _ => Err(SqawkError::TypeError(
+                                format!("Cannot compare {:?} and {:?} with >=", left_val, right_val)
+                            )),
+                        }
+                    },
+                    sqlparser::ast::BinaryOperator::LtEq => {
+                        match (&left_val, &right_val) {
+                            (Value::Integer(a), Value::Integer(b)) => Ok(a <= b),
+                            (Value::Float(a), Value::Float(b)) => Ok(a <= b),
+                            (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) <= *b),
+                            (Value::Float(a), Value::Integer(b)) => Ok(*a <= (*b as f64)),
+                            (Value::String(a), Value::String(b)) => Ok(a <= b),
+                            _ => Err(SqawkError::TypeError(
+                                format!("Cannot compare {:?} and {:?} with <=", left_val, right_val)
+                            )),
+                        }
+                    },
                     // Add more operators as needed
                     _ => Err(SqawkError::UnsupportedSqlFeature(
                         format!("Unsupported binary operator: {:?}", op)
