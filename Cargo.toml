@@ -3,13 +3,13 @@ name = "sqawk"
 version = "0.1.0"
 edition = "2021"
 authors = ["Jeff Garzik <jgarzik@pobox.com>"]
-description = "An SQL-based command-line tool for processing CSV files, inspired by awk"
+description = "An SQL-based command-line tool for processing delimiter-separated files (CSV, TSV, etc.), inspired by awk"
 license = "MIT"
 repository = "https://github.com/jgarzik/sqawk"
 homepage = "https://github.com/jgarzik/sqawk"
 documentation = "https://github.com/jgarzik/sqawk"
 readme = "README.md"
-keywords = ["csv", "sql", "command-line", "data-processing", "awk"]
+keywords = ["csv", "tsv", "sql", "delimited", "awk"]
 categories = ["command-line-utilities", "database", "text-processing"]
 # Minimum version of Rust required
 rust-version = "1.65.0"

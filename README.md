@@ -4,7 +4,7 @@
 [![Docs.rs](https://docs.rs/sqawk/badge.svg)](https://docs.rs/sqawk)
 [![MIT licensed](https://img.shields.io/crates/l/sqawk.svg)](./LICENSE)
 
-Sqawk is an SQL-based command-line tool for processing CSV files, inspired by the classic `awk` command. It loads CSV data into in-memory tables, executes SQL queries against these tables, and writes the results back to the console or files.
+Sqawk is an SQL-based command-line tool for processing delimiter-separated files (CSV, TSV, etc.), inspired by the classic `awk` command. It loads data into in-memory tables, executes SQL queries against these tables, and writes the results back to the console or files.
 
 ## Features
 
@@ -26,7 +26,9 @@ Sqawk is an SQL-based command-line tool for processing CSV files, inspired by th
   - Type coercion for comparisons
   - Null value support
   
-- **CSV Processing**
+- **File Format Support**
+  - Process CSV, TSV, and custom-delimited files
+  - Custom field separator support with -F option (like awk)
   - Fast in-memory execution
   - Process multiple files in a single command
   - Table name customization
@@ -87,6 +89,16 @@ This executes multiple SQL statements in sequence: first marking recent inactive
 
 ```sh
 sqawk -s "SELECT * FROM users" -s "SELECT * FROM orders" users.csv orders.csv
+```
+
+### Custom field separators
+
+```sh
+# Process a tab-delimited file (TSV)
+sqawk -F '\t' -s "SELECT * FROM employees WHERE salary > 70000" employees.tsv
+
+# Process a colon-delimited file
+sqawk -F ':' -s "SELECT id, name, email FROM contacts" contacts.txt
 ```
 
 ### Verbose mode

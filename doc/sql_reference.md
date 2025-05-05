@@ -2,16 +2,17 @@
 
 ## Introduction
 
-Sqawk provides a powerful SQL-like query language for processing CSV files. This document serves as a reference for the SQL dialect supported by Sqawk and explains its syntax, features, and limitations.
+Sqawk provides a powerful SQL-like query language for processing delimiter-separated files. While CSV (comma-separated values) is the default format, Sqawk also supports other delimiter-separated formats like TSV (tab-separated values) and custom delimiters. This document serves as a reference for the SQL dialect supported by Sqawk and explains its syntax, features, and limitations.
 
 ## Table of Contents
 
 1. [Introduction](#introduction)
 2. [Table Names and File Specification](#table-names-and-file-specification)
-3. [Chaining SQL Statements](#chaining-sql-statements)
-4. [Data Types](#data-types)
-5. [SQL Statement Types](#sql-statement-types)
-6. [SELECT Statement](#select-statement)
+3. [File Formats and Field Separators](#file-formats-and-field-separators)
+4. [Chaining SQL Statements](#chaining-sql-statements)
+5. [Data Types](#data-types)
+6. [SQL Statement Types](#sql-statement-types)
+7. [SELECT Statement](#select-statement)
    - [Basic Syntax](#basic-syntax)
    - [Column Selection](#column-selection)
    - [Column Aliases](#column-aliases)
@@ -28,7 +29,7 @@ Sqawk provides a powerful SQL-like query language for processing CSV files. This
 
 ## Table Names and File Specification
 
-When using Sqawk, CSV files are loaded as in-memory tables. By default, the table name is derived from the filename (without the extension). You can also explicitly specify a table name:
+When using Sqawk, delimiter-separated files are loaded as in-memory tables. By default, the table name is derived from the filename (without the extension). You can also explicitly specify a table name:
 
 ```bash
 # Default table name: "sample"
@@ -42,6 +43,41 @@ This naming flexibility allows you to:
 - Use meaningful table names that differ from filenames
 - Work with multiple files that would otherwise have the same derived table name
 - Create more readable SQL queries with domain-specific table names
+
+## File Formats and Field Separators
+
+Sqawk can work with various delimiter-separated file formats, not just standard CSV files. The default behavior is to treat files as comma-separated values (CSV), but you can specify a custom field separator using the `-F` option:
+
+```bash
+# Process a tab-delimited file (TSV)
+sqawk -F '\t' -s "SELECT * FROM employees WHERE salary > 70000" employees.tsv
+
+# Process a colon-delimited file
+sqawk -F ':' -s "SELECT id, name, email FROM contacts" contacts.txt
+
+# Process a pipe-delimited file
+sqawk -F '|' -s "SELECT * FROM data" data.txt
+```
+
+The `-F` option is similar to awk's field separator option, allowing Sqawk to handle a wide variety of text file formats. This capability is particularly useful when working with:
+
+- Tab-delimited files (TSV)
+- Exports from various systems that use custom delimiters
+- Fixed-width files converted to a delimiter format
+- Log files with specific field separators
+
+When using the `-F` option, Sqawk will:
+1. Parse the file using the specified delimiter instead of commas
+2. Automatically detect and preserve the header row for column names
+3. Perform the same type inference and SQL operations as with CSV files
+4. Write back to the original format when using the `--write` flag
+
+### File Format Detection
+
+Sqawk uses the following logic to determine which file format handler to use:
+- If the `-F` option is specified, the file is treated as a custom delimiter-separated file
+- Files with a `.csv` extension are treated as standard CSV files
+- Other file extensions without a specified delimiter are treated as tab-delimited by default
 
 ## Chaining SQL Statements
 
@@ -73,7 +109,7 @@ Sqawk supports the following data types:
 
 ### Type Inference
 
-When loading data from CSV files, Sqawk automatically infers the most appropriate type for each value:
+When loading data from delimiter-separated files, Sqawk automatically infers the most appropriate type for each value:
 
 1. First tries to parse as an `Integer`
 2. If that fails, tries to parse as a `Float` 
@@ -81,7 +117,7 @@ When loading data from CSV files, Sqawk automatically infers the most appropriat
 4. If all else fails, stores the value as a `String`
 5. Empty values are stored as `Null`
 
-This dynamic type inference provides flexibility when working with CSV data, which typically doesn't include explicit type information.
+This dynamic type inference provides flexibility when working with delimiter-separated data, which typically doesn't include explicit type information. The same type inference logic applies to all file formats, whether they are CSV files, TSV files, or files with custom delimiters.
 
 ### Type Coercion in Comparisons
 
@@ -414,14 +450,22 @@ Current limitations of Sqawk's SQL implementation:
 - Multi-column sorting
 - Table-qualified column names
 - Cross joins and inner joins through WHERE conditions
+- Support for custom field separators with -F option
+- Compatible with CSV, TSV, and custom-delimited files
 
 ## Writeback Behavior
 
-Modified tables are only written back to CSV files if:
+Modified tables are only written back to their source files if:
 - The `--write` (or `-w`) flag is explicitly provided
 - The table was actually modified by an SQL operation (INSERT, UPDATE, DELETE)
 
-Without the `--write` flag, source files remain untouched regardless of operations performed.
+When writing data back:
+- The original file format (CSV, TSV, or custom delimiter) is preserved
+- Header rows are maintained
+- Column order is preserved
+- Data types are formatted appropriately based on the original values
+
+Without the `--write` flag, source files remain untouched regardless of operations performed. This allows for exploratory data analysis without the risk of modifying source files.
 
 ---
 

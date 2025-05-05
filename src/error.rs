@@ -14,7 +14,7 @@ use thiserror::Error;
 ///
 /// This enum provides a comprehensive set of error types that can occur during:
 /// - File I/O operations
-/// - CSV parsing and handling
+/// - File parsing and handling
 /// - SQL query parsing
 /// - SQL query execution
 /// - Table and column operations
@@ -27,8 +27,8 @@ pub enum SqawkError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
 
-    /// Error while parsing or processing CSV data
-    #[error("CSV error: {0}")]
+    /// Error while parsing or processing delimited file data
+    #[error("File parsing error: {0}")]
     CsvError(#[from] csv::Error),
 
     /// Error during SQL query parsing with sqlparser

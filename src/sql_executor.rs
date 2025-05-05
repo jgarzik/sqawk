@@ -8,7 +8,7 @@
 //! - Column alias handling and resolution for both regular columns and aggregate functions
 //! - ORDER BY implementation with multi-column support and configurable sort direction
 //! - WHERE clause evaluation using a robust type system with SQL-like comparison semantics
-//! - Tracking of modified tables for selective write-back to CSV files
+//! - Tracking of modified tables for selective write-back to their original files
 //!
 //! The module implements a non-destructive approach, modifying only in-memory tables
 //! until explicitly requested to save changes back to the original files.
@@ -23,15 +23,15 @@ use sqlparser::ast::{
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
-use crate::csv_handler::CsvHandler;
+use crate::file_handler::FileHandler;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{SortDirection, Table, Value};
 use crate::aggregate::AggregateFunction;
 
 /// SQL statement executor
 pub struct SqlExecutor {
-    /// CSV handler for managing tables
-    csv_handler: CsvHandler,
+    /// File handler for managing tables
+    file_handler: FileHandler,
 
     /// Names of tables that have been modified
     modified_tables: HashSet<String>,
@@ -41,10 +41,10 @@ pub struct SqlExecutor {
 }
 
 impl SqlExecutor {
-    /// Create a new SQL executor with the given CSV handler and verbose flag
-    pub fn new_with_verbose(csv_handler: CsvHandler, verbose: bool) -> Self {
+    /// Create a new SQL executor with the given file handler and verbose flag
+    pub fn new_with_verbose(file_handler: FileHandler, verbose: bool) -> Self {
         SqlExecutor {
-            csv_handler,
+            file_handler,
             modified_tables: HashSet::new(),
             verbose,
         }
@@ -315,7 +315,7 @@ impl SqlExecutor {
         // Start with the first table in the FROM clause
         let first_table_with_joins = &from[0];
         let first_table_name = self.get_table_name(first_table_with_joins)?;
-        let mut result_table = self.csv_handler.get_table(&first_table_name)?.clone();
+        let mut result_table = self.file_handler.get_table(&first_table_name)?.clone();
         
         // Handle any joins in the first TableWithJoins
         if !first_table_with_joins.joins.is_empty() {
@@ -330,7 +330,7 @@ impl SqlExecutor {
             }
             for table_with_joins in &from[1..] {
                 let right_table_name = self.get_table_name(table_with_joins)?;
-                let right_table = self.csv_handler.get_table(&right_table_name)?;
+                let right_table = self.file_handler.get_table(&right_table_name)?;
                 
                 // Cross join with the current result table
                 result_table = result_table.cross_join(right_table)?;
@@ -378,7 +378,7 @@ impl SqlExecutor {
                 }
             };
             
-            let right_table = self.csv_handler.get_table(&right_table_name)?;
+            let right_table = self.file_handler.get_table(&right_table_name)?;
             
             // For now, we only support CROSS JOIN
             // Later we'll implement proper join types and conditions
@@ -418,13 +418,13 @@ impl SqlExecutor {
 
         // Check if the table exists
         let column_count = {
-            let table = self.csv_handler.get_table(&table_name)?;
+            let table = self.file_handler.get_table(&table_name)?;
             table.column_count()
         };
 
         // Extract column indices if specified
         let column_indices = if !columns.is_empty() {
-            let table = self.csv_handler.get_table(&table_name)?;
+            let table = self.file_handler.get_table(&table_name)?;
             columns
                 .iter()
                 .map(|ident| {
@@ -460,7 +460,7 @@ impl SqlExecutor {
                     }
 
                     // Add the row to the table
-                    let table = self.csv_handler.get_table_mut(&table_name)?;
+                    let table = self.file_handler.get_table_mut(&table_name)?;
                     table.add_row(row)?;
                 }
 
@@ -499,7 +499,7 @@ impl SqlExecutor {
         if let Some(ref where_expr) = selection {
 
             // Create a list of row indices to delete
-            let table_ref = self.csv_handler.get_table(&table_name)?;
+            let table_ref = self.file_handler.get_table(&table_name)?;
 
             // Evaluate WHERE condition for each row before modifying the table
             // to avoid borrow checker issues
@@ -515,7 +515,7 @@ impl SqlExecutor {
             }
 
             // Now get mutable reference and delete the rows
-            let table = self.csv_handler.get_table_mut(&table_name)?;
+            let table = self.file_handler.get_table_mut(&table_name)?;
 
             // If we have rows to delete, create a new set of rows excluding the ones to delete
             if !rows_to_delete.is_empty() {
@@ -544,7 +544,7 @@ impl SqlExecutor {
         } else {
             // No WHERE clause means delete all rows
 
-            let table = self.csv_handler.get_table_mut(&table_name)?;
+            let table = self.file_handler.get_table_mut(&table_name)?;
             let deleted_count = table.row_count();
 
             // Replace with empty row set
@@ -1826,7 +1826,7 @@ impl SqlExecutor {
         let table_name = self.get_table_name(&table)?;
         
         // Verify the table exists and get necessary info
-        let table_ref = self.csv_handler.get_table(&table_name)?;
+        let table_ref = self.file_handler.get_table(&table_name)?;
         
         // Process assignments to get column indices and their new values
         let column_assignments = self.process_update_assignments(&assignments, table_ref)?;
@@ -1918,7 +1918,7 @@ impl SqlExecutor {
         let row_count = row_indices.len();
         
         if row_count > 0 {
-            let table = self.csv_handler.get_table_mut(table_name)?;
+            let table = self.file_handler.get_table_mut(table_name)?;
             
             // Apply all the pre-computed updates
             for (row_idx, col_idx, value) in updates {
@@ -1935,17 +1935,17 @@ impl SqlExecutor {
     /// Save all modified tables back to their source files
     ///
     /// This function writes any tables that have been modified during execution
-    /// (e.g., through INSERT, UPDATE, or DELETE statements) back to their source CSV files.
+    /// (e.g., through INSERT, UPDATE, or DELETE statements) back to their source files.
     /// Only tables that have been modified will be saved, preserving the original
-    /// CSV files if no changes were made.
+    /// files if no changes were made.
     ///
     /// # Returns
     /// * `Ok(())` if all modified tables were saved successfully
     /// * `Err` if any error occurs during saving
     pub fn save_modified_tables(&self) -> Result<()> {
         for table_name in &self.modified_tables {
-            // Use the CSV handler to write the table back to its source file
-            self.csv_handler.save_table(table_name)?;
+            // Use the file handler to write the table back to its source file
+            self.file_handler.save_table(table_name)?;
         }
 
         Ok(())

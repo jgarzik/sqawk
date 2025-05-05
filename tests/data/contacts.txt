@@ -1,0 +1,11 @@
+id:name:email:phone:city
+1:John Smith:john.smith@example.com:555-123-4567:New York
+2:Jane Doe:jane.doe@example.com:555-987-6543:Los Angeles
+3:Bob Johnson:bob.johnson@example.com:555-567-8901:Chicago
+4:Alice Williams:alice.williams@example.com:555-234-5678:Houston
+5:Charlie Brown:charlie.brown@example.com:555-345-6789:Phoenix
+6:David Miller:david.miller@example.com:555-456-7890:Philadelphia
+7:Emily Davis:emily.davis@example.com:555-678-9012:San Antonio
+8:Frank Wilson:frank.wilson@example.com:555-789-0123:San Diego
+9:Grace Taylor:grace.taylor@example.com:555-890-1234:Dallas
+10:Henry Martin:henry.martin@example.com:555-901-2345:San Jose

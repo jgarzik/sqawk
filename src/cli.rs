@@ -22,7 +22,7 @@ use clap::Parser;
 /// The CLI follows the philosophy of being non-destructive by default, 
 /// requiring an explicit flag to modify input files.
 #[derive(Parser, Debug)]
-#[clap(author, version, about = "SQL-based CSV processor")]
+#[clap(author, version, about = "SQL-based processor for delimiter-separated files")]
 pub struct SqawkArgs {
     /// SQL statements to execute
     /// 
@@ -32,7 +32,7 @@ pub struct SqawkArgs {
     #[clap(short, long, required = true, help = "SQL statement to execute")]
     pub sql: Vec<String>,
 
-    /// CSV files to process - format: [table_name=]file_path.csv
+    /// Input files to process - format: [table_name=]file_path
     /// 
     /// Users can optionally specify a table name by prefixing the file path.
     /// If no table name is specified, the base filename (without extension)
@@ -40,9 +40,17 @@ pub struct SqawkArgs {
     /// Example: users=data/people.csv or just data/products.csv
     #[clap(
         required = true,
-        help = "CSV files to process as [table_name=]file_path.csv"
+        help = "Input files to process as [table_name=]file_path"
     )]
     pub files: Vec<String>,
+
+    /// Specify field separator character
+    ///
+    /// Similar to awk's -F option, this sets the field separator for all input files.
+    /// Default behavior is to use commas for .csv files and tabs for other file types.
+    /// Examples: -F: for colon-separated files, -F\\t for tab-separated files.
+    #[clap(short = 'F', help = "Field separator character")]
+    pub field_separator: Option<String>,
 
     /// Enable verbose diagnostic output
     ///
@@ -54,8 +62,9 @@ pub struct SqawkArgs {
     /// Write changes back to input files (default is to not modify files)
     ///
     /// By default, sqawk will not modify any input files. This flag must be
-    /// specified to write modified tables back to their respective CSV files.
-    /// Only tables that were modified by SQL statements will be written.
+    /// specified to write modified tables back to their respective files.
+    /// Only tables that were modified by SQL statements will be written,
+    /// and their original file format and delimiters will be preserved.
     #[clap(short = 'w', long, help = "Write changes back to input files")]
     pub write: bool,
 }

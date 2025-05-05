@@ -2,7 +2,7 @@
 
 ## Overview
 
-Sqawk implements a lightweight in-memory database engine that supports SQL operations on CSV data. The database is designed for performance and simplicity, focusing on providing essential SQL functionality for data analysis tasks directly on CSV files without requiring an external database engine.
+Sqawk implements a lightweight in-memory database engine that supports SQL operations on delimiter-separated data (CSV, TSV, etc.). The database is designed for performance and simplicity, focusing on providing essential SQL functionality for data analysis tasks directly on delimiter-separated files without requiring an external database engine.
 
 ## Table of Contents
 
@@ -14,12 +14,12 @@ Sqawk implements a lightweight in-memory database engine that supports SQL opera
 
 ### Tables
 
-Tables in Sqawk are in-memory representations of CSV files. Each table has:
+Tables in Sqawk are in-memory representations of delimiter-separated files. Each table has:
 
-- A unique name (derived from the CSV filename or explicitly provided)
-- A set of columns with names (derived from the CSV header row)
+- A unique name (derived from the file's filename or explicitly provided)
+- A set of columns with names (derived from the file's header row)
 - Zero or more rows of data
-- Optional metadata including the source file path
+- Optional metadata including the source file path and delimiter information
 
 Tables maintain an internal mapping of column names to their indices for efficient access.
 
@@ -27,20 +27,21 @@ Tables maintain an internal mapping of column names to their indices for efficie
 
 - **Rows**: Represented as vectors of values with one element per column
 - **Columns**: Identified by name, with automatic type inference based on content
-- **Schema**: Dynamically determined from the CSV header row
+- **Schema**: Dynamically determined from the file's header row
 - **Column Types**: Column types are not explicitly declared but inferred at runtime
 
 ### Table Lifecycle
 
-Tables are loaded from CSV files at startup and can be modified through SQL operations. Sqawk uses a safe, sed-like writeback model:
+Tables are loaded from delimiter-separated files at startup and can be modified through SQL operations. Sqawk uses a safe, sed-like writeback model:
 
 1. **Default Behavior**: All modifications remain in memory only
 2. **Tracking Changes**: The system tracks which tables have been modified by any operation
-3. **Write on Exit**: Modified tables are only written back to their source CSV files if:
+3. **Write on Exit**: Modified tables are only written back to their source files if:
    - The `--write` (or `-w`) flag is explicitly provided
    - The table was actually modified by an SQL operation (INSERT, UPDATE, DELETE)
 4. **Safe Execution**: Without the `--write` flag, source files remain untouched regardless of operations performed
 5. **Write Only Modified**: Only tables that were changed are written; unmodified tables are not rewritten
+6. **Format Preservation**: Original file formats and delimiters are preserved during writeback
 
 This design ensures that users can experiment with data manipulations while maintaining the integrity of source files. The verbose mode (`-v`) provides additional confirmation about whether changes were saved or not.
 
@@ -65,28 +66,41 @@ The `SqlExecutor` implements SQL parsing and execution:
 - Maintains a set of modified table names (`modified_tables`) to track changes
 - Provides `save_modified_tables()` method that only writes back tables that were actually modified
 
-### CSV Handler
+### File Handlers
 
-The `CsvHandler` manages I/O between CSV files and in-memory tables:
-- Loads CSV files into tables
-- Extracts column names from header rows
-- Maintains a registry of loaded tables with their source file paths
-- Provides `save_table()` method to write a specific table back to its source file
-- Handles table renaming through custom file specifications (`tablename=file.csv`)
+The file handling system consists of multiple components:
+
+#### `FileHandler` Trait
+- Defines a common interface for different file format handlers
+- Provides abstraction for loading and saving tables from various file formats
+- Allows for consistent treatment of different delimiter-separated formats
+
+#### `CsvHandler` Implementation
+- Specialized handler for standard CSV files
+- Uses the csv crate for parsing and writing
+- Handles comma-separated values with standard CSV escaping rules
+
+#### `DelimHandler` Implementation
+- Handles files with custom delimiters (e.g., TSV, colon-separated, etc.)
+- Configured via the `-F` command-line option
+- Supports tab, colon, pipe, and other custom separators
+- Preserves the original delimiter and format during writeback
 
 ## Performance Considerations
 
 Sqawk's in-memory database is optimized for:
 
-- **Fast Loading**: CSV files are parsed directly into memory
+- **Fast Loading**: Delimiter-separated files are parsed directly into memory
+- **Format Flexibility**: Support for CSV, TSV, and custom-delimited files
 - **Efficient Filtering**: WHERE clauses are applied in a single pass
 - **Low Memory Overhead**: Simple data structures minimize memory usage
-- **Zero Configuration**: No setup required, works directly on CSV files
+- **Zero Configuration**: No setup required, works directly with files in various formats
 
 For larger datasets, consider:
 - The entire dataset must fit in memory
 - Complex queries may require multiple passes over the data
 - Write operations create new copies of the data in memory
+- Custom delimiters may have slightly different performance characteristics than standard CSV
 
 ## Join Implementation
 

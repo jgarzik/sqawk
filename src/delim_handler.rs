@@ -1,68 +1,85 @@
-//! CSV file handling module for sqawk
+//! Delimiter-separated values file handling module for sqawk
 //!
-//! This module handles loading CSV files into in-memory tables and saving tables back to CSV files.
-//! It provides functionality for:
+//! This module handles loading and saving delimiter-separated files into in-memory tables.
+//! It works with files that use custom delimiters like tabs, colons, or any other character
+//! to separate fields, similar to awk's -F option.
+//!
+//! The module provides functionality for:
 //! 
-//! - Loading CSV files with automatic header detection
-//! - Parsing file specifications in the format [table_name=]file_path.csv
-//! - Managing a collection of in-memory tables
-//! - Converting between CSV records and the internal Value type
-//! - Writing modified tables back to CSV files
+//! - Loading files with custom field separators specified by the user
+//! - Parsing file specifications in the format [table_name=]file_path
+//! - Converting between delimited records and the internal Value type
+//! - Writing modified tables back to delimiter-separated files
 //!
-//! The module uses buffered I/O operations for efficiency and maintains
-//! a mapping between table names and their source files for writeback operations.
+//! This implementation reuses the CSV crate's functionality but configures it
+//! to use the specified delimiter instead of commas.
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 
-// Import removed as it's no longer needed
-// Using csv crate without specific imports
 use csv;
 
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{Table, Value};
 
-/// Handles loading and saving CSV files
-///
-/// This struct provides methods for loading tables from CSV files 
-/// and writing them back when modified. It's specialized for handling
-/// data in CSV format with commas as separators.
-pub struct CsvHandler {
+/// Handles loading and saving delimiter-separated value files
+pub struct DelimHandler {
+    /// Default field separator to use if none is specified
+    _field_separator: Option<String>, // Underscore prefix indicates that it's intentionally unused
 }
 
-impl CsvHandler {
-    /// Create a new CsvHandler
+impl DelimHandler {
+    /// Create a new DelimHandler with an optional default field separator
     /// 
+    /// # Arguments
+    /// * `field_separator` - Optional default field separator
+    ///
     /// # Returns
-    /// A new CsvHandler instance ready to load and manage CSV files
-    pub fn new() -> Self {
-        CsvHandler {}
+    /// A new DelimHandler instance ready to load and manage delimiter-separated files
+    pub fn new(field_separator: Option<String>) -> Self {
+        DelimHandler {
+            _field_separator: field_separator,
+        }
     }
 
-    /// Load a CSV file into an in-memory table
+    /// Load a delimiter-separated file into an in-memory table
     ///
-    /// This method parses CSV files with header rows, creating tables with
-    /// appropriate column names and automatically inferring data types for each cell.
+    /// This method parses files with the specified delimiter and header rows,
+    /// creating tables with appropriate column names and automatically inferring
+    /// data types for each cell.
     ///
     /// # Arguments
-    /// * `file_spec` - File specification in the format `[table_name=]file_path.csv`
-    ///                 If table_name is not specified, the file name without extension is used.
+    /// * `file_spec` - File specification in the format `[table_name=]file_path`
+    /// * `delimiter` - Delimiter character to use for parsing
     ///
     /// # Returns
     /// * `Ok(Table)` - The successfully loaded table
-    /// * `Err` if there was an error parsing the file spec, opening the file, or parsing the CSV data
-    pub fn load_csv(&self, file_spec: &str) -> SqawkResult<Table> {
+    /// * `Err` if there was an error parsing the file spec, opening the file, or parsing the file data
+    pub fn load_delimited(&self, file_spec: &str, delimiter: &str) -> SqawkResult<Table> {
         // Parse file spec to get table name and file path
         let (table_name, file_path) = self.parse_file_spec(file_spec)?;
 
-        // Open the CSV file
+        // Open the file
         let file = File::open(&file_path)?;
         let reader = BufReader::new(file);
 
-        // Create a CSV reader
+        // Get the delimiter as a byte
+        let delimiter_byte = if delimiter.len() == 1 {
+            delimiter.as_bytes()[0]
+        } else if delimiter == "\\t" {
+            b'\t' // Handle special case for tab
+        } else {
+            return Err(SqawkError::InvalidFileSpec(format!(
+                "Invalid delimiter: {}. Must be a single character.", 
+                delimiter
+            )));
+        };
+
+        // Create a CSV reader with custom delimiter
         let mut csv_reader = csv::ReaderBuilder::new()
             .has_headers(true)
+            .delimiter(delimiter_byte)
             .from_reader(reader);
 
         // Get headers
@@ -89,20 +106,20 @@ impl CsvHandler {
         Ok(table)
     }
 
-    /// Save a table back to its source CSV file
+    /// Save a table back to a delimiter-separated file
     ///
-    /// Writes the current state of a table back to its source CSV file,
+    /// Writes the current state of a table back to its source file,
     /// preserving column order and formatting values appropriately.
-    /// This is used for implementing the --write flag functionality.
     ///
     /// # Arguments
     /// * `table_name` - Name of the table to write
     /// * `table` - The table to save
+    /// * `delimiter` - Delimiter character to use for writing
     ///
     /// # Returns
     /// * `Ok(())` if the table was successfully written
     /// * `Err` if the table lacks a source file, or if there was an error writing the file
-    pub fn save_table(&self, _table_name: &str, table: &Table) -> SqawkResult<()> {
+    pub fn save_table(&self, _table_name: &str, table: &Table, delimiter: &str) -> SqawkResult<()> {
         // Check if the table has a source file
         let file_path = table.source_file().ok_or_else(|| {
             SqawkError::InvalidSqlQuery(format!(
@@ -111,12 +128,26 @@ impl CsvHandler {
             ))
         })?;
 
-        // Open the CSV file for writing
+        // Get the delimiter as a byte
+        let delimiter_byte = if delimiter.len() == 1 {
+            delimiter.as_bytes()[0]
+        } else if delimiter == "\\t" {
+            b'\t' // Handle special case for tab
+        } else {
+            return Err(SqawkError::InvalidFileSpec(format!(
+                "Invalid delimiter: {}. Must be a single character.", 
+                delimiter
+            )));
+        };
+
+        // Open the file for writing
         let file = File::create(file_path)?;
         let writer = BufWriter::new(file);
 
-        // Create a CSV writer
-        let mut csv_writer = csv::WriterBuilder::new().from_writer(writer);
+        // Create a CSV writer with custom delimiter
+        let mut csv_writer = csv::WriterBuilder::new()
+            .delimiter(delimiter_byte)
+            .from_writer(writer);
 
         // Write headers
         csv_writer
@@ -141,8 +172,8 @@ impl CsvHandler {
     /// Parse a file specification into table name and file path
     ///
     /// Handles two formats:
-    /// 1. `table_name=file_path.csv` - Explicit table name and file path
-    /// 2. `file_path.csv` - Table name derived from file name
+    /// 1. `table_name=file_path` - Explicit table name and file path
+    /// 2. `file_path` - Table name derived from file name
     ///
     /// # Arguments
     /// * `file_spec` - File specification in one of the supported formats

@@ -127,6 +127,14 @@ args = "Test GROUP BY"
 task = "workflow.run"
 args = "Test GROUP BY with Complex Expression"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test Tab Delimiter"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test Colon Delimiter"
+
 [[workflows.workflow]]
 name = "sqawk-build-and-run"
 author = "agent"
@@ -360,6 +368,22 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "cd $(pwd) && cargo run -- -s \"SELECT department, COUNT(*) AS employee_count, SUM(salary) AS total_salary, AVG(salary) AS avg_salary, MIN(salary) AS min_salary, MAX(salary) AS max_salary FROM departments GROUP BY department ORDER BY avg_salary DESC\" tests/data/departments.csv -v"
+
+[[workflows.workflow]]
+name = "Test Tab Delimiter"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT * FROM employees WHERE salary > 70000\" -F '\t' tests/data/employees.tsv -v"
+
+[[workflows.workflow]]
+name = "Test Colon Delimiter"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT id, name, email FROM contacts WHERE id > 5\" -F ':' tests/data/contacts.txt -v"
 
 [deployment]
 run = ["sh", "-c", "cargo build && echo \"Testing Sqawk with sample data:\" && cargo run -- -s \"SELECT * FROM sample\" tests/data/sample.csv -v"]

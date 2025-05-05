@@ -3,7 +3,7 @@
 //! This module provides the in-memory table representation for the sqawk utility.
 //! It handles all data storage, manipulation, and table operations including:
 //! 
-//! - Dynamic type inference for CSV data
+//! - Dynamic type inference for data from delimiter-separated files
 //! - In-memory data storage with column mapping
 //! - Table operations (select, project, update, delete)
 //! - Table joins (cross joins and inner joins via WHERE conditions)
@@ -162,7 +162,7 @@ impl PartialOrd for Value {
 /// Implementation of string formatting for Value
 /// 
 /// This implementation provides human-readable string representations of all value types.
-/// It ensures values are properly displayed when printing tables or generating CSV output.
+/// It ensures values are properly displayed when printing tables or generating output in delimited format.
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -177,7 +177,7 @@ impl fmt::Display for Value {
 
 /// Implementation of string conversion to Value with automatic type inference
 ///
-/// This implementation enables automatic type detection when loading data from CSV files.
+/// This implementation enables automatic type detection when loading data from delimiter-separated files.
 /// It attempts to parse the string value in the following order:
 /// 1. As an integer (i64)
 /// 2. As a floating point number (f64)
@@ -186,7 +186,7 @@ impl fmt::Display for Value {
 /// 5. Any other content is stored as a string
 ///
 /// This type inference approach allows for efficient data storage and comparisons
-/// without requiring explicit type declarations in the CSV files.
+/// without requiring explicit type declarations in the input files.
 impl From<&str> for Value {
     fn from(s: &str) -> Self {
         // Try to parse as integer first
@@ -271,7 +271,7 @@ impl Table {
     /// 
     /// Returns a slice containing all column names in the table. 
     /// The column names maintain their original order as specified when
-    /// the table was created or loaded from a CSV file.
+    /// the table was created or loaded from a file.
     pub fn columns(&self) -> &[String] {
         &self.columns
     }
@@ -292,6 +292,15 @@ impl Table {
     /// access to the table data for processing or querying.
     pub fn rows(&self) -> &[Row] {
         &self.rows
+    }
+    
+    /// Get the name of the table
+    ///
+    /// Returns the name of the table as a string slice.
+    /// This is useful for operations that need to access the table's name
+    /// such as logging, error messages, or generating SQL output.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Get the row count
@@ -334,7 +343,7 @@ impl Table {
 
     /// Get the source file path
     /// 
-    /// Returns the path to the original CSV file from which this table was loaded,
+    /// Returns the path to the original file from which this table was loaded,
     /// if applicable. This is used when writing changes back to disk.
     ///
     /// # Returns
@@ -362,7 +371,7 @@ impl Table {
 
     /// Print the table to stdout
     /// 
-    /// Formats and prints the table contents to standard output in CSV format.
+    /// Formats and prints the table contents to standard output in comma-delimited format.
     /// This is used for displaying query results to the user.
     /// 
     /// # Returns

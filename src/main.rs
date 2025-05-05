@@ -1,18 +1,21 @@
-//! sqawk - an SQL-based command-line utility for processing CSV files
+//! sqawk - an SQL-based command-line utility for processing delimited files
 //!
-//! This tool loads CSV files into memory as tables, executes SQL queries against
-//! them, and can save modified tables back to CSV files.
+//! This tool loads CSV and delimiter-separated files into memory as tables, 
+//! executes SQL queries against them, and can save modified tables back to their
+//! original format.
 
 mod aggregate;
 mod cli;
 mod csv_handler;
+mod delim_handler;
 mod error;
+mod file_handler;
 mod sql_executor;
 mod table;
 
 use anyhow::{Context, Result};
 // Not explicitly importing SqawkArgs as it's not directly used
-use csv_handler::CsvHandler;
+use file_handler::FileHandler;
 use sql_executor::SqlExecutor;
 
 /// Main entry point for the sqawk utility
@@ -26,25 +29,25 @@ fn main() -> Result<()> {
         println!("Arguments: {:?}", args);
     }
 
-    // Create a new CSV handler for loading and saving files
-    let mut csv_handler = CsvHandler::new();
+    // Create a new file handler for loading and saving files
+    let mut file_handler = FileHandler::new(args.field_separator.clone());
 
-    // Load all specified CSV files into memory
+    // Load all specified files into memory
     for file_spec in &args.files {
-        csv_handler
-            .load_csv(file_spec)
-            .with_context(|| format!("Failed to load CSV file: {}", file_spec))?;
+        file_handler
+            .load_file(file_spec)
+            .with_context(|| format!("Failed to load file: {}", file_spec))?;
     }
 
     if args.verbose {
-        println!("Loaded {} tables", csv_handler.table_count());
-        for table_name in csv_handler.table_names() {
+        println!("Loaded {} tables", file_handler.table_count());
+        for table_name in file_handler.table_names() {
             println!("Table '{}' loaded", table_name);
         }
     }
 
     // Create SQL executor and execute all SQL statements
-    let mut sql_executor = SqlExecutor::new_with_verbose(csv_handler, args.verbose);
+    let mut sql_executor = SqlExecutor::new_with_verbose(file_handler, args.verbose);
     for sql in &args.sql {
         if args.verbose {
             println!("Executing SQL: {}", sql);
@@ -70,7 +73,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // Save any modified tables back to CSV files (only if write flag is enabled)
+    // Save any modified tables back to their original files (only if write flag is enabled)
     if args.write {
         sql_executor
             .save_modified_tables()
