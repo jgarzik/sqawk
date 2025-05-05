@@ -2,12 +2,13 @@
 //! 
 //! This file contains end-to-end tests for the sqawk application.
 
-mod test_helpers;
-use test_helpers::{
+use crate::helpers::{
     SqawkTestCase, 
     run_test_case, 
     run_test_case_with_static_file,
     create_custom_csv,
+    create_temp_dir,
+    prepare_test_file,
     get_static_sample_file
 };
 
@@ -63,8 +64,8 @@ fn test_insert() -> Result<(), Box<dyn std::error::Error>> {
     };
     
     // We need to verify the file was modified, so we'll use a custom test function
-    let temp_dir = test_helpers::create_temp_dir()?;
-    let file_path = test_helpers::prepare_test_file(temp_dir.path())?;
+    let temp_dir = create_temp_dir()?;
+    let file_path = prepare_test_file(temp_dir.path())?;
     
     // Build the command
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
@@ -120,10 +121,10 @@ fn test_invalid_sql() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_multiple_files() -> Result<(), Box<dyn std::error::Error>> {
     // This test demonstrates using multiple files with custom data
-    let temp_dir = test_helpers::create_temp_dir()?;
+    let temp_dir = create_temp_dir()?;
     
     // Create people.csv file
-    let people_file = test_helpers::prepare_test_file(temp_dir.path())?;
+    let people_file = prepare_test_file(temp_dir.path())?;
     
     // Create scores.csv file
     let scores_content = "id,score\n1,95\n2,75\n3,85\n";
