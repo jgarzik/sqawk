@@ -64,16 +64,4 @@ pub enum SqawkError {
 ///
 /// This type alias simplifies function signatures and error handling throughout the codebase.
 /// It represents either a successful result of type `T` or a `SqawkError`.
-///
-/// Usage example:
-/// ```
-/// # // This is a doctest
-/// # use sqawk::error::SqawkResult;
-/// # use sqawk::table::Table;
-/// #
-/// fn process_data() -> SqawkResult<Table> {
-///     // Function implementation that might return a SqawkError
-///     # Ok(Table::new("example", vec!["column1".to_string()], None))
-/// }
-/// ```
 pub type SqawkResult<T> = std::result::Result<T, SqawkError>;

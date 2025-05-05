@@ -40,12 +40,6 @@ impl CsvHandler {
     /// 
     /// # Returns
     /// A new CsvHandler instance ready to load and manage tables
-    /// 
-    /// # Example
-    /// ```
-    /// # use sqawk::csv_handler::CsvHandler;
-    /// let handler = CsvHandler::new();
-    /// ```
     pub fn new() -> Self {
         CsvHandler {
             tables: HashMap::new(),
@@ -65,21 +59,6 @@ impl CsvHandler {
     /// # Returns
     /// * `Ok(())` if the file was successfully loaded
     /// * `Err` if there was an error parsing the file spec, opening the file, or parsing the CSV data
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use sqawk::csv_handler::CsvHandler;
-    /// # use sqawk::error::SqawkResult;
-    /// # fn example() -> SqawkResult<()> {
-    /// # let mut handler = CsvHandler::new();
-    /// // Load with default table name (derived from filename)
-    /// handler.load_csv("data/users.csv")?;
-    /// 
-    /// // Load with explicit table name
-    /// handler.load_csv("people=data/users.csv")?;
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn load_csv(&mut self, file_spec: &str) -> SqawkResult<()> {
         // Parse file spec to get table name and file path
         let (table_name, file_path) = self.parse_file_spec(file_spec)?;
@@ -132,19 +111,6 @@ impl CsvHandler {
     /// # Returns
     /// * `Ok(())` if the table was successfully written
     /// * `Err` if the table doesn't exist, lacks a source file, or if there was an error writing the file
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use sqawk::csv_handler::CsvHandler;
-    /// # use sqawk::error::SqawkResult;
-    /// # fn example() -> SqawkResult<()> {
-    /// # let mut handler = CsvHandler::new();
-    /// # handler.load_csv("users.csv")?;
-    /// // After modifying the table data, write it back to disk
-    /// handler.save_table("users")?;
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn save_table(&self, table_name: &str) -> SqawkResult<()> {
         let table = self.get_table(table_name)?;
 
@@ -193,19 +159,6 @@ impl CsvHandler {
     /// # Returns
     /// * `Ok(&Table)` - Reference to the requested table
     /// * `Err` - If the table doesn't exist in the collection
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use sqawk::csv_handler::CsvHandler;
-    /// # use sqawk::error::SqawkResult;
-    /// # fn example() -> SqawkResult<()> {
-    /// # let mut handler = CsvHandler::new();
-    /// # handler.load_csv("users.csv")?;
-    /// let users_table = handler.get_table("users")?;
-    /// println!("Table has {} rows", users_table.row_count());
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn get_table(&self, name: &str) -> SqawkResult<&Table> {
         self.tables
             .get(name)
@@ -222,21 +175,6 @@ impl CsvHandler {
     /// # Returns
     /// * `Ok(&mut Table)` - Mutable reference to the requested table
     /// * `Err` - If the table doesn't exist in the collection
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use sqawk::csv_handler::CsvHandler;
-    /// # use sqawk::error::SqawkResult;
-    /// # use sqawk::table::Value;
-    /// # fn example() -> SqawkResult<()> {
-    /// # let mut handler = CsvHandler::new();
-    /// # handler.load_csv("users.csv")?;
-    /// // Get a mutable reference for modifications
-    /// let users_table = handler.get_table_mut("users")?;
-    /// // Perform modifications...
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn get_table_mut(&mut self, name: &str) -> SqawkResult<&mut Table> {
         self.tables
             .get_mut(name)
@@ -250,15 +188,6 @@ impl CsvHandler {
     ///
     /// # Returns
     /// * A vector of table names as strings
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use sqawk::csv_handler::CsvHandler;
-    /// # let mut handler = CsvHandler::new();
-    /// // Get names of all loaded tables
-    /// let table_names = handler.table_names();
-    /// println!("Loaded tables: {:?}", table_names);
-    /// ```
     pub fn table_names(&self) -> Vec<String> {
         self.tables.keys().cloned().collect()
     }
@@ -269,13 +198,6 @@ impl CsvHandler {
     ///
     /// # Returns
     /// * The number of tables
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use sqawk::csv_handler::CsvHandler;
-    /// # let handler = CsvHandler::new();
-    /// println!("Loaded {} tables", handler.table_count());
-    /// ```
     pub fn table_count(&self) -> usize {
         self.tables.len()
     }

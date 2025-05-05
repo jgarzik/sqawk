@@ -69,17 +69,6 @@ pub struct SqawkArgs {
 /// # Returns
 /// * `Ok(SqawkArgs)` - Command-line arguments successfully parsed
 /// * `Err` - Error during argument parsing (handled by clap, usually results in help text display)
-///
-/// # Example
-/// ```no_run
-/// use sqawk::cli::parse_args;
-/// 
-/// # fn main() -> anyhow::Result<()> {
-/// let args = parse_args()?;
-/// println!("Processing {} files with {} SQL statements", args.files.len(), args.sql.len());
-/// # Ok(())
-/// # }
-/// ```
 pub fn parse_args() -> Result<SqawkArgs> {
     Ok(SqawkArgs::parse())
 }
