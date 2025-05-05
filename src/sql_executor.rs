@@ -77,8 +77,7 @@ impl SqlExecutor {
                 selection,
                 ..
             } => {
-                let updated_count = self.execute_update(table, assignments, selection)?;
-                eprintln!("Updated {} rows", updated_count);
+                let _updated_count = self.execute_update(table, assignments, selection)?;
                 Ok(None)
             }
             Statement::Delete {
@@ -90,8 +89,7 @@ impl SqlExecutor {
                     ));
                 }
                 let table_with_joins = &from[0];
-                let deleted_count = self.execute_delete(table_with_joins, selection)?;
-                eprintln!("Deleted {} rows", deleted_count);
+                let _deleted_count = self.execute_delete(table_with_joins, selection)?;
                 Ok(None)
             }
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -156,14 +154,12 @@ impl SqlExecutor {
         
         // Handle any joins in the first TableWithJoins
         if !first_table_with_joins.joins.is_empty() {
-            eprintln!("Processing {} joins for table {}", first_table_with_joins.joins.len(), first_table_name);
             result_table = self.process_table_joins(&result_table, &first_table_with_joins.joins)?;
         }
         
         // If there are multiple tables in the FROM clause, join them
         // This is the CROSS JOIN case for "FROM table1, table2, ..."
         if from.len() > 1 {
-            eprintln!("Processing multiple tables in FROM clause as CROSS JOINs");
             for table_with_joins in &from[1..] {
                 let right_table_name = self.get_table_name(table_with_joins)?;
                 let right_table = self.csv_handler.get_table(&right_table_name)?;
@@ -173,7 +169,6 @@ impl SqlExecutor {
                 
                 // Process any joins on this table
                 if !table_with_joins.joins.is_empty() {
-                    eprintln!("Processing {} joins for table {}", table_with_joins.joins.len(), right_table_name);
                     result_table = self.process_table_joins(&result_table, &table_with_joins.joins)?;
                 }
             }
@@ -317,7 +312,6 @@ impl SqlExecutor {
 
         // If there's a WHERE clause, we need to precompute which rows match before modifying the table
         if let Some(ref where_expr) = selection {
-            eprintln!("Executing DELETE with WHERE clause: {:?}", where_expr);
 
             // Create a list of row indices to delete
             let table_ref = self.csv_handler.get_table(&table_name)?;
@@ -364,7 +358,6 @@ impl SqlExecutor {
             }
         } else {
             // No WHERE clause means delete all rows
-            eprintln!("Executing DELETE (all rows)");
 
             let table = self.csv_handler.get_table_mut(&table_name)?;
             let deleted_count = table.row_count();
@@ -437,12 +430,10 @@ impl SqlExecutor {
                                 .collect::<Vec<_>>()
                                 .join(".");
                             
-                            eprintln!("Looking for qualified column: {}", qualified_name);
                             
                             // Try to find an exact match for the qualified column
                             let mut found = false;
                             for (i, col) in table.columns().iter().enumerate() {
-                                eprintln!("Comparing with column: {}", col);
                                 if col == &qualified_name {
                                     column_indices.push(i);
                                     found = true;
@@ -454,11 +445,9 @@ impl SqlExecutor {
                             // This helps with cases like "users.id" matching "users_orders_cross.users.id"
                             if !found && parts.len() == 2 {
                                 let suffix = format!("{}.{}", parts[0].value, parts[1].value);
-                                eprintln!("Trying suffix match for: {}", suffix);
                                 
                                 for (i, col) in table.columns().iter().enumerate() {
                                     if col.ends_with(&suffix) {
-                                        eprintln!("Found suffix match: {} contains {}", col, suffix);
                                         column_indices.push(i);
                                         found = true;
                                         break;
@@ -510,22 +499,6 @@ impl SqlExecutor {
     /// This function is called before column projection to ensure all columns
     /// needed for the WHERE condition evaluation are available.
     fn apply_where_clause(&self, table: Table, where_expr: &Expr) -> SqawkResult<Table> {
-        eprintln!("Applying WHERE clause: {:?}", where_expr);
-        eprintln!("Table before filtering: {} rows", table.row_count());
-        
-        // Print column names for debugging
-        eprintln!("Columns in table:");
-        for (i, col) in table.columns().iter().enumerate() {
-            eprintln!("[{}] {}", i, col);
-        }
-
-        // For multi-condition WHERE clauses, analyze them separately for debugging
-        if let Expr::BinaryOp { left, op, right } = where_expr {
-            if matches!(op, sqlparser::ast::BinaryOperator::And) {
-                eprintln!("WHERE clause has AND operator. Left: {:?}, Right: {:?}", left, right);
-            }
-        }
-
         // Create a new table that only includes rows matching the WHERE condition
         // by calling the table.select method with a closure that evaluates the condition
         let result = table.select(|row| {
@@ -535,13 +508,8 @@ impl SqlExecutor {
                 .evaluate_condition(where_expr, row, &table)
                 .unwrap_or(false);
 
-            // Debug output for each row evaluation
-            eprintln!("Row: {:?}, matches condition: {}", row, matches);
             matches
         });
-
-        // Log the filter results
-        eprintln!("Table after filtering: {} rows", result.row_count());
 
         Ok(result)
     }
@@ -568,11 +536,9 @@ impl SqlExecutor {
                 match op {
                     // AND operator - evaluate both sides and combine results
                     sqlparser::ast::BinaryOperator::And => {
-                        eprintln!("Evaluating AND expression");
                         
                         // Evaluate left condition
                         let left_result = self.evaluate_condition(left, row, table)?;
-                        eprintln!("Left condition evaluated to: {}", left_result);
                         
                         // Short-circuit - if left is false, don't evaluate right
                         if !left_result {
@@ -581,18 +547,15 @@ impl SqlExecutor {
                         
                         // Evaluate right condition only if left was true
                         let right_result = self.evaluate_condition(right, row, table)?;
-                        eprintln!("Right condition evaluated to: {}", right_result);
                         
                         Ok(left_result && right_result)
                     },
                     
                     // OR operator - evaluate both sides and combine results
                     sqlparser::ast::BinaryOperator::Or => {
-                        eprintln!("Evaluating OR expression");
                         
                         // Evaluate left condition
                         let left_result = self.evaluate_condition(left, row, table)?;
-                        eprintln!("Left condition evaluated to: {}", left_result);
                         
                         // Short-circuit - if left is true, don't evaluate right
                         if left_result {
@@ -601,7 +564,6 @@ impl SqlExecutor {
                         
                         // Evaluate right condition only if left was false
                         let right_result = self.evaluate_condition(right, row, table)?;
-                        eprintln!("Right condition evaluated to: {}", right_result);
                         
                         Ok(left_result || right_result)
                     },
@@ -611,16 +573,12 @@ impl SqlExecutor {
                         let left_val = self.evaluate_expr_with_row(left, row, table)?;
                         let right_val = self.evaluate_expr_with_row(right, row, table)?;
 
-                        // Debug print the values being compared
-                        eprintln!("WHERE comparison: {:?} {:?} {:?}", left_val, op, right_val);
-
                         // Handle different comparison operators
                         match op {
                             // Equal (=) operator
                             sqlparser::ast::BinaryOperator::Eq => {
                                 // Use the Value's implementation of PartialEq which handles type conversions
                                 let result = left_val == right_val;
-                                eprintln!("Equality result: {}", result);
                                 Ok(result)
                             }
 
@@ -755,9 +713,7 @@ impl SqlExecutor {
             }
             // Handle unary operations like - (negation)
             Expr::UnaryOp { op, expr } => {
-                eprintln!("Evaluating UnaryOp: {:?} on expr: {:?}", op, expr);
                 let val = self.evaluate_expr(expr)?;
-                eprintln!("Value before applying unary operator: {:?}", val);
 
                 match op {
                     sqlparser::ast::UnaryOperator::Minus => {
@@ -765,12 +721,10 @@ impl SqlExecutor {
                         match val {
                             Value::Integer(i) => {
                                 let result = Value::Integer(-i);
-                                eprintln!("Applying negation to integer: {} -> {}", i, -i);
                                 Ok(result)
                             }
                             Value::Float(f) => {
                                 let result = Value::Float(-f);
-                                eprintln!("Applying negation to float: {} -> {}", f, -f);
                                 Ok(result)
                             }
                             _ => Err(SqawkError::TypeError(format!(
@@ -863,14 +817,11 @@ impl SqlExecutor {
                     .collect::<Vec<_>>()
                     .join(".");
                 
-                eprintln!("Looking for qualified column in row evaluation: {}", qualified_name);
                 
                 // Try to find an exact match for the qualified column
                 for (i, col) in table.columns().iter().enumerate() {
-                    eprintln!("Comparing with column: {}", col);
                     if col == &qualified_name {
                         if i < row.len() {
-                            eprintln!("Found exact column match: {}", qualified_name);
                             return Ok(row[i].clone());
                         } else {
                             return Err(SqawkError::InvalidSqlQuery(format!(
@@ -886,11 +837,9 @@ impl SqlExecutor {
                 // This helps with cases like "users.id" matching "users_orders_cross.users.id"
                 if parts.len() == 2 {
                     let suffix = format!("{}.{}", parts[0].value, parts[1].value);
-                    eprintln!("Trying suffix match for: {}", suffix);
                     
                     for (i, col) in table.columns().iter().enumerate() {
                         if col.ends_with(&suffix) {
-                            eprintln!("Found suffix match: {} contains {}", col, suffix);
                             if i < row.len() {
                                 return Ok(row[i].clone());
                             } else {
@@ -933,7 +882,6 @@ impl SqlExecutor {
         // Get the target table name as a string
         let table_name = self.get_table_name(&table)?;
             
-        eprintln!("Executing UPDATE on table: {}", table_name);
         
         // Verify the table exists and get necessary info
         let table_ref = self.csv_handler.get_table(&table_name)?;
@@ -965,7 +913,6 @@ impl SqlExecutor {
         
         // Determine which rows match the WHERE clause
         if let Some(ref where_expr) = selection {
-            eprintln!("Filtering with WHERE clause: {:?}", where_expr);
             
             for (idx, row) in table_ref.rows().iter().enumerate() {
                 if self.evaluate_condition(where_expr, row, table_ref).unwrap_or(false) {
