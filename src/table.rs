@@ -401,19 +401,32 @@ impl Table {
         // Create result table with prefixed column names
         let mut columns = Vec::new();
         
-        // Add columns from left table (self) with table name prefix
+        // Add columns from left table (self)
         for col in self.columns() {
-            columns.push(format!("{}.{}", self.name, col));
+            // If the column already has a table prefix, keep it as is
+            // Otherwise, add the table name prefix
+            if col.contains('.') {
+                columns.push(col.clone());
+            } else {
+                columns.push(format!("{}.{}", self.name, col));
+            }
         }
         
-        // Add columns from right table with table name prefix
+        // Add columns from right table
         for col in right.columns() {
-            columns.push(format!("{}.{}", right.name, col));
+            // If the column already has a table prefix, keep it as is
+            // Otherwise, add the table name prefix
+            if col.contains('.') {
+                columns.push(col.clone());
+            } else {
+                columns.push(format!("{}.{}", right.name, col));
+            }
         }
         
         // Create a new table to hold the join result
+        // Use original table names in the result to keep column references simple
         let mut result = Table::new(
-            &format!("{}_{}_cross", self.name, right.name), 
+            &format!("join_result"), 
             columns, 
             None
         );

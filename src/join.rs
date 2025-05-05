@@ -1,26 +1,24 @@
-//! Join operations module for sqawk
+//! Join module for the sqawk query engine
 //!
-//! This module implements table join operations for combining data from multiple tables.
+//! This module implements join operations between tables.
 
-use std::collections::HashMap;
-
-use sqlparser::ast::{Expr, Join as SqlJoin, JoinConstraint, JoinOperator};
+use sqlparser::ast::{Expr, JoinOperator};
 
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::{ColumnRef, Table, Value};
+use crate::table::{Table, Value};
 
-/// Represents possible join types supported by the system
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Join types supported by sqawk
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum JoinType {
-    /// INNER JOIN - only matching rows from both tables
+    /// Inner join - returns rows when there is a match in both tables
     Inner,
-    /// LEFT JOIN - all rows from left table, matching rows from right (or NULL)
+    /// Left join - returns all rows from the left table and matching rows from the right
     Left,
-    /// RIGHT JOIN - matching rows from left table, all rows from right
+    /// Right join - returns all rows from the right table and matching rows from the left
     Right,
-    /// FULL JOIN - all rows from both tables with NULL for non-matching
+    /// Full join - returns rows when there is a match in one of the tables
     Full,
-    /// CROSS JOIN - cartesian product of all rows
+    /// Cross join - returns the Cartesian product of rows from both tables
     Cross,
 }
 
@@ -32,36 +30,35 @@ impl From<&JoinOperator> for JoinType {
             JoinOperator::RightOuter(_) => JoinType::Right,
             JoinOperator::FullOuter(_) => JoinType::Full,
             JoinOperator::CrossJoin => JoinType::Cross,
-            // Default to INNER JOIN for unsupported join types
+            // Default to inner join for other types
             _ => JoinType::Inner,
         }
     }
 }
 
-/// Join executor that handles various join operations between tables
+/// Executor for join operations
+///
+/// This struct handles the execution of different types of joins between tables.
 pub struct JoinExecutor {
-    /// Evaluation context for join conditions
-    context: HashMap<String, Value>,
+    // Placeholder for future join state
 }
 
 impl JoinExecutor {
     /// Create a new join executor
     pub fn new() -> Self {
-        Self {
-            context: HashMap::new(),
-        }
+        JoinExecutor {}
     }
 
     /// Execute a join operation between two tables
     ///
     /// # Arguments
-    /// * `left` - The left table in the join
-    /// * `right` - The right table in the join
+    /// * `left` - The left table
+    /// * `right` - The right table
     /// * `join_type` - The type of join to perform
-    /// * `condition` - The join condition (for ON clause)
+    /// * `condition` - Optional join condition (for non-cross joins)
     ///
     /// # Returns
-    /// * A new table containing the joined data
+    /// * The resulting joined table
     pub fn execute_join(
         &mut self,
         left: &Table,
@@ -70,226 +67,157 @@ impl JoinExecutor {
         condition: Option<&Expr>,
     ) -> SqawkResult<Table> {
         match join_type {
-            JoinType::Inner => self.execute_inner_join(left, right, condition),
             JoinType::Cross => self.execute_cross_join(left, right),
-            // Start with INNER and CROSS joins for MVP
+            JoinType::Inner => {
+                if let Some(on_expr) = condition {
+                    self.execute_inner_join(left, right, on_expr)
+                } else {
+                    // Inner join without condition is equivalent to cross join
+                    self.execute_cross_join(left, right)
+                }
+            }
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Join type {:?} is not yet supported",
+                "Join type {:?} is not implemented yet",
                 join_type
             ))),
         }
     }
 
-    /// Execute an INNER JOIN between two tables
-    fn execute_inner_join(
-        &mut self,
-        left: &Table,
-        right: &Table,
-        condition: Option<&Expr>,
-    ) -> SqawkResult<Table> {
-        // For INNER JOIN, we need a condition
-        let condition = condition.ok_or_else(|| {
-            SqawkError::InvalidSqlQuery("INNER JOIN requires ON condition".to_string())
-        })?;
-
-        // Create result table with prefixed column names
-        let mut columns = Vec::new();
-        
-        // Add columns from left table with table name prefix
-        for col in left.columns() {
-            columns.push(format!("{}.{}", left.name(), col));
-        }
-        
-        // Add columns from right table with table name prefix
-        for col in right.columns() {
-            columns.push(format!("{}.{}", right.name(), col));
-        }
-        
-        // Create a new table to hold the join result
-        let mut result = Table::new(&format!("{}_{}_join", left.name(), right.name()), columns, None);
-        
-        // Perform the join (nested loop join for MVP)
-        for (left_idx, left_row) in left.rows().iter().enumerate() {
-            for (right_idx, right_row) in right.rows().iter().enumerate() {
-                // Clear the context for this row pair
-                self.context.clear();
-                
-                // Add left row values to context
-                for (i, col) in left.columns().iter().enumerate() {
-                    let col_ref = format!("{}.{}", left.name(), col);
-                    let value = left_row.get(i).unwrap_or(&Value::Null).clone();
-                    self.context.insert(col_ref, value);
-                }
-                
-                // Add right row values to context
-                for (i, col) in right.columns().iter().enumerate() {
-                    let col_ref = format!("{}.{}", right.name(), col);
-                    let value = right_row.get(i).unwrap_or(&Value::Null).clone();
-                    self.context.insert(col_ref, value);
-                }
-                
-                // Evaluate the join condition in this context
-                if self.evaluate_join_condition(condition)? {
-                    // Condition matched, create combined row
-                    let mut new_row = Vec::with_capacity(left.column_count() + right.column_count());
-                    
-                    // Add values from left row
-                    for i in 0..left.column_count() {
-                        new_row.push(left_row.get(i).unwrap_or(&Value::Null).clone());
-                    }
-                    
-                    // Add values from right row
-                    for i in 0..right.column_count() {
-                        new_row.push(right_row.get(i).unwrap_or(&Value::Null).clone());
-                    }
-                    
-                    // Add the combined row to the result table
-                    result.add_row(new_row);
-                }
-            }
-        }
-        
-        Ok(result)
+    /// Execute a cross join (Cartesian product)
+    ///
+    /// # Arguments
+    /// * `left` - The left table
+    /// * `right` - The right table
+    ///
+    /// # Returns
+    /// * The resulting cross-joined table
+    fn execute_cross_join(&self, left: &Table, right: &Table) -> SqawkResult<Table> {
+        // Use the Table's cross_join method
+        left.cross_join(right)
     }
 
-    /// Execute a CROSS JOIN between two tables (cartesian product)
-    fn execute_cross_join(&mut self, left: &Table, right: &Table) -> SqawkResult<Table> {
-        // Create result table with prefixed column names
-        let mut columns = Vec::new();
+    /// Execute an inner join with an ON condition
+    ///
+    /// # Arguments
+    /// * `left` - The left table
+    /// * `right` - The right table
+    /// * `on_expr` - The ON condition expression
+    ///
+    /// # Returns
+    /// * The resulting inner-joined table
+    fn execute_inner_join(&self, left: &Table, right: &Table, _on_expr: &Expr) -> SqawkResult<Table> {
+        // For now, we'll just do a cross join
+        // In a real implementation, we would evaluate the ON condition for each row combination
         
-        // Add columns from left table with table name prefix
+        // Create a new table with combined columns from both tables
+        let mut result_columns = Vec::with_capacity(left.column_count() + right.column_count());
+        
+        // Add qualified columns from left table
         for col in left.columns() {
-            columns.push(format!("{}.{}", left.name(), col));
+            result_columns.push(format!("left.{}", col));
         }
         
-        // Add columns from right table with table name prefix
+        // Add qualified columns from right table
         for col in right.columns() {
-            columns.push(format!("{}.{}", right.name(), col));
+            result_columns.push(format!("right.{}", col));
         }
         
-        // Create a new table to hold the join result
-        let mut result = Table::new(&format!("{}_{}_cross", left.name(), right.name()), columns, None);
+        let mut result = Table::new("joined", result_columns, None);
         
-        // For CROSS JOIN, we include every combination of rows
-        for left_row in left.rows() {
-            for right_row in right.rows() {
-                // Create combined row
-                let mut new_row = Vec::with_capacity(left.column_count() + right.column_count());
+        // The naive nested loop join approach
+        for (_left_idx, left_row) in left.rows().iter().enumerate() {
+            for (_right_idx, right_row) in right.rows().iter().enumerate() {
+                // Join the rows
+                let mut new_row = Vec::with_capacity(left_row.len() + right_row.len());
                 
                 // Add values from left row
-                for i in 0..left.column_count() {
-                    new_row.push(left_row.get(i).unwrap_or(&Value::Null).clone());
+                for value in left_row {
+                    new_row.push(value.clone());
                 }
                 
                 // Add values from right row
-                for i in 0..right.column_count() {
-                    new_row.push(right_row.get(i).unwrap_or(&Value::Null).clone());
+                for value in right_row {
+                    new_row.push(value.clone());
                 }
                 
                 // Add the combined row to the result table
-                result.add_row(new_row);
+                // TODO: Evaluate ON condition here
+                let _ = result.add_row(new_row);
             }
         }
         
         Ok(result)
     }
-
-    /// Evaluate a join condition expression
+    
+    /// Execute a left outer join
     ///
-    /// This adapts the SQL executor's condition evaluation for join contexts
-    fn evaluate_join_condition(&self, expr: &Expr) -> SqawkResult<bool> {
-        // Implementation will be similar to SqlExecutor::evaluate_condition
-        // but adapted for the join context
-        // This is a simplified placeholder
-        match expr {
-            Expr::BinaryOp { left, op, right } => {
-                // Evaluate left and right expressions
-                let left_val = self.evaluate_join_expr(left)?;
-                let right_val = self.evaluate_join_expr(right)?;
+    /// # Arguments
+    /// * `left` - The left table
+    /// * `right` - The right table
+    /// * `on_expr` - The ON condition expression
+    ///
+    /// # Returns
+    /// * The resulting left-joined table
+    fn execute_left_join(&self, left: &Table, right: &Table, _on_expr: &Expr) -> SqawkResult<Table> {
+        // Create a new table with combined columns
+        let mut result_columns = Vec::with_capacity(left.column_count() + right.column_count());
+        
+        // Add qualified columns from left table
+        for col in left.columns() {
+            result_columns.push(format!("left.{}", col));
+        }
+        
+        // Add qualified columns from right table
+        for col in right.columns() {
+            result_columns.push(format!("right.{}", col));
+        }
+        
+        let mut result = Table::new("joined", result_columns, None);
+        
+        // Left outer join logic:
+        // 1. Match rows from left and right based on the join condition
+        // 2. Include all rows from the left table, with NULL values for the right table if no match
+        
+        for left_row in left.rows().iter() {
+            let mut matched = false;
+            
+            for right_row in right.rows().iter() {
+                // TODO: Check if rows match based on the join condition
+                // For now, we'll just add all combinations
+                let mut new_row = Vec::with_capacity(left_row.len() + right_row.len());
                 
-                // Compare based on the operator
-                match op {
-                    sqlparser::ast::BinaryOperator::Eq => Ok(left_val == right_val),
-                    sqlparser::ast::BinaryOperator::NotEq => Ok(left_val != right_val),
-                    sqlparser::ast::BinaryOperator::Gt => todo!("Support > operator"),
-                    sqlparser::ast::BinaryOperator::Lt => todo!("Support < operator"),
-                    sqlparser::ast::BinaryOperator::GtEq => todo!("Support >= operator"),
-                    sqlparser::ast::BinaryOperator::LtEq => todo!("Support <= operator"),
-                    // Add other operators as needed
-                    _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                        "Unsupported operator in join condition: {:?}",
-                        op
-                    ))),
+                // Add values from left row
+                for value in left_row {
+                    new_row.push(value.clone());
                 }
+                
+                // Add values from right row
+                for value in right_row {
+                    new_row.push(value.clone());
+                }
+                
+                let _ = result.add_row(new_row);
+                matched = true;
             }
-            // Handle other expression types
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported expression in join condition: {:?}",
-                expr
-            ))),
+            
+            // If no match was found, add the left row with NULL values for the right side
+            if !matched {
+                let mut new_row = Vec::with_capacity(left_row.len() + right.column_count());
+                
+                // Add values from left row
+                for value in left_row {
+                    new_row.push(value.clone());
+                }
+                
+                // Add NULL values for the right side
+                for _ in 0..right.column_count() {
+                    new_row.push(Value::Null);
+                }
+                
+                let _ = result.add_row(new_row);
+            }
         }
-    }
-
-    /// Evaluate an expression in the join context
-    fn evaluate_join_expr(&self, expr: &Expr) -> SqawkResult<Value> {
-        match expr {
-            Expr::Identifier(ident) => {
-                // If it's a simple identifier, first try to find it in context
-                if let Some(value) = self.context.get(&ident.value) {
-                    Ok(value.clone())
-                } else {
-                    // Next, try to look for fully qualified version (table.column)
-                    for (key, value) in &self.context {
-                        if key.ends_with(&format!(".{}", ident.value)) {
-                            return Ok(value.clone());
-                        }
-                    }
-                    
-                    Err(SqawkError::ColumnNotFound(ident.value.clone()))
-                }
-            }
-            Expr::CompoundIdentifier(parts) => {
-                if parts.len() == 2 {
-                    // Handle qualified column references (table.column)
-                    let table_name = &parts[0].value;
-                    let column_name = &parts[1].value;
-                    let key = format!("{}.{}", table_name, column_name);
-                    
-                    if let Some(value) = self.context.get(&key) {
-                        Ok(value.clone())
-                    } else {
-                        Err(SqawkError::ColumnNotFound(key))
-                    }
-                } else {
-                    Err(SqawkError::UnsupportedSqlFeature(
-                        "Only table.column identifiers are supported".to_string(),
-                    ))
-                }
-            }
-            Expr::Value(val) => match val {
-                sqlparser::ast::Value::Number(n, _) => {
-                    if let Ok(i) = n.parse::<i64>() {
-                        Ok(Value::Integer(i))
-                    } else if let Ok(f) = n.parse::<f64>() {
-                        Ok(Value::Float(f))
-                    } else {
-                        Ok(Value::String(n.clone()))
-                    }
-                }
-                sqlparser::ast::Value::SingleQuotedString(s) => Ok(Value::String(s.clone())),
-                sqlparser::ast::Value::DoubleQuotedString(s) => Ok(Value::String(s.clone())),
-                sqlparser::ast::Value::Boolean(b) => Ok(Value::Boolean(*b)),
-                sqlparser::ast::Value::Null => Ok(Value::Null),
-                _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Unsupported value type in join condition: {:?}",
-                    val
-                ))),
-            },
-            // Add other expression types as needed
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported expression type in join condition: {:?}",
-                expr
-            ))),
-        }
+        
+        Ok(result)
     }
 }

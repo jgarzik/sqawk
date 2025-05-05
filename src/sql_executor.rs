@@ -2,11 +2,11 @@
 //!
 //! This module handles parsing and executing SQL statements.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use anyhow::Result;
 use sqlparser::ast::{
-    Assignment, Expr, Join as SqlJoin, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr, 
+    Assignment, Expr, Join as SqlJoin, Query, SelectItem, SetExpr, 
     Statement, TableFactor, TableWithJoins, Value as SqlValue,
 };
 use sqlparser::dialect::GenericDialect;
@@ -14,8 +14,7 @@ use sqlparser::parser::Parser;
 
 use crate::csv_handler::CsvHandler;
 use crate::error::{SqawkError, SqawkResult};
-use crate::join::{JoinExecutor, JoinType};
-use crate::table::{ColumnRef, Table, Value};
+use crate::table::{Table, Value};
 
 /// SQL statement executor
 pub struct SqlExecutor {
@@ -195,7 +194,6 @@ impl SqlExecutor {
     /// * The resulting table after processing all joins
     fn process_table_joins(&self, left_table: &Table, joins: &[SqlJoin]) -> SqawkResult<Table> {
         let mut result_table = left_table.clone();
-        let mut join_executor = JoinExecutor::new();
         
         for join in joins {
             // Get the right table
@@ -215,32 +213,9 @@ impl SqlExecutor {
             
             let right_table = self.csv_handler.get_table(&right_table_name)?;
             
-            // Determine join type and condition
-            let join_type = JoinType::from(&join.join_operator);
-            let join_condition = match &join.join_operator {
-                JoinOperator::Inner(constraint) | 
-                JoinOperator::LeftOuter(constraint) |
-                JoinOperator::RightOuter(constraint) |
-                JoinOperator::FullOuter(constraint) => {
-                    match constraint {
-                        JoinConstraint::On(expr) => Some(expr),
-                        _ => {
-                            return Err(SqawkError::UnsupportedSqlFeature(
-                                "Only ON constraints are supported in joins".to_string(),
-                            ))
-                        }
-                    }
-                }
-                JoinOperator::CrossJoin => None,
-                _ => {
-                    return Err(SqawkError::UnsupportedSqlFeature(
-                        format!("Unsupported join type: {:?}", join.join_operator),
-                    ))
-                }
-            };
-            
-            // Execute the join
-            result_table = join_executor.execute_join(&result_table, right_table, join_type, join_condition)?;
+            // For now, we only support CROSS JOIN
+            // Later we'll implement proper join types and conditions
+            result_table = result_table.cross_join(right_table)?;
         }
         
         Ok(result_table)
@@ -425,62 +400,24 @@ impl SqlExecutor {
 
         for item in items {
             match item {
-                SelectItem::Wildcard(wildcard) => {
-                    match wildcard {
-                        // Regular wildcard (*) - select all columns
-                        None => {
-                            for i in 0..table.column_count() {
-                                column_indices.push(i);
-                            }
-                        },
-                        // Qualified wildcard (table.*) - select all columns from specified table
-                        Some(wildcard_ident) => {
-                            let table_name = &wildcard_ident[0].value;
-                            
-                            // Check if any columns have this table prefix
-                            let mut found_match = false;
-                            for (i, col) in table.columns().iter().enumerate() {
-                                if col.starts_with(&format!("{}.", table_name)) {
-                                    column_indices.push(i);
-                                    found_match = true;
-                                }
-                            }
-                            
-                            if !found_match {
-                                return Err(SqawkError::TableNotFound(table_name.clone()));
-                            }
-                        }
+                SelectItem::Wildcard(_) => {
+                    // For any wildcard (*), select all columns
+                    for i in 0..table.column_count() {
+                        column_indices.push(i);
                     }
                 }
                 SelectItem::UnnamedExpr(expr) => {
                     match expr {
                         // Simple column reference
                         Expr::Identifier(ident) => {
-                            let idx = table
-                                .column_index(&ident.value)
-                                .ok_or_else(|| {
-                                    // Try as qualified name by checking column patterns
-                                    for (i, col) in table.columns().iter().enumerate() {
-                                        if col.ends_with(&format!(".{}", ident.value)) {
-                                            return Ok(i);
-                                        }
-                                    }
-                                    
-                                    Err(SqawkError::ColumnNotFound(ident.value.clone()))
-                                })?;
-                            column_indices.push(idx);
-                        },
-                        // Qualified column reference (table.column)
-                        Expr::CompoundIdentifier(parts) => {
-                            if parts.len() == 2 {
-                                let table_name = &parts[0].value;
-                                let column_name = &parts[1].value;
-                                let qualified_name = format!("{}.{}", table_name, column_name);
-                                
-                                // First, try to find an exact match for the qualified column
+                            // First try as an exact column name match
+                            if let Some(idx) = table.column_index(&ident.value) {
+                                column_indices.push(idx);
+                            } else {
+                                // Try as qualified name by checking column patterns
                                 let mut found = false;
                                 for (i, col) in table.columns().iter().enumerate() {
-                                    if col == &qualified_name {
+                                    if col.ends_with(&format!(".{}", ident.value)) {
                                         column_indices.push(i);
                                         found = true;
                                         break;
@@ -488,12 +425,49 @@ impl SqlExecutor {
                                 }
                                 
                                 if !found {
-                                    return Err(SqawkError::ColumnNotFound(qualified_name));
+                                    return Err(SqawkError::ColumnNotFound(ident.value.clone()));
                                 }
-                            } else {
-                                return Err(SqawkError::UnsupportedSqlFeature(
-                                    "Only table.column references are supported".to_string(),
-                                ));
+                            }
+                        },
+                        // Qualified column reference (table.column or join_result.table.column)
+                        Expr::CompoundIdentifier(parts) => {
+                            // Build the fully qualified column name from parts
+                            let qualified_name = parts.iter()
+                                .map(|ident| ident.value.clone())
+                                .collect::<Vec<_>>()
+                                .join(".");
+                            
+                            eprintln!("Looking for qualified column: {}", qualified_name);
+                            
+                            // Try to find an exact match for the qualified column
+                            let mut found = false;
+                            for (i, col) in table.columns().iter().enumerate() {
+                                eprintln!("Comparing with column: {}", col);
+                                if col == &qualified_name {
+                                    column_indices.push(i);
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            
+                            // If we didn't find an exact match, try a suffix match
+                            // This helps with cases like "users.id" matching "users_orders_cross.users.id"
+                            if !found && parts.len() == 2 {
+                                let suffix = format!("{}.{}", parts[0].value, parts[1].value);
+                                eprintln!("Trying suffix match for: {}", suffix);
+                                
+                                for (i, col) in table.columns().iter().enumerate() {
+                                    if col.ends_with(&suffix) {
+                                        eprintln!("Found suffix match: {} contains {}", col, suffix);
+                                        column_indices.push(i);
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            if !found {
+                                return Err(SqawkError::ColumnNotFound(qualified_name));
                             }
                         },
                         _ => {
@@ -538,6 +512,19 @@ impl SqlExecutor {
     fn apply_where_clause(&self, table: Table, where_expr: &Expr) -> SqawkResult<Table> {
         eprintln!("Applying WHERE clause: {:?}", where_expr);
         eprintln!("Table before filtering: {} rows", table.row_count());
+        
+        // Print column names for debugging
+        eprintln!("Columns in table:");
+        for (i, col) in table.columns().iter().enumerate() {
+            eprintln!("[{}] {}", i, col);
+        }
+
+        // For multi-condition WHERE clauses, analyze them separately for debugging
+        if let Expr::BinaryOp { left, op, right } = where_expr {
+            if matches!(op, sqlparser::ast::BinaryOperator::And) {
+                eprintln!("WHERE clause has AND operator. Left: {:?}, Right: {:?}", left, right);
+            }
+        }
 
         // Create a new table that only includes rows matching the WHERE condition
         // by calling the table.select method with a closure that evaluates the condition
@@ -577,95 +564,141 @@ impl SqlExecutor {
     fn evaluate_condition(&self, expr: &Expr, row: &[Value], table: &Table) -> SqawkResult<bool> {
         match expr {
             Expr::BinaryOp { left, op, right } => {
-                let left_val = self.evaluate_expr_with_row(left, row, table)?;
-                let right_val = self.evaluate_expr_with_row(right, row, table)?;
-
-                // Debug print the values being compared
-                eprintln!("WHERE comparison: {:?} {:?} {:?}", left_val, op, right_val);
-
-                // Handle different comparison operators
+                // Handle logical operators (AND, OR) differently from comparison operators
                 match op {
-                    // Equal (=) operator
-                    sqlparser::ast::BinaryOperator::Eq => {
-                        // Use the Value's implementation of PartialEq which handles type conversions
-                        let result = left_val == right_val;
-                        eprintln!("Equality result: {}", result);
-                        Ok(result)
-                    }
+                    // AND operator - evaluate both sides and combine results
+                    sqlparser::ast::BinaryOperator::And => {
+                        eprintln!("Evaluating AND expression");
+                        
+                        // Evaluate left condition
+                        let left_result = self.evaluate_condition(left, row, table)?;
+                        eprintln!("Left condition evaluated to: {}", left_result);
+                        
+                        // Short-circuit - if left is false, don't evaluate right
+                        if !left_result {
+                            return Ok(false);
+                        }
+                        
+                        // Evaluate right condition only if left was true
+                        let right_result = self.evaluate_condition(right, row, table)?;
+                        eprintln!("Right condition evaluated to: {}", right_result);
+                        
+                        Ok(left_result && right_result)
+                    },
+                    
+                    // OR operator - evaluate both sides and combine results
+                    sqlparser::ast::BinaryOperator::Or => {
+                        eprintln!("Evaluating OR expression");
+                        
+                        // Evaluate left condition
+                        let left_result = self.evaluate_condition(left, row, table)?;
+                        eprintln!("Left condition evaluated to: {}", left_result);
+                        
+                        // Short-circuit - if left is true, don't evaluate right
+                        if left_result {
+                            return Ok(true);
+                        }
+                        
+                        // Evaluate right condition only if left was false
+                        let right_result = self.evaluate_condition(right, row, table)?;
+                        eprintln!("Right condition evaluated to: {}", right_result);
+                        
+                        Ok(left_result || right_result)
+                    },
+                    
+                    // For comparison operators, evaluate the operands to values first
+                    _ => {
+                        let left_val = self.evaluate_expr_with_row(left, row, table)?;
+                        let right_val = self.evaluate_expr_with_row(right, row, table)?;
 
-                    // Not equal (!=) operator
-                    sqlparser::ast::BinaryOperator::NotEq => Ok(left_val != right_val),
+                        // Debug print the values being compared
+                        eprintln!("WHERE comparison: {:?} {:?} {:?}", left_val, op, right_val);
 
-                    // Greater than (>) operator
-                    sqlparser::ast::BinaryOperator::Gt => {
-                        // Handle each type combination separately for correct numeric comparisons
-                        match (&left_val, &right_val) {
-                            // Integer-Integer comparison
-                            (Value::Integer(a), Value::Integer(b)) => Ok(a > b),
+                        // Handle different comparison operators
+                        match op {
+                            // Equal (=) operator
+                            sqlparser::ast::BinaryOperator::Eq => {
+                                // Use the Value's implementation of PartialEq which handles type conversions
+                                let result = left_val == right_val;
+                                eprintln!("Equality result: {}", result);
+                                Ok(result)
+                            }
 
-                            // Float-Float comparison
-                            (Value::Float(a), Value::Float(b)) => Ok(a > b),
+                            // Not equal (!=) operator
+                            sqlparser::ast::BinaryOperator::NotEq => Ok(left_val != right_val),
 
-                            // Integer-Float comparison (convert Integer to Float)
-                            (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) > *b),
+                            // Greater than (>) operator
+                            sqlparser::ast::BinaryOperator::Gt => {
+                                // Handle each type combination separately for correct numeric comparisons
+                                match (&left_val, &right_val) {
+                                    // Integer-Integer comparison
+                                    (Value::Integer(a), Value::Integer(b)) => Ok(a > b),
 
-                            // Float-Integer comparison (convert Integer to Float)
-                            (Value::Float(a), Value::Integer(b)) => Ok(*a > (*b as f64)),
+                                    // Float-Float comparison
+                                    (Value::Float(a), Value::Float(b)) => Ok(a > b),
 
-                            // String-String comparison (lexicographic)
-                            (Value::String(a), Value::String(b)) => Ok(a > b),
+                                    // Integer-Float comparison (convert Integer to Float)
+                                    (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) > *b),
 
-                            // Error for incompatible types
-                            _ => Err(SqawkError::TypeError(format!(
-                                "Cannot compare {:?} and {:?} with >",
-                                left_val, right_val
+                                    // Float-Integer comparison (convert Integer to Float)
+                                    (Value::Float(a), Value::Integer(b)) => Ok(*a > (*b as f64)),
+
+                                    // String-String comparison (lexicographic)
+                                    (Value::String(a), Value::String(b)) => Ok(a > b),
+
+                                    // Error for incompatible types
+                                    _ => Err(SqawkError::TypeError(format!(
+                                        "Cannot compare {:?} and {:?} with >",
+                                        left_val, right_val
+                                    ))),
+                                }
+                            }
+
+                            // Less than (<) operator
+                            sqlparser::ast::BinaryOperator::Lt => match (&left_val, &right_val) {
+                                (Value::Integer(a), Value::Integer(b)) => Ok(a < b),
+                                (Value::Float(a), Value::Float(b)) => Ok(a < b),
+                                (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) < *b),
+                                (Value::Float(a), Value::Integer(b)) => Ok(*a < (*b as f64)),
+                                (Value::String(a), Value::String(b)) => Ok(a < b),
+                                _ => Err(SqawkError::TypeError(format!(
+                                    "Cannot compare {:?} and {:?} with <",
+                                    left_val, right_val
+                                ))),
+                            },
+
+                            // Greater than or equal (>=) operator
+                            sqlparser::ast::BinaryOperator::GtEq => match (&left_val, &right_val) {
+                                (Value::Integer(a), Value::Integer(b)) => Ok(a >= b),
+                                (Value::Float(a), Value::Float(b)) => Ok(a >= b),
+                                (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) >= *b),
+                                (Value::Float(a), Value::Integer(b)) => Ok(*a >= (*b as f64)),
+                                (Value::String(a), Value::String(b)) => Ok(a >= b),
+                                _ => Err(SqawkError::TypeError(format!(
+                                    "Cannot compare {:?} and {:?} with >=",
+                                    left_val, right_val
+                                ))),
+                            },
+
+                            // Less than or equal (<=) operator
+                            sqlparser::ast::BinaryOperator::LtEq => match (&left_val, &right_val) {
+                                (Value::Integer(a), Value::Integer(b)) => Ok(a <= b),
+                                (Value::Float(a), Value::Float(b)) => Ok(a <= b),
+                                (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) <= *b),
+                                (Value::Float(a), Value::Integer(b)) => Ok(*a <= (*b as f64)),
+                                (Value::String(a), Value::String(b)) => Ok(a <= b),
+                                _ => Err(SqawkError::TypeError(format!(
+                                    "Cannot compare {:?} and {:?} with <=",
+                                    left_val, right_val
+                                ))),
+                            },
+                            // Add more operators as needed
+                            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                                "Unsupported binary operator: {:?}",
+                                op
                             ))),
                         }
                     }
-
-                    // Less than (<) operator
-                    sqlparser::ast::BinaryOperator::Lt => match (&left_val, &right_val) {
-                        (Value::Integer(a), Value::Integer(b)) => Ok(a < b),
-                        (Value::Float(a), Value::Float(b)) => Ok(a < b),
-                        (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) < *b),
-                        (Value::Float(a), Value::Integer(b)) => Ok(*a < (*b as f64)),
-                        (Value::String(a), Value::String(b)) => Ok(a < b),
-                        _ => Err(SqawkError::TypeError(format!(
-                            "Cannot compare {:?} and {:?} with <",
-                            left_val, right_val
-                        ))),
-                    },
-
-                    // Greater than or equal (>=) operator
-                    sqlparser::ast::BinaryOperator::GtEq => match (&left_val, &right_val) {
-                        (Value::Integer(a), Value::Integer(b)) => Ok(a >= b),
-                        (Value::Float(a), Value::Float(b)) => Ok(a >= b),
-                        (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) >= *b),
-                        (Value::Float(a), Value::Integer(b)) => Ok(*a >= (*b as f64)),
-                        (Value::String(a), Value::String(b)) => Ok(a >= b),
-                        _ => Err(SqawkError::TypeError(format!(
-                            "Cannot compare {:?} and {:?} with >=",
-                            left_val, right_val
-                        ))),
-                    },
-
-                    // Less than or equal (<=) operator
-                    sqlparser::ast::BinaryOperator::LtEq => match (&left_val, &right_val) {
-                        (Value::Integer(a), Value::Integer(b)) => Ok(a <= b),
-                        (Value::Float(a), Value::Float(b)) => Ok(a <= b),
-                        (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) <= *b),
-                        (Value::Float(a), Value::Integer(b)) => Ok(*a <= (*b as f64)),
-                        (Value::String(a), Value::String(b)) => Ok(a <= b),
-                        _ => Err(SqawkError::TypeError(format!(
-                            "Cannot compare {:?} and {:?} with <=",
-                            left_val, right_val
-                        ))),
-                    },
-                    // Add more operators as needed
-                    _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                        "Unsupported binary operator: {:?}",
-                        op
-                    ))),
                 }
             }
             Expr::IsNull(expr) => {
@@ -795,12 +828,89 @@ impl SqlExecutor {
         table: &Table,
     ) -> SqawkResult<Value> {
         match expr {
+            // Simple column reference (unqualified)
             Expr::Identifier(ident) => {
-                let idx = table
-                    .column_index(&ident.value)
-                    .ok_or_else(|| SqawkError::ColumnNotFound(ident.value.clone()))?;
-                Ok(row[idx].clone())
-            }
+                // First try as an exact column name match
+                if let Some(idx) = table.column_index(&ident.value) {
+                    if idx < row.len() {
+                        return Ok(row[idx].clone());
+                    } else {
+                        return Err(SqawkError::InvalidSqlQuery(format!(
+                            "Column index {} out of bounds for row with {} columns",
+                            idx,
+                            row.len()
+                        )));
+                    }
+                }
+                
+                // Try to find a matching qualified column (e.g., for "name", match "table.name")
+                for (i, col) in table.columns().iter().enumerate() {
+                    if col.ends_with(&format!(".{}", ident.value)) {
+                        if i < row.len() {
+                            return Ok(row[i].clone());
+                        }
+                    }
+                }
+                
+                // If we got here, the column wasn't found
+                Err(SqawkError::ColumnNotFound(ident.value.clone()))
+            },
+            // Qualified column reference (table.column or join_result.table.column)
+            Expr::CompoundIdentifier(parts) => {
+                // Build the fully qualified column name from parts
+                let qualified_name = parts.iter()
+                    .map(|ident| ident.value.clone())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                
+                eprintln!("Looking for qualified column in row evaluation: {}", qualified_name);
+                
+                // Try to find an exact match for the qualified column
+                let mut found = false;
+                let mut matched_value = Value::Null;
+                
+                for (i, col) in table.columns().iter().enumerate() {
+                    eprintln!("Comparing with column: {}", col);
+                    if col == &qualified_name {
+                        if i < row.len() {
+                            eprintln!("Found exact column match: {}", qualified_name);
+                            return Ok(row[i].clone());
+                        } else {
+                            return Err(SqawkError::InvalidSqlQuery(format!(
+                                "Column index {} out of bounds for row with {} columns",
+                                i,
+                                row.len()
+                            )));
+                        }
+                    }
+                }
+                
+                // If we didn't find an exact match, try a suffix match
+                // This helps with cases like "users.id" matching "users_orders_cross.users.id"
+                if parts.len() == 2 {
+                    let suffix = format!("{}.{}", parts[0].value, parts[1].value);
+                    eprintln!("Trying suffix match for: {}", suffix);
+                    
+                    for (i, col) in table.columns().iter().enumerate() {
+                        if col.ends_with(&suffix) {
+                            eprintln!("Found suffix match: {} contains {}", col, suffix);
+                            if i < row.len() {
+                                return Ok(row[i].clone());
+                            } else {
+                                return Err(SqawkError::InvalidSqlQuery(format!(
+                                    "Column index {} out of bounds for row with {} columns",
+                                    i,
+                                    row.len()
+                                )));
+                            }
+                        }
+                    }
+                }
+                
+                // If we got here, the qualified column wasn't found
+                Err(SqawkError::ColumnNotFound(qualified_name))
+            },
+            // Handle other expression types by delegating to the main evaluate_expr function
             _ => self.evaluate_expr(expr),
         }
     }
