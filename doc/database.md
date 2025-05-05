@@ -7,12 +7,8 @@ Sqawk implements a lightweight in-memory database engine that supports SQL opera
 ## Table of Contents
 
 1. [Data Model](#data-model)
-2. [Data Types](#data-types)
-3. [SQL Support](#sql-support)
-4. [Comparison Operators](#comparison-operators)
-5. [Architecture](#architecture)
-6. [Performance Considerations](#performance-considerations)
-7. [Limitations](#limitations)
+2. [Architecture](#architecture)
+3. [Performance Considerations](#performance-considerations)
 
 ## Data Model
 
@@ -47,103 +43,6 @@ Tables are loaded from CSV files at startup and can be modified through SQL oper
 5. **Write Only Modified**: Only tables that were changed are written; unmodified tables are not rewritten
 
 This design ensures that users can experiment with data manipulations while maintaining the integrity of source files. The verbose mode (`-v`) provides additional confirmation about whether changes were saved or not.
-
-## Data Types
-
-Sqawk supports the following data types internally:
-
-| Type | Description | Example | Storage |
-|------|-------------|---------|---------|
-| `Null` | Missing or null value | NULL | Special variant |
-| `Integer` | 64-bit signed integer | 42 | i64 |
-| `Float` | 64-bit floating point | 3.14 | f64 |
-| `String` | UTF-8 text | "hello" | String |
-| `Boolean` | True/false value | true | bool |
-
-### Type Conversion
-
-When loading data from CSV files, Sqawk attempts to infer the most appropriate type for each value:
-
-1. First tries to parse as an `Integer`
-2. If that fails, tries to parse as a `Float`
-3. If that fails, tries to parse as a `Boolean` (true/false, yes/no, 1/0)
-4. If all else fails, stores the value as a `String`
-5. Empty values are stored as `Null`
-
-### Type Coercion
-
-For comparison operations, Sqawk implements automatic type coercion:
-
-- `Integer` and `Float` values can be compared with each other (integer is converted to float)
-- All other type combinations require exact type matches for comparison
-- Comparisons involving `Null` follow NULL semantics (generally returning false)
-
-## SQL Support
-
-### Supported SQL Statements
-
-Sqawk currently supports the following SQL operations:
-
-| Statement | Description | Example |
-|-----------|-------------|---------|
-| `SELECT` | Query data from tables | `SELECT * FROM users WHERE age > 30` |
-| `INSERT` | Add new rows to tables | `INSERT INTO users VALUES (4, 'Dave', 28)` |
-| `UPDATE` | Modify existing rows in tables | `UPDATE users SET age = 29 WHERE name = 'Dave'` |
-| `DELETE` | Remove rows from tables | `DELETE FROM users WHERE age < 18` |
-
-### SELECT Statement
-
-The `SELECT` statement supports:
-
-- Column selection (`SELECT col1, col2, ...`)
-- Wildcard selection (`SELECT *`)
-- `WHERE` clause for filtering rows
-- Column qualification using table names (`SELECT table1.col1, table2.col2`) 
-- Multi-table joins with comma-separated table lists (`FROM table1, table2`)
-
-### INSERT Statement
-
-The `INSERT` statement supports:
-
-- Direct value insertion with the `VALUES` clause
-- All columns must be provided in the correct order
-- No column mapping or partial column insertion
-
-### UPDATE Statement
-
-The `UPDATE` statement supports:
-
-- Updating one or more columns in all rows (`UPDATE table SET col = value`)
-- Conditional updates with the `WHERE` clause (`UPDATE table SET col = value WHERE condition`)
-- Simple assignments with literal values (`UPDATE users SET age = 30`)
-- Using the same conditions and operators as in the WHERE clause for filtering
-
-### DELETE Statement
-
-The `DELETE` statement supports:
-
-- Deleting all rows from a table (`DELETE FROM table`)
-- Conditional deletion with `WHERE` clause (`DELETE FROM table WHERE condition`)
-
-## Comparison Operators
-
-Sqawk supports the standard SQL comparison operators:
-
-| Operator | Description | Example |
-|----------|-------------|---------|
-| `=` | Equal to | `WHERE age = 30` |
-| `!=` | Not equal to | `WHERE name != 'Alice'` |
-| `>` | Greater than | `WHERE age > 18` |
-| `<` | Less than | `WHERE price < 100` |
-| `>=` | Greater than or equal to | `WHERE age >= 21` |
-| `<=` | Less than or equal to | `WHERE score <= 5` |
-
-### Operator Behavior with Different Types
-
-- **Numeric Comparisons**: Both `Integer` and `Float` values can be compared using any comparison operator
-- **String Comparisons**: String values are compared lexicographically
-- **Boolean Comparisons**: Boolean values can be compared for equality/inequality only
-- **NULL Handling**: Comparisons with NULL follow SQL NULL semantics (generally returning false)
 
 ## Architecture
 
@@ -189,55 +88,40 @@ For larger datasets, consider:
 - Complex queries may require multiple passes over the data
 - Write operations create new copies of the data in memory
 
-## Join Functionality
+## Join Implementation
 
-Sqawk now supports SQL joins to combine data from multiple tables. Join capabilities include:
+The database engine includes support for combining data from multiple tables through joins:
 
-### Types of Joins
+### Join Engine Design
 
-- **Cross Joins**: Combine all rows from all tables (Cartesian product) using comma-separated syntax in the `FROM` clause
-  ```sql
-  SELECT * FROM users, orders 
-  ```
+- **Cross Join Implementation**: Creates a Cartesian product of all rows
+- **Filter-Based Joins**: Uses WHERE conditions for relationship-based filtering
+- **Multi-table Support**: Handles joining multiple tables in sequence
 
-- **Inner Joins**: Filter the cross join results using `WHERE` conditions to create relationship-based joins
-  ```sql
-  SELECT * FROM users, orders WHERE users.id = orders.user_id
-  ```
+### Column Naming Strategy
 
-- **Multi-table Joins**: Chain together multiple tables with appropriate `WHERE` conditions
-  ```sql
-  SELECT * FROM users, orders, products
-  WHERE users.id = orders.user_id AND products.product_id = orders.product_id
-  ```
+To maintain clarity when working with multiple tables:
 
-### Column Naming
+- **Qualified Naming**: Columns are prefixed with their table names
+- **Consistent Referencing**: A consistent naming convention is applied in multi-table operations
+- **Qualified References**: Column references include table qualifiers in conditions
 
-In join results, columns are qualified with their table names to avoid ambiguity:
+### Technical Implementation
 
-- **Qualified Columns**: All columns are prefixed with table names (`users.id`, `orders.date`)
-- **Consistent Naming**: For multi-table queries, consistent naming is used for all column references
-- **Column References**: Columns can be referenced in `WHERE` clauses using table qualification
+- The join operation first creates a cross product, then applies filters
+- Tables are processed in the order specified
+- The column naming system ensures disambiguation in result sets
+- Type coercion rules are applied consistently in join conditions
 
-### Implementation Details
+## Current System Limitations
 
-- Cross joins are implemented first, with filtering applied afterwards
-- Tables are joined in the order they appear in the `FROM` clause
-- The column prefixing system ensures unique column names in result sets
-- Type coercion is properly handled in join conditions
+The database engine has several architectural limitations:
 
-## Limitations
-
-Current limitations of the database system:
-
-- **No Indices**: All operations scan the entire table
-- **Limited Join Syntax**: No explicit `JOIN ... ON` syntax yet, must use `WHERE` conditions
-- **No Outer Joins**: No support for LEFT, RIGHT, or FULL OUTER joins
-- **Limited Expression Support**: Complex expressions in WHERE clauses are not supported
-- **No Aggregations**: GROUP BY, HAVING, and aggregate functions are not implemented
-- **No Transactions**: All operations are applied immediately to the in-memory tables with no support for BEGIN, COMMIT, or ROLLBACK
-- **No Schema Enforcement**: Column types are inferred, not declared
-- **No Constraints**: Uniqueness, foreign keys, etc. are not supported
+- **No Index Structure**: All operations perform full table scans
+- **Limited Join Capabilities**: Advanced join syntax not implemented
+- **No Transaction Support**: Operations are applied immediately with no rollback capability
+- **Schema Flexibility**: Types are inferred rather than enforced
+- **No Constraints System**: Referential integrity not enforced
 
 ---
 
