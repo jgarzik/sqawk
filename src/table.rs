@@ -437,9 +437,20 @@ impl Table {
     /// # Returns
     /// * `Ok(Table)` containing only the specified columns from the original table
     /// * `Err` if any column index is out of bounds
-    pub fn project(&self, column_indices: &[usize]) -> SqawkResult<Self> {
+    /// Create a new table with only specified columns and optional aliases
+    /// 
+    /// Projects the table to include only the columns specified by their indices,
+    /// applying any aliases provided.
+    /// 
+    /// # Arguments
+    /// * `column_specs` - Array of column indices and optional aliases to include in the result table
+    /// 
+    /// # Returns
+    /// * `Ok(Table)` containing only the specified columns from the original table with aliases applied
+    /// * `Err` if any column index is out of bounds
+    pub fn project_with_aliases(&self, column_specs: &[(usize, Option<String>)]) -> SqawkResult<Self> {
         // Validate column indices
-        for &idx in column_indices {
+        for &(idx, _) in column_specs {
             if idx >= self.columns.len() {
                 return Err(SqawkError::ColumnNotFound(format!(
                     "Column index {} out of bounds",
@@ -448,23 +459,39 @@ impl Table {
             }
         }
 
-        // Create new column list
-        let columns: Vec<String> = column_indices
+        // Create new column list with aliases where specified
+        let columns: Vec<String> = column_specs
             .iter()
-            .map(|&idx| self.columns[idx].clone())
+            .map(|&(idx, ref alias)| {
+                if let Some(alias_name) = alias {
+                    alias_name.clone()
+                } else {
+                    self.columns[idx].clone()
+                }
+            })
             .collect();
 
-        let mut result = Table::new(&self.name, columns, None);
+        let mut result = Table::new(&self.name, columns, self.source_file.clone());
 
         // Project rows
         for row in &self.rows {
             let projected_row: Vec<Value> =
-                column_indices.iter().map(|&idx| row[idx].clone()).collect();
+                column_specs.iter().map(|&(idx, _)| row[idx].clone()).collect();
 
             result.add_row(projected_row)?;
         }
 
         Ok(result)
+    }
+    
+    pub fn project(&self, column_indices: &[usize]) -> SqawkResult<Self> {
+        // Convert column indices to column specs without aliases
+        let column_specs: Vec<(usize, Option<String>)> = column_indices
+            .iter()
+            .map(|&idx| (idx, None))
+            .collect();
+            
+        self.project_with_aliases(&column_specs)
     }
     
 

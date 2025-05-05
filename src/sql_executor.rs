@@ -152,7 +152,7 @@ impl SqlExecutor {
                     Ok(Some(result_table))
                 } else {
                     // For non-aggregate queries, use the normal column resolution and projection
-                    let column_indices = self.resolve_select_items(&select.projection, &source_table)?;
+                    let column_specs = self.resolve_select_items(&select.projection, &source_table)?;
 
                     // IMPORTANT: First filter rows if WHERE clause is present
                     // We must apply the WHERE clause before projection to ensure all columns
@@ -167,9 +167,9 @@ impl SqlExecutor {
                         source_table
                     };
 
-                    // Then apply projection to get only the requested columns
+                    // Then apply projection to get only the requested columns with aliases
                     // This happens AFTER filtering to ensure WHERE clauses can access all columns
-                    let mut result_table = filtered_table.project(&column_indices)?;
+                    let mut result_table = filtered_table.project_with_aliases(&column_specs)?;
                     
                     // Apply ORDER BY if present
                     // This needs to happen after projection because we need to sort
@@ -524,35 +524,40 @@ impl SqlExecutor {
         }
     }
 
-    /// Resolve SELECT items to column indices
+    /// Resolve SELECT items to column indices and aliases
     /// Resolve the column indices for a SELECT statement
     ///
     /// This function takes the SELECT items from a query and resolves them to
-    /// column indices in the source table.
+    /// column indices in the source table, along with any aliases.
     ///
     /// # Arguments
     /// * `items` - The SELECT items from the query (columns to select)
     /// * `table` - The source table containing the columns
     ///
     /// # Returns
-    /// * A vector of column indices corresponding to the SELECT items
-    fn resolve_select_items(&self, items: &[SelectItem], table: &Table) -> SqawkResult<Vec<usize>> {
-        let mut column_indices = Vec::new();
+    /// * A vector of column indices and optional aliases corresponding to the SELECT items
+    fn resolve_select_items(&self, items: &[SelectItem], table: &Table) -> SqawkResult<Vec<(usize, Option<String>)>> {
+        let mut column_specs = Vec::new();
 
         for item in items {
             match item {
                 SelectItem::Wildcard(_) => {
-                    self.handle_wildcard_select(table, &mut column_indices);
+                    // For wildcard, add all columns without aliases
+                    for i in 0..table.column_count() {
+                        column_specs.push((i, None));
+                    }
                 }
                 SelectItem::UnnamedExpr(expr) => {
                     match expr {
                         // Simple column reference
                         Expr::Identifier(ident) => {
-                            self.resolve_simple_column_for_select(&ident.value, table, &mut column_indices)?;
+                            let idx = self.get_column_index_for_select(&ident.value, table)?;
+                            column_specs.push((idx, None));
                         },
                         // Qualified column reference (table.column or join_result.table.column)
                         Expr::CompoundIdentifier(parts) => {
-                            self.resolve_qualified_column_for_select(parts, table, &mut column_indices)?;
+                            let idx = self.get_qualified_column_index(parts, table)?;
+                            column_specs.push((idx, None));
                         },
                         _ => {
                             return Err(SqawkError::UnsupportedSqlFeature(
@@ -561,10 +566,35 @@ impl SqlExecutor {
                         }
                     }
                 }
-                SelectItem::ExprWithAlias { .. } => {
-                    return Err(SqawkError::UnsupportedSqlFeature(
-                        "Column aliases are not supported".to_string(),
-                    ));
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    // If query has aggregates and we're seeing a function with an alias,
+                    // we should let apply_aggregate_functions handle it instead
+                    if self.contains_aggregate_functions(&[SelectItem::ExprWithAlias { 
+                        expr: expr.clone(), 
+                        alias: alias.clone() 
+                    }]) {
+                        // Skip this item, as it will be handled by apply_aggregate_functions
+                        // We add a placeholder that won't be used
+                        column_specs.push((0, Some(alias.value.clone())));
+                    } else {
+                        match &*expr {
+                            Expr::Identifier(ident) => {
+                                // Simple column reference with alias
+                                let idx = self.get_column_index_for_select(&ident.value, table)?;
+                                column_specs.push((idx, Some(alias.value.clone())));
+                            },
+                            Expr::CompoundIdentifier(parts) => {
+                                // Qualified column reference (table.column or join_result.table.column) with alias
+                                let idx = self.get_qualified_column_index(&parts, table)?;
+                                column_specs.push((idx, Some(alias.value.clone())));
+                            },
+                            _ => {
+                                return Err(SqawkError::UnsupportedSqlFeature(
+                                    "Only direct column references are supported with aliases in SELECT".to_string(),
+                                ));
+                            }
+                        }
+                    }
                 }
                 _ => {
                     return Err(SqawkError::UnsupportedSqlFeature(
@@ -574,7 +604,59 @@ impl SqlExecutor {
             }
         }
 
-        Ok(column_indices)
+        Ok(column_specs)
+    }
+    
+    /// Get the column index for a simple column name
+    ///
+    /// Helper function that centralizes column index resolution for simple column names
+    fn get_column_index_for_select(&self, column_name: &str, table: &Table) -> SqawkResult<usize> {
+        // First try as an exact column name match
+        if let Some(idx) = table.column_index(column_name) {
+            return Ok(idx);
+        }
+        
+        // Try as qualified name by checking column patterns
+        let suffix = format!(".{}", column_name);
+        for (i, col) in table.columns().iter().enumerate() {
+            if col.ends_with(&suffix) {
+                return Ok(i);
+            }
+        }
+        
+        // If we got here, the column wasn't found
+        Err(SqawkError::ColumnNotFound(column_name.to_string()))
+    }
+    
+    /// Get the column index for a qualified column reference
+    ///
+    /// Helper function that centralizes column index resolution for qualified column names
+    fn get_qualified_column_index(&self, parts: &[sqlparser::ast::Ident], table: &Table) -> SqawkResult<usize> {
+        // Build the fully qualified column name from parts
+        let qualified_name = parts.iter()
+            .map(|ident| ident.value.clone())
+            .collect::<Vec<_>>()
+            .join(".");
+        
+        // Try to find an exact match for the qualified column
+        if let Some(idx) = table.column_index(&qualified_name) {
+            return Ok(idx);
+        }
+        
+        // If we didn't find an exact match, try a suffix match
+        // This helps with cases like "users.id" matching "users_orders_cross.users.id"
+        if parts.len() == 2 {
+            let suffix = format!("{}.{}", parts[0].value, parts[1].value);
+            
+            for (i, col) in table.columns().iter().enumerate() {
+                if col.ends_with(&suffix) {
+                    return Ok(i);
+                }
+            }
+        }
+        
+        // If we got here, the qualified column wasn't found
+        Err(SqawkError::ColumnNotFound(qualified_name))
     }
     
     /// Handle a wildcard (*) in a SELECT statement
@@ -1010,14 +1092,28 @@ impl SqlExecutor {
     /// * `true` if any of the items contains an aggregate function
     fn contains_aggregate_functions(&self, items: &[SelectItem]) -> bool {
         for item in items {
-            if let SelectItem::UnnamedExpr(expr) = item {
-                if let Expr::Function(func) = expr {
-                    // Check if the function name is one of our supported aggregates
-                    let name = func.name.0.first().map(|i| i.value.as_str()).unwrap_or("");
-                    if AggregateFunction::from_name(name).is_some() {
-                        return true;
+            match item {
+                // Check for aggregate functions in non-aliased expressions
+                SelectItem::UnnamedExpr(expr) => {
+                    if let Expr::Function(func) = expr {
+                        // Check if the function name is one of our supported aggregates
+                        let name = func.name.0.first().map(|i| i.value.as_str()).unwrap_or("");
+                        if AggregateFunction::from_name(name).is_some() {
+                            return true;
+                        }
                     }
-                }
+                },
+                // Check for aggregate functions in aliased expressions
+                SelectItem::ExprWithAlias { expr, .. } => {
+                    if let Expr::Function(func) = &*expr {
+                        // Check if the function name is one of our supported aggregates
+                        let name = func.name.0.first().map(|i| i.value.as_str()).unwrap_or("");
+                        if AggregateFunction::from_name(name).is_some() {
+                            return true;
+                        }
+                    }
+                },
+                _ => {}
             }
         }
         false
@@ -1070,6 +1166,43 @@ impl SqlExecutor {
                         return Err(SqawkError::UnsupportedSqlFeature(
                             "Only aggregate functions are supported in aggregate queries".to_string()
                         ));
+                    }
+                },
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    // Handle function call with alias
+                    match &*expr {
+                        Expr::Function(func) => {
+                            let func_name = func.name.0.first().map(|i| i.value.clone()).unwrap_or_default();
+                            
+                            // Check if this is a supported aggregate function
+                            if let Some(agg_func) = AggregateFunction::from_name(&func_name) {
+                                // Process the function arguments
+                                if func.args.len() != 1 {
+                                    return Err(SqawkError::InvalidSqlQuery(
+                                        format!("{} function requires exactly one argument", func_name)
+                                    ));
+                                }
+                                
+                                // Get the column values for the function argument
+                                let column_values = self.get_values_for_function_arg(&func.args[0], table)?;
+                                
+                                // Execute the aggregate function
+                                let result_value = agg_func.execute(&column_values)?;
+                                
+                                // Add the result to our output with the alias
+                                result_columns.push(alias.value.clone());
+                                result_values.push(result_value);
+                            } else {
+                                return Err(SqawkError::UnsupportedSqlFeature(
+                                    format!("Unsupported function: {}", func_name)
+                                ));
+                            }
+                        },
+                        _ => {
+                            return Err(SqawkError::UnsupportedSqlFeature(
+                                "Only aggregate functions are supported in aggregate queries".to_string()
+                            ));
+                        }
                     }
                 },
                 SelectItem::Wildcard(_) => {

@@ -111,6 +111,14 @@ args = "Test Complex Aggregate Functions"
 task = "workflow.run"
 args = "Test Filtered Aggregate Functions"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test Column Aliases"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test Aggregate with Aliases"
+
 [[workflows.workflow]]
 name = "sqawk-build-and-run"
 author = "agent"
@@ -312,6 +320,22 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "cd $(pwd) && cargo run --bin sqawk -- -s \"SELECT COUNT(*), SUM(salary), AVG(age), MIN(salary), MAX(age) FROM aggregates WHERE age > 25\" tests/aggregates.csv -v"
+
+[[workflows.workflow]]
+name = "Test Column Aliases"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run --bin sqawk -- -s \"SELECT name AS employee_name, age AS employee_age, department AS dept FROM aliases\" tests/aliases.csv -v"
+
+[[workflows.workflow]]
+name = "Test Aggregate with Aliases"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run --bin sqawk -- -s \"SELECT COUNT(*) AS total_count, AVG(age) AS average_age FROM sample\" tests/data/sample.csv -v"
 
 [deployment]
 run = ["sh", "-c", "cargo build && echo \"Testing Sqawk with sample data:\" && cargo run -- -s \"SELECT * FROM sample\" tests/data/sample.csv -v"]
