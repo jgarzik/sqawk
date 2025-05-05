@@ -140,7 +140,18 @@ impl SqlExecutor {
 
                 // Then apply projection to get only the requested columns
                 // This happens AFTER filtering to ensure WHERE clauses can access all columns
-                let result_table = filtered_table.project(&column_indices)?;
+                let mut result_table = filtered_table.project(&column_indices)?;
+                
+                // Apply ORDER BY if present
+                // This needs to happen after projection because we need to sort
+                // using the column indices in the result table, not the source table
+                // In sqlparser 0.36, order_by is Vec<OrderByExpr> not Option<Vec<OrderByExpr>>
+                if !query.order_by.is_empty() {
+                    if self.verbose {
+                        eprintln!("Applying ORDER BY");
+                    }
+                    result_table = self.apply_order_by(result_table, &query.order_by)?;
+                }
 
                 Ok(Some(result_table))
             }
@@ -148,6 +159,86 @@ impl SqlExecutor {
                 "Only simple SELECT statements are supported".to_string(),
             )),
         }
+    }
+    
+    /// Apply an ORDER BY clause to sort the result table
+    ///
+    /// # Arguments
+    /// * `table` - The table to sort
+    /// * `order_by` - The ORDER BY expressions from the SQL query
+    ///
+    /// # Returns
+    /// * A new sorted table
+    fn apply_order_by(&self, table: Table, order_by: &[sqlparser::ast::OrderByExpr]) -> SqawkResult<Table> {
+        // Convert ORDER BY expressions to column indices and sort directions
+        let mut sort_columns = Vec::new();
+        
+        for order_expr in order_by {
+            // Extract the column index for this ORDER BY expression
+            let col_idx = match &order_expr.expr {
+                Expr::Identifier(ident) => {
+                    // Try to find the column by exact name first
+                    match table.column_index(&ident.value) {
+                        Some(idx) => idx,
+                        None => {
+                            // Try with qualified names (table.column) lookup
+                            let mut found = false;
+                            let mut idx = 0;
+                            for (i, col) in table.columns().iter().enumerate() {
+                                if col.ends_with(&format!(".{}", ident.value)) {
+                                    found = true;
+                                    idx = i;
+                                    break;
+                                }
+                            }
+                            
+                            if found {
+                                idx
+                            } else {
+                                return Err(SqawkError::ColumnNotFound(ident.value.clone()));
+                            }
+                        }
+                    }
+                },
+                // Handle qualified column reference: table.column
+                Expr::CompoundIdentifier(idents) => {
+                    if idents.len() != 2 {
+                        return Err(SqawkError::UnsupportedSqlFeature(
+                            "Only simple qualified column references (table.column) are supported in ORDER BY".to_string(),
+                        ));
+                    }
+                    
+                    let table_name = &idents[0].value;
+                    let column_name = &idents[1].value;
+                    let qualified_name = format!("{}.{}", table_name, column_name);
+                    
+                    match table.column_index(&qualified_name) {
+                        Some(idx) => idx,
+                        None => {
+                            return Err(SqawkError::ColumnNotFound(qualified_name));
+                        }
+                    }
+                },
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Only simple column references are supported in ORDER BY".to_string(),
+                    ));
+                }
+            };
+            
+            // Determine sort direction (ASC/DESC)
+            let direction = match order_expr.asc {
+                // If asc is None or Some(true), use Ascending
+                None | Some(true) => crate::table::SortDirection::Ascending,
+                // If asc is Some(false), use Descending
+                Some(false) => crate::table::SortDirection::Descending,
+            };
+            
+            sort_columns.push((col_idx, direction));
+        }
+        
+        // Sort the table using the calculated columns and directions
+        table.sort(sort_columns)
     }
     
     /// Process the FROM clause of a SELECT statement

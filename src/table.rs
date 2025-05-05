@@ -79,6 +79,49 @@ impl PartialEq for Value {
     }
 }
 
+/// Implementation of ordering comparison for Value
+///
+/// This implementation allows ordering comparison between different types with appropriate
+/// type coercion, following SQL comparison rules:
+/// - NULL values are considered less than any non-NULL value
+/// - Numbers (Integer and Float) can be compared with each other
+/// - Strings are compared lexicographically
+/// - Booleans compare false < true
+/// - Different types follow a precedence order: NULL < Boolean < Number < String
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        use std::cmp::Ordering;
+        
+        match (self, other) {
+            // NULL handling: NULL is less than anything but equal to NULL
+            (Value::Null, Value::Null) => Some(Ordering::Equal),
+            (Value::Null, _) => Some(Ordering::Less),
+            (_, Value::Null) => Some(Ordering::Greater),
+            
+            // Same types comparison
+            (Value::Integer(a), Value::Integer(b)) => a.partial_cmp(b),
+            (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
+            (Value::String(a), Value::String(b)) => a.partial_cmp(b),
+            (Value::Boolean(a), Value::Boolean(b)) => a.partial_cmp(b),
+            
+            // Mixed number types
+            (Value::Integer(a), Value::Float(b)) => (*a as f64).partial_cmp(b),
+            (Value::Float(a), Value::Integer(b)) => a.partial_cmp(&(*b as f64)),
+            
+            // Different types follow precedence order:
+            // Boolean < Number < String
+            (Value::Boolean(_), Value::Integer(_) | Value::Float(_) | Value::String(_)) => 
+                Some(Ordering::Less),
+            (Value::Integer(_) | Value::Float(_), Value::String(_)) => 
+                Some(Ordering::Less),
+            (Value::String(_), Value::Boolean(_) | Value::Integer(_) | Value::Float(_)) => 
+                Some(Ordering::Greater),
+            (Value::Integer(_) | Value::Float(_), Value::Boolean(_)) => 
+                Some(Ordering::Greater),
+        }
+    }
+}
+
 /// Implementation of string formatting for Value
 /// 
 /// This implementation provides human-readable string representations of all value types.
@@ -155,6 +198,15 @@ pub struct Table {
 
     /// Whether the table was modified since loading
     modified: bool,
+}
+
+/// Sort direction for a column in ORDER BY clause
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SortDirection {
+    /// Sort in ascending order (default)
+    Ascending,
+    /// Sort in descending order
+    Descending,
 }
 
 impl Table {
@@ -479,6 +531,70 @@ impl Table {
                 // Add the combined row to the result table
                 result.add_row(new_row)?;
             }
+        }
+        
+        Ok(result)
+    }
+    
+    /// Sort the table by one or more columns
+    ///
+    /// This method implements the ORDER BY functionality for SQL queries.
+    /// It takes a list of column indices and their respective sort directions,
+    /// then sorts the table rows accordingly. Sort direction can be either
+    /// ascending (the default) or descending.
+    ///
+    /// # Arguments
+    /// * `sort_columns` - A vector of tuples containing (column_index, sort_direction)
+    ///
+    /// # Returns
+    /// * A new sorted table if successful
+    /// * Error if any column index is invalid
+    pub fn sort(&self, sort_columns: Vec<(usize, SortDirection)>) -> SqawkResult<Self> {
+        // Validate column indices
+        for (col_idx, _) in &sort_columns {
+            if *col_idx >= self.column_count() {
+                return Err(SqawkError::ColumnNotFound(format!(
+                    "Column index {} out of bounds for ORDER BY (table has {} columns)",
+                    col_idx,
+                    self.column_count()
+                )));
+            }
+        }
+        
+        // Create a new table with the same structure
+        let mut result = Table::new(&self.name, self.columns.clone(), None);
+        
+        // Clone the rows for sorting
+        let mut sorted_rows = self.rows.clone();
+        
+        // Sort the rows based on the specified columns and directions
+        sorted_rows.sort_by(|row_a, row_b| {
+            // Compare each sort column in order until a difference is found
+            for &(col_idx, direction) in &sort_columns {
+                // Compare values using our PartialOrd implementation
+                match row_a[col_idx].partial_cmp(&row_b[col_idx]) {
+                    Some(ordering) => {
+                        // If not equal, return the ordering (possibly reversed for DESC)
+                        if ordering != std::cmp::Ordering::Equal {
+                            return match direction {
+                                SortDirection::Ascending => ordering,
+                                SortDirection::Descending => ordering.reverse(),
+                            };
+                        }
+                    }
+                    // If values can't be compared (which shouldn't happen with our implementation),
+                    // continue to the next column
+                    None => continue,
+                }
+            }
+            
+            // If all specified columns are equal, maintain stable sort
+            std::cmp::Ordering::Equal
+        });
+        
+        // Add the sorted rows to the result table
+        for row in sorted_rows {
+            result.add_row(row)?;
         }
         
         Ok(result)

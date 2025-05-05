@@ -87,6 +87,18 @@ args = "Test Three-Way Inner Join"
 task = "workflow.run"
 args = "Test Three-Way Inner Join Without Aliases"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test ORDER BY"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test ORDER BY with Join"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test ORDER BY with Mixed Directions"
+
 [[workflows.workflow]]
 name = "sqawk-build-and-run"
 author = "agent"
@@ -240,6 +252,30 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "cd $(pwd) && cargo run --bin sqawk -- -s \"SELECT users.name, products.name, products.price, orders.date FROM users, orders, products WHERE orders.user_id = users.id AND orders.product_id = products.product_id\" tests/data/users.csv tests/data/orders.csv tests/data/products.csv -v"
+
+[[workflows.workflow]]
+name = "Test ORDER BY"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run --bin sqawk -- -s \"SELECT * FROM sample ORDER BY age DESC, name ASC\" tests/data/sample.csv -v"
+
+[[workflows.workflow]]
+name = "Test ORDER BY with Join"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run --bin sqawk -- -s \"SELECT users.name, products.name, products.price, orders.date FROM users, orders, products WHERE orders.user_id = users.id AND orders.product_id = products.product_id ORDER BY users.name ASC, products.price DESC\" tests/data/users.csv tests/data/orders.csv tests/data/products.csv -v"
+
+[[workflows.workflow]]
+name = "Test ORDER BY with Mixed Directions"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run --bin sqawk -- -s \"SELECT * FROM sample ORDER BY age ASC, name DESC\" tests/data/sample.csv -v"
 
 [deployment]
 run = ["sh", "-c", "cargo build && echo \"Testing Sqawk with sample data:\" && cargo run -- -s \"SELECT * FROM sample\" tests/data/sample.csv -v"]
