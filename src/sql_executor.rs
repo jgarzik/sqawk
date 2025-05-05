@@ -1429,7 +1429,7 @@ impl SqlExecutor {
                         let func_name = func.name.0.first().map(|i| i.value.clone()).unwrap_or_default();
                         
                         // Check if this is a supported aggregate function
-                        if let Some(agg_func) = AggregateFunction::from_name(&func_name) {
+                        if let Some(_agg_func) = AggregateFunction::from_name(&func_name) {
                             // Process the function arguments
                             if func.args.len() != 1 {
                                 return Err(SqawkError::InvalidSqlQuery(
@@ -1459,7 +1459,7 @@ impl SqlExecutor {
                         let func_name = func.name.0.first().map(|i| i.value.clone()).unwrap_or_default();
                         
                         // Check if this is a supported aggregate function
-                        if let Some(agg_func) = AggregateFunction::from_name(&func_name) {
+                        if let Some(_agg_func) = AggregateFunction::from_name(&func_name) {
                             // Process the function arguments
                             if func.args.len() != 1 {
                                 return Err(SqawkError::InvalidSqlQuery(

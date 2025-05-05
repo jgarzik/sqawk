@@ -18,6 +18,7 @@ Sqawk provides a powerful SQL-like query language for processing CSV files. This
    - [WHERE Clause](#where-clause)
    - [ORDER BY Clause](#order-by-clause)
    - [Aggregate Functions](#aggregate-functions)
+   - [GROUP BY Clause](#group-by-clause)
 7. [Multi-Table Operations (Joins)](#multi-table-operations-joins)
 8. [INSERT Statement](#insert-statement)
 9. [UPDATE Statement](#update-statement)
@@ -239,6 +240,55 @@ Aggregate functions can also be used with `WHERE` clauses to filter input rows:
 SELECT COUNT(*) AS count, AVG(salary) AS avg_salary FROM employees WHERE department = 'Engineering'
 ```
 
+### GROUP BY Clause
+
+The `GROUP BY` clause allows you to group rows that have the same values in specified columns and apply aggregate functions to each group:
+
+```sql
+SELECT column1, column2, aggregate_function(column3)
+FROM table_name
+GROUP BY column1, column2
+```
+
+Examples of using GROUP BY:
+
+```sql
+-- Group by a single column
+SELECT department, COUNT(*) AS employee_count, AVG(salary) AS avg_salary
+FROM employees
+GROUP BY department
+
+-- Group by multiple columns
+SELECT department, location, COUNT(*) AS employee_count
+FROM employees
+GROUP BY department, location
+
+-- Group by with ORDER BY
+SELECT department, COUNT(*) AS employee_count, SUM(salary) AS total_salary
+FROM employees
+GROUP BY department
+ORDER BY total_salary DESC
+```
+
+GROUP BY can be used with all aggregate functions (COUNT, SUM, AVG, MIN, MAX) and can be combined with column aliases:
+
+```sql
+SELECT department, 
+       COUNT(*) AS count, 
+       SUM(salary) AS total_salary, 
+       AVG(salary) AS avg_salary,
+       MIN(salary) AS min_salary,
+       MAX(salary) AS max_salary
+FROM employees
+GROUP BY department
+```
+
+Rules and behavior:
+- All columns in the SELECT clause that are not in aggregate functions must be included in the GROUP BY clause
+- Column aliases defined in the SELECT clause cannot be used in the GROUP BY clause (but they can be used in ORDER BY)
+- GROUP BY columns are always included in the result set
+- NULL values in GROUP BY columns are treated as a single group
+
 ## Multi-Table Operations (Joins)
 
 ### Cross Joins
@@ -346,7 +396,7 @@ Current limitations of Sqawk's SQL implementation:
 
 - **Query Features**:
   - No complex expressions in WHERE clauses (only simple comparisons)
-  - No GROUP BY or HAVING clauses (though aggregate functions are supported)
+  - No HAVING clause
   - No subqueries
   - No window functions
   - No common table expressions (CTEs)
@@ -360,6 +410,7 @@ Current limitations of Sqawk's SQL implementation:
 - Column aliases (AS keyword)
 - ORDER BY with ascending/descending sorting
 - Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
+- GROUP BY clause for data aggregation
 - Multi-column sorting
 - Table-qualified column names
 - Cross joins and inner joins through WHERE conditions
