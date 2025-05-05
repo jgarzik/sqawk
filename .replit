@@ -99,6 +99,18 @@ args = "Test ORDER BY with Join"
 task = "workflow.run"
 args = "Test ORDER BY with Mixed Directions"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test Aggregate Functions"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test Complex Aggregate Functions"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test Filtered Aggregate Functions"
+
 [[workflows.workflow]]
 name = "sqawk-build-and-run"
 author = "agent"
@@ -276,6 +288,30 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "cd $(pwd) && cargo run --bin sqawk -- -s \"SELECT * FROM sample ORDER BY age ASC, name DESC\" tests/data/sample.csv -v"
+
+[[workflows.workflow]]
+name = "Test Aggregate Functions"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run --bin sqawk -- -s \"SELECT COUNT(*), SUM(age), AVG(salary), MIN(age), MAX(salary) FROM aggregates\" tests/aggregates.csv -v"
+
+[[workflows.workflow]]
+name = "Test Complex Aggregate Functions"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run --bin sqawk -- -s \"SELECT COUNT(*) AS count, SUM(salary) AS total_salary, AVG(age) AS avg_age, MIN(salary) AS min_salary, MAX(age) AS max_age FROM aggregates WHERE age > 25\" tests/aggregates.csv -v"
+
+[[workflows.workflow]]
+name = "Test Filtered Aggregate Functions"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run --bin sqawk -- -s \"SELECT COUNT(*), SUM(salary), AVG(age), MIN(salary), MAX(age) FROM aggregates WHERE age > 25\" tests/aggregates.csv -v"
 
 [deployment]
 run = ["sh", "-c", "cargo build && echo \"Testing Sqawk with sample data:\" && cargo run -- -s \"SELECT * FROM sample\" tests/data/sample.csv -v"]

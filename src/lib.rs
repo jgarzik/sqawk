@@ -2,6 +2,7 @@
 //!
 //! This is the library component of Sqawk, containing all the core functionality.
 
+pub mod aggregate;
 pub mod cli;
 pub mod csv_handler;
 pub mod error;

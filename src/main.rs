@@ -3,6 +3,7 @@
 //! This tool loads CSV files into memory as tables, executes SQL queries against
 //! them, and can save modified tables back to CSV files.
 
+mod aggregate;
 mod cli;
 mod csv_handler;
 mod error;

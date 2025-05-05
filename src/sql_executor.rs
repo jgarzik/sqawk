@@ -14,7 +14,8 @@ use sqlparser::parser::Parser;
 
 use crate::csv_handler::CsvHandler;
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::{Table, Value};
+use crate::table::{SortDirection, Table, Value};
+use crate::aggregate::AggregateFunction;
 
 /// SQL statement executor
 pub struct SqlExecutor {
@@ -122,38 +123,67 @@ impl SqlExecutor {
                 // Process the FROM clause to get a table or join result
                 let source_table = self.process_from_clause(&select.from)?;
 
+                // Check if the query contains any aggregate functions
+                let has_aggregates = self.contains_aggregate_functions(&select.projection);
+
                 // Determine which columns to include in the result (for projection)
-                let column_indices = self.resolve_select_items(&select.projection, &source_table)?;
-
-                // IMPORTANT: First filter rows if WHERE clause is present
-                // We must apply the WHERE clause before projection to ensure all columns
-                // needed for filtering are available during the WHERE evaluation
-                let filtered_table = if let Some(where_clause) = &select.selection {
+                if has_aggregates {
                     if self.verbose {
-                        eprintln!("WHERE comparison");
+                        eprintln!("Applying aggregate functions");
                     }
-                    self.apply_where_clause(source_table, where_clause)?
+                    
+                    // IMPORTANT: First filter rows if WHERE clause is present
+                    // We must apply the WHERE clause before aggregation to ensure all columns
+                    // needed for filtering are available during the WHERE evaluation
+                    let filtered_table = if let Some(where_clause) = &select.selection {
+                        if self.verbose {
+                            eprintln!("WHERE comparison");
+                        }
+                        self.apply_where_clause(source_table, where_clause)?
+                    } else {
+                        // If no WHERE clause, just use the source table as is
+                        source_table
+                    };
+                    
+                    // Apply aggregation functions to the filtered table
+                    let result_table = self.apply_aggregate_functions(&select.projection, &filtered_table)?;
+                    
+                    // GROUP BY not implemented yet, so all aggregate functions apply to the whole column
+                    Ok(Some(result_table))
                 } else {
-                    // If no WHERE clause, just use the source table as is
-                    source_table
-                };
+                    // For non-aggregate queries, use the normal column resolution and projection
+                    let column_indices = self.resolve_select_items(&select.projection, &source_table)?;
 
-                // Then apply projection to get only the requested columns
-                // This happens AFTER filtering to ensure WHERE clauses can access all columns
-                let mut result_table = filtered_table.project(&column_indices)?;
-                
-                // Apply ORDER BY if present
-                // This needs to happen after projection because we need to sort
-                // using the column indices in the result table, not the source table
-                // In sqlparser 0.36, order_by is Vec<OrderByExpr> not Option<Vec<OrderByExpr>>
-                if !query.order_by.is_empty() {
-                    if self.verbose {
-                        eprintln!("Applying ORDER BY");
+                    // IMPORTANT: First filter rows if WHERE clause is present
+                    // We must apply the WHERE clause before projection to ensure all columns
+                    // needed for filtering are available during the WHERE evaluation
+                    let filtered_table = if let Some(where_clause) = &select.selection {
+                        if self.verbose {
+                            eprintln!("WHERE comparison");
+                        }
+                        self.apply_where_clause(source_table, where_clause)?
+                    } else {
+                        // If no WHERE clause, just use the source table as is
+                        source_table
+                    };
+
+                    // Then apply projection to get only the requested columns
+                    // This happens AFTER filtering to ensure WHERE clauses can access all columns
+                    let mut result_table = filtered_table.project(&column_indices)?;
+                    
+                    // Apply ORDER BY if present
+                    // This needs to happen after projection because we need to sort
+                    // using the column indices in the result table, not the source table
+                    // In sqlparser 0.36, order_by is Vec<OrderByExpr> not Option<Vec<OrderByExpr>>
+                    if !query.order_by.is_empty() {
+                        if self.verbose {
+                            eprintln!("Applying ORDER BY");
+                        }
+                        result_table = self.apply_order_by(result_table, &query.order_by)?;
                     }
-                    result_table = self.apply_order_by(result_table, &query.order_by)?;
-                }
 
-                Ok(Some(result_table))
+                    Ok(Some(result_table))
+                }
             }
             _ => Err(SqawkError::UnsupportedSqlFeature(
                 "Only simple SELECT statements are supported".to_string(),
@@ -229,9 +259,9 @@ impl SqlExecutor {
             // Determine sort direction (ASC/DESC)
             let direction = match order_expr.asc {
                 // If asc is None or Some(true), use Ascending
-                None | Some(true) => crate::table::SortDirection::Ascending,
+                None | Some(true) => SortDirection::Ascending,
                 // If asc is Some(false), use Descending
-                Some(false) => crate::table::SortDirection::Descending,
+                Some(false) => SortDirection::Descending,
             };
             
             sort_columns.push((col_idx, direction));
@@ -968,6 +998,189 @@ impl SqlExecutor {
             },
             // Handle other expression types by delegating to the main evaluate_expr function
             _ => self.evaluate_expr(expr),
+        }
+    }
+    
+    /// Check if the SELECT items contain any aggregate functions
+    ///
+    /// # Arguments
+    /// * `items` - The SELECT items from the query
+    ///
+    /// # Returns
+    /// * `true` if any of the items contains an aggregate function
+    fn contains_aggregate_functions(&self, items: &[SelectItem]) -> bool {
+        for item in items {
+            if let SelectItem::UnnamedExpr(expr) = item {
+                if let Expr::Function(func) = expr {
+                    // Check if the function name is one of our supported aggregates
+                    let name = func.name.0.first().map(|i| i.value.as_str()).unwrap_or("");
+                    if AggregateFunction::from_name(name).is_some() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+    
+    /// Apply aggregate functions to a table
+    ///
+    /// # Arguments
+    /// * `items` - The SELECT items from the query
+    /// * `table` - The source table
+    ///
+    /// # Returns
+    /// * A new table with the results of the aggregate functions
+    fn apply_aggregate_functions(&self, items: &[SelectItem], table: &Table) -> SqawkResult<Table> {
+        let mut result_columns = Vec::new();
+        let mut result_values = Vec::new();
+        
+        // Process each item in the SELECT list
+        for item in items {
+            match item {
+                SelectItem::UnnamedExpr(expr) => {
+                    // Handle function call
+                    if let Expr::Function(func) = expr {
+                        let func_name = func.name.0.first().map(|i| i.value.clone()).unwrap_or_default();
+                        
+                        // Check if this is a supported aggregate function
+                        if let Some(agg_func) = AggregateFunction::from_name(&func_name) {
+                            // Process the function arguments
+                            if func.args.len() != 1 {
+                                return Err(SqawkError::InvalidSqlQuery(
+                                    format!("{} function requires exactly one argument", func_name)
+                                ));
+                            }
+                            
+                            // Get the column values for the function argument
+                            let column_values = self.get_values_for_function_arg(&func.args[0], table)?;
+                            
+                            // Execute the aggregate function
+                            let result_value = agg_func.execute(&column_values)?;
+                            
+                            // Add the result to our output
+                            result_columns.push(func_name.clone());
+                            result_values.push(result_value);
+                        } else {
+                            return Err(SqawkError::UnsupportedSqlFeature(
+                                format!("Unsupported function: {}", func_name)
+                            ));
+                        }
+                    } else {
+                        return Err(SqawkError::UnsupportedSqlFeature(
+                            "Only aggregate functions are supported in aggregate queries".to_string()
+                        ));
+                    }
+                },
+                SelectItem::Wildcard(_) => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Wildcard (*) is not supported in queries with aggregate functions".to_string()
+                    ));
+                },
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Unsupported SELECT item in aggregate query".to_string()
+                    ));
+                }
+            }
+        }
+        
+        // Create a new table with a single row containing the aggregate results
+        let mut result_table = Table::new("aggregate_result", result_columns, None);
+        result_table.add_row(result_values)?;
+        Ok(result_table)
+    }
+    
+    /// Get values for a function argument
+    ///
+    /// # Arguments
+    /// * `arg` - The function argument
+    /// * `table` - The source table
+    ///
+    /// # Returns
+    /// * A vector of values from the specified column or all values for COUNT(*)
+    fn get_values_for_function_arg(&self, arg: &sqlparser::ast::FunctionArg, table: &Table) -> SqawkResult<Vec<Value>> {
+        match arg {
+            sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Wildcard) => {
+                // For COUNT(*), return a list of non-null placeholders, one for each row
+                Ok(table.rows().iter().map(|_| Value::Integer(1)).collect())
+            },
+            sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(expr)) => {
+                match expr {
+                    Expr::Identifier(ident) => {
+                        // Get column index
+                        let col_idx = match table.column_index(&ident.value) {
+                            Some(idx) => idx,
+                            None => {
+                                // Try suffix match for qualified columns
+                                let mut found = false;
+                                let mut idx = 0;
+                                for (i, col) in table.columns().iter().enumerate() {
+                                    if col.ends_with(&format!(".{}", ident.value)) {
+                                        found = true;
+                                        idx = i;
+                                        break;
+                                    }
+                                }
+                                
+                                if found {
+                                    idx
+                                } else {
+                                    return Err(SqawkError::ColumnNotFound(ident.value.clone()));
+                                }
+                            }
+                        };
+                        
+                        // Extract all values for this column
+                        Ok(table.rows().iter().map(|row| row[col_idx].clone()).collect())
+                    },
+                    Expr::CompoundIdentifier(parts) => {
+                        // Handle qualified column references like table.column
+                        let qualified_name = parts.iter()
+                            .map(|ident| ident.value.clone())
+                            .collect::<Vec<_>>()
+                            .join(".");
+                        
+                        // Get column index
+                        let col_idx = match table.column_index(&qualified_name) {
+                            Some(idx) => idx,
+                            None => {
+                                // Try suffix match
+                                if parts.len() == 2 {
+                                    let suffix = format!("{}.{}", parts[0].value, parts[1].value);
+                                    
+                                    let mut found = false;
+                                    let mut idx = 0;
+                                    for (i, col) in table.columns().iter().enumerate() {
+                                        if col.ends_with(&suffix) {
+                                            found = true;
+                                            idx = i;
+                                            break;
+                                        }
+                                    }
+                                    
+                                    if found {
+                                        idx
+                                    } else {
+                                        return Err(SqawkError::ColumnNotFound(qualified_name));
+                                    }
+                                } else {
+                                    return Err(SqawkError::ColumnNotFound(qualified_name));
+                                }
+                            }
+                        };
+                        
+                        // Extract all values for this column
+                        Ok(table.rows().iter().map(|row| row[col_idx].clone()).collect())
+                    },
+                    _ => Err(SqawkError::UnsupportedSqlFeature(
+                        "Only column references are supported in aggregate functions".to_string()
+                    )),
+                }
+            },
+            _ => Err(SqawkError::UnsupportedSqlFeature(
+                "Unsupported function argument type".to_string()
+            )),
         }
     }
     
