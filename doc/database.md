@@ -98,7 +98,8 @@ The `SELECT` statement supports:
 - Column selection (`SELECT col1, col2, ...`)
 - Wildcard selection (`SELECT *`)
 - `WHERE` clause for filtering rows
-- Single table queries only (no JOINs)
+- Column qualification using table names (`SELECT table1.col1, table2.col2`) 
+- Multi-table joins with comma-separated table lists (`FROM table1, table2`)
 
 ### INSERT Statement
 
@@ -188,12 +189,50 @@ For larger datasets, consider:
 - Complex queries may require multiple passes over the data
 - Write operations create new copies of the data in memory
 
+## Join Functionality
+
+Sqawk now supports SQL joins to combine data from multiple tables. Join capabilities include:
+
+### Types of Joins
+
+- **Cross Joins**: Combine all rows from all tables (Cartesian product) using comma-separated syntax in the `FROM` clause
+  ```sql
+  SELECT * FROM users, orders 
+  ```
+
+- **Inner Joins**: Filter the cross join results using `WHERE` conditions to create relationship-based joins
+  ```sql
+  SELECT * FROM users, orders WHERE users.id = orders.user_id
+  ```
+
+- **Multi-table Joins**: Chain together multiple tables with appropriate `WHERE` conditions
+  ```sql
+  SELECT * FROM users, orders, products
+  WHERE users.id = orders.user_id AND products.product_id = orders.product_id
+  ```
+
+### Column Naming
+
+In join results, columns are qualified with their table names to avoid ambiguity:
+
+- **Qualified Columns**: All columns are prefixed with table names (`users.id`, `orders.date`)
+- **Consistent Naming**: For multi-table queries, consistent naming is used for all column references
+- **Column References**: Columns can be referenced in `WHERE` clauses using table qualification
+
+### Implementation Details
+
+- Cross joins are implemented first, with filtering applied afterwards
+- Tables are joined in the order they appear in the `FROM` clause
+- The column prefixing system ensures unique column names in result sets
+- Type coercion is properly handled in join conditions
+
 ## Limitations
 
 Current limitations of the database system:
 
 - **No Indices**: All operations scan the entire table
-- **No Joins**: Only single-table queries are supported
+- **Limited Join Syntax**: No explicit `JOIN ... ON` syntax yet, must use `WHERE` conditions
+- **No Outer Joins**: No support for LEFT, RIGHT, or FULL OUTER joins
 - **Limited Expression Support**: Complex expressions in WHERE clauses are not supported
 - **No Aggregations**: GROUP BY, HAVING, and aggregate functions are not implemented
 - **No Transactions**: All operations are applied immediately to the in-memory tables with no support for BEGIN, COMMIT, or ROLLBACK
