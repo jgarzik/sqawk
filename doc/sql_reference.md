@@ -21,6 +21,7 @@ Sqawk provides a powerful SQL-like query language for processing delimiter-separ
    - [LIMIT and OFFSET Clauses](#limit-and-offset-clauses)
    - [Aggregate Functions](#aggregate-functions)
    - [GROUP BY Clause](#group-by-clause)
+   - [HAVING Clause](#having-clause)
 7. [Multi-Table Operations (Joins)](#multi-table-operations-joins)
 8. [INSERT Statement](#insert-statement)
 9. [UPDATE Statement](#update-statement)
@@ -166,6 +167,7 @@ SELECT [DISTINCT] [column_list | *]
 FROM table_name [, table_name2, ...]
 [WHERE condition]
 [GROUP BY column_list]
+[HAVING condition]
 [ORDER BY column [ASC|DESC], ...]
 [LIMIT count [OFFSET skip_count]]
 ```
@@ -378,6 +380,49 @@ Rules and behavior:
 - GROUP BY columns are always included in the result set
 - NULL values in GROUP BY columns are treated as a single group
 
+### HAVING Clause
+
+The `HAVING` clause filters grouped results based on conditions, similar to how the WHERE clause filters individual rows:
+
+```sql
+SELECT column1, column2, aggregate_function(column3)
+FROM table_name
+GROUP BY column1, column2
+HAVING condition
+```
+
+The HAVING clause is applied after groups are formed and aggregate functions are calculated, whereas the WHERE clause is applied before grouping.
+
+Examples of using HAVING:
+
+```sql
+-- Filter groups based on aggregate results
+SELECT department, COUNT(*) AS employee_count, AVG(salary) AS avg_salary
+FROM employees
+GROUP BY department
+HAVING COUNT(*) > 5
+
+-- Filter groups using multiple conditions
+SELECT department, COUNT(*) AS employee_count, AVG(salary) AS avg_salary
+FROM employees
+GROUP BY department
+HAVING COUNT(*) > 5 AND AVG(salary) > 60000
+
+-- Combine WHERE and HAVING clauses
+SELECT department, COUNT(*) AS employee_count, AVG(salary) AS avg_salary
+FROM employees
+WHERE location = 'New York'
+GROUP BY department
+HAVING AVG(salary) > 70000
+```
+
+Key characteristics of the HAVING clause:
+- Applied after GROUP BY and aggregate calculations
+- Can reference aggregate functions
+- Can contain arithmetic operations (e.g., `HAVING AVG(salary) * 1.1 > 75000`)
+- Can be combined with other clauses like ORDER BY and LIMIT
+- HAVING without GROUP BY treats the entire table as a single group
+
 ## Multi-Table Operations (Joins)
 
 ### Cross Joins
@@ -515,7 +560,6 @@ Current limitations of Sqawk's SQL implementation:
 
 - **Query Features**:
   - No complex expressions in WHERE clauses (only simple comparisons)
-  - No HAVING clause
   - No subqueries
   - No window functions
   - No common table expressions (CTEs)
@@ -532,6 +576,8 @@ Current limitations of Sqawk's SQL implementation:
 - LIMIT and OFFSET for pagination and result set control
 - Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
 - GROUP BY clause for data aggregation
+- HAVING clause for filtering grouped results
+- Arithmetic operations in expressions (addition, subtraction, multiplication, division)
 - Multi-column sorting
 - Table-qualified column names
 - Cross joins and inner joins through both WHERE conditions and INNER JOIN...ON syntax

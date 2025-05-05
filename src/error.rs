@@ -58,6 +58,10 @@ pub enum SqawkError {
     /// Error for semantically invalid SQL queries
     #[error("Invalid SQL query: {0}")]
     InvalidSqlQuery(String),
+
+    /// Error for division by zero in arithmetic operations
+    #[error("Division by zero")]
+    DivideByZero,
 }
 
 /// Result type alias for operations that can produce a SqawkError

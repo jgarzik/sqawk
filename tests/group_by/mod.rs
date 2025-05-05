@@ -190,3 +190,87 @@ fn test_group_by_with_complex_expressions() -> Result<(), Box<dyn std::error::Er
 
     Ok(())
 }
+
+#[test]
+fn test_group_by_with_having() -> Result<(), Box<dyn std::error::Error>> {
+    // Create test data file - keep temp_dir alive for the test duration
+    let (_temp_dir, file_path) = create_departments_file()?;
+
+    // Run sqawk with GROUP BY and HAVING
+    let mut cmd = Command::cargo_bin("sqawk")?;
+    cmd.arg("-s")
+        .arg("SELECT department, COUNT(*) AS employee_count, AVG(salary) AS avg_salary FROM departments GROUP BY department HAVING COUNT(*) > 2")
+        .arg(file_path.to_str().unwrap())
+        .arg("-v");
+
+    // Check output
+    cmd.assert().success();
+
+    // Get the output to check the specific values
+    let output = cmd.output()?;
+    let stdout = String::from_utf8(output.stdout)?;
+
+    // Check that header is correct
+    assert!(
+        stdout.contains("department,employee_count,avg_salary"),
+        "Header row not found or incorrect"
+    );
+
+    // Engineering has 3 employees, so it should be included
+    assert!(
+        stdout.contains("Engineering,3,"),
+        "Engineering should appear in results with 3 employees"
+    );
+
+    // Marketing and Sales only have 2 employees, so they should be filtered out by HAVING
+    assert!(
+        !stdout.contains("Marketing,2,"),
+        "Marketing should be filtered out by HAVING clause"
+    );
+    assert!(
+        !stdout.contains("Sales,2,"),
+        "Sales should be filtered out by HAVING clause"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_group_by_with_having_avg() -> Result<(), Box<dyn std::error::Error>> {
+    // Create test data file - keep temp_dir alive for the test duration
+    let (_temp_dir, file_path) = create_departments_file()?;
+
+    // Run sqawk with GROUP BY and HAVING with AVG function
+    let mut cmd = Command::cargo_bin("sqawk")?;
+    cmd.arg("-s")
+        .arg("SELECT department, COUNT(*) AS employee_count, AVG(salary) AS avg_salary FROM departments GROUP BY department HAVING AVG(salary) > 70000")
+        .arg(file_path.to_str().unwrap())
+        .arg("-v");
+
+    // Check output
+    cmd.assert().success();
+
+    // Get the output to check the specific values
+    let output = cmd.output()?;
+    let stdout = String::from_utf8(output.stdout)?;
+
+    // Engineering has avg salary > 70000, so it should be included
+    assert!(
+        stdout.contains("Engineering,3,"),
+        "Engineering should appear in results with avg salary > 70000"
+    );
+
+    // Marketing has avg salary < 70000, so it should be filtered out
+    assert!(
+        !stdout.contains("Marketing,2,"),
+        "Marketing should be filtered out by HAVING clause"
+    );
+
+    // Sales has avg salary < 70000, so it should be filtered out
+    assert!(
+        !stdout.contains("Sales,2,"),
+        "Sales should be filtered out by HAVING clause"
+    );
+
+    Ok(())
+}
