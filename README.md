@@ -17,7 +17,7 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
   
 - **Multi-Table Operations**
   - Cross joins between tables
-  - Inner joins using WHERE conditions
+  - INNER JOIN with ON conditions for precise join criteria
   - Support for joining multiple tables
   - Table-qualified column names
 
@@ -89,6 +89,16 @@ This executes multiple SQL statements in sequence: first marking recent inactive
 
 ```sh
 sqawk -s "SELECT * FROM users" -s "SELECT * FROM orders" users.csv orders.csv
+```
+
+### Join tables with INNER JOIN
+
+```sh
+# Join users and orders using INNER JOIN with ON condition
+sqawk -s "SELECT users.name, orders.product_id, orders.date FROM users INNER JOIN orders ON users.id = orders.user_id" users.csv orders.csv
+
+# Join with additional WHERE filtering
+sqawk -s "SELECT users.name, orders.product_id, orders.date FROM users INNER JOIN orders ON users.id = orders.user_id WHERE orders.product_id > 100" users.csv orders.csv
 ```
 
 ### Custom field separators

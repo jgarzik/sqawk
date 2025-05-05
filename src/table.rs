@@ -568,6 +568,50 @@ impl Table {
         Ok(result)
     }
     
+    /// Perform an inner join with another table based on a join condition
+    ///
+    /// This function creates a new table containing rows from both tables where
+    /// the join condition is satisfied. The join condition is evaluated for each
+    /// pair of rows, and only matching pairs are included in the result.
+    ///
+    /// # Arguments
+    /// * `right` - The right-hand table for the join
+    /// * `join_condition` - A function that takes a row from the combined table
+    ///                     and returns whether it satisfies the join condition
+    ///
+    /// # Returns
+    /// * A new table containing the inner join result
+    pub fn inner_join<F>(&self, right: &Self, join_condition: F) -> SqawkResult<Self> 
+    where 
+        F: Fn(&[Value], &Self) -> SqawkResult<bool>
+    {
+        // Create result columns with proper prefixes
+        let columns = self.create_joined_columns(right);
+        
+        // Create a new table to hold the join result
+        // Convert the String to &str with as_str() to fix type mismatch
+        let name = format!("{}_inner_join", self.name());
+        let mut result = Table::new(
+            &name, 
+            columns, 
+            None
+        );
+        
+        // First create the cross join to evaluate conditions against
+        let combined_tables = self.cross_join(right)?;
+        
+        // Then filter the rows based on the join condition
+        for row in combined_tables.rows().iter() {
+            // Evaluate the condition for this row
+            if join_condition(row, &combined_tables)? {
+                // Add matching row to result
+                result.add_row(row.clone())?;
+            }
+        }
+        
+        Ok(result)
+    }
+    
     /// Create column names for a joined table
     ///
     /// This function creates a list of qualified column names by prefixing

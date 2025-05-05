@@ -19,6 +19,7 @@ use anyhow::Result;
 use sqlparser::ast::{
     Assignment, Expr, Join as SqlJoin, Query, SelectItem, SetExpr, 
     Statement, TableFactor, TableWithJoins, Value as SqlValue,
+    JoinOperator, JoinConstraint,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -350,8 +351,10 @@ impl SqlExecutor {
     /// This function processes a list of explicit JOIN clauses for a table.
     /// It iterates through each join specification, resolves the right table,
     /// and applies the appropriate join operation based on the join type.
-    /// Currently, only CROSS JOIN is fully implemented, with other join types 
-    /// returning cross join results or errors.
+    /// 
+    /// Supported join types:
+    /// - CROSS JOIN: Returns all combinations of rows from both tables
+    /// - INNER JOIN with ON condition: Returns only rows that match the join condition
     ///
     /// # Arguments
     /// * `left_table` - The left table for the join operations
@@ -363,6 +366,10 @@ impl SqlExecutor {
         let mut result_table = left_table.clone();
         
         for join in joins {
+            if self.verbose {
+                eprintln!("DEBUG - Join type: {:?}", join.join_operator);
+            }
+            
             // Get the right table
             let right_table_name = match &join.relation {
                 TableFactor::Table { name, .. } => name
@@ -380,9 +387,45 @@ impl SqlExecutor {
             
             let right_table = self.file_handler.get_table(&right_table_name)?;
             
-            // For now, we only support CROSS JOIN
-            // Later we'll implement proper join types and conditions
-            result_table = result_table.cross_join(right_table)?;
+            // Handle different join types
+            match &join.join_operator {
+                // CROSS JOIN (no ON condition)
+                // In sqlparser 0.36, CrossJoin is separate enum variant, not part of JoinOperator
+                // JoinOperator with None constraint indicates no ON clause (effectively a CROSS JOIN)
+                JoinOperator::FullOuter(JoinConstraint::None) | 
+                JoinOperator::Inner(JoinConstraint::None) | JoinOperator::LeftOuter(JoinConstraint::None) | 
+                JoinOperator::RightOuter(JoinConstraint::None) => {
+                    result_table = result_table.cross_join(right_table)?;
+                }
+                
+                // INNER JOIN with ON condition
+                JoinOperator::Inner(JoinConstraint::On(expr)) => {
+                    if self.verbose {
+                        eprintln!("Processing INNER JOIN with ON condition: {:?}", expr);
+                    }
+                    
+                    // Create a closure to evaluate the join condition for each combined row
+                    result_table = result_table.inner_join(right_table, |row, table| {
+                        self.evaluate_condition(expr, row, table)
+                    })?;
+                }
+                
+                // Other JOIN types with ON conditions are not supported yet
+                JoinOperator::LeftOuter(JoinConstraint::On(_)) | 
+                JoinOperator::RightOuter(JoinConstraint::On(_)) | 
+                JoinOperator::FullOuter(JoinConstraint::On(_)) => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "LEFT, RIGHT and FULL OUTER JOIN with ON conditions not yet supported".to_string(),
+                    ));
+                }
+                
+                // USING constraints or other constraints are not supported
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Only INNER JOIN with ON conditions or CROSS JOIN is supported".to_string(),
+                    ));
+                }
+            }
         }
         
         Ok(result_table)

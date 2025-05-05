@@ -339,7 +339,9 @@ This returns all possible combinations of rows from the `users` and `orders` tab
 
 ### Inner Joins
 
-Inner joins match rows based on a condition:
+Sqawk supports two inner join syntax styles:
+
+#### 1. Using WHERE Conditions:
 
 ```sql
 SELECT * FROM users, orders WHERE users.id = orders.user_id
@@ -347,14 +349,41 @@ SELECT * FROM users, orders WHERE users.id = orders.user_id
 
 This returns only the rows where a user ID in the `users` table matches a user_id in the `orders` table.
 
-### Multi-Table Joins
-
-You can join multiple tables:
+#### 2. Using INNER JOIN ... ON Syntax:
 
 ```sql
+SELECT * FROM users INNER JOIN orders ON users.id = orders.user_id
+```
+
+The explicit JOIN...ON syntax provides a clearer structure for complex joins and better distinguishes the join criteria from other filtering conditions.
+
+### Combining Joins with WHERE Clauses
+
+When using explicit JOIN...ON syntax, you can still add WHERE clauses to filter the joined results:
+
+```sql
+SELECT users.name, orders.product_id 
+FROM users INNER JOIN orders ON users.id = orders.user_id 
+WHERE orders.product_id > 100
+```
+
+This returns only rows that satisfy both the join condition AND the additional WHERE filter.
+
+### Multi-Table Joins
+
+You can join multiple tables using either syntax:
+
+```sql
+-- Using traditional WHERE joins
 SELECT users.name, products.name, orders.date 
 FROM users, orders, products 
 WHERE users.id = orders.user_id AND products.product_id = orders.product_id
+
+-- Or using explicit JOIN...ON syntax
+SELECT users.name, products.name, orders.date 
+FROM users 
+INNER JOIN orders ON users.id = orders.user_id
+INNER JOIN products ON products.product_id = orders.product_id
 ```
 
 ### Column Naming in Joins
@@ -362,7 +391,8 @@ WHERE users.id = orders.user_id AND products.product_id = orders.product_id
 In join results, columns are qualified with their table names to avoid ambiguity:
 
 ```sql
-SELECT users.name AS user_name, orders.date AS order_date FROM users, orders WHERE users.id = orders.user_id
+SELECT users.name AS user_name, orders.date AS order_date 
+FROM users INNER JOIN orders ON users.id = orders.user_id
 ```
 
 ## INSERT Statement
@@ -427,7 +457,7 @@ Current limitations of Sqawk's SQL implementation:
   - No views
 
 - **Join Operations**:
-  - No explicit `JOIN ... ON` syntax yet; must use `WHERE` conditions
+  - INNER JOIN with ON conditions is supported
   - No outer joins (LEFT, RIGHT, or FULL OUTER) are supported
 
 - **Query Features**:
@@ -449,7 +479,7 @@ Current limitations of Sqawk's SQL implementation:
 - GROUP BY clause for data aggregation
 - Multi-column sorting
 - Table-qualified column names
-- Cross joins and inner joins through WHERE conditions
+- Cross joins and inner joins through both WHERE conditions and INNER JOIN...ON syntax
 - Support for custom field separators with -F option
 - Compatible with CSV, TSV, and custom-delimited files
 
