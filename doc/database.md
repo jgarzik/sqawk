@@ -36,7 +36,17 @@ Tables maintain an internal mapping of column names to their indices for efficie
 
 ### Table Lifecycle
 
-Tables are loaded from CSV files at startup and can be modified through SQL operations. Any modifications are kept in memory until explicitly written back to disk with the `--write` flag.
+Tables are loaded from CSV files at startup and can be modified through SQL operations. Sqawk uses a safe, sed-like writeback model:
+
+1. **Default Behavior**: All modifications remain in memory only
+2. **Tracking Changes**: The system tracks which tables have been modified by any operation
+3. **Write on Exit**: Modified tables are only written back to their source CSV files if:
+   - The `--write` (or `-w`) flag is explicitly provided
+   - The table was actually modified by an SQL operation (INSERT, UPDATE, DELETE)
+4. **Safe Execution**: Without the `--write` flag, source files remain untouched regardless of operations performed
+5. **Write Only Modified**: Only tables that were changed are written; unmodified tables are not rewritten
+
+This design ensures that users can experiment with data manipulations while maintaining the integrity of source files. The verbose mode (`-v`) provides additional confirmation about whether changes were saved or not.
 
 ## Data Types
 
@@ -152,15 +162,17 @@ The `SqlExecutor` implements SQL parsing and execution:
 - Uses `sqlparser` crate to parse SQL statements
 - Converts parsed AST to operations on in-memory tables
 - Handles WHERE clause evaluation
-- Tracks which tables have been modified
+- Maintains a set of modified table names (`modified_tables`) to track changes
+- Provides `save_modified_tables()` method that only writes back tables that were actually modified
 
 ### CSV Handler
 
 The `CsvHandler` manages I/O between CSV files and in-memory tables:
 - Loads CSV files into tables
 - Extracts column names from header rows
-- Writes modified tables back to CSV files
-- Maintains a registry of loaded tables
+- Maintains a registry of loaded tables with their source file paths
+- Provides `save_table()` method to write a specific table back to its source file
+- Handles table renaming through custom file specifications (`tablename=file.csv`)
 
 ## Performance Considerations
 
@@ -184,7 +196,7 @@ Current limitations of the database system:
 - **No Joins**: Only single-table queries are supported
 - **Limited Expression Support**: Complex expressions in WHERE clauses are not supported
 - **No Aggregations**: GROUP BY, HAVING, and aggregate functions are not implemented
-- **No Transactions**: All operations are applied immediately
+- **No Transactions**: All operations are applied immediately to the in-memory tables with no support for BEGIN, COMMIT, or ROLLBACK
 - **No Schema Enforcement**: Column types are inferred, not declared
 - **No Constraints**: Uniqueness, foreign keys, etc. are not supported
 
