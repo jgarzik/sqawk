@@ -69,13 +69,13 @@ fn main() -> Result<()> {
         }
     }
 
-    // Save any modified tables back to CSV files (unless dry run is enabled)
-    if !args.dry_run {
+    // Save any modified tables back to CSV files (only if write flag is enabled)
+    if args.write {
         sql_executor
             .save_modified_tables()
             .context("Failed to save modified tables")?;
     } else if args.verbose {
-        println!("Dry run mode: not saving changes to files");
+        println!("Changes not saved: use --write to save changes to files");
     }
 
     Ok(())

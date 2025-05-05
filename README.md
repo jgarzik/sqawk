@@ -12,7 +12,7 @@ Sqawk is an SQL-based command-line tool for processing CSV files, inspired by th
 - Support for SELECT, INSERT, and DELETE operations
 - Filter data with SQL WHERE clauses
 - Process multiple files in a single command
-- Dry run mode to test queries without modifying files
+- Safe by default: doesn't modify files without explicit request
 
 ## Installation
 
@@ -39,14 +39,18 @@ sqawk -s "SELECT * FROM employees WHERE salary > 50000" employees.csv
 ### Deleting rows
 
 ```sh
-sqawk -s "DELETE FROM data WHERE id = 5" data.csv
+sqawk -s "DELETE FROM data WHERE id = 5" data.csv --write
 ```
+
+This removes rows with id = 5 and saves the changes back to data.csv.
 
 ### Multiple operations
 
 ```sh
-sqawk -s "DELETE FROM data WHERE inactive = 1" -s "SELECT * FROM data" data.csv
+sqawk -s "DELETE FROM data WHERE inactive = 1" -s "SELECT * FROM data" data.csv --write
 ```
+
+This executes multiple SQL statements in sequence, deleting rows and then showing the results.
 
 ### Multiple files
 
@@ -60,11 +64,13 @@ sqawk -s "SELECT * FROM users" -s "SELECT * FROM orders" users.csv orders.csv
 sqawk -s "SELECT * FROM data WHERE value > 100" data.csv -v
 ```
 
-### Dry run mode
+### Write mode
 
 ```sh
-sqawk -s "DELETE FROM data WHERE status = 'expired'" data.csv --dry-run
+sqawk -s "DELETE FROM data WHERE status = 'expired'" data.csv --write
 ```
+
+By default, sqawk doesn't modify input files. Use the `--write` flag to save changes back to the original files.
 
 ## Documentation
 

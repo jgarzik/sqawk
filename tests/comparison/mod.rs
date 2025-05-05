@@ -3,18 +3,19 @@
 //! This module contains tests for all SQL comparison operators (=, !=, >, <, >=, <=)
 //! to ensure they work correctly with integer types.
 
+use std::path::PathBuf;
 use assert_cmd;
 use predicates;
 use predicates::prelude::PredicateBooleanExt;
 
-/// Get path to the static sample test CSV file
-fn get_test_data_path() -> std::path::PathBuf {
-    std::path::PathBuf::from("tests/data/sample.csv")
+/// Get path to the static sample test CSV file (for read-only tests)
+fn get_test_data_path() -> PathBuf {
+    PathBuf::from("tests/data/sample.csv")
 }
 
-/// Get path to the static boundaries test CSV file with extreme values
-fn get_boundaries_data_path() -> std::path::PathBuf {
-    std::path::PathBuf::from("tests/data/boundaries.csv")
+/// Get path to the static boundaries test CSV file (for read-only tests)
+fn get_boundaries_data_path() -> PathBuf {
+    PathBuf::from("tests/data/boundaries.csv")
 }
 
 // Test cases for each comparison operator
@@ -28,7 +29,7 @@ fn test_equals_operator() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM sample WHERE age = 30")
         .arg(file_path)
-        .arg("--dry-run");
+        ;
 
     cmd.assert()
         .success()
@@ -47,7 +48,7 @@ fn test_not_equals_operator() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM sample WHERE age != 30")
         .arg(file_path)
-        .arg("--dry-run");
+        ;
 
     cmd.assert()
         .success()
@@ -68,7 +69,7 @@ fn test_greater_than_operator() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM sample WHERE age > 30")
         .arg(file_path)
-        .arg("--dry-run");
+        ;
 
     cmd.assert()
         .success()
@@ -89,7 +90,7 @@ fn test_less_than_operator() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM sample WHERE age < 30")
         .arg(file_path)
-        .arg("--dry-run");
+        ;
 
     cmd.assert()
         .success()
@@ -110,7 +111,7 @@ fn test_greater_than_or_equal_operator() -> Result<(), Box<dyn std::error::Error
     cmd.arg("-s")
         .arg("SELECT * FROM sample WHERE age >= 30")
         .arg(file_path)
-        .arg("--dry-run");
+        ;
 
     cmd.assert()
         .success()
@@ -131,7 +132,7 @@ fn test_less_than_or_equal_operator() -> Result<(), Box<dyn std::error::Error>> 
     cmd.arg("-s")
         .arg("SELECT * FROM sample WHERE age <= 30")
         .arg(file_path)
-        .arg("--dry-run");
+        ;
 
     cmd.assert()
         .success()
@@ -152,7 +153,7 @@ fn test_equals_with_no_matches() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM sample WHERE age = 40")
         .arg(file_path)
-        .arg("--dry-run");
+        ;
 
     // Should return just the header, no data rows
     cmd.assert()
@@ -182,7 +183,7 @@ fn test_comparison_boundary_values() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM boundaries WHERE value = 9223372036854775807")
         .arg(file_path.clone())
-        .arg("--dry-run");
+        ;
 
     cmd.assert()
         .success()
@@ -194,7 +195,7 @@ fn test_comparison_boundary_values() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM boundaries WHERE value = -9223372036854775808")
         .arg(file_path.clone())
-        .arg("--dry-run");
+        ;
 
     cmd.assert()
         .success()
@@ -206,7 +207,7 @@ fn test_comparison_boundary_values() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM boundaries WHERE value > 0")
         .arg(file_path.clone())
-        .arg("--dry-run");
+        ;
 
     cmd.assert()
         .success()
@@ -219,7 +220,7 @@ fn test_comparison_boundary_values() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM boundaries WHERE value < 0")
         .arg(file_path.clone())
-        .arg("--dry-run");
+        ;
 
     cmd.assert()
         .success()

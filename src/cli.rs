@@ -24,9 +24,9 @@ pub struct SqawkArgs {
     #[clap(short, long, help = "Enable verbose output")]
     pub verbose: bool,
 
-    /// Dry run mode: don't modify any files
-    #[clap(long, help = "Don't write changes back to files (dry run)")]
-    pub dry_run: bool,
+    /// Write changes back to input files (default is to not modify files)
+    #[clap(short = 'w', long, help = "Write changes back to input files")]
+    pub write: bool,
 }
 
 /// Parse command-line arguments

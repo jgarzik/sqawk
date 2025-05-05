@@ -66,6 +66,7 @@ fn test_insert() -> Result<(), Box<dyn std::error::Error>> {
         .arg("INSERT INTO people (id, name, age) VALUES (4, 'Dave', 40)")
         .arg("-s")
         .arg("SELECT * FROM people")
+        .arg("--write") // Add write flag to save changes to file
         .arg(file_path.to_str().unwrap());
 
     // Check output
@@ -206,7 +207,7 @@ fn test_delete_with_where() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM people")
         .arg(file_path.to_str().unwrap())
-        .arg("--dry-run");
+        ;
 
     cmd.assert()
         .success()
@@ -222,7 +223,7 @@ fn test_delete_with_where() -> Result<(), Box<dyn std::error::Error>> {
         .arg("SELECT * FROM people") // Check result after deletion
         .arg(file_path.to_str().unwrap())
         .arg("-v") // Verbose mode to see more details
-        .arg("--dry-run"); // Prevent file modifications
+        ; // Prevent file modifications
 
     // Verify deletion worked correctly
     cmd.assert()
@@ -233,7 +234,7 @@ fn test_delete_with_where() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicates::str::contains("2,Bob,25"))
         .stdout(predicates::str::contains("3,Charlie,35").not());
 
-    // File should NOT be modified in dry-run mode
+    // File should NOT be modified by default (without --write flag)
     let content = fs::read_to_string(&file_path)?;
     assert!(content.contains("1,Alice,30"));
     assert!(content.contains("2,Bob,25"));
@@ -253,7 +254,7 @@ fn test_delete_all() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM people")
         .arg(file_path.to_str().unwrap())
-        .arg("--dry-run");
+        ;
 
     cmd.assert()
         .success()
@@ -268,7 +269,7 @@ fn test_delete_all() -> Result<(), Box<dyn std::error::Error>> {
         .arg("SELECT * FROM people") // Check result after deletion
         .arg(file_path.to_str().unwrap())
         .arg("-v") // Verbose mode to see more details
-        .arg("--dry-run"); // Prevent file modifications
+        ; // Prevent file modifications
 
     // Verify deletion worked correctly - should only show header, no rows
     cmd.assert()
@@ -279,7 +280,7 @@ fn test_delete_all() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicates::str::contains("2,Bob,25").not())
         .stdout(predicates::str::contains("3,Charlie,35").not());
 
-    // File should NOT be modified in dry-run mode
+    // File should NOT be modified by default (without --write flag)
     let content = fs::read_to_string(&file_path)?;
     assert!(content.contains("id,name,age"));
     assert!(content.contains("1,Alice,30")); // All rows should still be there

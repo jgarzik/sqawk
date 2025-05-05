@@ -55,11 +55,29 @@ pub fn run_test_case(test_case: SqawkTestCase) -> Result<(), Box<dyn std::error:
 }
 
 /// Run a test using a static test file that already exists in the project
+/// For write operations (--write flag), makes a copy of the file to ensure the original is never modified
 pub fn run_test_case_with_static_file(
     test_case: SqawkTestCase,
-    test_file: PathBuf,
+    static_file: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_test_case_with_file(test_case, test_file)
+    // Check if any arguments contain --write or -w flag
+    let needs_copy = test_case.args.iter().any(|arg| arg == "--write" || arg == "-w");
+    
+    if needs_copy {
+        // Create a temporary directory
+        let temp_dir = create_temp_dir()?;
+        
+        // Copy the static file to the temp directory to protect the original
+        let file_name = static_file.file_name().unwrap().to_str().unwrap();
+        let temp_file_path = temp_dir.path().join(file_name);
+        fs::copy(&static_file, &temp_file_path)?;
+        
+        // Use the copied file for the test
+        run_test_case_with_file(test_case, temp_file_path)
+    } else {
+        // For read-only operations, use the original file directly
+        run_test_case_with_file(test_case, static_file)
+    }
 }
 
 /// Common test helper function used by both temporary and static file test runners
@@ -78,8 +96,7 @@ fn run_test_case_with_file(
         cmd.arg("-v");
     }
 
-    // Always use dry-run mode to prevent modifying test files
-    cmd.arg("--dry-run");
+    // Not writing to files is now the default behavior, so no need for additional flags
 
     // Add any additional arguments
     for arg in &test_case.args {
