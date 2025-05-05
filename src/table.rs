@@ -478,11 +478,63 @@ impl Table {
     ///
     /// # Returns
     /// * A new table containing the joined data
+    /// Perform a cross join between two tables
+    ///
+    /// This method implements the Cartesian product of two tables, combining every row from
+    /// the left table with every row from the right table.
+    ///
+    /// # Arguments
+    /// * `right` - The right-hand table to join with
+    ///
+    /// # Returns
+    /// * A new table containing the cross join result
     pub fn cross_join(&self, right: &Self) -> SqawkResult<Self> {
-        // Create result table with prefixed column names
+        // Create result columns with proper prefixes
+        let columns = self.create_joined_columns(right);
+        
+        // Create a new table to hold the join result
+        let mut result = Table::new(
+            "join_result", 
+            columns, 
+            None
+        );
+        
+        // Fill with cross-joined rows
+        self.fill_cross_joined_rows(right, &mut result)?;
+        
+        Ok(result)
+    }
+    
+    /// Create column names for a joined table
+    ///
+    /// This function creates a list of qualified column names by prefixing
+    /// each column name with its table name if it doesn't already have a prefix.
+    ///
+    /// # Arguments
+    /// * `right` - The right-hand table for the join
+    ///
+    /// # Returns
+    /// * A vector of qualified column names
+    fn create_joined_columns(&self, right: &Self) -> Vec<String> {
         let mut columns = Vec::new();
         
-        // Add columns from left table (self)
+        // Add columns from left table (self) with prefixes
+        self.add_prefixed_columns(&mut columns);
+        
+        // Add columns from right table with prefixes
+        right.add_prefixed_columns(&mut columns);
+        
+        columns
+    }
+    
+    /// Add columns with table name prefixes to a column list
+    ///
+    /// This function adds column names to a list, prefixing them with
+    /// the table name if they don't already have a prefix.
+    ///
+    /// # Arguments
+    /// * `columns` - The column list to add to
+    fn add_prefixed_columns(&self, columns: &mut Vec<String>) {
         for col in self.columns() {
             // If the column already has a table prefix, keep it as is
             // Otherwise, add the table name prefix
@@ -492,48 +544,61 @@ impl Table {
                 columns.push(format!("{}.{}", self.name, col));
             }
         }
-        
-        // Add columns from right table
-        for col in right.columns() {
-            // If the column already has a table prefix, keep it as is
-            // Otherwise, add the table name prefix
-            if col.contains('.') {
-                columns.push(col.clone());
-            } else {
-                columns.push(format!("{}.{}", right.name, col));
-            }
-        }
-        
-        // Create a new table to hold the join result
-        // Use original table names in the result to keep column references simple
-        let mut result = Table::new(
-            &format!("join_result"), 
-            columns, 
-            None
-        );
-        
+    }
+    
+    /// Fill a table with cross-joined rows
+    ///
+    /// This function creates rows for a cross join by combining each row
+    /// from the left table with each row from the right table.
+    ///
+    /// # Arguments
+    /// * `right` - The right-hand table for the join
+    /// * `result` - The result table to fill with rows
+    ///
+    /// # Returns
+    /// * Ok(()) if all rows were successfully added
+    /// * Err if there was an error adding a row
+    fn fill_cross_joined_rows(&self, right: &Self, result: &mut Self) -> SqawkResult<()> {
         // For CROSS JOIN, we include every combination of rows
         for left_row in self.rows() {
             for right_row in right.rows() {
                 // Create combined row
-                let mut new_row = Vec::with_capacity(self.column_count() + right.column_count());
-                
-                // Add values from left row
-                for i in 0..self.column_count() {
-                    new_row.push(left_row.get(i).unwrap_or(&Value::Null).clone());
-                }
-                
-                // Add values from right row
-                for i in 0..right.column_count() {
-                    new_row.push(right_row.get(i).unwrap_or(&Value::Null).clone());
-                }
+                let new_row = self.combine_rows(left_row, right_row, right.column_count());
                 
                 // Add the combined row to the result table
                 result.add_row(new_row)?;
             }
         }
         
-        Ok(result)
+        Ok(())
+    }
+    
+    /// Combine two rows into a single row
+    ///
+    /// This function combines a row from the left table with a row
+    /// from the right table to create a joined row.
+    ///
+    /// # Arguments
+    /// * `left_row` - A row from the left table
+    /// * `right_row` - A row from the right table
+    /// * `right_column_count` - The number of columns in the right table
+    ///
+    /// # Returns
+    /// * A new combined row
+    fn combine_rows(&self, left_row: &[Value], right_row: &[Value], right_column_count: usize) -> Vec<Value> {
+        let mut new_row = Vec::with_capacity(self.column_count() + right_column_count);
+        
+        // Add values from left row
+        for i in 0..self.column_count() {
+            new_row.push(left_row.get(i).unwrap_or(&Value::Null).clone());
+        }
+        
+        // Add values from right row
+        for i in 0..right_column_count {
+            new_row.push(right_row.get(i).unwrap_or(&Value::Null).clone());
+        }
+        
+        new_row
     }
     
     /// Sort the table by one or more columns

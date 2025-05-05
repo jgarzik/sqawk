@@ -495,76 +495,34 @@ impl SqlExecutor {
     }
 
     /// Resolve SELECT items to column indices
+    /// Resolve the column indices for a SELECT statement
+    ///
+    /// This function takes the SELECT items from a query and resolves them to
+    /// column indices in the source table.
+    ///
+    /// # Arguments
+    /// * `items` - The SELECT items from the query (columns to select)
+    /// * `table` - The source table containing the columns
+    ///
+    /// # Returns
+    /// * A vector of column indices corresponding to the SELECT items
     fn resolve_select_items(&self, items: &[SelectItem], table: &Table) -> SqawkResult<Vec<usize>> {
         let mut column_indices = Vec::new();
 
         for item in items {
             match item {
                 SelectItem::Wildcard(_) => {
-                    // For any wildcard (*), select all columns
-                    for i in 0..table.column_count() {
-                        column_indices.push(i);
-                    }
+                    self.handle_wildcard_select(table, &mut column_indices);
                 }
                 SelectItem::UnnamedExpr(expr) => {
                     match expr {
                         // Simple column reference
                         Expr::Identifier(ident) => {
-                            // First try as an exact column name match
-                            if let Some(idx) = table.column_index(&ident.value) {
-                                column_indices.push(idx);
-                            } else {
-                                // Try as qualified name by checking column patterns
-                                let mut found = false;
-                                for (i, col) in table.columns().iter().enumerate() {
-                                    if col.ends_with(&format!(".{}", ident.value)) {
-                                        column_indices.push(i);
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                                
-                                if !found {
-                                    return Err(SqawkError::ColumnNotFound(ident.value.clone()));
-                                }
-                            }
+                            self.resolve_simple_column_for_select(&ident.value, table, &mut column_indices)?;
                         },
                         // Qualified column reference (table.column or join_result.table.column)
                         Expr::CompoundIdentifier(parts) => {
-                            // Build the fully qualified column name from parts
-                            let qualified_name = parts.iter()
-                                .map(|ident| ident.value.clone())
-                                .collect::<Vec<_>>()
-                                .join(".");
-                            
-                            
-                            // Try to find an exact match for the qualified column
-                            let mut found = false;
-                            for (i, col) in table.columns().iter().enumerate() {
-                                if col == &qualified_name {
-                                    column_indices.push(i);
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            
-                            // If we didn't find an exact match, try a suffix match
-                            // This helps with cases like "users.id" matching "users_orders_cross.users.id"
-                            if !found && parts.len() == 2 {
-                                let suffix = format!("{}.{}", parts[0].value, parts[1].value);
-                                
-                                for (i, col) in table.columns().iter().enumerate() {
-                                    if col.ends_with(&suffix) {
-                                        column_indices.push(i);
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            
-                            if !found {
-                                return Err(SqawkError::ColumnNotFound(qualified_name));
-                            }
+                            self.resolve_qualified_column_for_select(parts, table, &mut column_indices)?;
                         },
                         _ => {
                             return Err(SqawkError::UnsupportedSqlFeature(
@@ -587,6 +545,72 @@ impl SqlExecutor {
         }
 
         Ok(column_indices)
+    }
+    
+    /// Handle a wildcard (*) in a SELECT statement
+    ///
+    /// This function adds all column indices from the table to the result
+    fn handle_wildcard_select(&self, table: &Table, column_indices: &mut Vec<usize>) {
+        // For any wildcard (*), select all columns
+        for i in 0..table.column_count() {
+            column_indices.push(i);
+        }
+    }
+    
+    /// Resolve a simple column reference for a SELECT statement
+    ///
+    /// This function handles unqualified column references like 'name'
+    fn resolve_simple_column_for_select(&self, column_name: &str, table: &Table, column_indices: &mut Vec<usize>) -> SqawkResult<()> {
+        // First try as an exact column name match
+        if let Some(idx) = table.column_index(column_name) {
+            column_indices.push(idx);
+            return Ok(());
+        }
+        
+        // Try as qualified name by checking column patterns
+        let suffix = format!(".{}", column_name);
+        for (i, col) in table.columns().iter().enumerate() {
+            if col.ends_with(&suffix) {
+                column_indices.push(i);
+                return Ok(());
+            }
+        }
+        
+        // If we got here, the column wasn't found
+        Err(SqawkError::ColumnNotFound(column_name.to_string()))
+    }
+    
+    /// Resolve a qualified column reference for a SELECT statement
+    ///
+    /// This function handles qualified column references like 'table.column'
+    fn resolve_qualified_column_for_select(&self, parts: &[sqlparser::ast::Ident], table: &Table, column_indices: &mut Vec<usize>) -> SqawkResult<()> {
+        // Build the fully qualified column name from parts
+        let qualified_name = parts.iter()
+            .map(|ident| ident.value.clone())
+            .collect::<Vec<_>>()
+            .join(".");
+        
+        // Try to find an exact match for the qualified column
+        if let Some(idx) = table.column_index(&qualified_name) {
+            column_indices.push(idx);
+            return Ok(());
+        }
+        
+        // If we didn't find an exact match, try a suffix match
+        // This helps with cases like "users.id" matching "users_orders_cross.users.id"
+        if parts.len() == 2 {
+            let suffix = format!("{}.{}", parts[0].value, parts[1].value);
+            
+            for (i, col) in table.columns().iter().enumerate() {
+                if col.ends_with(&suffix) {
+                    column_indices.push(i);
+                    return Ok(());
+                }
+            }
+        }
+        
+        // If we got here, the qualified column wasn't found
+        Err(SqawkError::ColumnNotFound(qualified_name))
     }
 
     /// Apply a WHERE clause to filter table rows
@@ -636,133 +660,23 @@ impl SqlExecutor {
     /// * `Ok(true)` if the condition matches the row
     /// * `Ok(false)` if the condition doesn't match
     /// * `Err` if there's an error during evaluation (type mismatch, etc.)
+    /// Evaluate a condition expression to a boolean value
+    ///
+    /// This is the main entry point for condition evaluation used in WHERE clauses
     fn evaluate_condition(&self, expr: &Expr, row: &[Value], table: &Table) -> SqawkResult<bool> {
         match expr {
             Expr::BinaryOp { left, op, right } => {
                 // Handle logical operators (AND, OR) differently from comparison operators
                 match op {
-                    // AND operator - evaluate both sides and combine results
                     sqlparser::ast::BinaryOperator::And => {
-                        
-                        // Evaluate left condition
-                        let left_result = self.evaluate_condition(left, row, table)?;
-                        
-                        // Short-circuit - if left is false, don't evaluate right
-                        if !left_result {
-                            return Ok(false);
-                        }
-                        
-                        // Evaluate right condition only if left was true
-                        let right_result = self.evaluate_condition(right, row, table)?;
-                        
-                        Ok(left_result && right_result)
+                        self.evaluate_logical_and(left, right, row, table)
                     },
-                    
-                    // OR operator - evaluate both sides and combine results
                     sqlparser::ast::BinaryOperator::Or => {
-                        
-                        // Evaluate left condition
-                        let left_result = self.evaluate_condition(left, row, table)?;
-                        
-                        // Short-circuit - if left is true, don't evaluate right
-                        if left_result {
-                            return Ok(true);
-                        }
-                        
-                        // Evaluate right condition only if left was false
-                        let right_result = self.evaluate_condition(right, row, table)?;
-                        
-                        Ok(left_result || right_result)
+                        self.evaluate_logical_or(left, right, row, table)
                     },
-                    
-                    // For comparison operators, evaluate the operands to values first
+                    // For comparison operators, delegate to a separate function
                     _ => {
-                        let left_val = self.evaluate_expr_with_row(left, row, table)?;
-                        let right_val = self.evaluate_expr_with_row(right, row, table)?;
-
-                        // Handle different comparison operators
-                        match op {
-                            // Equal (=) operator
-                            sqlparser::ast::BinaryOperator::Eq => {
-                                // Use the Value's implementation of PartialEq which handles type conversions
-                                let result = left_val == right_val;
-                                Ok(result)
-                            }
-
-                            // Not equal (!=) operator
-                            sqlparser::ast::BinaryOperator::NotEq => Ok(left_val != right_val),
-
-                            // Greater than (>) operator
-                            sqlparser::ast::BinaryOperator::Gt => {
-                                // Handle each type combination separately for correct numeric comparisons
-                                match (&left_val, &right_val) {
-                                    // Integer-Integer comparison
-                                    (Value::Integer(a), Value::Integer(b)) => Ok(a > b),
-
-                                    // Float-Float comparison
-                                    (Value::Float(a), Value::Float(b)) => Ok(a > b),
-
-                                    // Integer-Float comparison (convert Integer to Float)
-                                    (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) > *b),
-
-                                    // Float-Integer comparison (convert Integer to Float)
-                                    (Value::Float(a), Value::Integer(b)) => Ok(*a > (*b as f64)),
-
-                                    // String-String comparison (lexicographic)
-                                    (Value::String(a), Value::String(b)) => Ok(a > b),
-
-                                    // Error for incompatible types
-                                    _ => Err(SqawkError::TypeError(format!(
-                                        "Cannot compare {:?} and {:?} with >",
-                                        left_val, right_val
-                                    ))),
-                                }
-                            }
-
-                            // Less than (<) operator
-                            sqlparser::ast::BinaryOperator::Lt => match (&left_val, &right_val) {
-                                (Value::Integer(a), Value::Integer(b)) => Ok(a < b),
-                                (Value::Float(a), Value::Float(b)) => Ok(a < b),
-                                (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) < *b),
-                                (Value::Float(a), Value::Integer(b)) => Ok(*a < (*b as f64)),
-                                (Value::String(a), Value::String(b)) => Ok(a < b),
-                                _ => Err(SqawkError::TypeError(format!(
-                                    "Cannot compare {:?} and {:?} with <",
-                                    left_val, right_val
-                                ))),
-                            },
-
-                            // Greater than or equal (>=) operator
-                            sqlparser::ast::BinaryOperator::GtEq => match (&left_val, &right_val) {
-                                (Value::Integer(a), Value::Integer(b)) => Ok(a >= b),
-                                (Value::Float(a), Value::Float(b)) => Ok(a >= b),
-                                (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) >= *b),
-                                (Value::Float(a), Value::Integer(b)) => Ok(*a >= (*b as f64)),
-                                (Value::String(a), Value::String(b)) => Ok(a >= b),
-                                _ => Err(SqawkError::TypeError(format!(
-                                    "Cannot compare {:?} and {:?} with >=",
-                                    left_val, right_val
-                                ))),
-                            },
-
-                            // Less than or equal (<=) operator
-                            sqlparser::ast::BinaryOperator::LtEq => match (&left_val, &right_val) {
-                                (Value::Integer(a), Value::Integer(b)) => Ok(a <= b),
-                                (Value::Float(a), Value::Float(b)) => Ok(a <= b),
-                                (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) <= *b),
-                                (Value::Float(a), Value::Integer(b)) => Ok(*a <= (*b as f64)),
-                                (Value::String(a), Value::String(b)) => Ok(a <= b),
-                                _ => Err(SqawkError::TypeError(format!(
-                                    "Cannot compare {:?} and {:?} with <=",
-                                    left_val, right_val
-                                ))),
-                            },
-                            // Add more operators as needed
-                            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                                "Unsupported binary operator: {:?}",
-                                op
-                            ))),
-                        }
+                        self.evaluate_comparison(left, op, right, row, table)
                     }
                 }
             }
@@ -778,6 +692,161 @@ impl SqlExecutor {
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
                 "Unsupported WHERE condition: {:?}",
                 expr
+            ))),
+        }
+    }
+    
+    /// Evaluate a logical AND expression with short-circuit evaluation
+    fn evaluate_logical_and(&self, left: &Expr, right: &Expr, row: &[Value], table: &Table) -> SqawkResult<bool> {
+        // Evaluate left condition
+        let left_result = self.evaluate_condition(left, row, table)?;
+        
+        // Short-circuit - if left is false, don't evaluate right
+        if !left_result {
+            return Ok(false);
+        }
+        
+        // Evaluate right condition only if left was true
+        let right_result = self.evaluate_condition(right, row, table)?;
+        
+        Ok(left_result && right_result)
+    }
+    
+    /// Evaluate a logical OR expression with short-circuit evaluation
+    fn evaluate_logical_or(&self, left: &Expr, right: &Expr, row: &[Value], table: &Table) -> SqawkResult<bool> {
+        // Evaluate left condition
+        let left_result = self.evaluate_condition(left, row, table)?;
+        
+        // Short-circuit - if left is true, don't evaluate right
+        if left_result {
+            return Ok(true);
+        }
+        
+        // Evaluate right condition only if left was false
+        let right_result = self.evaluate_condition(right, row, table)?;
+        
+        Ok(left_result || right_result)
+    }
+    
+    /// Evaluate a comparison expression between two values
+    fn evaluate_comparison(&self, left: &Expr, op: &sqlparser::ast::BinaryOperator, right: &Expr, row: &[Value], table: &Table) -> SqawkResult<bool> {
+        let left_val = self.evaluate_expr_with_row(left, row, table)?;
+        let right_val = self.evaluate_expr_with_row(right, row, table)?;
+
+        match op {
+            // Equal (=) operator
+            sqlparser::ast::BinaryOperator::Eq => {
+                // Use the Value's implementation of PartialEq which handles type conversions
+                Ok(left_val == right_val)
+            }
+
+            // Not equal (!=) operator
+            sqlparser::ast::BinaryOperator::NotEq => Ok(left_val != right_val),
+
+            // Greater than (>) operator
+            sqlparser::ast::BinaryOperator::Gt => {
+                self.compare_values_with_operator(&left_val, &right_val, ">")
+            }
+
+            // Less than (<) operator
+            sqlparser::ast::BinaryOperator::Lt => {
+                self.compare_values_with_operator(&left_val, &right_val, "<")
+            }
+
+            // Greater than or equal (>=) operator
+            sqlparser::ast::BinaryOperator::GtEq => {
+                self.compare_values_with_operator(&left_val, &right_val, ">=")
+            }
+
+            // Less than or equal (<=) operator
+            sqlparser::ast::BinaryOperator::LtEq => {
+                self.compare_values_with_operator(&left_val, &right_val, "<=")
+            }
+            
+            // Add more operators as needed
+            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Unsupported binary operator: {:?}",
+                op
+            ))),
+        }
+    }
+    
+    /// Compare two values with a specific operator
+    ///
+    /// Helper function to handle type-specific comparisons
+    fn compare_values_with_operator(&self, left_val: &Value, right_val: &Value, op_symbol: &str) -> SqawkResult<bool> {
+        match (left_val, right_val) {
+            // Integer-Integer comparison
+            (Value::Integer(a), Value::Integer(b)) => {
+                Ok(match op_symbol {
+                    ">" => a > b,
+                    "<" => a < b,
+                    ">=" => a >= b,
+                    "<=" => a <= b,
+                    _ => return Err(SqawkError::InvalidSqlQuery(
+                        format!("Unexpected operator symbol: {}", op_symbol)
+                    )),
+                })
+            }
+
+            // Float-Float comparison
+            (Value::Float(a), Value::Float(b)) => {
+                Ok(match op_symbol {
+                    ">" => a > b,
+                    "<" => a < b,
+                    ">=" => a >= b,
+                    "<=" => a <= b,
+                    _ => return Err(SqawkError::InvalidSqlQuery(
+                        format!("Unexpected operator symbol: {}", op_symbol)
+                    )),
+                })
+            }
+
+            // Integer-Float comparison (convert Integer to Float)
+            (Value::Integer(a), Value::Float(b)) => {
+                let a_float = *a as f64;
+                Ok(match op_symbol {
+                    ">" => a_float > *b,
+                    "<" => a_float < *b,
+                    ">=" => a_float >= *b,
+                    "<=" => a_float <= *b,
+                    _ => return Err(SqawkError::InvalidSqlQuery(
+                        format!("Unexpected operator symbol: {}", op_symbol)
+                    )),
+                })
+            }
+
+            // Float-Integer comparison (convert Integer to Float)
+            (Value::Float(a), Value::Integer(b)) => {
+                let b_float = *b as f64;
+                Ok(match op_symbol {
+                    ">" => *a > b_float,
+                    "<" => *a < b_float,
+                    ">=" => *a >= b_float,
+                    "<=" => *a <= b_float,
+                    _ => return Err(SqawkError::InvalidSqlQuery(
+                        format!("Unexpected operator symbol: {}", op_symbol)
+                    )),
+                })
+            }
+
+            // String-String comparison (lexicographic)
+            (Value::String(a), Value::String(b)) => {
+                Ok(match op_symbol {
+                    ">" => a > b,
+                    "<" => a < b,
+                    ">=" => a >= b,
+                    "<=" => a <= b,
+                    _ => return Err(SqawkError::InvalidSqlQuery(
+                        format!("Unexpected operator symbol: {}", op_symbol)
+                    )),
+                })
+            }
+
+            // Error for incompatible types
+            _ => Err(SqawkError::TypeError(format!(
+                "Cannot compare {:?} and {:?} with {}",
+                left_val, right_val, op_symbol
             ))),
         }
     }
@@ -891,80 +960,95 @@ impl SqlExecutor {
         match expr {
             // Simple column reference (unqualified)
             Expr::Identifier(ident) => {
-                // First try as an exact column name match
-                if let Some(idx) = table.column_index(&ident.value) {
-                    if idx < row.len() {
-                        return Ok(row[idx].clone());
-                    } else {
-                        return Err(SqawkError::InvalidSqlQuery(format!(
-                            "Column index {} out of bounds for row with {} columns",
-                            idx,
-                            row.len()
-                        )));
-                    }
-                }
-                
-                // Try to find a matching qualified column (e.g., for "name", match "table.name")
-                for (i, col) in table.columns().iter().enumerate() {
-                    if col.ends_with(&format!(".{}", ident.value)) {
-                        if i < row.len() {
-                            return Ok(row[i].clone());
-                        }
-                    }
-                }
-                
-                // If we got here, the column wasn't found
-                Err(SqawkError::ColumnNotFound(ident.value.clone()))
+                self.resolve_simple_column_reference(&ident.value, row, table)
             },
             // Qualified column reference (table.column or join_result.table.column)
             Expr::CompoundIdentifier(parts) => {
-                // Build the fully qualified column name from parts
-                let qualified_name = parts.iter()
-                    .map(|ident| ident.value.clone())
-                    .collect::<Vec<_>>()
-                    .join(".");
-                
-                
-                // Try to find an exact match for the qualified column
-                for (i, col) in table.columns().iter().enumerate() {
-                    if col == &qualified_name {
-                        if i < row.len() {
-                            return Ok(row[i].clone());
-                        } else {
-                            return Err(SqawkError::InvalidSqlQuery(format!(
-                                "Column index {} out of bounds for row with {} columns",
-                                i,
-                                row.len()
-                            )));
-                        }
-                    }
-                }
-                
-                // If we didn't find an exact match, try a suffix match
-                // This helps with cases like "users.id" matching "users_orders_cross.users.id"
-                if parts.len() == 2 {
-                    let suffix = format!("{}.{}", parts[0].value, parts[1].value);
-                    
-                    for (i, col) in table.columns().iter().enumerate() {
-                        if col.ends_with(&suffix) {
-                            if i < row.len() {
-                                return Ok(row[i].clone());
-                            } else {
-                                return Err(SqawkError::InvalidSqlQuery(format!(
-                                    "Column index {} out of bounds for row with {} columns",
-                                    i,
-                                    row.len()
-                                )));
-                            }
-                        }
-                    }
-                }
-                
-                // If we got here, the qualified column wasn't found
-                Err(SqawkError::ColumnNotFound(qualified_name))
+                self.resolve_qualified_column_reference(parts, row, table)
             },
             // Handle other expression types by delegating to the main evaluate_expr function
             _ => self.evaluate_expr(expr),
+        }
+    }
+    
+    /// Resolve a simple (unqualified) column reference like 'name'
+    ///
+    /// First tries exact match, then tries to match as suffix of qualified column
+    fn resolve_simple_column_reference(&self, column_name: &str, row: &[Value], table: &Table) -> SqawkResult<Value> {
+        // First try as an exact column name match
+        if let Some(idx) = table.column_index(column_name) {
+            return self.get_row_value_at_index(idx, row);
+        }
+        
+        // Try to find a matching qualified column (e.g., for "name", match "table.name")
+        let suffix = format!(".{}", column_name);
+        for (i, col) in table.columns().iter().enumerate() {
+            if col.ends_with(&suffix) {
+                return self.get_row_value_at_index(i, row);
+            }
+        }
+        
+        // If we got here, the column wasn't found
+        Err(SqawkError::ColumnNotFound(column_name.to_string()))
+    }
+    
+    /// Resolve a qualified column reference like 'table.column'
+    ///
+    /// First tries exact match, then tries suffix match for joins
+    fn resolve_qualified_column_reference(&self, parts: &[sqlparser::ast::Ident], row: &[Value], table: &Table) -> SqawkResult<Value> {
+        // Build the fully qualified column name from parts
+        let qualified_name = parts.iter()
+            .map(|ident| ident.value.clone())
+            .collect::<Vec<_>>()
+            .join(".");
+        
+        // Try to find an exact match for the qualified column
+        if let Some(idx) = table.column_index(&qualified_name) {
+            return self.get_row_value_at_index(idx, row);
+        }
+        
+        // If we didn't find an exact match, try a suffix match
+        // This helps with cases like "users.id" matching "users_orders_cross.users.id"
+        if parts.len() == 2 {
+            return self.try_suffix_match(parts, row, table);
+        }
+        
+        // If we got here, the qualified column wasn't found
+        Err(SqawkError::ColumnNotFound(qualified_name))
+    }
+    
+    /// Try to match a column reference as a suffix
+    ///
+    /// This helps with joins where the full reference might be something like
+    /// 'users_orders_cross.users.id' but the user references 'users.id'
+    fn try_suffix_match(&self, parts: &[sqlparser::ast::Ident], row: &[Value], table: &Table) -> SqawkResult<Value> {
+        let suffix = format!("{}.{}", parts[0].value, parts[1].value);
+        
+        for (i, col) in table.columns().iter().enumerate() {
+            if col.ends_with(&suffix) {
+                return self.get_row_value_at_index(i, row);
+            }
+        }
+        
+        // If no suffix match was found, report the column as not found
+        Err(SqawkError::ColumnNotFound(
+            parts.iter()
+                .map(|ident| ident.value.clone())
+                .collect::<Vec<_>>()
+                .join(".")
+        ))
+    }
+    
+    /// Get a value from a row at the specified index with bounds checking
+    fn get_row_value_at_index(&self, idx: usize, row: &[Value]) -> SqawkResult<Value> {
+        if idx < row.len() {
+            Ok(row[idx].clone())
+        } else {
+            Err(SqawkError::InvalidSqlQuery(format!(
+                "Column index {} out of bounds for row with {} columns",
+                idx,
+                row.len()
+            )))
         }
     }
 
@@ -988,14 +1072,29 @@ impl SqlExecutor {
     ) -> SqawkResult<usize> {
         // Get the target table name as a string
         let table_name = self.get_table_name(&table)?;
-            
         
         // Verify the table exists and get necessary info
         let table_ref = self.csv_handler.get_table(&table_name)?;
         
         // Process assignments to get column indices and their new values
-        let column_assignments: Vec<(usize, Expr)> = assignments
-            .into_iter()
+        let column_assignments = self.process_update_assignments(&assignments, table_ref)?;
+            
+        // Find rows to update based on WHERE clause
+        let rows_to_update = self.find_rows_to_update(selection.as_ref(), table_ref)?;
+        
+        // Compute all values for each assignment before getting a mutable reference
+        let updates = self.compute_update_values(&rows_to_update, &column_assignments)?;
+        
+        // Apply updates with a mutable reference, now that all expressions have been evaluated
+        self.apply_updates(&table_name, updates)
+    }
+    
+    /// Process assignment expressions for an UPDATE statement
+    ///
+    /// Converts SQL assignments to column indices and expressions
+    fn process_update_assignments(&self, assignments: &[Assignment], table: &Table) -> SqawkResult<Vec<(usize, Expr)>> {
+        assignments
+            .iter()
             .map(|assignment| {
                 // The id is a Vec<Ident> but we only support simple column references
                 if assignment.id.len() != 1 {
@@ -1006,47 +1105,68 @@ impl SqlExecutor {
                 
                 let column_name = assignment.id[0].value.clone();
                 
-                let column_idx = table_ref
+                let column_idx = table
                     .column_index(&column_name)
                     .ok_or_else(|| SqawkError::ColumnNotFound(column_name))?;
                 
                 // Clone the Expr value since we can't take ownership of it
                 Ok((column_idx, assignment.value.clone()))
             })
-            .collect::<SqawkResult<Vec<_>>>()?;
-            
-        // Find rows to update based on WHERE clause
+            .collect::<SqawkResult<Vec<_>>>()
+    }
+    
+    /// Find rows to update based on an optional WHERE clause
+    ///
+    /// If no WHERE clause is provided, all rows will be updated
+    fn find_rows_to_update(&self, where_expr: Option<&Expr>, table: &Table) -> SqawkResult<Vec<usize>> {
         let mut rows_to_update = Vec::new();
         
-        // Determine which rows match the WHERE clause
-        if let Some(ref where_expr) = selection {
-            
-            for (idx, row) in table_ref.rows().iter().enumerate() {
-                if self.evaluate_condition(where_expr, row, table_ref).unwrap_or(false) {
+        if let Some(expr) = where_expr {
+            // Filter rows that match the WHERE condition
+            for (idx, row) in table.rows().iter().enumerate() {
+                if self.evaluate_condition(expr, row, table).unwrap_or(false) {
                     rows_to_update.push(idx);
                 }
             }
         } else {
             // If no WHERE clause, update all rows
-            rows_to_update = (0..table_ref.row_count()).collect();
+            rows_to_update = (0..table.row_count()).collect();
         }
         
-        // Compute all values for each assignment before getting a mutable reference
-        // This avoids the borrow checker conflict between evaluate_expr and table_mut
+        Ok(rows_to_update)
+    }
+    
+    /// Compute all values for an UPDATE operation
+    ///
+    /// This avoids the borrow checker conflict between evaluate_expr and table_mut
+    /// by pre-computing all values before applying them
+    fn compute_update_values(&self, rows: &[usize], column_assignments: &[(usize, Expr)]) -> SqawkResult<Vec<(usize, usize, Value)>> {
         let mut updates = Vec::new();
         
         // Pre-compute all values to be updated
-        for row_idx in &rows_to_update {
-            for &(col_idx, ref expr) in &column_assignments {
+        for &row_idx in rows {
+            for &(col_idx, ref expr) in column_assignments {
                 let value = self.evaluate_expr(expr)?;
-                updates.push((*row_idx, col_idx, value));
+                updates.push((row_idx, col_idx, value));
             }
         }
         
-        // Apply updates with a mutable reference, now that all expressions have been evaluated
-        let row_count = rows_to_update.len();
+        Ok(updates)
+    }
+    
+    /// Apply a set of pre-computed updates to a table
+    ///
+    /// Returns the number of rows that were affected
+    fn apply_updates(&mut self, table_name: &str, updates: Vec<(usize, usize, Value)>) -> SqawkResult<usize> {
+        // Calculate how many rows were affected (distinct row indices)
+        let row_indices: std::collections::HashSet<usize> = updates.iter()
+            .map(|(row_idx, _, _)| *row_idx)
+            .collect();
+        
+        let row_count = row_indices.len();
+        
         if row_count > 0 {
-            let table = self.csv_handler.get_table_mut(&table_name)?;
+            let table = self.csv_handler.get_table_mut(table_name)?;
             
             // Apply all the pre-computed updates
             for (row_idx, col_idx, value) in updates {
@@ -1054,7 +1174,7 @@ impl SqlExecutor {
             }
             
             // Mark the table as modified
-            self.modified_tables.insert(table_name);
+            self.modified_tables.insert(table_name.to_string());
         }
         
         Ok(row_count)
