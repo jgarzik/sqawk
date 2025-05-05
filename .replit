@@ -155,6 +155,30 @@ args = "Test Three-Way Inner Join With JOIN ON"
 task = "workflow.run"
 args = "Test Complex Operations with JOIN ON"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test DISTINCT Basic"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test DISTINCT with WHERE"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test DISTINCT with ORDER BY"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test DISTINCT with JOIN"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test DISTINCT with SELECT *"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test DISTINCT without id"
+
 [[workflows.workflow]]
 name = "sqawk-build-and-run"
 author = "agent"
@@ -444,6 +468,54 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "cd $(pwd) && cargo run -- -s \"SELECT users.name AS customer, orders.date AS purchase_date, products.name AS item, products.price FROM users INNER JOIN orders ON users.id = orders.user_id INNER JOIN products ON orders.product_id = products.product_id WHERE products.price > 100 ORDER BY products.price DESC\" tests/data/users.csv tests/data/orders.csv tests/data/products.csv -v"
+
+[[workflows.workflow]]
+name = "Test DISTINCT Basic"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT DISTINCT name, department FROM duplicates\" tests/data/duplicates.csv -v"
+
+[[workflows.workflow]]
+name = "Test DISTINCT with WHERE"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT DISTINCT name, role FROM duplicates WHERE department = 'Engineering'\" tests/data/duplicates.csv -v"
+
+[[workflows.workflow]]
+name = "Test DISTINCT with ORDER BY"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT DISTINCT name, department FROM duplicates ORDER BY department, name\" tests/data/duplicates.csv -v"
+
+[[workflows.workflow]]
+name = "Test DISTINCT with JOIN"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT DISTINCT users.name, orders.product_id FROM users INNER JOIN orders ON users.id = orders.user_id\" tests/data/users.csv tests/data/orders.csv -v"
+
+[[workflows.workflow]]
+name = "Test DISTINCT with SELECT *"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT DISTINCT * FROM duplicates WHERE department = 'Engineering'\" tests/data/duplicates.csv -v"
+
+[[workflows.workflow]]
+name = "Test DISTINCT without id"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT DISTINCT name, department, role FROM duplicates\" tests/data/duplicates.csv -v"
 
 [deployment]
 run = ["sh", "-c", "cargo build && echo \"Testing Sqawk with sample data:\" && cargo run -- -s \"SELECT * FROM sample\" tests/data/sample.csv -v"]

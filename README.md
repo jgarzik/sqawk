@@ -11,9 +11,11 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 - **Powerful SQL Query Engine**
   - Support for SELECT, INSERT, UPDATE, and DELETE operations
   - WHERE clause filtering with comparison operators
+  - DISTINCT keyword for removing duplicate rows
   - ORDER BY for sorting results (ASC/DESC)
   - Column aliases with the AS keyword
   - Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
+  - GROUP BY for data aggregation
   
 - **Multi-Table Operations**
   - Cross joins between tables
@@ -91,6 +93,19 @@ This executes multiple SQL statements in sequence: first marking recent inactive
 sqawk -s "SELECT * FROM users" -s "SELECT * FROM orders" users.csv orders.csv
 ```
 
+### Finding unique values with DISTINCT
+
+```sh
+# Get unique values from a single column
+sqawk -s "SELECT DISTINCT category FROM products" products.csv
+
+# Get unique combinations of columns
+sqawk -s "SELECT DISTINCT department, role FROM employees" employees.csv
+
+# Use DISTINCT with ORDER BY for sorted unique values
+sqawk -s "SELECT DISTINCT region FROM customers ORDER BY region" customers.csv
+```
+
 ### Join tables with INNER JOIN
 
 ```sh
@@ -99,6 +114,9 @@ sqawk -s "SELECT users.name, orders.product_id, orders.date FROM users INNER JOI
 
 # Join with additional WHERE filtering
 sqawk -s "SELECT users.name, orders.product_id, orders.date FROM users INNER JOIN orders ON users.id = orders.user_id WHERE orders.product_id > 100" users.csv orders.csv
+
+# Using DISTINCT with JOINs to find unique customer-product pairs
+sqawk -s "SELECT DISTINCT users.name, products.name FROM users INNER JOIN orders ON users.id = orders.user_id INNER JOIN products ON orders.product_id = products.product_id" users.csv orders.csv products.csv
 ```
 
 ### Custom field separators

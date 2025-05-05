@@ -291,6 +291,15 @@ sqawk -s "SELECT MIN(value) AS min, MAX(value) AS max, AVG(value) AS avg FROM da
 
 # See distribution by category
 sqawk -s "SELECT category, COUNT(*) FROM data GROUP BY category ORDER BY COUNT(*) DESC" data.csv
+
+# Find unique values in a column
+sqawk -s "SELECT DISTINCT category FROM data ORDER BY category" data.csv
+
+# Count unique values
+sqawk -s "SELECT COUNT(DISTINCT category) AS unique_categories FROM data" data.csv
+
+# Find unique combinations of columns
+sqawk -s "SELECT DISTINCT department, role FROM employees" employees.csv
 ```
 
 ### Data Cleanup
@@ -298,8 +307,11 @@ sqawk -s "SELECT category, COUNT(*) FROM data GROUP BY category ORDER BY COUNT(*
 Clean and transform data files:
 
 ```sh
-# Remove duplicate records
-sqawk -s "WITH numbered AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY id) AS rn FROM data) SELECT * FROM numbered WHERE rn = 1" data.csv --write
+# Remove duplicate records using Sqawk's DISTINCT keyword
+sqawk -s "SELECT DISTINCT * FROM data" data.csv > deduped_data.csv
+
+# Extract only unique combinations of name and email
+sqawk -s "SELECT DISTINCT name, email FROM contacts" contacts.csv > unique_contacts.csv
 
 # Delete rows with missing values
 sqawk -s "DELETE FROM data WHERE email IS NULL OR email = ''" data.csv --write
@@ -337,6 +349,13 @@ sqawk -s "SELECT users.name AS customer, products.name AS product, orders.date
           INNER JOIN orders ON users.id = orders.user_id 
           INNER JOIN products ON orders.product_id = products.product_id 
           WHERE orders.date > '2023-01-01'" 
+      users.csv orders.csv products.csv
+      
+# Using DISTINCT with JOINs to find unique customer-product pairs
+sqawk -s "SELECT DISTINCT users.name, products.name 
+          FROM users 
+          INNER JOIN orders ON users.id = orders.user_id 
+          INNER JOIN products ON orders.product_id = products.product_id" 
       users.csv orders.csv products.csv
 ```
 

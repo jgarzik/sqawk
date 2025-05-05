@@ -161,11 +161,33 @@ Sqawk currently supports the following SQL statement types:
 ### Basic Syntax
 
 ```sql
-SELECT [column_list | *]
+SELECT [DISTINCT] [column_list | *]
 FROM table_name [, table_name2, ...]
 [WHERE condition]
 [ORDER BY column [ASC|DESC], ...]
 ```
+
+### DISTINCT Keyword
+
+The `DISTINCT` keyword eliminates duplicate rows from the result set:
+
+```sql
+-- Return unique combinations of name and age 
+SELECT DISTINCT name, age FROM users
+
+-- Return unique department values
+SELECT DISTINCT department FROM employees
+
+-- Can be used with aggregate functions
+SELECT COUNT(DISTINCT department) AS unique_departments FROM employees
+```
+
+When using DISTINCT:
+- Rows are considered identical only if all selected column values match exactly
+- The comparison uses the same type system as the rest of SQL operations
+- DISTINCT is applied after WHERE filtering but before ORDER BY
+- DISTINCT can be used with JOINs to find unique combinations across tables
+- DISTINCT is particularly useful for finding unique values or removing redundant results
 
 ### Column Selection
 
@@ -474,6 +496,7 @@ Current limitations of Sqawk's SQL implementation:
 
 **Supported Features**:
 - Column aliases (AS keyword)
+- DISTINCT keyword for removing duplicate rows
 - ORDER BY with ascending/descending sorting
 - Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
 - GROUP BY clause for data aggregation

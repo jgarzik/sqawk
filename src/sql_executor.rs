@@ -168,16 +168,24 @@ impl SqlExecutor {
                         self.apply_aggregate_functions(&select.projection, &filtered_table)?
                     };
                     
+                    // Apply DISTINCT if present
+                    let mut final_result_table = result_table;
+                    if let Some(_) = &select.distinct {
+                        if self.verbose {
+                            eprintln!("Applying DISTINCT");
+                        }
+                        final_result_table = final_result_table.distinct()?;
+                    }
+                    
                     // Apply ORDER BY if present
-                    let mut ordered_result_table = result_table;
                     if !query.order_by.is_empty() {
                         if self.verbose {
                             eprintln!("Applying ORDER BY");
                         }
-                        ordered_result_table = self.apply_order_by(ordered_result_table, &query.order_by)?;
+                        final_result_table = self.apply_order_by(final_result_table, &query.order_by)?;
                     }
                     
-                    Ok(Some(ordered_result_table))
+                    Ok(Some(final_result_table))
                 } else {
                     // For non-aggregate queries, use the normal column resolution and projection
                     let column_specs = self.resolve_select_items(&select.projection, &source_table)?;
@@ -198,6 +206,14 @@ impl SqlExecutor {
                     // Then apply projection to get only the requested columns with aliases
                     // This happens AFTER filtering to ensure WHERE clauses can access all columns
                     let mut result_table = filtered_table.project_with_aliases(&column_specs)?;
+                    
+                    // Apply DISTINCT if present
+                    if let Some(_) = &select.distinct {
+                        if self.verbose {
+                            eprintln!("Applying DISTINCT");
+                        }
+                        result_table = result_table.distinct()?;
+                    }
                     
                     // Apply ORDER BY if present
                     // This needs to happen after projection because we need to sort

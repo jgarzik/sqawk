@@ -740,6 +740,40 @@ impl Table {
         new_row
     }
     
+    /// Remove duplicate rows from the table
+    ///
+    /// This method implements the DISTINCT functionality for SQL queries.
+    /// It creates a new table with the same structure but with duplicate rows removed.
+    /// Two rows are considered identical if all of their column values match exactly.
+    ///
+    /// # Returns
+    /// * A new table with duplicate rows removed
+    pub fn distinct(&self) -> SqawkResult<Self> {
+        // Create a new table with the same structure
+        let mut result = Table::new(&self.name, self.columns.clone(), self.source_file.clone());
+        
+        // Use a vector to track rows we've already seen
+        // We can't use a HashSet directly because Row is Vec<Value> which may not implement Hash
+        let mut seen_rows: Vec<Vec<Value>> = Vec::new();
+        
+        for row in &self.rows {
+            // Check if this row is already in our seen rows
+            let is_duplicate = seen_rows.iter().any(|seen_row| {
+                // Two rows are identical if they have the same length and all values match
+                row.len() == seen_row.len() && 
+                row.iter().zip(seen_row.iter()).all(|(a, b)| a == b)
+            });
+            
+            // If it's not a duplicate, add it to result and to seen rows
+            if !is_duplicate {
+                seen_rows.push(row.clone());
+                result.add_row(row.clone())?;
+            }
+        }
+        
+        Ok(result)
+    }
+
     /// Sort the table by one or more columns
     ///
     /// This method implements the ORDER BY functionality for SQL queries.
@@ -766,7 +800,7 @@ impl Table {
         }
         
         // Create a new table with the same structure
-        let mut result = Table::new(&self.name, self.columns.clone(), None);
+        let mut result = Table::new(&self.name, self.columns.clone(), self.source_file.clone());
         
         // Clone the rows for sorting
         let mut sorted_rows = self.rows.clone();
