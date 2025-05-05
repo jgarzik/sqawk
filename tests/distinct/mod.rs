@@ -1,4 +1,4 @@
-//! Integration tests for DISTINCT functionality in sqawk
+//! Tests for DISTINCT functionality in sqawk
 //!
 //! Tests for DISTINCT SELECT queries in various contexts including
 //! with WHERE clauses, ORDER BY clauses, and JOINs.

@@ -1,4 +1,4 @@
-//! Integration tests for join functionality in sqawk
+//! Tests for join functionality in sqawk
 //!
 //! Tests for cross joins, inner joins, and multi-table joins.
 

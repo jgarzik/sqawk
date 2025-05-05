@@ -1,12 +1,6 @@
-//! Integration tests for sqawk
+//! Basic end-to-end tests for sqawk
 //!
-//! This file contains end-to-end tests for the sqawk application.
-
-// Import test submodules
-mod update_tests;
-mod join_tests;
-mod order_by_tests;
-mod distinct_tests;
+//! This file contains fundamental end-to-end tests for the sqawk application.
 
 use crate::helpers::{
     create_custom_csv, create_temp_dir, get_static_sample_file, prepare_test_file, run_test_case,

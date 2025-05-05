@@ -1,4 +1,4 @@
-//! Integration tests for ORDER BY functionality in sqawk
+//! Tests for ORDER BY functionality in sqawk
 //!
 //! Tests for sorting functionality with different column combinations and directions.
 

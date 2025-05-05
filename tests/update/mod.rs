@@ -1,4 +1,4 @@
-//! Integration tests for UPDATE functionality
+//! Tests for UPDATE functionality
 //! 
 //! This file contains tests for the SQL UPDATE statement.
 
