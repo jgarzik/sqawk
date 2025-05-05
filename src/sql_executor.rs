@@ -29,15 +29,6 @@ pub struct SqlExecutor {
 }
 
 impl SqlExecutor {
-    /// Create a new SQL executor with the given CSV handler
-    pub fn new(csv_handler: CsvHandler) -> Self {
-        SqlExecutor {
-            csv_handler,
-            modified_tables: HashSet::new(),
-            verbose: false,
-        }
-    }
-    
     /// Create a new SQL executor with the given CSV handler and verbose flag
     pub fn new_with_verbose(csv_handler: CsvHandler, verbose: bool) -> Self {
         SqlExecutor {
