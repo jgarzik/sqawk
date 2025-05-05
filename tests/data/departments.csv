@@ -1,8 +1,8 @@
 id,name,department,salary
-1,Alice,Engineering,90000
-2,Bob,Marketing,75000
-3,Charlie,Engineering,95000
-4,David,HR,70000
-5,Eve,Marketing,80000
-6,Frank,Engineering,100000
-7,Grace,HR,65000
+1,Alice,Engineering,75000
+2,Bob,Marketing,65000
+3,Charlie,Engineering,85000
+4,David,Sales,60000
+5,Eve,Marketing,70000
+6,Frank,Engineering,90000
+7,Grace,Sales,65000

@@ -10,5 +10,12 @@ mod join;        // JOIN operations tests
 mod order_by;    // ORDER BY clause tests
 mod update;      // UPDATE statement tests
 
+// New test modules for enhanced coverage
+mod delimiter;   // Tests for delimiter options (-F flag)
+mod aggregate;   // Tests for aggregate functions (COUNT, SUM, AVG, MIN, MAX)
+mod alias;       // Tests for column aliases (AS keyword)
+mod group_by;    // Tests for GROUP BY functionality
+mod join_on;     // Tests for JOIN ON syntax (as opposed to WHERE for joins)
+
 // Support modules
 mod helpers;     // Test helpers and utilities
