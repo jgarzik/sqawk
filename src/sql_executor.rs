@@ -245,11 +245,19 @@ impl SqlExecutor {
     
     /// Apply a WHERE clause to filter table rows
     fn apply_where_clause(&self, table: Table, where_expr: &Expr) -> SqawkResult<Table> {
+        eprintln!("Applying WHERE clause: {:?}", where_expr);
+        eprintln!("Table before filtering: {} rows", table.row_count());
+        
         // Create a new table that only includes rows matching the WHERE condition
         let result = table.select(|row| {
-            self.evaluate_condition(where_expr, row, &table)
-                .unwrap_or(false)
+            let matches = self.evaluate_condition(where_expr, row, &table)
+                .unwrap_or(false);
+            
+            eprintln!("Row: {:?}, matches condition: {}", row, matches);
+            matches
         });
+        
+        eprintln!("Table after filtering: {} rows", result.row_count());
         
         Ok(result)
     }
@@ -261,8 +269,15 @@ impl SqlExecutor {
                 let left_val = self.evaluate_expr_with_row(left, row, table)?;
                 let right_val = self.evaluate_expr_with_row(right, row, table)?;
                 
+                // Debug print the values being compared
+                eprintln!("WHERE comparison: {:?} {:?} {:?}", left_val, op, right_val);
+                
                 match op {
-                    sqlparser::ast::BinaryOperator::Eq => Ok(left_val == right_val),
+                    sqlparser::ast::BinaryOperator::Eq => {
+                        let result = left_val == right_val;
+                        eprintln!("Equality result: {}", result);
+                        Ok(result)
+                    },
                     sqlparser::ast::BinaryOperator::NotEq => Ok(left_val != right_val),
                     // Add more operators as needed
                     _ => Err(SqawkError::UnsupportedSqlFeature(

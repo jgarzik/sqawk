@@ -12,13 +12,30 @@ use serde::{Deserialize, Serialize};
 use crate::error::{SqawkError, SqawkResult};
 
 /// Represents a value in a table cell
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
     Null,
     Integer(i64),
     Float(f64),
     String(String),
     Boolean(bool),
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Null, Value::Null) => true,
+            (Value::Integer(a), Value::Integer(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::Boolean(a), Value::Boolean(b)) => a == b,
+            // Handle comparisons between Integer and Float
+            (Value::Integer(a), Value::Float(b)) => *a as f64 == *b,
+            (Value::Float(a), Value::Integer(b)) => *a == *b as f64,
+            // All other combinations are not equal
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for Value {
