@@ -27,6 +27,22 @@ args = "Test Specific Query"
 task = "workflow.run"
 args = "Test Less Than Operator"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test Boundary Value"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test Min Boundary Comparison"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test Max Boundary Value"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Run Comparison Tests"
+
 [[workflows.workflow]]
 name = "Sqawk Build and Run"
 author = "agent"
@@ -60,6 +76,38 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "cd $(pwd) && cargo run -- -s \"SELECT * FROM sample WHERE age <= 30\" tests/data/sample.csv -v"
+
+[[workflows.workflow]]
+name = "Test Boundary Value"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT * FROM boundaries WHERE value = -9223372036854775808\" tests/data/boundaries.csv -v"
+
+[[workflows.workflow]]
+name = "Test Min Boundary Comparison"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT * FROM boundaries WHERE value < 0\" tests/data/boundaries.csv -v"
+
+[[workflows.workflow]]
+name = "Test Max Boundary Value"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT * FROM boundaries WHERE value = 9223372036854775807\" tests/data/boundaries.csv -v"
+
+[[workflows.workflow]]
+name = "Run Comparison Tests"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && RUST_TEST_THREADS=1 cargo test --test comparison_tests"
 
 [deployment]
 run = ["sh", "-c", "cargo build && echo \"Testing Sqawk with sample data:\" && cargo run -- -s \"SELECT * FROM sample\" tests/data/sample.csv -v"]

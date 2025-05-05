@@ -456,6 +456,49 @@ impl SqlExecutor {
                     }
                 }
             },
+            // Handle unary operations like - (negation)
+            Expr::UnaryOp { op, expr } => {
+                eprintln!("Evaluating UnaryOp: {:?} on expr: {:?}", op, expr);
+                let val = self.evaluate_expr(expr)?;
+                eprintln!("Value before applying unary operator: {:?}", val);
+                
+                match op {
+                    sqlparser::ast::UnaryOperator::Minus => {
+                        // Apply negation to numeric values
+                        match val {
+                            Value::Integer(i) => {
+                                let result = Value::Integer(-i);
+                                eprintln!("Applying negation to integer: {} -> {}", i, -i);
+                                Ok(result)
+                            },
+                            Value::Float(f) => {
+                                let result = Value::Float(-f);
+                                eprintln!("Applying negation to float: {} -> {}", f, -f);
+                                Ok(result)
+                            },
+                            _ => Err(SqawkError::TypeError(
+                                format!("Cannot apply negation to non-numeric value: {:?}", val)
+                            ))
+                        }
+                    },
+                    sqlparser::ast::UnaryOperator::Plus => {
+                        // Plus operator doesn't change the value
+                        Ok(val)
+                    },
+                    sqlparser::ast::UnaryOperator::Not => {
+                        // Boolean negation
+                        match val {
+                            Value::Boolean(b) => Ok(Value::Boolean(!b)),
+                            _ => Err(SqawkError::TypeError(
+                                format!("Cannot apply NOT to non-boolean value: {:?}", val)
+                            ))
+                        }
+                    },
+                    _ => Err(SqawkError::UnsupportedSqlFeature(
+                        format!("Unsupported unary operator: {:?}", op)
+                    ))
+                }
+            },
             _ => {
                 Err(SqawkError::UnsupportedSqlFeature(
                     format!("Unsupported expression: {:?}", expr)
