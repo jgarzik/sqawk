@@ -658,72 +658,7 @@ impl SqlExecutor {
         // If we got here, the qualified column wasn't found
         Err(SqawkError::ColumnNotFound(qualified_name))
     }
-    
-    /// Handle a wildcard (*) in a SELECT statement
-    ///
-    /// This function adds all column indices from the table to the result
-    fn handle_wildcard_select(&self, table: &Table, column_indices: &mut Vec<usize>) {
-        // For any wildcard (*), select all columns
-        for i in 0..table.column_count() {
-            column_indices.push(i);
-        }
-    }
-    
-    /// Resolve a simple column reference for a SELECT statement
-    ///
-    /// This function handles unqualified column references like 'name'
-    fn resolve_simple_column_for_select(&self, column_name: &str, table: &Table, column_indices: &mut Vec<usize>) -> SqawkResult<()> {
-        // First try as an exact column name match
-        if let Some(idx) = table.column_index(column_name) {
-            column_indices.push(idx);
-            return Ok(());
-        }
-        
-        // Try as qualified name by checking column patterns
-        let suffix = format!(".{}", column_name);
-        for (i, col) in table.columns().iter().enumerate() {
-            if col.ends_with(&suffix) {
-                column_indices.push(i);
-                return Ok(());
-            }
-        }
-        
-        // If we got here, the column wasn't found
-        Err(SqawkError::ColumnNotFound(column_name.to_string()))
-    }
-    
-    /// Resolve a qualified column reference for a SELECT statement
-    ///
-    /// This function handles qualified column references like 'table.column'
-    fn resolve_qualified_column_for_select(&self, parts: &[sqlparser::ast::Ident], table: &Table, column_indices: &mut Vec<usize>) -> SqawkResult<()> {
-        // Build the fully qualified column name from parts
-        let qualified_name = parts.iter()
-            .map(|ident| ident.value.clone())
-            .collect::<Vec<_>>()
-            .join(".");
-        
-        // Try to find an exact match for the qualified column
-        if let Some(idx) = table.column_index(&qualified_name) {
-            column_indices.push(idx);
-            return Ok(());
-        }
-        
-        // If we didn't find an exact match, try a suffix match
-        // This helps with cases like "users.id" matching "users_orders_cross.users.id"
-        if parts.len() == 2 {
-            let suffix = format!("{}.{}", parts[0].value, parts[1].value);
-            
-            for (i, col) in table.columns().iter().enumerate() {
-                if col.ends_with(&suffix) {
-                    column_indices.push(i);
-                    return Ok(());
-                }
-            }
-        }
-        
-        // If we got here, the qualified column wasn't found
-        Err(SqawkError::ColumnNotFound(qualified_name))
-    }
+
 
     /// Apply a WHERE clause to filter table rows
     ///

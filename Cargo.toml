@@ -31,7 +31,3 @@ tempfile = "3.8"
 [[bin]]
 name = "sqawk"
 path = "src/main.rs"
-
-[[bin]]
-name = "test_parser"
-path = "src/test_parser.rs"

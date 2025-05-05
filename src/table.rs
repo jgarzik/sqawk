@@ -484,16 +484,6 @@ impl Table {
         Ok(result)
     }
     
-    pub fn project(&self, column_indices: &[usize]) -> SqawkResult<Self> {
-        // Convert column indices to column specs without aliases
-        let column_specs: Vec<(usize, Option<String>)> = column_indices
-            .iter()
-            .map(|&idx| (idx, None))
-            .collect();
-            
-        self.project_with_aliases(&column_specs)
-    }
-    
 
     
     /// Execute a CROSS JOIN with another table
