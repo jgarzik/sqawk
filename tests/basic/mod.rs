@@ -206,8 +206,7 @@ fn test_delete_with_where() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM people")
-        .arg(file_path.to_str().unwrap())
-        ;
+        .arg(file_path.to_str().unwrap());
 
     cmd.assert()
         .success()
@@ -253,8 +252,7 @@ fn test_delete_all() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM people")
-        .arg(file_path.to_str().unwrap())
-        ;
+        .arg(file_path.to_str().unwrap());
 
     cmd.assert()
         .success()

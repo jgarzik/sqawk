@@ -69,9 +69,7 @@ impl AggregateFunction {
     ///
     /// Counts non-NULL values in the column
     fn count(&self, values: &[Value]) -> SqawkResult<Value> {
-        let count = values.iter()
-            .filter(|v| !matches!(v, Value::Null))
-            .count();
+        let count = values.iter().filter(|v| !matches!(v, Value::Null)).count();
 
         Ok(Value::Integer(count as i64))
     }
@@ -131,21 +129,22 @@ impl AggregateFunction {
     fn avg(&self, values: &[Value]) -> SqawkResult<Value> {
         // Get the sum first
         let sum = self.sum(values)?;
-        
+
         // Count numeric values
-        let count = values.iter()
+        let count = values
+            .iter()
             .filter(|v| matches!(v, Value::Integer(_) | Value::Float(_)))
             .count();
-            
+
         if count == 0 {
             return Ok(Value::Null);
         }
-            
+
         // Convert to float and divide by count
         match sum {
             Value::Integer(i) => Ok(Value::Float(i as f64 / count as f64)),
             Value::Float(f) => Ok(Value::Float(f / count as f64)),
-            _ => Ok(Value::Null),  // This shouldn't happen, but handle it just in case
+            _ => Ok(Value::Null), // This shouldn't happen, but handle it just in case
         }
     }
 
@@ -154,24 +153,25 @@ impl AggregateFunction {
     /// Finds the minimum value in the column
     fn min(&self, values: &[Value]) -> SqawkResult<Value> {
         // Filter out NULL values
-        let non_null_values: Vec<&Value> = values.iter()
+        let non_null_values: Vec<&Value> = values
+            .iter()
             .filter(|v| !matches!(v, Value::Null))
             .collect();
-            
+
         if non_null_values.is_empty() {
             return Ok(Value::Null);
         }
-        
+
         // Start with the first value as our minimum
         let mut min_value = non_null_values[0].clone();
-        
+
         // Compare with the rest of the values
         for value in &non_null_values[1..] {
             if value < &&min_value {
                 min_value = (*value).clone();
             }
         }
-        
+
         Ok(min_value)
     }
 
@@ -180,24 +180,25 @@ impl AggregateFunction {
     /// Finds the maximum value in the column
     fn max(&self, values: &[Value]) -> SqawkResult<Value> {
         // Filter out NULL values
-        let non_null_values: Vec<&Value> = values.iter()
+        let non_null_values: Vec<&Value> = values
+            .iter()
             .filter(|v| !matches!(v, Value::Null))
             .collect();
-            
+
         if non_null_values.is_empty() {
             return Ok(Value::Null);
         }
-        
+
         // Start with the first value as our maximum
         let mut max_value = non_null_values[0].clone();
-        
+
         // Compare with the rest of the values
         for value in &non_null_values[1..] {
             if value > &&max_value {
                 max_value = (*value).clone();
             }
         }
-        
+
         Ok(max_value)
     }
 }
@@ -214,7 +215,7 @@ mod tests {
             Value::Integer(20),
             Value::String("test".to_string()),
         ];
-        
+
         let count = AggregateFunction::Count.execute(&values).unwrap();
         assert_eq!(count, Value::Integer(3));
     }
@@ -227,19 +228,15 @@ mod tests {
             Value::Integer(20),
             Value::Float(5.5),
         ];
-        
+
         let sum = AggregateFunction::Sum.execute(&values).unwrap();
         assert_eq!(sum, Value::Float(35.5));
     }
 
     #[test]
     fn test_sum_integers_only() {
-        let values = vec![
-            Value::Integer(10),
-            Value::Integer(20),
-            Value::Integer(30),
-        ];
-        
+        let values = vec![Value::Integer(10), Value::Integer(20), Value::Integer(30)];
+
         let sum = AggregateFunction::Sum.execute(&values).unwrap();
         assert_eq!(sum, Value::Integer(60));
     }
@@ -252,7 +249,7 @@ mod tests {
             Value::Integer(20),
             Value::Float(30.0),
         ];
-        
+
         let avg = AggregateFunction::Avg.execute(&values).unwrap();
         if let Value::Float(f) = avg {
             assert!((f - 20.0).abs() < f64::EPSILON);
@@ -269,7 +266,7 @@ mod tests {
             Value::Null,
             Value::Integer(20),
         ];
-        
+
         let min = AggregateFunction::Min.execute(&values).unwrap();
         assert_eq!(min, Value::Integer(10));
     }
@@ -282,7 +279,7 @@ mod tests {
             Value::String("abc".to_string()),
             Value::Null,
         ];
-        
+
         let min = AggregateFunction::Min.execute(&values).unwrap();
         assert_eq!(min, Value::Float(5.5));
     }
@@ -295,7 +292,7 @@ mod tests {
             Value::Null,
             Value::Integer(20),
         ];
-        
+
         let max = AggregateFunction::Max.execute(&values).unwrap();
         assert_eq!(max, Value::Integer(30));
     }
@@ -308,7 +305,7 @@ mod tests {
             Value::String("xyz".to_string()),
             Value::Null,
         ];
-        
+
         let max = AggregateFunction::Max.execute(&values).unwrap();
         assert_eq!(max, Value::String("xyz".to_string()));
     }

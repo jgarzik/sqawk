@@ -8,7 +8,7 @@
 //! for the rest of the application to work with in-memory tables.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::csv_handler::CsvHandler;
 use crate::delim_handler::DelimHandler;
@@ -28,16 +28,16 @@ pub enum FileFormat {
 pub struct FileHandler {
     /// In-memory tables indexed by their names
     tables: HashMap<String, Table>,
-    
+
     /// Handler for CSV files
     csv_handler: CsvHandler,
-    
+
     /// Handler for delimiter-separated files
     delim_handler: DelimHandler,
-    
+
     /// Default format to use if not specified (underscore prefix indicates it's intentionally unused for now)
     _default_format: FileFormat,
-    
+
     /// Custom field separator if specified
     field_separator: Option<String>,
 }
@@ -56,7 +56,7 @@ impl FileHandler {
         } else {
             FileFormat::Csv
         };
-        
+
         FileHandler {
             tables: HashMap::new(),
             csv_handler: CsvHandler::new(),
@@ -65,7 +65,7 @@ impl FileHandler {
             field_separator,
         }
     }
-    
+
     /// Load a file into an in-memory table
     ///
     /// This method determines the file format based on extension or explicit format argument
@@ -81,25 +81,25 @@ impl FileHandler {
     pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<()> {
         // Parse file spec to get table name and file path
         let (table_name, file_path) = self.parse_file_spec(file_spec)?;
-        
+
         // Determine the file format based on extension
         let format = self.detect_format(&file_path);
-        
+
         match format {
             FileFormat::Csv => {
                 let table = self.csv_handler.load_csv(file_spec)?;
                 self.tables.insert(table_name, table);
-            },
+            }
             FileFormat::Delimited => {
                 let delimiter = self.field_separator.as_deref().unwrap_or("\t");
                 let table = self.delim_handler.load_delimited(file_spec, delimiter)?;
                 self.tables.insert(table_name, table);
-            },
+            }
         }
-        
+
         Ok(())
     }
-    
+
     /// Save a table back to its source file
     ///
     /// Writes the current state of a table back to its source file,
@@ -113,7 +113,7 @@ impl FileHandler {
     /// * `Err` if the table doesn't exist, lacks a source file, or if there was an error writing the file
     pub fn save_table(&self, table_name: &str) -> SqawkResult<()> {
         let table = self.get_table(table_name)?;
-        
+
         // Check if the table has a source file
         let file_path = table.source_file().ok_or_else(|| {
             SqawkError::InvalidSqlQuery(format!(
@@ -121,47 +121,48 @@ impl FileHandler {
                 table_name
             ))
         })?;
-        
+
         // Determine the file format based on extension
         let format = self.detect_format(file_path);
-        
+
         match format {
             FileFormat::Csv => {
                 self.csv_handler.save_table(table_name, table)?;
-            },
+            }
             FileFormat::Delimited => {
                 let delimiter = self.field_separator.as_deref().unwrap_or("\t");
-                self.delim_handler.save_table(table_name, table, delimiter)?;
-            },
+                self.delim_handler
+                    .save_table(table_name, table, delimiter)?;
+            }
         }
-        
+
         Ok(())
     }
-    
+
     /// Get a reference to a table by name
     pub fn get_table(&self, name: &str) -> SqawkResult<&Table> {
         self.tables
             .get(name)
             .ok_or_else(|| SqawkError::TableNotFound(name.to_string()))
     }
-    
+
     /// Get a mutable reference to a table by name
     pub fn get_table_mut(&mut self, name: &str) -> SqawkResult<&mut Table> {
         self.tables
             .get_mut(name)
             .ok_or_else(|| SqawkError::TableNotFound(name.to_string()))
     }
-    
+
     /// Get the names of all tables in the collection
     pub fn table_names(&self) -> Vec<String> {
         self.tables.keys().cloned().collect()
     }
-    
+
     /// Get the number of tables in the collection
     pub fn table_count(&self) -> usize {
         self.tables.len()
     }
-    
+
     /// Parse a file specification into table name and file path
     ///
     /// Handles two formats:
@@ -193,7 +194,7 @@ impl FileHandler {
             Ok((stem.to_string_lossy().to_string(), path))
         }
     }
-    
+
     /// Detect file format based on extension and default settings
     ///
     /// # Arguments
@@ -201,12 +202,12 @@ impl FileHandler {
     ///
     /// # Returns
     /// The detected file format
-    fn detect_format(&self, path: &PathBuf) -> FileFormat {
+    fn detect_format(&self, path: &Path) -> FileFormat {
         // If a field separator was explicitly provided, use delimited format
         if self.field_separator.is_some() {
             return FileFormat::Delimited;
         }
-        
+
         // Otherwise determine by extension
         match path.extension().and_then(|ext| ext.to_str()) {
             Some("csv") => FileFormat::Csv,

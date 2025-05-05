@@ -1,6 +1,6 @@
 //! sqawk - an SQL-based command-line utility for processing delimited files
 //!
-//! This tool loads CSV and delimiter-separated files into memory as tables, 
+//! This tool loads CSV and delimiter-separated files into memory as tables,
 //! executes SQL queries against them, and can save modified tables back to their
 //! original format.
 //!
@@ -57,7 +57,7 @@ use sql_executor::SqlExecutor;
 /// * `Ok(())` if all operations completed successfully
 /// * `Err` with context if any step fails
 fn main() -> Result<()> {
-    // Step 1: Parse command-line arguments 
+    // Step 1: Parse command-line arguments
     // This handles -s/--sql, file specs, -F (field separator), --write, and -v flags
     let args = cli::parse_args()?;
 
@@ -91,7 +91,7 @@ fn main() -> Result<()> {
     // Step 3: Create SQL executor and process all SQL statements sequentially
     // The executor maintains state across statements, allowing multi-statement operations
     let mut sql_executor = SqlExecutor::new_with_verbose(file_handler, args.verbose);
-    
+
     // Process each SQL statement in the order specified on the command line
     // This allows operations like: UPDATE -> DELETE -> SELECT to see the effects
     for sql in &args.sql {
@@ -128,7 +128,7 @@ fn main() -> Result<()> {
     // Step 5: Handle file writeback based on the --write flag
     // By default, Sqawk operates in read-only mode unless explicitly told to write
     if args.write {
-        // Only tables that were actually modified (by UPDATE, INSERT, DELETE) 
+        // Only tables that were actually modified (by UPDATE, INSERT, DELETE)
         // will be written back to their source files
         sql_executor
             .save_modified_tables()

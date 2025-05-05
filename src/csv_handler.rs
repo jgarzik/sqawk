@@ -2,7 +2,7 @@
 //!
 //! This module handles loading CSV files into in-memory tables and saving tables back to CSV files.
 //! It provides functionality for:
-//! 
+//!
 //! - Loading CSV files with automatic header detection
 //! - Parsing file specifications in the format [table_name=]file_path.csv
 //! - Managing a collection of in-memory tables
@@ -16,24 +16,25 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 
-// Import removed as it's no longer needed
-// Using csv crate without specific imports
-use csv;
-
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{Table, Value};
 
 /// Handles loading and saving CSV files
 ///
-/// This struct provides methods for loading tables from CSV files 
+/// This struct provides methods for loading tables from CSV files
 /// and writing them back when modified. It's specialized for handling
 /// data in CSV format with commas as separators.
-pub struct CsvHandler {
+pub struct CsvHandler {}
+
+impl Default for CsvHandler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CsvHandler {
     /// Create a new CsvHandler
-    /// 
+    ///
     /// # Returns
     /// A new CsvHandler instance ready to load and manage CSV files
     pub fn new() -> Self {
@@ -68,7 +69,7 @@ impl CsvHandler {
         // Get headers
         let headers = csv_reader
             .headers()
-            .map_err(|e| SqawkError::CsvError(e))?
+            .map_err(SqawkError::CsvError)?
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
@@ -78,10 +79,10 @@ impl CsvHandler {
 
         // Read rows
         for result in csv_reader.records() {
-            let record = result.map_err(|e| SqawkError::CsvError(e))?;
+            let record = result.map_err(SqawkError::CsvError)?;
 
             // Convert record to a row of values
-            let row = record.iter().map(|field| Value::from(field)).collect();
+            let row = record.iter().map(Value::from).collect();
 
             table.add_row(row)?;
         }
@@ -121,7 +122,7 @@ impl CsvHandler {
         // Write headers
         csv_writer
             .write_record(table.columns())
-            .map_err(|e| SqawkError::CsvError(e))?;
+            .map_err(SqawkError::CsvError)?;
 
         // Write rows
         for row in table.rows() {
@@ -129,7 +130,7 @@ impl CsvHandler {
 
             csv_writer
                 .write_record(&record)
-                .map_err(|e| SqawkError::CsvError(e))?;
+                .map_err(SqawkError::CsvError)?;
         }
 
         // Flush and finish

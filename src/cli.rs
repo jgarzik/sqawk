@@ -19,13 +19,17 @@ use clap::Parser;
 /// command-line parameters. It is automatically populated by clap based on
 /// the provided arguments.
 ///
-/// The CLI follows the philosophy of being non-destructive by default, 
+/// The CLI follows the philosophy of being non-destructive by default,
 /// requiring an explicit flag to modify input files.
 #[derive(Parser, Debug)]
-#[clap(author, version, about = "SQL-based processor for delimiter-separated files")]
+#[clap(
+    author,
+    version,
+    about = "SQL-based processor for delimiter-separated files"
+)]
 pub struct SqawkArgs {
     /// SQL statements to execute
-    /// 
+    ///
     /// Multiple SQL statements can be provided and they will be executed in sequence.
     /// Each statement operates on the state resulting from the previous statement.
     /// Example: -s "SELECT * FROM data" -s "DELETE FROM data WHERE id = 1"
@@ -33,7 +37,7 @@ pub struct SqawkArgs {
     pub sql: Vec<String>,
 
     /// Input files to process - format: [table_name=]file_path
-    /// 
+    ///
     /// Users can optionally specify a table name by prefixing the file path.
     /// If no table name is specified, the base filename (without extension)
     /// is used as the table name in SQL queries.

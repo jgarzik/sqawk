@@ -61,17 +61,20 @@ pub fn run_test_case_with_static_file(
     static_file: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Check if any arguments contain --write or -w flag
-    let needs_copy = test_case.args.iter().any(|arg| arg == "--write" || arg == "-w");
-    
+    let needs_copy = test_case
+        .args
+        .iter()
+        .any(|arg| arg == "--write" || arg == "-w");
+
     if needs_copy {
         // Create a temporary directory
         let temp_dir = create_temp_dir()?;
-        
+
         // Copy the static file to the temp directory to protect the original
         let file_name = static_file.file_name().unwrap().to_str().unwrap();
         let temp_file_path = temp_dir.path().join(file_name);
         fs::copy(&static_file, &temp_file_path)?;
-        
+
         // Use the copied file for the test
         run_test_case_with_file(test_case, temp_file_path)
     } else {

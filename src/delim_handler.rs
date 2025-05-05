@@ -5,7 +5,7 @@
 //! to separate fields, similar to awk's -F option.
 //!
 //! The module provides functionality for:
-//! 
+//!
 //! - Loading files with custom field separators specified by the user
 //! - Parsing file specifications in the format [table_name=]file_path
 //! - Converting between delimited records and the internal Value type
@@ -18,8 +18,6 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 
-use csv;
-
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{Table, Value};
 
@@ -31,7 +29,7 @@ pub struct DelimHandler {
 
 impl DelimHandler {
     /// Create a new DelimHandler with an optional default field separator
-    /// 
+    ///
     /// # Arguments
     /// * `field_separator` - Optional default field separator
     ///
@@ -71,7 +69,7 @@ impl DelimHandler {
             b'\t' // Handle special case for tab
         } else {
             return Err(SqawkError::InvalidFileSpec(format!(
-                "Invalid delimiter: {}. Must be a single character.", 
+                "Invalid delimiter: {}. Must be a single character.",
                 delimiter
             )));
         };
@@ -85,7 +83,7 @@ impl DelimHandler {
         // Get headers
         let headers = csv_reader
             .headers()
-            .map_err(|e| SqawkError::CsvError(e))?
+            .map_err(SqawkError::CsvError)?
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
@@ -95,10 +93,10 @@ impl DelimHandler {
 
         // Read rows
         for result in csv_reader.records() {
-            let record = result.map_err(|e| SqawkError::CsvError(e))?;
+            let record = result.map_err(SqawkError::CsvError)?;
 
             // Convert record to a row of values
-            let row = record.iter().map(|field| Value::from(field)).collect();
+            let row = record.iter().map(Value::from).collect();
 
             table.add_row(row)?;
         }
@@ -135,7 +133,7 @@ impl DelimHandler {
             b'\t' // Handle special case for tab
         } else {
             return Err(SqawkError::InvalidFileSpec(format!(
-                "Invalid delimiter: {}. Must be a single character.", 
+                "Invalid delimiter: {}. Must be a single character.",
                 delimiter
             )));
         };
@@ -152,7 +150,7 @@ impl DelimHandler {
         // Write headers
         csv_writer
             .write_record(table.columns())
-            .map_err(|e| SqawkError::CsvError(e))?;
+            .map_err(SqawkError::CsvError)?;
 
         // Write rows
         for row in table.rows() {
@@ -160,7 +158,7 @@ impl DelimHandler {
 
             csv_writer
                 .write_record(&record)
-                .map_err(|e| SqawkError::CsvError(e))?;
+                .map_err(SqawkError::CsvError)?;
         }
 
         // Flush and finish

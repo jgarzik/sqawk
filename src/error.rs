@@ -4,7 +4,7 @@
 //! It provides a comprehensive error handling system that categorizes
 //! different failure modes, supports error propagation, and supplies
 //! helpful error messages to users.
-//! 
+//!
 //! The module uses thiserror to minimize boilerplate code and create
 //! a consistent error handling approach throughout the codebase.
 

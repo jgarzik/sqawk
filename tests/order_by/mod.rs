@@ -2,10 +2,9 @@
 //!
 //! Tests for sorting functionality with different column combinations and directions.
 
-
+use crate::helpers::*;
 use assert_cmd::Command;
 use predicates::prelude::*;
-use crate::helpers::*;
 
 /// Test ordering by a single column in ascending order (implicit)
 #[test]
@@ -111,8 +110,14 @@ fn test_order_by_with_where() -> Result<(), Box<dyn std::error::Error>> {
     // Make sure we don't have HR department entries
     let output = cmd.output()?;
     let stdout = String::from_utf8(output.stdout)?;
-    assert!(!stdout.contains("Bob"), "Should not contain Bob from HR department");
-    assert!(!stdout.contains("David"), "Should not contain David from HR department");
+    assert!(
+        !stdout.contains("Bob"),
+        "Should not contain Bob from HR department"
+    );
+    assert!(
+        !stdout.contains("David"),
+        "Should not contain David from HR department"
+    );
 
     Ok(())
 }

@@ -2,9 +2,9 @@
 //!
 //! Tests for SQL JOIN with the ON clause, as opposed to using WHERE for join conditions.
 
-use std::path::PathBuf;
 use assert_cmd::Command;
 use predicates::prelude::*;
+use std::path::PathBuf;
 
 // Helper functions to get the path to standard test files
 fn get_users_file() -> PathBuf {
@@ -30,9 +30,9 @@ fn test_inner_join_on_basic() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-v");
 
     // Check output
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("users.name,orders.product_id,orders.date"));
+    cmd.assert().success().stdout(predicate::str::contains(
+        "users.name,orders.product_id,orders.date",
+    ));
 
     // Verify join results
     cmd.assert()
@@ -41,17 +41,22 @@ fn test_inner_join_on_basic() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicate::str::contains("John,103,2023-02-10"))
         .stdout(predicate::str::contains("Jane,105,2023-02-25"))
         .stdout(predicate::str::contains("John,104,2023-03-05"));
-    
+
     // Verify verbose output shows JOIN processing
     cmd.assert()
         .stderr(predicate::str::contains("DEBUG - Join type: Inner"))
-        .stderr(predicate::str::contains("Processing INNER JOIN with ON condition"));
+        .stderr(predicate::str::contains(
+            "Processing INNER JOIN with ON condition",
+        ));
 
     // Michael has no orders, should not appear
     let output = cmd.output()?;
     let stdout = String::from_utf8(output.stdout)?;
-    assert!(!stdout.contains("Michael"), "Michael should not appear in the results (no matching orders)");
-    
+    assert!(
+        !stdout.contains("Michael"),
+        "Michael should not appear in the results (no matching orders)"
+    );
+
     Ok(())
 }
 
@@ -66,22 +71,28 @@ fn test_inner_join_on_with_where() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-v");
 
     // Check output - should only include orders with product_id > 102
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("users.name,orders.product_id,orders.date"));
+    cmd.assert().success().stdout(predicate::str::contains(
+        "users.name,orders.product_id,orders.date",
+    ));
 
     // Verify results match the filter
     cmd.assert()
         .stdout(predicate::str::contains("John,103,2023-02-10"))
         .stdout(predicate::str::contains("Jane,105,2023-02-25"))
         .stdout(predicate::str::contains("John,104,2023-03-05"));
-    
+
     // Verify items with product_id <= 102 are not included
     let output = cmd.output()?;
     let stdout = String::from_utf8(output.stdout)?;
-    assert!(!stdout.contains(",101,"), "Should not contain product_id 101 (≤ 102)");
-    assert!(!stdout.contains(",102,"), "Should not contain product_id 102 (≤ 102)");
-    
+    assert!(
+        !stdout.contains(",101,"),
+        "Should not contain product_id 101 (≤ 102)"
+    );
+    assert!(
+        !stdout.contains(",102,"),
+        "Should not contain product_id 102 (≤ 102)"
+    );
+
     Ok(())
 }
 
@@ -97,9 +108,9 @@ fn test_three_way_inner_join_on() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-v");
 
     // Check column aliases and content
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("user,product,products.price,orders.date"));
+    cmd.assert().success().stdout(predicate::str::contains(
+        "user,product,products.price,orders.date",
+    ));
 
     // Check some expected join results
     cmd.assert()
@@ -108,7 +119,7 @@ fn test_three_way_inner_join_on() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicate::str::contains("John,Headphones,150,2023-02-10"))
         .stdout(predicate::str::contains("Jane,Monitor,350,2023-02-25"))
         .stdout(predicate::str::contains("John,Keyboard,80,2023-03-05"));
-    
+
     Ok(())
 }
 
@@ -125,28 +136,40 @@ fn test_complex_operations_with_join_on() -> Result<(), Box<dyn std::error::Erro
 
     // Verify the command executes successfully
     cmd.assert().success();
-    
+
     // Check basic query output content (using direct contains for robustness)
     let output = cmd.output()?;
     let stdout = String::from_utf8(output.stdout)?;
-    
+
     // Check header row
-    assert!(stdout.contains("customer,purchase_date,item,price"), 
-            "Header row not found or incorrect");
-    
+    assert!(
+        stdout.contains("customer,purchase_date,item,price"),
+        "Header row not found or incorrect"
+    );
+
     // Check expected data rows in order
-    assert!(stdout.contains("John,2023-01-15,Laptop,1200"), 
-            "Row with John's Laptop not found");
-    assert!(stdout.contains("Jane,2023-01-20,Phone,800"), 
-            "Row with Jane's Phone not found");
-    assert!(stdout.contains("Jane,2023-02-25,Monitor,350"), 
-            "Row with Jane's Monitor not found");
-    assert!(stdout.contains("John,2023-02-10,Headphones,150"), 
-            "Row with John's Headphones not found");
-    
+    assert!(
+        stdout.contains("John,2023-01-15,Laptop,1200"),
+        "Row with John's Laptop not found"
+    );
+    assert!(
+        stdout.contains("Jane,2023-01-20,Phone,800"),
+        "Row with Jane's Phone not found"
+    );
+    assert!(
+        stdout.contains("Jane,2023-02-25,Monitor,350"),
+        "Row with Jane's Monitor not found"
+    );
+    assert!(
+        stdout.contains("John,2023-02-10,Headphones,150"),
+        "Row with John's Headphones not found"
+    );
+
     // Keyboard at $80 shouldn't be included due to price > 100 filter
-    assert!(!stdout.contains("Keyboard"), 
-            "Keyboard should not be in results (price ≤ 100)");
-    
+    assert!(
+        !stdout.contains("Keyboard"),
+        "Keyboard should not be in results (price ≤ 100)"
+    );
+
     Ok(())
 }

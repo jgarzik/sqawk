@@ -17,17 +17,16 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use sqlparser::ast::{
-    Assignment, Expr, Join as SqlJoin, Query, SelectItem, SetExpr, 
+    Assignment, Expr, Join as SqlJoin, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr,
     Statement, TableFactor, TableWithJoins, Value as SqlValue,
-    JoinOperator, JoinConstraint,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
-use crate::file_handler::FileHandler;
-use crate::error::{SqawkError, SqawkResult};
-use crate::table::{SortDirection, Table, Value};
 use crate::aggregate::AggregateFunction;
+use crate::error::{SqawkError, SqawkResult};
+use crate::file_handler::FileHandler;
+use crate::table::{SortDirection, Table, Value};
 
 /// SQL statement executor
 pub struct SqlExecutor {
@@ -36,7 +35,7 @@ pub struct SqlExecutor {
 
     /// Names of tables that have been modified
     modified_tables: HashSet<String>,
-    
+
     /// Verbose mode flag
     verbose: bool,
 }
@@ -57,8 +56,7 @@ impl SqlExecutor {
     pub fn execute(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
         // Parse the SQL statement
         let dialect = GenericDialect {};
-        let statements =
-            Parser::parse_sql(&dialect, sql).map_err(|e| SqawkError::SqlParseError(e))?;
+        let statements = Parser::parse_sql(&dialect, sql).map_err(SqawkError::SqlParseError)?;
 
         if statements.is_empty() {
             return Err(SqawkError::InvalidSqlQuery(
@@ -143,7 +141,7 @@ impl SqlExecutor {
                     if self.verbose {
                         eprintln!("Applying aggregate functions");
                     }
-                    
+
                     // IMPORTANT: First filter rows if WHERE clause is present
                     // We must apply the WHERE clause before aggregation to ensure all columns
                     // needed for filtering are available during the WHERE evaluation
@@ -156,39 +154,45 @@ impl SqlExecutor {
                         // If no WHERE clause, just use the source table as is
                         source_table
                     };
-                    
+
                     let result_table = if !select.group_by.is_empty() {
                         if self.verbose {
                             eprintln!("Applying GROUP BY");
                         }
                         // Apply aggregation functions with grouping
-                        self.apply_grouped_aggregate_functions(&select.projection, &filtered_table, &select.group_by)?
+                        self.apply_grouped_aggregate_functions(
+                            &select.projection,
+                            &filtered_table,
+                            &select.group_by,
+                        )?
                     } else {
                         // Apply aggregation functions without grouping (to the whole table)
                         self.apply_aggregate_functions(&select.projection, &filtered_table)?
                     };
-                    
+
                     // Apply DISTINCT if present
                     let mut final_result_table = result_table;
-                    if let Some(_) = &select.distinct {
+                    if select.distinct.is_some() {
                         if self.verbose {
                             eprintln!("Applying DISTINCT");
                         }
                         final_result_table = final_result_table.distinct()?;
                     }
-                    
+
                     // Apply ORDER BY if present
                     if !query.order_by.is_empty() {
                         if self.verbose {
                             eprintln!("Applying ORDER BY");
                         }
-                        final_result_table = self.apply_order_by(final_result_table, &query.order_by)?;
+                        final_result_table =
+                            self.apply_order_by(final_result_table, &query.order_by)?;
                     }
-                    
+
                     Ok(Some(final_result_table))
                 } else {
                     // For non-aggregate queries, use the normal column resolution and projection
-                    let column_specs = self.resolve_select_items(&select.projection, &source_table)?;
+                    let column_specs =
+                        self.resolve_select_items(&select.projection, &source_table)?;
 
                     // IMPORTANT: First filter rows if WHERE clause is present
                     // We must apply the WHERE clause before projection to ensure all columns
@@ -206,15 +210,15 @@ impl SqlExecutor {
                     // Then apply projection to get only the requested columns with aliases
                     // This happens AFTER filtering to ensure WHERE clauses can access all columns
                     let mut result_table = filtered_table.project_with_aliases(&column_specs)?;
-                    
+
                     // Apply DISTINCT if present
-                    if let Some(_) = &select.distinct {
+                    if select.distinct.is_some() {
                         if self.verbose {
                             eprintln!("Applying DISTINCT");
                         }
                         result_table = result_table.distinct()?;
                     }
-                    
+
                     // Apply ORDER BY if present
                     // This needs to happen after projection because we need to sort
                     // using the column indices in the result table, not the source table
@@ -234,7 +238,7 @@ impl SqlExecutor {
             )),
         }
     }
-    
+
     /// Apply an ORDER BY clause to sort the result table
     ///
     /// # Arguments
@@ -243,10 +247,14 @@ impl SqlExecutor {
     ///
     /// # Returns
     /// * A new sorted table
-    fn apply_order_by(&self, table: Table, order_by: &[sqlparser::ast::OrderByExpr]) -> SqawkResult<Table> {
+    fn apply_order_by(
+        &self,
+        table: Table,
+        order_by: &[sqlparser::ast::OrderByExpr],
+    ) -> SqawkResult<Table> {
         // Convert ORDER BY expressions to column indices and sort directions
         let mut sort_columns = Vec::new();
-        
+
         for order_expr in order_by {
             // Extract the column index for this ORDER BY expression
             let col_idx = match &order_expr.expr {
@@ -265,7 +273,7 @@ impl SqlExecutor {
                                     break;
                                 }
                             }
-                            
+
                             if found {
                                 idx
                             } else {
@@ -273,7 +281,7 @@ impl SqlExecutor {
                             }
                         }
                     }
-                },
+                }
                 // Handle qualified column reference: table.column
                 Expr::CompoundIdentifier(idents) => {
                     if idents.len() != 2 {
@@ -281,25 +289,25 @@ impl SqlExecutor {
                             "Only simple qualified column references (table.column) are supported in ORDER BY".to_string(),
                         ));
                     }
-                    
+
                     let table_name = &idents[0].value;
                     let column_name = &idents[1].value;
                     let qualified_name = format!("{}.{}", table_name, column_name);
-                    
+
                     match table.column_index(&qualified_name) {
                         Some(idx) => idx,
                         None => {
                             return Err(SqawkError::ColumnNotFound(qualified_name));
                         }
                     }
-                },
+                }
                 _ => {
                     return Err(SqawkError::UnsupportedSqlFeature(
                         "Only simple column references are supported in ORDER BY".to_string(),
                     ));
                 }
             };
-            
+
             // Determine sort direction (ASC/DESC)
             let direction = match order_expr.asc {
                 // If asc is None or Some(true), use Ascending
@@ -307,14 +315,14 @@ impl SqlExecutor {
                 // If asc is Some(false), use Descending
                 Some(false) => SortDirection::Descending,
             };
-            
+
             sort_columns.push((col_idx, direction));
         }
-        
+
         // Sort the table using the calculated columns and directions
         table.sort(sort_columns)
     }
-    
+
     /// Process the FROM clause of a SELECT statement
     ///
     /// This function handles tables and joins specified in the FROM clause. It:
@@ -333,12 +341,13 @@ impl SqlExecutor {
         let first_table_with_joins = &from[0];
         let first_table_name = self.get_table_name(first_table_with_joins)?;
         let mut result_table = self.file_handler.get_table(&first_table_name)?.clone();
-        
+
         // Handle any joins in the first TableWithJoins
         if !first_table_with_joins.joins.is_empty() {
-            result_table = self.process_table_joins(&result_table, &first_table_with_joins.joins)?;
+            result_table =
+                self.process_table_joins(&result_table, &first_table_with_joins.joins)?;
         }
-        
+
         // If there are multiple tables in the FROM clause, join them
         // This is the CROSS JOIN case for "FROM table1, table2, ..."
         if from.len() > 1 {
@@ -348,26 +357,27 @@ impl SqlExecutor {
             for table_with_joins in &from[1..] {
                 let right_table_name = self.get_table_name(table_with_joins)?;
                 let right_table = self.file_handler.get_table(&right_table_name)?;
-                
+
                 // Cross join with the current result table
                 result_table = result_table.cross_join(right_table)?;
-                
+
                 // Process any joins on this table
                 if !table_with_joins.joins.is_empty() {
-                    result_table = self.process_table_joins(&result_table, &table_with_joins.joins)?;
+                    result_table =
+                        self.process_table_joins(&result_table, &table_with_joins.joins)?;
                 }
             }
         }
-        
+
         Ok(result_table)
     }
-    
+
     /// Process joins for a table
     ///
     /// This function processes a list of explicit JOIN clauses for a table.
     /// It iterates through each join specification, resolves the right table,
     /// and applies the appropriate join operation based on the join type.
-    /// 
+    ///
     /// Supported join types:
     /// - CROSS JOIN: Returns all combinations of rows from both tables
     /// - INNER JOIN with ON condition: Returns only rows that match the join condition
@@ -378,7 +388,7 @@ impl SqlExecutor {
     ///
     /// # Returns
     /// * A new table resulting from applying all join operations sequentially
-    /// Process explicit JOIN clauses in a SQL statement
+    ///   Process explicit JOIN clauses in a SQL statement
     ///
     /// This function handles the various types of JOIN operations in a SQL statement,
     /// including INNER JOIN with ON conditions and implicit CROSS JOINs.
@@ -402,14 +412,14 @@ impl SqlExecutor {
     fn process_table_joins(&self, left_table: &Table, joins: &[SqlJoin]) -> SqawkResult<Table> {
         // Start with a clone of the left table as our working result
         let mut result_table = left_table.clone();
-        
+
         // Process each join clause sequentially
         for join in joins {
             // Log join type in verbose mode for debugging
             if self.verbose {
                 eprintln!("DEBUG - Join type: {:?}", join.join_operator);
             }
-            
+
             // Extract the right table name from the join specification
             // This handles simple table references like "TableName" but not complex expressions
             let right_table_name = match &join.relation {
@@ -425,29 +435,29 @@ impl SqlExecutor {
                     ))
                 }
             };
-            
+
             // Fetch the right table from the loaded tables collection
             let right_table = self.file_handler.get_table(&right_table_name)?;
-            
+
             // Apply different join algorithms based on join type and constraints
             match &join.join_operator {
                 // Handle JOINs without ON conditions (CROSS JOINs)
                 // Note: In sqlparser 0.36, the lack of a constraint (JoinConstraint::None)
                 // indicates the absence of an ON clause, which we treat as a CROSS JOIN
-                JoinOperator::FullOuter(JoinConstraint::None) | 
-                JoinOperator::Inner(JoinConstraint::None) | 
-                JoinOperator::LeftOuter(JoinConstraint::None) | 
-                JoinOperator::RightOuter(JoinConstraint::None) => {
+                JoinOperator::FullOuter(JoinConstraint::None)
+                | JoinOperator::Inner(JoinConstraint::None)
+                | JoinOperator::LeftOuter(JoinConstraint::None)
+                | JoinOperator::RightOuter(JoinConstraint::None) => {
                     // Create a Cartesian product of the tables (all possible row combinations)
                     result_table = result_table.cross_join(right_table)?;
                 }
-                
+
                 // Handle INNER JOIN with ON condition
                 JoinOperator::Inner(JoinConstraint::On(expr)) => {
                     if self.verbose {
                         eprintln!("Processing INNER JOIN with ON condition: {:?}", expr);
                     }
-                    
+
                     // Use inner_join with a closure that evaluates the ON condition
                     // for each potential row combination from the Cartesian product
                     result_table = result_table.inner_join(right_table, |row, table| {
@@ -455,17 +465,18 @@ impl SqlExecutor {
                         self.evaluate_condition(expr, row, table)
                     })?;
                 }
-                
+
                 // Handle JOIN types that are not yet supported
                 // Future enhancement: Implement LEFT, RIGHT, and FULL OUTER JOINs
-                JoinOperator::LeftOuter(JoinConstraint::On(_)) | 
-                JoinOperator::RightOuter(JoinConstraint::On(_)) | 
-                JoinOperator::FullOuter(JoinConstraint::On(_)) => {
+                JoinOperator::LeftOuter(JoinConstraint::On(_))
+                | JoinOperator::RightOuter(JoinConstraint::On(_))
+                | JoinOperator::FullOuter(JoinConstraint::On(_)) => {
                     return Err(SqawkError::UnsupportedSqlFeature(
-                        "LEFT, RIGHT and FULL OUTER JOIN with ON conditions not yet supported".to_string(),
+                        "LEFT, RIGHT and FULL OUTER JOIN with ON conditions not yet supported"
+                            .to_string(),
                     ));
                 }
-                
+
                 // USING constraints or other constraints are not supported
                 _ => {
                     return Err(SqawkError::UnsupportedSqlFeature(
@@ -474,7 +485,7 @@ impl SqlExecutor {
                 }
             }
         }
-        
+
         Ok(result_table)
     }
 
@@ -520,7 +531,7 @@ impl SqlExecutor {
                 .map(|ident| {
                     table
                         .column_index(&ident.value)
-                        .ok_or_else(|| SqawkError::ColumnNotFound(ident.value.clone()))
+                        .ok_or(SqawkError::ColumnNotFound(ident.value.clone()))
                 })
                 .collect::<Result<Vec<_>, _>>()?
         } else {
@@ -587,7 +598,6 @@ impl SqlExecutor {
 
         // If there's a WHERE clause, we need to precompute which rows match before modifying the table
         if let Some(ref where_expr) = selection {
-
             // Create a list of row indices to delete
             let table_ref = self.file_handler.get_table(&table_name)?;
 
@@ -689,7 +699,11 @@ impl SqlExecutor {
     ///
     /// # Returns
     /// * A vector of (column_index, optional_alias) pairs for projecting the table
-    fn resolve_select_items(&self, items: &[SelectItem], table: &Table) -> SqawkResult<Vec<(usize, Option<String>)>> {
+    fn resolve_select_items(
+        &self,
+        items: &[SelectItem],
+        table: &Table,
+    ) -> SqawkResult<Vec<(usize, Option<String>)>> {
         let mut column_specs = Vec::new();
 
         for item in items {
@@ -706,12 +720,12 @@ impl SqlExecutor {
                         Expr::Identifier(ident) => {
                             let idx = self.get_column_index_for_select(&ident.value, table)?;
                             column_specs.push((idx, None));
-                        },
+                        }
                         // Qualified column reference (table.column or join_result.table.column)
                         Expr::CompoundIdentifier(parts) => {
                             let idx = self.get_qualified_column_index(parts, table)?;
                             column_specs.push((idx, None));
-                        },
+                        }
                         _ => {
                             return Err(SqawkError::UnsupportedSqlFeature(
                                 "Only direct column references are supported in SELECT".to_string(),
@@ -722,25 +736,25 @@ impl SqlExecutor {
                 SelectItem::ExprWithAlias { expr, alias } => {
                     // If query has aggregates and we're seeing a function with an alias,
                     // we should let apply_aggregate_functions handle it instead
-                    if self.contains_aggregate_functions(&[SelectItem::ExprWithAlias { 
-                        expr: expr.clone(), 
-                        alias: alias.clone() 
+                    if self.contains_aggregate_functions(&[SelectItem::ExprWithAlias {
+                        expr: expr.clone(),
+                        alias: alias.clone(),
                     }]) {
                         // Skip this item, as it will be handled by apply_aggregate_functions
                         // We add a placeholder that won't be used
                         column_specs.push((0, Some(alias.value.clone())));
                     } else {
-                        match &*expr {
+                        match expr {
                             Expr::Identifier(ident) => {
                                 // Simple column reference with alias
                                 let idx = self.get_column_index_for_select(&ident.value, table)?;
                                 column_specs.push((idx, Some(alias.value.clone())));
-                            },
+                            }
                             Expr::CompoundIdentifier(parts) => {
                                 // Qualified column reference (table.column or join_result.table.column) with alias
-                                let idx = self.get_qualified_column_index(&parts, table)?;
+                                let idx = self.get_qualified_column_index(parts, table)?;
                                 column_specs.push((idx, Some(alias.value.clone())));
-                            },
+                            }
                             _ => {
                                 return Err(SqawkError::UnsupportedSqlFeature(
                                     "Only direct column references are supported with aliases in SELECT".to_string(),
@@ -759,7 +773,7 @@ impl SqlExecutor {
 
         Ok(column_specs)
     }
-    
+
     /// Get the column index for a simple column name
     ///
     /// Helper function that centralizes column index resolution for simple column names
@@ -768,7 +782,7 @@ impl SqlExecutor {
         if let Some(idx) = table.column_index(column_name) {
             return Ok(idx);
         }
-        
+
         // Try as qualified name by checking column patterns
         let suffix = format!(".{}", column_name);
         for (i, col) in table.columns().iter().enumerate() {
@@ -776,42 +790,46 @@ impl SqlExecutor {
                 return Ok(i);
             }
         }
-        
+
         // If we got here, the column wasn't found
         Err(SqawkError::ColumnNotFound(column_name.to_string()))
     }
-    
+
     /// Get the column index for a qualified column reference
     ///
     /// Helper function that centralizes column index resolution for qualified column names
-    fn get_qualified_column_index(&self, parts: &[sqlparser::ast::Ident], table: &Table) -> SqawkResult<usize> {
+    fn get_qualified_column_index(
+        &self,
+        parts: &[sqlparser::ast::Ident],
+        table: &Table,
+    ) -> SqawkResult<usize> {
         // Build the fully qualified column name from parts
-        let qualified_name = parts.iter()
+        let qualified_name = parts
+            .iter()
             .map(|ident| ident.value.clone())
             .collect::<Vec<_>>()
             .join(".");
-        
+
         // Try to find an exact match for the qualified column
         if let Some(idx) = table.column_index(&qualified_name) {
             return Ok(idx);
         }
-        
+
         // If we didn't find an exact match, try a suffix match
         // This helps with cases like "users.id" matching "users_orders_cross.users.id"
         if parts.len() == 2 {
             let suffix = format!("{}.{}", parts[0].value, parts[1].value);
-            
+
             for (i, col) in table.columns().iter().enumerate() {
                 if col.ends_with(&suffix) {
                     return Ok(i);
                 }
             }
         }
-        
+
         // If we got here, the qualified column wasn't found
         Err(SqawkError::ColumnNotFound(qualified_name))
     }
-
 
     /// Apply a WHERE clause to filter table rows
     ///
@@ -835,11 +853,8 @@ impl SqlExecutor {
         let result = table.select(|row| {
             // For each row, evaluate the WHERE condition expression
             // If evaluation fails (returns an error), default to false (exclude the row)
-            let matches = self
-                .evaluate_condition(where_expr, row, &table)
-                .unwrap_or(false);
-
-            matches
+            self.evaluate_condition(where_expr, row, &table)
+                .unwrap_or(false)
         });
 
         Ok(result)
@@ -869,14 +884,12 @@ impl SqlExecutor {
                 match op {
                     sqlparser::ast::BinaryOperator::And => {
                         self.evaluate_logical_and(left, right, row, table)
-                    },
+                    }
                     sqlparser::ast::BinaryOperator::Or => {
                         self.evaluate_logical_or(left, right, row, table)
-                    },
-                    // For comparison operators, delegate to a separate function
-                    _ => {
-                        self.evaluate_comparison(left, op, right, row, table)
                     }
+                    // For comparison operators, delegate to a separate function
+                    _ => self.evaluate_comparison(left, op, right, row, table),
                 }
             }
             Expr::IsNull(expr) => {
@@ -894,7 +907,7 @@ impl SqlExecutor {
             ))),
         }
     }
-    
+
     /// Evaluate a logical AND expression with short-circuit evaluation
     ///
     /// This function implements AND logic with short-circuit evaluation
@@ -911,21 +924,27 @@ impl SqlExecutor {
     /// * `Ok(true)` if both conditions evaluate to true
     /// * `Ok(false)` if either condition evaluates to false
     /// * `Err` if there's an error evaluating either condition
-    fn evaluate_logical_and(&self, left: &Expr, right: &Expr, row: &[Value], table: &Table) -> SqawkResult<bool> {
+    fn evaluate_logical_and(
+        &self,
+        left: &Expr,
+        right: &Expr,
+        row: &[Value],
+        table: &Table,
+    ) -> SqawkResult<bool> {
         // Evaluate left condition
         let left_result = self.evaluate_condition(left, row, table)?;
-        
+
         // Short-circuit - if left is false, don't evaluate right
         if !left_result {
             return Ok(false);
         }
-        
+
         // Evaluate right condition only if left was true
         let right_result = self.evaluate_condition(right, row, table)?;
-        
+
         Ok(left_result && right_result)
     }
-    
+
     /// Evaluate a logical OR expression with short-circuit evaluation
     ///
     /// This function implements OR logic with short-circuit evaluation
@@ -942,21 +961,27 @@ impl SqlExecutor {
     /// * `Ok(true)` if either condition evaluates to true
     /// * `Ok(false)` if both conditions evaluate to false
     /// * `Err` if there's an error evaluating either condition
-    fn evaluate_logical_or(&self, left: &Expr, right: &Expr, row: &[Value], table: &Table) -> SqawkResult<bool> {
+    fn evaluate_logical_or(
+        &self,
+        left: &Expr,
+        right: &Expr,
+        row: &[Value],
+        table: &Table,
+    ) -> SqawkResult<bool> {
         // Evaluate left condition
         let left_result = self.evaluate_condition(left, row, table)?;
-        
+
         // Short-circuit - if left is true, don't evaluate right
         if left_result {
             return Ok(true);
         }
-        
+
         // Evaluate right condition only if left was false
         let right_result = self.evaluate_condition(right, row, table)?;
-        
+
         Ok(left_result || right_result)
     }
-    
+
     /// Evaluate a comparison expression between two values
     ///
     /// This function handles binary comparison operators (=, !=, >, <, >=, <=)
@@ -974,7 +999,14 @@ impl SqlExecutor {
     /// * `Ok(true)` if the comparison evaluates to true
     /// * `Ok(false)` if the comparison evaluates to false
     /// * `Err` if there's an error evaluating the expressions or the comparison is invalid
-    fn evaluate_comparison(&self, left: &Expr, op: &sqlparser::ast::BinaryOperator, right: &Expr, row: &[Value], table: &Table) -> SqawkResult<bool> {
+    fn evaluate_comparison(
+        &self,
+        left: &Expr,
+        op: &sqlparser::ast::BinaryOperator,
+        right: &Expr,
+        row: &[Value],
+        table: &Table,
+    ) -> SqawkResult<bool> {
         let left_val = self.evaluate_expr_with_row(left, row, table)?;
         let right_val = self.evaluate_expr_with_row(right, row, table)?;
 
@@ -1007,7 +1039,7 @@ impl SqlExecutor {
             sqlparser::ast::BinaryOperator::LtEq => {
                 self.compare_values_with_operator(&left_val, &right_val, "<=")
             }
-            
+
             // Add more operators as needed
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
                 "Unsupported binary operator: {:?}",
@@ -1015,7 +1047,7 @@ impl SqlExecutor {
             ))),
         }
     }
-    
+
     /// Compare two values with a specific operator
     ///
     /// This helper function implements type-aware comparison logic for different data types.
@@ -1037,33 +1069,40 @@ impl SqlExecutor {
     /// * `Ok(true)` if the comparison evaluates to true
     /// * `Ok(false)` if the comparison evaluates to false
     /// * `Err` if the comparison is invalid (incompatible types, etc.)
-    fn compare_values_with_operator(&self, left_val: &Value, right_val: &Value, op_symbol: &str) -> SqawkResult<bool> {
+    fn compare_values_with_operator(
+        &self,
+        left_val: &Value,
+        right_val: &Value,
+        op_symbol: &str,
+    ) -> SqawkResult<bool> {
         match (left_val, right_val) {
             // Integer-Integer comparison
-            (Value::Integer(a), Value::Integer(b)) => {
-                Ok(match op_symbol {
-                    ">" => a > b,
-                    "<" => a < b,
-                    ">=" => a >= b,
-                    "<=" => a <= b,
-                    _ => return Err(SqawkError::InvalidSqlQuery(
-                        format!("Unexpected operator symbol: {}", op_symbol)
-                    )),
-                })
-            }
+            (Value::Integer(a), Value::Integer(b)) => Ok(match op_symbol {
+                ">" => a > b,
+                "<" => a < b,
+                ">=" => a >= b,
+                "<=" => a <= b,
+                _ => {
+                    return Err(SqawkError::InvalidSqlQuery(format!(
+                        "Unexpected operator symbol: {}",
+                        op_symbol
+                    )))
+                }
+            }),
 
             // Float-Float comparison
-            (Value::Float(a), Value::Float(b)) => {
-                Ok(match op_symbol {
-                    ">" => a > b,
-                    "<" => a < b,
-                    ">=" => a >= b,
-                    "<=" => a <= b,
-                    _ => return Err(SqawkError::InvalidSqlQuery(
-                        format!("Unexpected operator symbol: {}", op_symbol)
-                    )),
-                })
-            }
+            (Value::Float(a), Value::Float(b)) => Ok(match op_symbol {
+                ">" => a > b,
+                "<" => a < b,
+                ">=" => a >= b,
+                "<=" => a <= b,
+                _ => {
+                    return Err(SqawkError::InvalidSqlQuery(format!(
+                        "Unexpected operator symbol: {}",
+                        op_symbol
+                    )))
+                }
+            }),
 
             // Integer-Float comparison (convert Integer to Float)
             (Value::Integer(a), Value::Float(b)) => {
@@ -1073,9 +1112,12 @@ impl SqlExecutor {
                     "<" => a_float < *b,
                     ">=" => a_float >= *b,
                     "<=" => a_float <= *b,
-                    _ => return Err(SqawkError::InvalidSqlQuery(
-                        format!("Unexpected operator symbol: {}", op_symbol)
-                    )),
+                    _ => {
+                        return Err(SqawkError::InvalidSqlQuery(format!(
+                            "Unexpected operator symbol: {}",
+                            op_symbol
+                        )))
+                    }
                 })
             }
 
@@ -1087,24 +1129,28 @@ impl SqlExecutor {
                     "<" => *a < b_float,
                     ">=" => *a >= b_float,
                     "<=" => *a <= b_float,
-                    _ => return Err(SqawkError::InvalidSqlQuery(
-                        format!("Unexpected operator symbol: {}", op_symbol)
-                    )),
+                    _ => {
+                        return Err(SqawkError::InvalidSqlQuery(format!(
+                            "Unexpected operator symbol: {}",
+                            op_symbol
+                        )))
+                    }
                 })
             }
 
             // String-String comparison (lexicographic)
-            (Value::String(a), Value::String(b)) => {
-                Ok(match op_symbol {
-                    ">" => a > b,
-                    "<" => a < b,
-                    ">=" => a >= b,
-                    "<=" => a <= b,
-                    _ => return Err(SqawkError::InvalidSqlQuery(
-                        format!("Unexpected operator symbol: {}", op_symbol)
-                    )),
-                })
-            }
+            (Value::String(a), Value::String(b)) => Ok(match op_symbol {
+                ">" => a > b,
+                "<" => a < b,
+                ">=" => a >= b,
+                "<=" => a <= b,
+                _ => {
+                    return Err(SqawkError::InvalidSqlQuery(format!(
+                        "Unexpected operator symbol: {}",
+                        op_symbol
+                    )))
+                }
+            }),
 
             // Error for incompatible types
             _ => Err(SqawkError::TypeError(format!(
@@ -1125,6 +1171,7 @@ impl SqlExecutor {
     /// # Returns
     /// * `Ok(Value)` - The resulting value after evaluation
     /// * `Err` - If the expression can't be evaluated or contains unsupported features
+    #[allow(clippy::only_used_in_recursion)]
     fn evaluate_expr(&self, expr: &Expr) -> SqawkResult<Value> {
         match expr {
             Expr::Value(value) => {
@@ -1224,16 +1271,16 @@ impl SqlExecutor {
             // Simple column reference (unqualified)
             Expr::Identifier(ident) => {
                 self.resolve_simple_column_reference(&ident.value, row, table)
-            },
+            }
             // Qualified column reference (table.column or join_result.table.column)
             Expr::CompoundIdentifier(parts) => {
                 self.resolve_qualified_column_reference(parts, row, table)
-            },
+            }
             // Handle other expression types by delegating to the main evaluate_expr function
             _ => self.evaluate_expr(expr),
         }
     }
-    
+
     /// Check if the SELECT items contain any aggregate functions
     ///
     /// This function analyzes a list of SELECT items and determines if any of them
@@ -1253,31 +1300,32 @@ impl SqlExecutor {
         for item in items {
             match item {
                 // Check for aggregate functions in non-aliased expressions
-                SelectItem::UnnamedExpr(expr) => {
-                    if let Expr::Function(func) = expr {
-                        // Check if the function name is one of our supported aggregates
-                        let name = func.name.0.first().map(|i| i.value.as_str()).unwrap_or("");
-                        if AggregateFunction::from_name(name).is_some() {
-                            return true;
-                        }
+                SelectItem::UnnamedExpr(Expr::Function(func)) => {
+                    // Check if the function name is one of our supported aggregates
+                    let name = func.name.0.first().map(|i| i.value.as_str()).unwrap_or("");
+                    if AggregateFunction::from_name(name).is_some() {
+                        return true;
                     }
-                },
+                }
+                SelectItem::UnnamedExpr(_) => {}
                 // Check for aggregate functions in aliased expressions
-                SelectItem::ExprWithAlias { expr, .. } => {
-                    if let Expr::Function(func) = &*expr {
-                        // Check if the function name is one of our supported aggregates
-                        let name = func.name.0.first().map(|i| i.value.as_str()).unwrap_or("");
-                        if AggregateFunction::from_name(name).is_some() {
-                            return true;
-                        }
+                SelectItem::ExprWithAlias {
+                    expr: Expr::Function(func),
+                    ..
+                } => {
+                    // Check if the function name is one of our supported aggregates
+                    let name = func.name.0.first().map(|i| i.value.as_str()).unwrap_or("");
+                    if AggregateFunction::from_name(name).is_some() {
+                        return true;
                     }
-                },
+                }
+                SelectItem::ExprWithAlias { .. } => {}
                 _ => {}
             }
         }
         false
     }
-    
+
     /// Apply aggregate functions to a table
     ///
     /// This function processes SELECT items containing aggregate functions (COUNT, SUM, AVG, MIN, MAX)
@@ -1299,100 +1347,119 @@ impl SqlExecutor {
     fn apply_aggregate_functions(&self, items: &[SelectItem], table: &Table) -> SqawkResult<Table> {
         let mut result_columns = Vec::new();
         let mut result_values = Vec::new();
-        
+
         // Process each item in the SELECT list
         for item in items {
             match item {
                 SelectItem::UnnamedExpr(expr) => {
                     // Handle function call
                     if let Expr::Function(func) = expr {
-                        let func_name = func.name.0.first().map(|i| i.value.clone()).unwrap_or_default();
-                        
+                        let func_name = func
+                            .name
+                            .0
+                            .first()
+                            .map(|i| i.value.clone())
+                            .unwrap_or_default();
+
                         // Check if this is a supported aggregate function
                         if let Some(agg_func) = AggregateFunction::from_name(&func_name) {
                             // Process the function arguments
                             if func.args.len() != 1 {
-                                return Err(SqawkError::InvalidSqlQuery(
-                                    format!("{} function requires exactly one argument", func_name)
-                                ));
+                                return Err(SqawkError::InvalidSqlQuery(format!(
+                                    "{} function requires exactly one argument",
+                                    func_name
+                                )));
                             }
-                            
+
                             // Get the column values for the function argument
-                            let column_values = self.get_values_for_function_arg(&func.args[0], table)?;
-                            
+                            let column_values =
+                                self.get_values_for_function_arg(&func.args[0], table)?;
+
                             // Execute the aggregate function
                             let result_value = agg_func.execute(&column_values)?;
-                            
+
                             // Add the result to our output
                             result_columns.push(func_name.clone());
                             result_values.push(result_value);
                         } else {
-                            return Err(SqawkError::UnsupportedSqlFeature(
-                                format!("Unsupported function: {}", func_name)
-                            ));
+                            return Err(SqawkError::UnsupportedSqlFeature(format!(
+                                "Unsupported function: {}",
+                                func_name
+                            )));
                         }
                     } else {
                         return Err(SqawkError::UnsupportedSqlFeature(
-                            "Only aggregate functions are supported in aggregate queries".to_string()
+                            "Only aggregate functions are supported in aggregate queries"
+                                .to_string(),
                         ));
                     }
-                },
+                }
                 SelectItem::ExprWithAlias { expr, alias } => {
                     // Handle function call with alias
-                    match &*expr {
+                    match expr {
                         Expr::Function(func) => {
-                            let func_name = func.name.0.first().map(|i| i.value.clone()).unwrap_or_default();
-                            
+                            let func_name = func
+                                .name
+                                .0
+                                .first()
+                                .map(|i| i.value.clone())
+                                .unwrap_or_default();
+
                             // Check if this is a supported aggregate function
                             if let Some(agg_func) = AggregateFunction::from_name(&func_name) {
                                 // Process the function arguments
                                 if func.args.len() != 1 {
-                                    return Err(SqawkError::InvalidSqlQuery(
-                                        format!("{} function requires exactly one argument", func_name)
-                                    ));
+                                    return Err(SqawkError::InvalidSqlQuery(format!(
+                                        "{} function requires exactly one argument",
+                                        func_name
+                                    )));
                                 }
-                                
+
                                 // Get the column values for the function argument
-                                let column_values = self.get_values_for_function_arg(&func.args[0], table)?;
-                                
+                                let column_values =
+                                    self.get_values_for_function_arg(&func.args[0], table)?;
+
                                 // Execute the aggregate function
                                 let result_value = agg_func.execute(&column_values)?;
-                                
+
                                 // Add the result to our output with the alias
                                 result_columns.push(alias.value.clone());
                                 result_values.push(result_value);
                             } else {
-                                return Err(SqawkError::UnsupportedSqlFeature(
-                                    format!("Unsupported function: {}", func_name)
-                                ));
+                                return Err(SqawkError::UnsupportedSqlFeature(format!(
+                                    "Unsupported function: {}",
+                                    func_name
+                                )));
                             }
-                        },
+                        }
                         _ => {
                             return Err(SqawkError::UnsupportedSqlFeature(
-                                "Only aggregate functions are supported in aggregate queries".to_string()
+                                "Only aggregate functions are supported in aggregate queries"
+                                    .to_string(),
                             ));
                         }
                     }
-                },
+                }
                 SelectItem::Wildcard(_) => {
                     return Err(SqawkError::UnsupportedSqlFeature(
-                        "Wildcard (*) is not supported in queries with aggregate functions".to_string()
+                        "Wildcard (*) is not supported in queries with aggregate functions"
+                            .to_string(),
                     ));
-                },
+                }
                 _ => {
                     return Err(SqawkError::UnsupportedSqlFeature(
-                        "Unsupported SELECT item in aggregate query".to_string()
+                        "Unsupported SELECT item in aggregate query".to_string(),
                     ));
                 }
             }
         }
-        
+
         // Create a new table with a single row containing the aggregate results
         let mut result_table = Table::new("aggregate_result", result_columns, None);
         result_table.add_row(result_values)?;
         Ok(result_table)
     }
-    
+
     /// Apply aggregate functions with GROUP BY clause
     ///
     /// This function implements SQL's GROUP BY functionality, which groups rows based on
@@ -1405,7 +1472,7 @@ impl SqlExecutor {
     /// * `group_by` - The GROUP BY expressions defining how to group the rows
     ///
     /// # Returns
-    /// 
+    ///
     /// # Implementation Details
     /// The GROUP BY implementation follows these steps:
     /// 1. Identify the columns to group by
@@ -1422,96 +1489,99 @@ impl SqlExecutor {
         &self,
         items: &[SelectItem],
         table: &Table,
-        group_by: &Vec<sqlparser::ast::Expr>
+        group_by: &Vec<sqlparser::ast::Expr>,
     ) -> SqawkResult<Table> {
         // Extract GROUP BY columns
         let mut group_columns = Vec::new();
         let mut group_column_indices = Vec::new();
-        
+
         // Process each GROUP BY expression
         for expr in group_by {
-                    match expr {
-                        Expr::Identifier(ident) => {
-                            // Simple column reference
-                            let col_name = ident.value.clone();
-                            if let Some(col_idx) = table.column_index(&col_name) {
-                                group_columns.push(col_name);
-                                group_column_indices.push(col_idx);
-                            } else {
-                                // Try suffix match for qualified columns
-                                let suffix = format!(".{}", col_name);
-                                let mut found = false;
-                                for (i, col) in table.columns().iter().enumerate() {
-                                    if col.ends_with(&suffix) {
-                                        found = true;
-                                        group_columns.push(col.clone());
-                                        group_column_indices.push(i);
-                                        break;
-                                    }
-                                }
-                                
-                                if !found {
-                                    return Err(SqawkError::ColumnNotFound(col_name));
-                                }
+            match expr {
+                Expr::Identifier(ident) => {
+                    // Simple column reference
+                    let col_name = ident.value.clone();
+                    if let Some(col_idx) = table.column_index(&col_name) {
+                        group_columns.push(col_name);
+                        group_column_indices.push(col_idx);
+                    } else {
+                        // Try suffix match for qualified columns
+                        let suffix = format!(".{}", col_name);
+                        let mut found = false;
+                        for (i, col) in table.columns().iter().enumerate() {
+                            if col.ends_with(&suffix) {
+                                found = true;
+                                group_columns.push(col.clone());
+                                group_column_indices.push(i);
+                                break;
                             }
-                        },
-                        Expr::CompoundIdentifier(parts) => {
-                            // Qualified column reference (table.column)
-                            let qualified_name = parts.iter()
-                                .map(|ident| ident.value.clone())
-                                .collect::<Vec<_>>()
-                                .join(".");
-                            
-                            if let Some(col_idx) = table.column_index(&qualified_name) {
-                                group_columns.push(qualified_name);
-                                group_column_indices.push(col_idx);
-                            } else {
-                                // Try suffix match
-                                if parts.len() == 2 {
-                                    let suffix = format!("{}.{}", parts[0].value, parts[1].value);
-                                    
-                                    let mut found = false;
-                                    for (i, col) in table.columns().iter().enumerate() {
-                                        if col.ends_with(&suffix) {
-                                            found = true;
-                                            group_columns.push(col.clone());
-                                            group_column_indices.push(i);
-                                            break;
-                                        }
-                                    }
-                                    
-                                    if !found {
-                                        return Err(SqawkError::ColumnNotFound(qualified_name));
-                                    }
-                                } else {
-                                    return Err(SqawkError::ColumnNotFound(qualified_name));
-                                }
-                            }
-                        },
-                        _ => {
-                            return Err(SqawkError::UnsupportedSqlFeature(
-                                "Only simple column references are supported in GROUP BY".to_string()
-                            ));
+                        }
+
+                        if !found {
+                            return Err(SqawkError::ColumnNotFound(col_name));
                         }
                     }
                 }
-        
+                Expr::CompoundIdentifier(parts) => {
+                    // Qualified column reference (table.column)
+                    let qualified_name = parts
+                        .iter()
+                        .map(|ident| ident.value.clone())
+                        .collect::<Vec<_>>()
+                        .join(".");
+
+                    if let Some(col_idx) = table.column_index(&qualified_name) {
+                        group_columns.push(qualified_name);
+                        group_column_indices.push(col_idx);
+                    } else {
+                        // Try suffix match
+                        if parts.len() == 2 {
+                            let suffix = format!("{}.{}", parts[0].value, parts[1].value);
+
+                            let mut found = false;
+                            for (i, col) in table.columns().iter().enumerate() {
+                                if col.ends_with(&suffix) {
+                                    found = true;
+                                    group_columns.push(col.clone());
+                                    group_column_indices.push(i);
+                                    break;
+                                }
+                            }
+
+                            if !found {
+                                return Err(SqawkError::ColumnNotFound(qualified_name));
+                            }
+                        } else {
+                            return Err(SqawkError::ColumnNotFound(qualified_name));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Only simple column references are supported in GROUP BY".to_string(),
+                    ));
+                }
+            }
+        }
+
         // Group the rows based on GROUP BY columns
-        let mut groups: std::collections::HashMap<Vec<Value>, Vec<usize>> = std::collections::HashMap::new();
-        
+        let mut groups: std::collections::HashMap<Vec<Value>, Vec<usize>> =
+            std::collections::HashMap::new();
+
         for (row_idx, row) in table.rows().iter().enumerate() {
             // Build the group key from the values of GROUP BY columns
-            let group_key: Vec<Value> = group_column_indices.iter()
+            let group_key: Vec<Value> = group_column_indices
+                .iter()
                 .map(|&col_idx| row[col_idx].clone())
                 .collect();
-            
+
             // Add this row's index to the appropriate group
-            groups.entry(group_key).or_insert_with(Vec::new).push(row_idx);
+            groups.entry(group_key).or_default().push(row_idx);
         }
-        
+
         // Prepare the result table columns (GROUP BY columns + aggregate function results)
         let mut result_columns = group_columns.clone();
-        
+
         // Process each SELECT item to identify function columns
         let mut function_info = Vec::new();
         for item in items {
@@ -1520,7 +1590,9 @@ impl SqlExecutor {
                     // Handle simple column references that should match GROUP BY columns
                     if let Expr::Identifier(ident) = expr {
                         // Skip if this column is already in result_columns (GROUP BY column)
-                        if table.column_index(&ident.value).is_some() && !group_columns.contains(&ident.value) {
+                        if table.column_index(&ident.value).is_some()
+                            && !group_columns.contains(&ident.value)
+                        {
                             // Non-aggregated column not in GROUP BY is not allowed
                             return Err(SqawkError::InvalidSqlQuery(
                                 format!("Column '{}' must appear in the GROUP BY clause or be used in an aggregate function", ident.value)
@@ -1528,164 +1600,200 @@ impl SqlExecutor {
                         }
                     } else if let Expr::Function(func) = expr {
                         // Handle aggregate function
-                        let func_name = func.name.0.first().map(|i| i.value.clone()).unwrap_or_default();
-                        
+                        let func_name = func
+                            .name
+                            .0
+                            .first()
+                            .map(|i| i.value.clone())
+                            .unwrap_or_default();
+
                         // Check if this is a supported aggregate function
                         if let Some(_agg_func) = AggregateFunction::from_name(&func_name) {
                             // Process the function arguments
                             if func.args.len() != 1 {
-                                return Err(SqawkError::InvalidSqlQuery(
-                                    format!("{} function requires exactly one argument", func_name)
-                                ));
+                                return Err(SqawkError::InvalidSqlQuery(format!(
+                                    "{} function requires exactly one argument",
+                                    func_name
+                                )));
                             }
-                            
+
                             // Add the function column to results
                             result_columns.push(func_name.clone());
-                            
+
                             // Store function info for later execution
                             function_info.push((func_name, func.args[0].clone(), None));
                         } else {
-                            return Err(SqawkError::UnsupportedSqlFeature(
-                                format!("Unsupported function: {}", func_name)
-                            ));
+                            return Err(SqawkError::UnsupportedSqlFeature(format!(
+                                "Unsupported function: {}",
+                                func_name
+                            )));
                         }
                     } else {
                         return Err(SqawkError::UnsupportedSqlFeature(
                             "Only column references and aggregate functions are supported in GROUP BY queries".to_string()
                         ));
                     }
-                },
+                }
                 SelectItem::ExprWithAlias { expr, alias } => {
                     // Handle expressions with aliases
                     if let Expr::Function(func) = expr {
-                        let func_name = func.name.0.first().map(|i| i.value.clone()).unwrap_or_default();
-                        
+                        let func_name = func
+                            .name
+                            .0
+                            .first()
+                            .map(|i| i.value.clone())
+                            .unwrap_or_default();
+
                         // Check if this is a supported aggregate function
                         if let Some(_agg_func) = AggregateFunction::from_name(&func_name) {
                             // Process the function arguments
                             if func.args.len() != 1 {
-                                return Err(SqawkError::InvalidSqlQuery(
-                                    format!("{} function requires exactly one argument", func_name)
-                                ));
+                                return Err(SqawkError::InvalidSqlQuery(format!(
+                                    "{} function requires exactly one argument",
+                                    func_name
+                                )));
                             }
-                            
+
                             // Add the aliased column to results
                             result_columns.push(alias.value.clone());
-                            
+
                             // Store function info for later execution with alias
-                            function_info.push((func_name, func.args[0].clone(), Some(alias.value.clone())));
-                        } else {
-                            return Err(SqawkError::UnsupportedSqlFeature(
-                                format!("Unsupported function: {}", func_name)
+                            function_info.push((
+                                func_name,
+                                func.args[0].clone(),
+                                Some(alias.value.clone()),
                             ));
+                        } else {
+                            return Err(SqawkError::UnsupportedSqlFeature(format!(
+                                "Unsupported function: {}",
+                                func_name
+                            )));
                         }
                     } else {
                         return Err(SqawkError::UnsupportedSqlFeature(
-                            "Only aggregate functions can have aliases in GROUP BY queries".to_string()
+                            "Only aggregate functions can have aliases in GROUP BY queries"
+                                .to_string(),
                         ));
                     }
-                },
+                }
                 SelectItem::Wildcard(_) => {
                     return Err(SqawkError::UnsupportedSqlFeature(
-                        "Wildcard (*) is not supported in GROUP BY queries".to_string()
+                        "Wildcard (*) is not supported in GROUP BY queries".to_string(),
                     ));
-                },
+                }
                 _ => {
                     return Err(SqawkError::UnsupportedSqlFeature(
-                        "Unsupported SELECT item in GROUP BY query".to_string()
+                        "Unsupported SELECT item in GROUP BY query".to_string(),
                     ));
                 }
             }
         }
-        
+
         // Create the result table
         let mut result_table = Table::new("grouped_result", result_columns, None);
-        
+
         // Generate a row for each group
         for (group_key, row_indices) in groups {
             let mut result_row = Vec::new();
-            
+
             // Add the GROUP BY column values
             result_row.extend(group_key);
-            
+
             // Apply aggregate functions to each group
             for (func_name, func_arg, _alias) in &function_info {
                 // Extract values for this function's column in this group
                 let mut group_values = Vec::new();
-                
+
                 for &row_idx in &row_indices {
                     if let sqlparser::ast::FunctionArg::Unnamed(expr) = func_arg {
                         match expr {
                             sqlparser::ast::FunctionArgExpr::Wildcard => {
                                 // For COUNT(*), one value per row
                                 group_values.push(Value::Integer(1));
-                            },
+                            }
                             sqlparser::ast::FunctionArgExpr::QualifiedWildcard(_) => {
                                 // For COUNT(table.*), one value per row like COUNT(*)
                                 group_values.push(Value::Integer(1));
-                            },
+                            }
                             sqlparser::ast::FunctionArgExpr::Expr(expr) => {
                                 match expr {
                                     Expr::Identifier(ident) => {
                                         // Get column index
                                         if let Some(col_idx) = table.column_index(&ident.value) {
-                                            group_values.push(table.rows()[row_idx][col_idx].clone());
+                                            group_values
+                                                .push(table.rows()[row_idx][col_idx].clone());
                                         } else {
                                             // Try suffix match for qualified columns
                                             let suffix = format!(".{}", ident.value);
                                             let mut found = false;
                                             let mut value = Value::Null;
-                                            
-                                            for (col_idx, col_name) in table.columns().iter().enumerate() {
+
+                                            for (col_idx, col_name) in
+                                                table.columns().iter().enumerate()
+                                            {
                                                 if col_name.ends_with(&suffix) {
                                                     found = true;
                                                     value = table.rows()[row_idx][col_idx].clone();
                                                     break;
                                                 }
                                             }
-                                            
+
                                             if found {
                                                 group_values.push(value);
                                             } else {
-                                                return Err(SqawkError::ColumnNotFound(ident.value.clone()));
+                                                return Err(SqawkError::ColumnNotFound(
+                                                    ident.value.clone(),
+                                                ));
                                             }
                                         }
-                                    },
+                                    }
                                     Expr::CompoundIdentifier(parts) => {
                                         // Handle qualified column references
-                                        let qualified_name = parts.iter()
+                                        let qualified_name = parts
+                                            .iter()
                                             .map(|ident| ident.value.clone())
                                             .collect::<Vec<_>>()
                                             .join(".");
-                                        
+
                                         if let Some(col_idx) = table.column_index(&qualified_name) {
-                                            group_values.push(table.rows()[row_idx][col_idx].clone());
+                                            group_values
+                                                .push(table.rows()[row_idx][col_idx].clone());
                                         } else {
                                             // Try suffix match
                                             if parts.len() == 2 {
-                                                let suffix = format!("{}.{}", parts[0].value, parts[1].value);
-                                                
+                                                let suffix = format!(
+                                                    "{}.{}",
+                                                    parts[0].value, parts[1].value
+                                                );
+
                                                 let mut found = false;
                                                 let mut value = Value::Null;
-                                                
-                                                for (col_idx, col_name) in table.columns().iter().enumerate() {
+
+                                                for (col_idx, col_name) in
+                                                    table.columns().iter().enumerate()
+                                                {
                                                     if col_name.ends_with(&suffix) {
                                                         found = true;
-                                                        value = table.rows()[row_idx][col_idx].clone();
+                                                        value =
+                                                            table.rows()[row_idx][col_idx].clone();
                                                         break;
                                                     }
                                                 }
-                                                
+
                                                 if found {
                                                     group_values.push(value);
                                                 } else {
-                                                    return Err(SqawkError::ColumnNotFound(qualified_name));
+                                                    return Err(SqawkError::ColumnNotFound(
+                                                        qualified_name,
+                                                    ));
                                                 }
                                             } else {
-                                                return Err(SqawkError::ColumnNotFound(qualified_name));
+                                                return Err(SqawkError::ColumnNotFound(
+                                                    qualified_name,
+                                                ));
                                             }
                                         }
-                                    },
+                                    }
                                     _ => {
                                         return Err(SqawkError::UnsupportedSqlFeature(
                                             "Only column references are supported in aggregate functions".to_string()
@@ -1696,29 +1804,31 @@ impl SqlExecutor {
                         }
                     } else {
                         return Err(SqawkError::UnsupportedSqlFeature(
-                            "Only unnamed arguments are supported in aggregate functions".to_string()
+                            "Only unnamed arguments are supported in aggregate functions"
+                                .to_string(),
                         ));
                     }
                 }
-                
+
                 // Execute the aggregate function on this group's values
                 if let Some(agg_func) = AggregateFunction::from_name(func_name) {
                     let result_value = agg_func.execute(&group_values)?;
                     result_row.push(result_value);
                 } else {
-                    return Err(SqawkError::UnsupportedSqlFeature(
-                        format!("Unsupported function: {}", func_name)
-                    ));
+                    return Err(SqawkError::UnsupportedSqlFeature(format!(
+                        "Unsupported function: {}",
+                        func_name
+                    )));
                 }
             }
-            
+
             // Add this group's result row to the table
             result_table.add_row(result_row)?;
         }
-        
+
         Ok(result_table)
     }
-    
+
     /// Get values for a function argument
     ///
     /// This function extracts all values from a table column specified in an aggregate
@@ -1736,16 +1846,22 @@ impl SqlExecutor {
     /// * A vector of all values from the specified column
     /// * For COUNT(*), a vector of placeholder values (one per row)
     /// * `Err` if the column doesn't exist or the argument type is unsupported
-    fn get_values_for_function_arg(&self, arg: &sqlparser::ast::FunctionArg, table: &Table) -> SqawkResult<Vec<Value>> {
+    fn get_values_for_function_arg(
+        &self,
+        arg: &sqlparser::ast::FunctionArg,
+        table: &Table,
+    ) -> SqawkResult<Vec<Value>> {
         match arg {
             sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Wildcard) => {
                 // For COUNT(*), return a list of non-null placeholders, one for each row
                 Ok(table.rows().iter().map(|_| Value::Integer(1)).collect())
-            },
-            sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::QualifiedWildcard(_)) => {
+            }
+            sqlparser::ast::FunctionArg::Unnamed(
+                sqlparser::ast::FunctionArgExpr::QualifiedWildcard(_),
+            ) => {
                 // For COUNT(table.*), return a list of non-null placeholders, one for each row
                 Ok(table.rows().iter().map(|_| Value::Integer(1)).collect())
-            },
+            }
             sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(expr)) => {
                 match expr {
                     Expr::Identifier(ident) => {
@@ -1763,7 +1879,7 @@ impl SqlExecutor {
                                         break;
                                     }
                                 }
-                                
+
                                 if found {
                                     idx
                                 } else {
@@ -1771,17 +1887,22 @@ impl SqlExecutor {
                                 }
                             }
                         };
-                        
+
                         // Extract all values for this column
-                        Ok(table.rows().iter().map(|row| row[col_idx].clone()).collect())
-                    },
+                        Ok(table
+                            .rows()
+                            .iter()
+                            .map(|row| row[col_idx].clone())
+                            .collect())
+                    }
                     Expr::CompoundIdentifier(parts) => {
                         // Handle qualified column references like table.column
-                        let qualified_name = parts.iter()
+                        let qualified_name = parts
+                            .iter()
                             .map(|ident| ident.value.clone())
                             .collect::<Vec<_>>()
                             .join(".");
-                        
+
                         // Get column index
                         let col_idx = match table.column_index(&qualified_name) {
                             Some(idx) => idx,
@@ -1789,7 +1910,7 @@ impl SqlExecutor {
                                 // Try suffix match
                                 if parts.len() == 2 {
                                     let suffix = format!("{}.{}", parts[0].value, parts[1].value);
-                                    
+
                                     let mut found = false;
                                     let mut idx = 0;
                                     for (i, col) in table.columns().iter().enumerate() {
@@ -1799,7 +1920,7 @@ impl SqlExecutor {
                                             break;
                                         }
                                     }
-                                    
+
                                     if found {
                                         idx
                                     } else {
@@ -1810,30 +1931,39 @@ impl SqlExecutor {
                                 }
                             }
                         };
-                        
+
                         // Extract all values for this column
-                        Ok(table.rows().iter().map(|row| row[col_idx].clone()).collect())
-                    },
+                        Ok(table
+                            .rows()
+                            .iter()
+                            .map(|row| row[col_idx].clone())
+                            .collect())
+                    }
                     _ => Err(SqawkError::UnsupportedSqlFeature(
-                        "Only column references are supported in aggregate functions".to_string()
+                        "Only column references are supported in aggregate functions".to_string(),
                     )),
                 }
-            },
+            }
             _ => Err(SqawkError::UnsupportedSqlFeature(
-                "Unsupported function argument type".to_string()
+                "Unsupported function argument type".to_string(),
             )),
         }
     }
-    
+
     /// Resolve a simple (unqualified) column reference like 'name'
     ///
     /// First tries exact match, then tries to match as suffix of qualified column
-    fn resolve_simple_column_reference(&self, column_name: &str, row: &[Value], table: &Table) -> SqawkResult<Value> {
+    fn resolve_simple_column_reference(
+        &self,
+        column_name: &str,
+        row: &[Value],
+        table: &Table,
+    ) -> SqawkResult<Value> {
         // First try as an exact column name match
         if let Some(idx) = table.column_index(column_name) {
             return self.get_row_value_at_index(idx, row);
         }
-        
+
         // Try to find a matching qualified column (e.g., for "name", match "table.name")
         let suffix = format!(".{}", column_name);
         for (i, col) in table.columns().iter().enumerate() {
@@ -1841,58 +1971,70 @@ impl SqlExecutor {
                 return self.get_row_value_at_index(i, row);
             }
         }
-        
+
         // If we got here, the column wasn't found
         Err(SqawkError::ColumnNotFound(column_name.to_string()))
     }
-    
+
     /// Resolve a qualified column reference like 'table.column'
     ///
     /// First tries exact match, then tries suffix match for joins
-    fn resolve_qualified_column_reference(&self, parts: &[sqlparser::ast::Ident], row: &[Value], table: &Table) -> SqawkResult<Value> {
+    fn resolve_qualified_column_reference(
+        &self,
+        parts: &[sqlparser::ast::Ident],
+        row: &[Value],
+        table: &Table,
+    ) -> SqawkResult<Value> {
         // Build the fully qualified column name from parts
-        let qualified_name = parts.iter()
+        let qualified_name = parts
+            .iter()
             .map(|ident| ident.value.clone())
             .collect::<Vec<_>>()
             .join(".");
-        
+
         // Try to find an exact match for the qualified column
         if let Some(idx) = table.column_index(&qualified_name) {
             return self.get_row_value_at_index(idx, row);
         }
-        
+
         // If we didn't find an exact match, try a suffix match
         // This helps with cases like "users.id" matching "users_orders_cross.users.id"
         if parts.len() == 2 {
             return self.try_suffix_match(parts, row, table);
         }
-        
+
         // If we got here, the qualified column wasn't found
         Err(SqawkError::ColumnNotFound(qualified_name))
     }
-    
+
     /// Try to match a column reference as a suffix
     ///
     /// This helps with joins where the full reference might be something like
     /// 'users_orders_cross.users.id' but the user references 'users.id'
-    fn try_suffix_match(&self, parts: &[sqlparser::ast::Ident], row: &[Value], table: &Table) -> SqawkResult<Value> {
+    fn try_suffix_match(
+        &self,
+        parts: &[sqlparser::ast::Ident],
+        row: &[Value],
+        table: &Table,
+    ) -> SqawkResult<Value> {
         let suffix = format!("{}.{}", parts[0].value, parts[1].value);
-        
+
         for (i, col) in table.columns().iter().enumerate() {
             if col.ends_with(&suffix) {
                 return self.get_row_value_at_index(i, row);
             }
         }
-        
+
         // If no suffix match was found, report the column as not found
         Err(SqawkError::ColumnNotFound(
-            parts.iter()
+            parts
+                .iter()
                 .map(|ident| ident.value.clone())
                 .collect::<Vec<_>>()
-                .join(".")
+                .join("."),
         ))
     }
-    
+
     /// Get a value from a row at the specified index with bounds checking
     fn get_row_value_at_index(&self, idx: usize, row: &[Value]) -> SqawkResult<Value> {
         if idx < row.len() {
@@ -1926,27 +2068,31 @@ impl SqlExecutor {
     ) -> SqawkResult<usize> {
         // Get the target table name as a string
         let table_name = self.get_table_name(&table)?;
-        
+
         // Verify the table exists and get necessary info
         let table_ref = self.file_handler.get_table(&table_name)?;
-        
+
         // Process assignments to get column indices and their new values
         let column_assignments = self.process_update_assignments(&assignments, table_ref)?;
-            
+
         // Find rows to update based on WHERE clause
         let rows_to_update = self.find_rows_to_update(selection.as_ref(), table_ref)?;
-        
+
         // Compute all values for each assignment before getting a mutable reference
         let updates = self.compute_update_values(&rows_to_update, &column_assignments)?;
-        
+
         // Apply updates with a mutable reference, now that all expressions have been evaluated
         self.apply_updates(&table_name, updates)
     }
-    
+
     /// Process assignment expressions for an UPDATE statement
     ///
     /// Converts SQL assignments to column indices and expressions
-    fn process_update_assignments(&self, assignments: &[Assignment], table: &Table) -> SqawkResult<Vec<(usize, Expr)>> {
+    fn process_update_assignments(
+        &self,
+        assignments: &[Assignment],
+        table: &Table,
+    ) -> SqawkResult<Vec<(usize, Expr)>> {
         assignments
             .iter()
             .map(|assignment| {
@@ -1956,25 +2102,29 @@ impl SqlExecutor {
                         "Compound column identifiers not supported".to_string(),
                     ));
                 }
-                
+
                 let column_name = assignment.id[0].value.clone();
-                
+
                 let column_idx = table
                     .column_index(&column_name)
-                    .ok_or_else(|| SqawkError::ColumnNotFound(column_name))?;
-                
+                    .ok_or(SqawkError::ColumnNotFound(column_name))?;
+
                 // Clone the Expr value since we can't take ownership of it
                 Ok((column_idx, assignment.value.clone()))
             })
             .collect::<SqawkResult<Vec<_>>>()
     }
-    
+
     /// Find rows to update based on an optional WHERE clause
     ///
     /// If no WHERE clause is provided, all rows will be updated
-    fn find_rows_to_update(&self, where_expr: Option<&Expr>, table: &Table) -> SqawkResult<Vec<usize>> {
+    fn find_rows_to_update(
+        &self,
+        where_expr: Option<&Expr>,
+        table: &Table,
+    ) -> SqawkResult<Vec<usize>> {
         let mut rows_to_update = Vec::new();
-        
+
         if let Some(expr) = where_expr {
             // Filter rows that match the WHERE condition
             for (idx, row) in table.rows().iter().enumerate() {
@@ -1986,17 +2136,21 @@ impl SqlExecutor {
             // If no WHERE clause, update all rows
             rows_to_update = (0..table.row_count()).collect();
         }
-        
+
         Ok(rows_to_update)
     }
-    
+
     /// Compute all values for an UPDATE operation
     ///
     /// This avoids the borrow checker conflict between evaluate_expr and table_mut
     /// by pre-computing all values before applying them
-    fn compute_update_values(&self, rows: &[usize], column_assignments: &[(usize, Expr)]) -> SqawkResult<Vec<(usize, usize, Value)>> {
+    fn compute_update_values(
+        &self,
+        rows: &[usize],
+        column_assignments: &[(usize, Expr)],
+    ) -> SqawkResult<Vec<(usize, usize, Value)>> {
         let mut updates = Vec::new();
-        
+
         // Pre-compute all values to be updated
         for &row_idx in rows {
             for &(col_idx, ref expr) in column_assignments {
@@ -2004,33 +2158,36 @@ impl SqlExecutor {
                 updates.push((row_idx, col_idx, value));
             }
         }
-        
+
         Ok(updates)
     }
-    
+
     /// Apply a set of pre-computed updates to a table
     ///
     /// Returns the number of rows that were affected
-    fn apply_updates(&mut self, table_name: &str, updates: Vec<(usize, usize, Value)>) -> SqawkResult<usize> {
+    fn apply_updates(
+        &mut self,
+        table_name: &str,
+        updates: Vec<(usize, usize, Value)>,
+    ) -> SqawkResult<usize> {
         // Calculate how many rows were affected (distinct row indices)
-        let row_indices: std::collections::HashSet<usize> = updates.iter()
-            .map(|(row_idx, _, _)| *row_idx)
-            .collect();
-        
+        let row_indices: std::collections::HashSet<usize> =
+            updates.iter().map(|(row_idx, _, _)| *row_idx).collect();
+
         let row_count = row_indices.len();
-        
+
         if row_count > 0 {
             let table = self.file_handler.get_table_mut(table_name)?;
-            
+
             // Apply all the pre-computed updates
             for (row_idx, col_idx, value) in updates {
                 table.update_value(row_idx, col_idx, value)?;
             }
-            
+
             // Mark the table as modified
             self.modified_tables.insert(table_name.to_string());
         }
-        
+
         Ok(row_count)
     }
 

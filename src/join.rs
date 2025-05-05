@@ -53,6 +53,12 @@ pub struct JoinExecutor {
     // Placeholder for future join state
 }
 
+impl Default for JoinExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl JoinExecutor {
     /// Create a new join executor
     pub fn new() -> Self {
@@ -115,47 +121,52 @@ impl JoinExecutor {
     ///
     /// # Returns
     /// * The resulting inner-joined table
-    fn execute_inner_join(&self, left: &Table, right: &Table, _on_expr: &Expr) -> SqawkResult<Table> {
+    fn execute_inner_join(
+        &self,
+        left: &Table,
+        right: &Table,
+        _on_expr: &Expr,
+    ) -> SqawkResult<Table> {
         // For now, we'll just do a cross join
         // In a real implementation, we would evaluate the ON condition for each row combination
-        
+
         // Create a new table with combined columns from both tables
         let mut result_columns = Vec::with_capacity(left.column_count() + right.column_count());
-        
+
         // Add qualified columns from left table
         for col in left.columns() {
             result_columns.push(format!("left.{}", col));
         }
-        
+
         // Add qualified columns from right table
         for col in right.columns() {
             result_columns.push(format!("right.{}", col));
         }
-        
+
         let mut result = Table::new("joined", result_columns, None);
-        
+
         // The naive nested loop join approach
-        for (_left_idx, left_row) in left.rows().iter().enumerate() {
-            for (_right_idx, right_row) in right.rows().iter().enumerate() {
+        for left_row in left.rows().iter() {
+            for right_row in right.rows().iter() {
                 // Join the rows
                 let mut new_row = Vec::with_capacity(left_row.len() + right_row.len());
-                
+
                 // Add values from left row
                 for value in left_row {
                     new_row.push(value.clone());
                 }
-                
+
                 // Add values from right row
                 for value in right_row {
                     new_row.push(value.clone());
                 }
-                
+
                 // Add the combined row to the result table
                 // TODO: Evaluate ON condition here
                 let _ = result.add_row(new_row);
             }
         }
-        
+
         Ok(result)
     }
 }

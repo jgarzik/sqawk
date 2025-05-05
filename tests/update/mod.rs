@@ -1,10 +1,8 @@
 //! Tests for UPDATE functionality
-//! 
+//!
 //! This file contains tests for the SQL UPDATE statement.
 
-use crate::helpers::{
-    create_temp_dir, prepare_test_file,
-};
+use crate::helpers::{create_temp_dir, prepare_test_file};
 
 use assert_cmd;
 use predicates;

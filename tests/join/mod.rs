@@ -2,9 +2,9 @@
 //!
 //! Tests for cross joins, inner joins, and multi-table joins.
 
-use std::path::PathBuf;
 use assert_cmd::Command;
 use predicates::prelude::*;
+use std::path::PathBuf;
 
 // Helper function to get the path to static test files for joins
 fn get_users_file() -> PathBuf {
@@ -67,7 +67,9 @@ fn test_inner_join() -> Result<(), Box<dyn std::error::Error>> {
 
     // Verify verbose output contains filtering indications
     cmd.assert()
-        .stderr(predicate::str::contains("Processing multiple tables in FROM clause as CROSS JOINs"))
+        .stderr(predicate::str::contains(
+            "Processing multiple tables in FROM clause as CROSS JOINs",
+        ))
         .stderr(predicate::str::contains("WHERE comparison"));
 
     Ok(())
@@ -83,9 +85,9 @@ fn test_inner_join_with_projection() -> Result<(), Box<dyn std::error::Error>> {
         .arg(get_orders_file().to_str().unwrap());
 
     // Check output - should include only selected columns
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("users.name,orders.product_id,orders.date"));
+    cmd.assert().success().stdout(predicate::str::contains(
+        "users.name,orders.product_id,orders.date",
+    ));
 
     // Verify we have the correct data
     cmd.assert()
@@ -106,9 +108,9 @@ fn test_three_table_join() -> Result<(), Box<dyn std::error::Error>> {
         .arg(get_products_file().to_str().unwrap());
 
     // Check output headers
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("users.name,products.name,products.price,orders.date"));
+    cmd.assert().success().stdout(predicate::str::contains(
+        "users.name,products.name,products.price,orders.date",
+    ));
 
     // Check for some expected combinations
     cmd.assert()
@@ -133,7 +135,9 @@ fn test_join_with_additional_filtering() -> Result<(), Box<dyn std::error::Error
     // We should only see products with price > 500
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("users.name,products.name,products.price"))
+        .stdout(predicate::str::contains(
+            "users.name,products.name,products.price",
+        ))
         // These should be included (price > 500)
         .stdout(predicate::str::contains("John,Laptop,1200"))
         .stdout(predicate::str::contains("Jane,Phone,800"));
@@ -141,9 +145,18 @@ fn test_join_with_additional_filtering() -> Result<(), Box<dyn std::error::Error
     // Check that output DOES NOT contain these cheaper products
     let output = cmd.output()?;
     let stdout = String::from_utf8(output.stdout)?;
-    assert!(!stdout.contains("Jane,Monitor,350"), "Should not contain Monitor (price <= 500)");
-    assert!(!stdout.contains("John,Headphones,150"), "Should not contain Headphones (price <= 500)");
-    assert!(!stdout.contains("John,Keyboard,80"), "Should not contain Keyboard (price <= 500)");
+    assert!(
+        !stdout.contains("Jane,Monitor,350"),
+        "Should not contain Monitor (price <= 500)"
+    );
+    assert!(
+        !stdout.contains("John,Headphones,150"),
+        "Should not contain Headphones (price <= 500)"
+    );
+    assert!(
+        !stdout.contains("John,Keyboard,80"),
+        "Should not contain Keyboard (price <= 500)"
+    );
 
     Ok(())
 }
@@ -152,7 +165,7 @@ fn test_join_with_additional_filtering() -> Result<(), Box<dyn std::error::Error
 fn test_join_order_preservation() -> Result<(), Box<dyn std::error::Error>> {
     // Test that join result order is preserved based on input order
     // This test verifies that the order of rows in the result set
-    
+
     let mut cmd = Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT users.name, orders.id FROM users, orders WHERE users.id = orders.user_id")
@@ -165,6 +178,6 @@ fn test_join_order_preservation() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicate::str::contains("users.name,orders.id"))
         .stdout(predicate::str::contains("John,101"))
         .stdout(predicate::str::contains("Jane,102"));
-    
+
     Ok(())
 }
