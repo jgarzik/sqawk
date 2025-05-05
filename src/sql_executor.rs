@@ -65,6 +65,17 @@ impl SqlExecutor {
                 self.execute_insert(table_name, columns, source)?;
                 Ok(None)
             },
+            Statement::Delete { from, selection, .. } => {
+                if from.len() != 1 {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "DELETE with multiple tables is not supported".to_string()
+                    ));
+                }
+                let table_with_joins = &from[0];
+                let deleted_count = self.execute_delete(table_with_joins, selection)?;
+                eprintln!("Deleted {} rows", deleted_count);
+                Ok(None)
+            },
             _ => {
                 Err(SqawkError::UnsupportedSqlFeature(
                     format!("Unsupported SQL statement: {:?}", statement)
@@ -185,6 +196,85 @@ impl SqlExecutor {
                     "Only INSERT ... VALUES is supported".to_string()
                 ))
             }
+        }
+    }
+    
+    /// Execute a DELETE statement
+    ///
+    /// This function deletes rows from a table based on an optional WHERE condition.
+    /// If no WHERE condition is provided, all rows are deleted.
+    ///
+    /// # Arguments
+    /// * `table_with_joins` - The table reference to delete rows from
+    /// * `selection` - Optional WHERE clause to filter which rows to delete
+    ///
+    /// # Returns
+    /// * The number of rows that were deleted
+    fn execute_delete(
+        &mut self, 
+        table_with_joins: &TableWithJoins,
+        selection: Option<Expr>
+    ) -> SqawkResult<usize> {
+        // Get the target table name
+        let table_name = self.get_table_name(table_with_joins)?;
+        
+        // If there's a WHERE clause, we need to precompute which rows match before modifying the table
+        if let Some(ref where_expr) = selection {
+            eprintln!("Executing DELETE with WHERE clause: {:?}", where_expr);
+            
+            // Create a list of row indices to delete
+            let table_ref = self.csv_handler.get_table(&table_name)?;
+            
+            // Evaluate WHERE condition for each row before modifying the table
+            // to avoid borrow checker issues
+            let mut rows_to_delete: Vec<usize> = Vec::new();
+            
+            for (idx, row) in table_ref.rows().iter().enumerate() {
+                if self.evaluate_condition(where_expr, row, table_ref).unwrap_or(false) {
+                    rows_to_delete.push(idx);
+                }
+            }
+            
+            // Now get mutable reference and delete the rows
+            let table = self.csv_handler.get_table_mut(&table_name)?;
+            
+            // If we have rows to delete, create a new set of rows excluding the ones to delete
+            if !rows_to_delete.is_empty() {
+                let deleted_count = rows_to_delete.len();
+                
+                // Create a new row set excluding the rows to delete
+                let mut new_rows: Vec<Vec<Value>> = Vec::with_capacity(table.row_count() - deleted_count);
+                
+                for (idx, row) in table.rows().iter().enumerate() {
+                    if !rows_to_delete.contains(&idx) {
+                        new_rows.push(row.clone());
+                    }
+                }
+                
+                table.replace_rows(new_rows);
+                
+                // Mark the table as modified
+                self.modified_tables.insert(table_name);
+                
+                Ok(deleted_count)
+            } else {
+                // No rows matched the WHERE condition
+                Ok(0)
+            }
+        } else {
+            // No WHERE clause means delete all rows
+            eprintln!("Executing DELETE (all rows)");
+            
+            let table = self.csv_handler.get_table_mut(&table_name)?;
+            let deleted_count = table.row_count();
+            
+            // Replace with empty row set
+            table.replace_rows(Vec::new());
+            
+            // Mark the table as modified
+            self.modified_tables.insert(table_name);
+            
+            Ok(deleted_count)
         }
     }
     

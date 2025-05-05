@@ -26,7 +26,8 @@ fn test_equals_operator() -> Result<(), Box<dyn std::error::Error>> {
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s").arg("SELECT * FROM sample WHERE age = 30")
-       .arg(file_path);
+       .arg(file_path)
+       .arg("--dry-run");
        
     cmd.assert()
        .success()
@@ -43,7 +44,8 @@ fn test_not_equals_operator() -> Result<(), Box<dyn std::error::Error>> {
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s").arg("SELECT * FROM sample WHERE age != 30")
-       .arg(file_path);
+       .arg(file_path)
+       .arg("--dry-run");
        
     cmd.assert()
        .success()
@@ -62,7 +64,8 @@ fn test_greater_than_operator() -> Result<(), Box<dyn std::error::Error>> {
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s").arg("SELECT * FROM sample WHERE age > 30")
-       .arg(file_path);
+       .arg(file_path)
+       .arg("--dry-run");
        
     cmd.assert()
        .success()
@@ -81,7 +84,8 @@ fn test_less_than_operator() -> Result<(), Box<dyn std::error::Error>> {
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s").arg("SELECT * FROM sample WHERE age < 30")
-       .arg(file_path);
+       .arg(file_path)
+       .arg("--dry-run");
        
     cmd.assert()
        .success()
@@ -100,7 +104,8 @@ fn test_greater_than_or_equal_operator() -> Result<(), Box<dyn std::error::Error
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s").arg("SELECT * FROM sample WHERE age >= 30")
-       .arg(file_path);
+       .arg(file_path)
+       .arg("--dry-run");
        
     cmd.assert()
        .success()
@@ -119,7 +124,8 @@ fn test_less_than_or_equal_operator() -> Result<(), Box<dyn std::error::Error>> 
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s").arg("SELECT * FROM sample WHERE age <= 30")
-       .arg(file_path);
+       .arg(file_path)
+       .arg("--dry-run");
        
     cmd.assert()
        .success()
@@ -138,7 +144,8 @@ fn test_equals_with_no_matches() -> Result<(), Box<dyn std::error::Error>> {
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s").arg("SELECT * FROM sample WHERE age = 40")
-       .arg(file_path);
+       .arg(file_path)
+       .arg("--dry-run");
        
     // Should return just the header, no data rows
     cmd.assert()
@@ -163,7 +170,8 @@ fn test_comparison_boundary_values() -> Result<(), Box<dyn std::error::Error>> {
     // Test with max integer value
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s").arg("SELECT * FROM boundaries WHERE value = 9223372036854775807")
-       .arg(file_path.clone());
+       .arg(file_path.clone())
+       .arg("--dry-run");
        
     cmd.assert()
        .success()
@@ -173,7 +181,8 @@ fn test_comparison_boundary_values() -> Result<(), Box<dyn std::error::Error>> {
     // Test with min integer value
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s").arg("SELECT * FROM boundaries WHERE value = -9223372036854775808")
-       .arg(file_path.clone());
+       .arg(file_path.clone())
+       .arg("--dry-run");
        
     cmd.assert()
        .success()
@@ -183,7 +192,8 @@ fn test_comparison_boundary_values() -> Result<(), Box<dyn std::error::Error>> {
     // Test greater than zero
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s").arg("SELECT * FROM boundaries WHERE value > 0")
-       .arg(file_path.clone());
+       .arg(file_path.clone())
+       .arg("--dry-run");
        
     cmd.assert()
        .success()
@@ -194,7 +204,8 @@ fn test_comparison_boundary_values() -> Result<(), Box<dyn std::error::Error>> {
     // Test less than zero
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s").arg("SELECT * FROM boundaries WHERE value < 0")
-       .arg(file_path.clone());
+       .arg(file_path.clone())
+       .arg("--dry-run");
        
     cmd.assert()
        .success()

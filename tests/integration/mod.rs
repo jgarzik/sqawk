@@ -15,6 +15,7 @@ use crate::helpers::{
 use std::fs;
 use assert_cmd;
 use predicates;
+use predicates::prelude::PredicateBooleanExt; // Import trait for .not()
 
 #[test]
 fn test_basic_select() -> Result<(), Box<dyn std::error::Error>> {
@@ -196,4 +197,93 @@ fn test_static_file_query() -> Result<(), Box<dyn std::error::Error>> {
     
     // Use the static sample.csv file
     run_test_case_with_static_file(test_case, get_static_sample_file())
+}
+
+#[test]
+fn test_delete_with_where() -> Result<(), Box<dyn std::error::Error>> {
+    // This test verifies the DELETE functionality with a WHERE clause
+    // We need to verify the file was modified, so we'll use a custom test function
+    let temp_dir = create_temp_dir()?;
+    let file_path = prepare_test_file(temp_dir.path())?;
+    
+    // First verify we have 3 rows initially
+    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    cmd.arg("-s").arg("SELECT * FROM people")
+       .arg(file_path.to_str().unwrap())
+       .arg("--dry-run");
+       
+    cmd.assert()
+       .success()
+       .stdout(predicates::str::contains("1,Alice,30"))
+       .stdout(predicates::str::contains("2,Bob,25"))
+       .stdout(predicates::str::contains("3,Charlie,35"));
+    
+    // Now execute DELETE with WHERE
+    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    cmd.arg("-s").arg("DELETE FROM people WHERE age > 30")
+       .arg("-s").arg("SELECT * FROM people")  // Check result after deletion
+       .arg(file_path.to_str().unwrap())
+       .arg("-v")  // Verbose mode to see more details
+       .arg("--dry-run");  // Prevent file modifications
+    
+    // Verify deletion worked correctly
+    cmd.assert()
+       .success()
+       .stderr(predicates::str::contains("Deleted 1 rows"))  // Should delete only Charlie
+       .stdout(predicates::str::contains("id,name,age"))
+       .stdout(predicates::str::contains("1,Alice,30"))
+       .stdout(predicates::str::contains("2,Bob,25"))
+       .stdout(predicates::str::contains("3,Charlie,35").not());
+       
+    // File should NOT be modified in dry-run mode
+    let content = fs::read_to_string(&file_path)?;
+    assert!(content.contains("1,Alice,30"));
+    assert!(content.contains("2,Bob,25"));
+    assert!(content.contains("3,Charlie,35")); // Charlie should still be there
+    
+    Ok(())
+}
+
+#[test]
+fn test_delete_all() -> Result<(), Box<dyn std::error::Error>> {
+    // This test verifies the DELETE functionality without a WHERE clause (deletes all rows)
+    let temp_dir = create_temp_dir()?;
+    let file_path = prepare_test_file(temp_dir.path())?;
+    
+    // First verify we have rows initially
+    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    cmd.arg("-s").arg("SELECT * FROM people")
+       .arg(file_path.to_str().unwrap())
+       .arg("--dry-run");
+       
+    cmd.assert()
+       .success()
+       .stdout(predicates::str::contains("id,name,age"))
+       .stdout(predicates::str::contains("1,Alice,30"));
+    
+    // Now execute DELETE without WHERE
+    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    cmd.arg("-s").arg("DELETE FROM people")
+       .arg("-s").arg("SELECT * FROM people")  // Check result after deletion
+       .arg(file_path.to_str().unwrap())
+       .arg("-v")  // Verbose mode to see more details
+       .arg("--dry-run");  // Prevent file modifications
+    
+    // Verify deletion worked correctly - should only show header, no rows
+    cmd.assert()
+       .success()
+       .stderr(predicates::str::contains("Deleted 3 rows"))  // Should delete all 3 rows
+       .stdout(predicates::str::contains("id,name,age"))
+       .stdout(predicates::str::contains("1,Alice,30").not())
+       .stdout(predicates::str::contains("2,Bob,25").not())
+       .stdout(predicates::str::contains("3,Charlie,35").not());
+       
+    // File should NOT be modified in dry-run mode
+    let content = fs::read_to_string(&file_path)?;
+    assert!(content.contains("id,name,age"));
+    assert!(content.contains("1,Alice,30")); // All rows should still be there
+    assert!(content.contains("2,Bob,25"));
+    assert!(content.contains("3,Charlie,35"));
+    
+    Ok(())
 }

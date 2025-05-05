@@ -78,6 +78,9 @@ fn run_test_case_with_file(
         cmd.arg("-v");
     }
     
+    // Always use dry-run mode to prevent modifying test files
+    cmd.arg("--dry-run");
+    
     // Add any additional arguments
     for arg in &test_case.args {
         cmd.arg(arg);

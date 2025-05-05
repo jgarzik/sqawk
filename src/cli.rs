@@ -20,6 +20,10 @@ pub struct SqawkArgs {
     /// Verbose output
     #[clap(short, long, help = "Enable verbose output")]
     pub verbose: bool,
+    
+    /// Dry run mode: don't modify any files
+    #[clap(long, help = "Don't write changes back to files (dry run)")]
+    pub dry_run: bool,
 }
 
 /// Parse command-line arguments
