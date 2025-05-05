@@ -1,0 +1,41 @@
+modules = ["rust"]
+
+[nix]
+channel = "stable-24_05"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Sqawk Build and Run"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "sqawk-build-and-run"
+
+[[workflows.workflow]]
+name = "Sqawk Build and Run"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cargo build && echo \"Testing Sqawk with sample data:\" && cargo run -- -s \"SELECT * FROM sample\" tests/data/sample.csv -v"
+
+[[workflows.workflow]]
+name = "sqawk-build-and-run"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = """
+cd $(pwd) && cargo build && echo -e \"
+--- Testing basic query ---\" && cargo run -- -s \"SELECT * FROM sample\" tests/data/sample.csv"""
+
+[deployment]
+run = ["sh", "-c", "cargo build && echo \"Testing Sqawk with sample data:\" && cargo run -- -s \"SELECT * FROM sample\" tests/data/sample.csv -v"]

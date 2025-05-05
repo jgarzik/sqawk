@@ -1,0 +1,10 @@
+/home/runner/workspace/target/debug/deps/libdifflib-14a77fee27c51c4a.rmeta: /home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/lib.rs /home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/differ.rs /home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/sequencematcher.rs /home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/utils.rs
+
+/home/runner/workspace/target/debug/deps/libdifflib-14a77fee27c51c4a.rlib: /home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/lib.rs /home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/differ.rs /home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/sequencematcher.rs /home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/utils.rs
+
+/home/runner/workspace/target/debug/deps/difflib-14a77fee27c51c4a.d: /home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/lib.rs /home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/differ.rs /home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/sequencematcher.rs /home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/utils.rs
+
+/home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/lib.rs:
+/home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/differ.rs:
+/home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/sequencematcher.rs:
+/home/runner/workspace/.local/share/.cargo/registry/src/index.crates.io-6f17d22bba15001f/difflib-0.4.0/src/utils.rs:

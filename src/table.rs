@@ -1,0 +1,236 @@
+//! Table module for sqawk
+//!
+//! This module provides the in-memory table representation for the sqawk utility.
+
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::path::PathBuf;
+
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+use crate::error::{SqawkError, SqawkResult};
+
+/// Represents a value in a table cell
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Value {
+    Null,
+    Integer(i64),
+    Float(f64),
+    String(String),
+    Boolean(bool),
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Null => write!(f, "NULL"),
+            Value::Integer(i) => write!(f, "{}", i),
+            Value::Float(float) => write!(f, "{}", float),
+            Value::String(s) => write!(f, "{}", s),
+            Value::Boolean(b) => write!(f, "{}", b),
+        }
+    }
+}
+
+impl From<&str> for Value {
+    fn from(s: &str) -> Self {
+        // Try to parse as integer first
+        if let Ok(i) = s.parse::<i64>() {
+            return Value::Integer(i);
+        }
+        
+        // Try to parse as float
+        if let Ok(fl) = s.parse::<f64>() {
+            return Value::Float(fl);
+        }
+        
+        // Try to parse as boolean
+        match s.to_lowercase().as_str() {
+            "true" | "yes" | "1" => return Value::Boolean(true),
+            "false" | "no" | "0" => return Value::Boolean(false),
+            "" => return Value::Null,
+            _ => {}
+        }
+        
+        // Default to string
+        Value::String(s.to_string())
+    }
+}
+
+/// Represents a row in a table
+pub type Row = Vec<Value>;
+
+/// Represents an in-memory table
+#[derive(Debug, Clone)]
+pub struct Table {
+    /// Name of the table
+    name: String,
+    
+    /// Column names
+    columns: Vec<String>,
+    
+    /// Map of column names to their indices
+    column_map: HashMap<String, usize>,
+    
+    /// Rows of data
+    rows: Vec<Row>,
+    
+    /// Source file path, if loaded from a file
+    source_file: Option<PathBuf>,
+    
+    /// Whether the table was modified since loading
+    modified: bool,
+}
+
+impl Table {
+    /// Create a new table with the given name and columns
+    pub fn new(name: &str, columns: Vec<String>, source_file: Option<PathBuf>) -> Self {
+        let column_map = columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+        
+        Table {
+            name: name.to_string(),
+            columns,
+            column_map,
+            rows: Vec::new(),
+            source_file,
+            modified: false,
+        }
+    }
+    
+    /// Get the table name
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    
+    /// Get the columns of the table
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+    
+    /// Get the column count
+    pub fn column_count(&self) -> usize {
+        self.columns.len()
+    }
+    
+    /// Get the rows of the table
+    pub fn rows(&self) -> &[Row] {
+        &self.rows
+    }
+    
+    /// Get the row count
+    pub fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+    
+    /// Get a reference to a row by index
+    pub fn row(&self, index: usize) -> Option<&Row> {
+        self.rows.get(index)
+    }
+    
+    /// Add a row to the table
+    pub fn add_row(&mut self, row: Row) -> SqawkResult<()> {
+        if row.len() != self.columns.len() {
+            return Err(SqawkError::InvalidSqlQuery(format!(
+                "Row has {} columns, but table '{}' has {} columns",
+                row.len(),
+                self.name,
+                self.columns.len()
+            )));
+        }
+        
+        self.rows.push(row);
+        self.modified = true;
+        Ok(())
+    }
+    
+    /// Get the source file path
+    pub fn source_file(&self) -> Option<&PathBuf> {
+        self.source_file.as_ref()
+    }
+    
+    /// Check if the table was modified
+    pub fn is_modified(&self) -> bool {
+        self.modified
+    }
+    
+    /// Get the index of a column by name
+    pub fn column_index(&self, name: &str) -> Option<usize> {
+        self.column_map.get(name).copied()
+    }
+    
+    /// Print the table to stdout
+    pub fn print_to_stdout(&self) -> Result<()> {
+        // Print header
+        for (i, col) in self.columns.iter().enumerate() {
+            if i > 0 {
+                print!(",");
+            }
+            print!("{}", col);
+        }
+        println!();
+        
+        // Print rows
+        for row in &self.rows {
+            for (i, val) in row.iter().enumerate() {
+                if i > 0 {
+                    print!(",");
+                }
+                print!("{}", val);
+            }
+            println!();
+        }
+        
+        Ok(())
+    }
+    
+    /// Create a new table with a subset of rows matching a predicate
+    pub fn select<F>(&self, predicate: F) -> Self 
+    where
+        F: Fn(&Row) -> bool
+    {
+        let mut result = Table::new(&self.name, self.columns.clone(), None);
+        
+        for row in &self.rows {
+            if predicate(row) {
+                result.rows.push(row.clone());
+            }
+        }
+        
+        result
+    }
+    
+    /// Create a new table with only specified columns
+    pub fn project(&self, column_indices: &[usize]) -> SqawkResult<Self> {
+        // Validate column indices
+        for &idx in column_indices {
+            if idx >= self.columns.len() {
+                return Err(SqawkError::ColumnNotFound(format!("Column index {} out of bounds", idx)));
+            }
+        }
+        
+        // Create new column list
+        let columns: Vec<String> = column_indices
+            .iter()
+            .map(|&idx| self.columns[idx].clone())
+            .collect();
+        
+        let mut result = Table::new(&self.name, columns, None);
+        
+        // Project rows
+        for row in &self.rows {
+            let projected_row: Vec<Value> = column_indices
+                .iter()
+                .map(|&idx| row[idx].clone())
+                .collect();
+            
+            result.add_row(projected_row)?;
+        }
+        
+        Ok(result)
+    }
+}

@@ -1,0 +1,20 @@
+[package]
+name = "sqawk"
+version = "0.1.0"
+edition = "2021"
+authors = ["sqawk"]
+description = "An SQL-based command-line tool for processing CSV files"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+sqlparser = "0.36"
+csv = "1.2"
+anyhow = "1.0"
+thiserror = "1.0"
+regex = "1.9"
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.0"
+tempfile = "3.8"
