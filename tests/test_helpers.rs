@@ -113,68 +113,6 @@ fn run_test_case_with_file(
     Ok(())
 }
 
-/// Run a sqawk test with a custom test setup
-/// This function allows greater control over the test process
-pub fn run_test_with_custom_file<F, T>(
-    mut test_case: SqawkTestCase, 
-    prepare_file_fn: F
-) -> Result<T, Box<dyn std::error::Error>> 
-where 
-    F: FnOnce(&Path, &mut SqawkTestCase) -> Result<(Option<PathBuf>, T), Box<dyn std::error::Error>>
-{
-    // Create a temporary directory for test files
-    let temp_dir = create_temp_dir()?;
-    let (maybe_test_file, return_value) = prepare_file_fn(temp_dir.path(), &mut test_case)?;
-    
-    // Build the command
-    let mut cmd = Command::cargo_bin("sqawk")?;
-    
-    // Add SQL statement
-    cmd.arg("-s").arg(&test_case.sql);
-    
-    // Add verbose flag if requested
-    if test_case.verbose {
-        cmd.arg("-v");
-    }
-    
-    // Add any additional arguments
-    for arg in &test_case.args {
-        cmd.arg(arg);
-    }
-    
-    // Add table name mapping if specified and we have a test file, 
-    // or use the test file directly if provided
-    if let Some(test_file) = maybe_test_file {
-        if let Some(table_name) = test_case.table_name {
-            cmd.arg(format!("{}={}", table_name, test_file.to_str().unwrap()));
-        } else {
-            cmd.arg(test_file.to_str().unwrap());
-        }
-    }
-    
-    // Set up assertions
-    let mut assert = cmd.assert();
-    
-    // Check success/failure
-    if test_case.should_succeed {
-        assert = assert.success();
-    } else {
-        assert = assert.failure();
-    }
-    
-    // Check stdout expectations
-    for expected in test_case.expected_stdout {
-        assert = assert.stdout(predicate::str::contains(expected));
-    }
-    
-    // Check stderr expectations
-    for expected in test_case.expected_stderr {
-        assert = assert.stderr(predicate::str::contains(expected));
-    }
-    
-    Ok(return_value)
-}
-
 /// Helper function to create a temp directory for tests, respecting CARGO_TARGET_TMPDIR if set
 pub fn create_temp_dir() -> Result<TempDir, Box<dyn std::error::Error>> {
     if let Ok(cargo_target_tmpdir) = env::var("CARGO_TARGET_TMPDIR") {
