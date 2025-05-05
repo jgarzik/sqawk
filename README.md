@@ -129,8 +129,9 @@ By default, sqawk doesn't modify input files. Use the `--write` flag to save cha
 
 For more detailed information, see:
 
+- [User Guide](doc/user_guide.md) - Complete guide to installing and using Sqawk
 - [SQL Language Reference](doc/sql_reference.md) - Comprehensive guide to Sqawk's SQL dialect
-- [In-Memory Database Architecture](doc/database.md) - Technical details about the database implementation
+- [In-Memory Database Architecture](doc/database.md) - Technical details about the database implementation (for developers)
 
 ## License
 
