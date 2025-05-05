@@ -88,17 +88,21 @@ impl SqlExecutor {
                 let table_name = self.get_table_name(table_with_joins)?;
                 let source_table = self.csv_handler.get_table(&table_name)?;
                 
-                // Determine which columns to include in the result
+                // Determine which columns to include in the result (for projection)
                 let column_indices = self.resolve_select_items(&select.projection, source_table)?;
                 
-                // First filter rows if WHERE clause is present
+                // IMPORTANT: First filter rows if WHERE clause is present
+                // We must apply the WHERE clause before projection to ensure all columns 
+                // needed for filtering are available during the WHERE evaluation
                 let filtered_table = if let Some(where_clause) = &select.selection {
                     self.apply_where_clause(source_table.clone(), where_clause)?
                 } else {
+                    // If no WHERE clause, just use the source table as is
                     source_table.clone()
                 };
                 
                 // Then apply projection to get only the requested columns
+                // This happens AFTER filtering to ensure WHERE clauses can access all columns
                 let result_table = filtered_table.project(&column_indices)?;
                 
                 Ok(Some(result_table))
@@ -246,25 +250,59 @@ impl SqlExecutor {
     }
     
     /// Apply a WHERE clause to filter table rows
+    /// 
+    /// This function creates a new table containing only rows that match the condition
+    /// specified in the WHERE clause. It evaluates the condition for each row and includes
+    /// only those rows for which the condition evaluates to true.
+    /// 
+    /// # Arguments
+    /// * `table` - The source table to filter
+    /// * `where_expr` - The WHERE clause expression to evaluate
+    /// 
+    /// # Returns
+    /// * A new table containing only rows that match the condition
+    /// 
+    /// # Important
+    /// This function is called before column projection to ensure all columns
+    /// needed for the WHERE condition evaluation are available.
     fn apply_where_clause(&self, table: Table, where_expr: &Expr) -> SqawkResult<Table> {
         eprintln!("Applying WHERE clause: {:?}", where_expr);
         eprintln!("Table before filtering: {} rows", table.row_count());
         
         // Create a new table that only includes rows matching the WHERE condition
+        // by calling the table.select method with a closure that evaluates the condition
         let result = table.select(|row| {
+            // For each row, evaluate the WHERE condition expression
+            // If evaluation fails (returns an error), default to false (exclude the row)
             let matches = self.evaluate_condition(where_expr, row, &table)
                 .unwrap_or(false);
             
+            // Debug output for each row evaluation
             eprintln!("Row: {:?}, matches condition: {}", row, matches);
             matches
         });
         
+        // Log the filter results
         eprintln!("Table after filtering: {} rows", result.row_count());
         
         Ok(result)
     }
     
     /// Evaluate a condition expression against a row
+    /// 
+    /// This function evaluates SQL WHERE clause conditions against a specific row.
+    /// It handles various expression types including binary operations (comparisons),
+    /// IS NULL and IS NOT NULL checks.
+    ///
+    /// # Arguments
+    /// * `expr` - The SQL expression to evaluate
+    /// * `row` - The row data to evaluate the expression against
+    /// * `table` - The table containing column metadata for the row
+    ///
+    /// # Returns
+    /// * `Ok(true)` if the condition matches the row
+    /// * `Ok(false)` if the condition doesn't match
+    /// * `Err` if there's an error during evaluation (type mismatch, etc.)
     fn evaluate_condition(&self, expr: &Expr, row: &[Value], table: &Table) -> SqawkResult<bool> {
         match expr {
             Expr::BinaryOp { left, op, right } => {
@@ -274,25 +312,46 @@ impl SqlExecutor {
                 // Debug print the values being compared
                 eprintln!("WHERE comparison: {:?} {:?} {:?}", left_val, op, right_val);
                 
+                // Handle different comparison operators
                 match op {
+                    // Equal (=) operator
                     sqlparser::ast::BinaryOperator::Eq => {
+                        // Use the Value's implementation of PartialEq which handles type conversions
                         let result = left_val == right_val;
                         eprintln!("Equality result: {}", result);
                         Ok(result)
                     },
+                    
+                    // Not equal (!=) operator
                     sqlparser::ast::BinaryOperator::NotEq => Ok(left_val != right_val),
+                    
+                    // Greater than (>) operator
                     sqlparser::ast::BinaryOperator::Gt => {
+                        // Handle each type combination separately for correct numeric comparisons
                         match (&left_val, &right_val) {
+                            // Integer-Integer comparison
                             (Value::Integer(a), Value::Integer(b)) => Ok(a > b),
+                            
+                            // Float-Float comparison
                             (Value::Float(a), Value::Float(b)) => Ok(a > b),
+                            
+                            // Integer-Float comparison (convert Integer to Float)
                             (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) > *b),
+                            
+                            // Float-Integer comparison (convert Integer to Float)
                             (Value::Float(a), Value::Integer(b)) => Ok(*a > (*b as f64)),
+                            
+                            // String-String comparison (lexicographic)
                             (Value::String(a), Value::String(b)) => Ok(a > b),
+                            
+                            // Error for incompatible types
                             _ => Err(SqawkError::TypeError(
                                 format!("Cannot compare {:?} and {:?} with >", left_val, right_val)
                             )),
                         }
                     },
+                    
+                    // Less than (<) operator
                     sqlparser::ast::BinaryOperator::Lt => {
                         match (&left_val, &right_val) {
                             (Value::Integer(a), Value::Integer(b)) => Ok(a < b),
@@ -305,6 +364,8 @@ impl SqlExecutor {
                             )),
                         }
                     },
+                    
+                    // Greater than or equal (>=) operator
                     sqlparser::ast::BinaryOperator::GtEq => {
                         match (&left_val, &right_val) {
                             (Value::Integer(a), Value::Integer(b)) => Ok(a >= b),
@@ -317,6 +378,8 @@ impl SqlExecutor {
                             )),
                         }
                     },
+                    
+                    // Less than or equal (<=) operator
                     sqlparser::ast::BinaryOperator::LtEq => {
                         match (&left_val, &right_val) {
                             (Value::Integer(a), Value::Integer(b)) => Ok(a <= b),
@@ -351,6 +414,16 @@ impl SqlExecutor {
     }
     
     /// Evaluate an expression to a Value
+    /// 
+    /// This function evaluates SQL expressions like literals, constants, etc.
+    /// and converts them to our internal Value type.
+    ///
+    /// # Arguments
+    /// * `expr` - The SQL expression to evaluate
+    ///
+    /// # Returns
+    /// * `Ok(Value)` - The resulting value after evaluation
+    /// * `Err` - If the expression can't be evaluated or contains unsupported features
     fn evaluate_expr(&self, expr: &Expr) -> SqawkResult<Value> {
         match expr {
             Expr::Value(value) => {
@@ -392,6 +465,20 @@ impl SqlExecutor {
     }
     
     /// Evaluate an expression with a row context
+    /// 
+    /// This function extends `evaluate_expr` to handle expressions that reference
+    /// columns in a specific row (e.g., for WHERE clause evaluation). It first
+    /// tries to resolve column references in the current row, and if that doesn't apply,
+    /// falls back to standard expression evaluation.
+    /// 
+    /// # Arguments
+    /// * `expr` - The SQL expression to evaluate
+    /// * `row` - The row containing values for column references
+    /// * `table` - The table metadata for column name resolution
+    ///
+    /// # Returns
+    /// * `Ok(Value)` - The resolved value from the row or expression
+    /// * `Err` - If column resolution fails or expression evaluation fails
     fn evaluate_expr_with_row(
         &self,
         expr: &Expr,
@@ -409,8 +496,18 @@ impl SqlExecutor {
     }
     
     /// Save all modified tables back to their source files
+    /// 
+    /// This function writes any tables that have been modified during execution 
+    /// (e.g., through INSERT statements) back to their source CSV files.
+    /// Only tables that have been modified will be saved, preserving the original
+    /// CSV files if no changes were made.
+    ///
+    /// # Returns
+    /// * `Ok(())` if all modified tables were saved successfully
+    /// * `Err` if any error occurs during saving
     pub fn save_modified_tables(&self) -> Result<()> {
         for table_name in &self.modified_tables {
+            // Use the CSV handler to write the table back to its source file
             self.csv_handler.save_table(table_name)?;
         }
         

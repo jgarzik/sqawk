@@ -12,12 +12,21 @@ use serde::{Deserialize, Serialize};
 use crate::error::{SqawkError, SqawkResult};
 
 /// Represents a value in a table cell
+/// 
+/// This enum provides the possible data types for a cell value in a table.
+/// It supports the common SQL data types and allows for type conversions
+/// between numeric types (Integer <-> Float) for comparison operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
+    /// Represents a NULL or missing value
     Null,
+    /// 64-bit signed integer
     Integer(i64),
+    /// 64-bit floating point number
     Float(f64),
+    /// UTF-8 string
     String(String),
+    /// Boolean value (true/false)
     Boolean(bool),
 }
 

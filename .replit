@@ -19,6 +19,14 @@ args = "Sqawk Build and Run"
 task = "workflow.run"
 args = "sqawk-build-and-run"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test Specific Query"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test Less Than Operator"
+
 [[workflows.workflow]]
 name = "Sqawk Build and Run"
 author = "agent"
@@ -36,6 +44,22 @@ task = "shell.exec"
 args = """
 cd $(pwd) && cargo build && echo -e \"
 --- Testing basic query ---\" && cargo run -- -s \"SELECT * FROM sample\" tests/data/sample.csv"""
+
+[[workflows.workflow]]
+name = "Test Specific Query"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT * FROM sample WHERE age > 25\" tests/data/sample.csv -v"
+
+[[workflows.workflow]]
+name = "Test Less Than Operator"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"SELECT * FROM sample WHERE age <= 30\" tests/data/sample.csv -v"
 
 [deployment]
 run = ["sh", "-c", "cargo build && echo \"Testing Sqawk with sample data:\" && cargo run -- -s \"SELECT * FROM sample\" tests/data/sample.csv -v"]
