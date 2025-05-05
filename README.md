@@ -8,11 +8,34 @@ Sqawk is an SQL-based command-line tool for processing CSV files, inspired by th
 
 ## Features
 
-- Fast in-memory SQL query execution for CSV files
-- Support for SELECT, INSERT, UPDATE, and DELETE operations
-- Filter data with SQL WHERE clauses
-- Process multiple files in a single command
-- Safe by default: doesn't modify files without explicit request
+- **Powerful SQL Query Engine**
+  - Support for SELECT, INSERT, UPDATE, and DELETE operations
+  - WHERE clause filtering with comparison operators
+  - ORDER BY for sorting results (ASC/DESC)
+  - Column aliases with the AS keyword
+  - Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
+  
+- **Multi-Table Operations**
+  - Cross joins between tables
+  - Inner joins using WHERE conditions
+  - Support for joining multiple tables
+  - Table-qualified column names
+
+- **Smart Data Handling**
+  - Automatic type inference (Integer, Float, Boolean, String)
+  - Type coercion for comparisons
+  - Null value support
+  
+- **CSV Processing**
+  - Fast in-memory execution
+  - Process multiple files in a single command
+  - Table name customization
+  - Chain multiple SQL statements
+  
+- **Safe Operation**
+  - Doesn't modify files without explicit request (--write flag)
+  - Only writes back tables that were modified
+  - Verbose mode for operation transparency
 
 ## Installation
 
@@ -82,7 +105,10 @@ By default, sqawk doesn't modify input files. Use the `--write` flag to save cha
 
 ## Documentation
 
-For more information, see the [documentation](https://github.com/jgarzik/sqawk).
+For more detailed information, see:
+
+- [SQL Language Reference](doc/sql_reference.md) - Comprehensive guide to Sqawk's SQL dialect
+- [In-Memory Database Architecture](doc/database.md) - Technical details about the database implementation
 
 ## License
 

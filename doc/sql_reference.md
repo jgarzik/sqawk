@@ -9,19 +9,19 @@ Sqawk provides a powerful SQL-like query language for processing CSV files. This
 1. [Introduction](#introduction)
 2. [Table Names and File Specification](#table-names-and-file-specification)
 3. [Chaining SQL Statements](#chaining-sql-statements)
-4. [SQL Statement Types](#sql-statement-types)
-5. [SELECT Statement](#select-statement)
+4. [Data Types](#data-types)
+5. [SQL Statement Types](#sql-statement-types)
+6. [SELECT Statement](#select-statement)
    - [Basic Syntax](#basic-syntax)
    - [Column Selection](#column-selection)
    - [Column Aliases](#column-aliases)
    - [WHERE Clause](#where-clause)
    - [ORDER BY Clause](#order-by-clause)
    - [Aggregate Functions](#aggregate-functions)
-6. [Multi-Table Operations (Joins)](#multi-table-operations-joins)
-7. [INSERT Statement](#insert-statement)
-8. [UPDATE Statement](#update-statement)
-9. [DELETE Statement](#delete-statement)
-10. [Data Types](#data-types)
+7. [Multi-Table Operations (Joins)](#multi-table-operations-joins)
+8. [INSERT Statement](#insert-statement)
+9. [UPDATE Statement](#update-statement)
+10. [DELETE Statement](#delete-statement)
 11. [Limitations](#limitations)
 12. [Writeback Behavior](#writeback-behavior)
 
@@ -57,6 +57,56 @@ This allows for complex operations such as:
 - Running sequential operations like cleanup and then analysis
 
 Each statement executes against the in-memory state after the previous statement's execution.
+
+## Data Types
+
+Sqawk supports the following data types:
+
+| Type | Description | Example | Storage |
+|------|-------------|---------|---------|
+| `Null` | Missing or null value | NULL | Special variant |
+| `Integer` | 64-bit signed integer | 42 | i64 |
+| `Float` | 64-bit floating point | 3.14 | f64 |
+| `String` | UTF-8 text | "hello" | String |
+| `Boolean` | True/false value | true | bool |
+
+### Type Inference
+
+When loading data from CSV files, Sqawk automatically infers the most appropriate type for each value:
+
+1. First tries to parse as an `Integer`
+2. If that fails, tries to parse as a `Float` 
+3. If that fails, tries to parse as a `Boolean` (values like true/false, yes/no, 1/0)
+4. If all else fails, stores the value as a `String`
+5. Empty values are stored as `Null`
+
+This dynamic type inference provides flexibility when working with CSV data, which typically doesn't include explicit type information.
+
+### Type Coercion in Comparisons
+
+Sqawk implements SQL-like type coercion rules when comparing values:
+
+- **NULL Values**: 
+  - NULL equals NULL
+  - NULL is less than any other value
+  - Comparisons between NULL and non-NULL values generally evaluate to false
+
+- **Numeric Comparisons**:
+  - `Integer` and `Float` values can be compared directly
+  - When comparing different numeric types, integers are converted to floats
+
+- **Same-Type Comparisons**:
+  - Strings are compared lexicographically (dictionary order)
+  - Boolean values follow false < true
+
+- **Different-Type Comparisons**:
+  - Types follow a strict precedence order: NULL < Boolean < Number < String
+  - This means:
+    - Boolean values are less than any numeric or string value
+    - Numbers (both Integer and Float) are less than any String value
+    - Strings are greater than all other types
+
+This type precedence system is particularly important for operations like `MIN()` and `MAX()` and when sorting values with `ORDER BY`.
 
 ## SQL Statement Types
 
@@ -280,56 +330,6 @@ DELETE FROM users WHERE age < 18
 -- Delete all rows
 DELETE FROM users
 ```
-
-## Data Types
-
-Sqawk supports the following data types:
-
-| Type | Description | Example | Storage |
-|------|-------------|---------|---------|
-| `Null` | Missing or null value | NULL | Special variant |
-| `Integer` | 64-bit signed integer | 42 | i64 |
-| `Float` | 64-bit floating point | 3.14 | f64 |
-| `String` | UTF-8 text | "hello" | String |
-| `Boolean` | True/false value | true | bool |
-
-### Type Inference
-
-When loading data from CSV files, Sqawk automatically infers the most appropriate type for each value:
-
-1. First tries to parse as an `Integer`
-2. If that fails, tries to parse as a `Float` 
-3. If that fails, tries to parse as a `Boolean` (values like true/false, yes/no, 1/0)
-4. If all else fails, stores the value as a `String`
-5. Empty values are stored as `Null`
-
-This dynamic type inference provides flexibility when working with CSV data, which typically doesn't include explicit type information.
-
-### Type Coercion in Comparisons
-
-Sqawk implements SQL-like type coercion rules when comparing values:
-
-- **NULL Values**: 
-  - NULL equals NULL
-  - NULL is less than any other value
-  - Comparisons between NULL and non-NULL values generally evaluate to false
-
-- **Numeric Comparisons**:
-  - `Integer` and `Float` values can be compared directly
-  - When comparing different numeric types, integers are converted to floats
-
-- **Same-Type Comparisons**:
-  - Strings are compared lexicographically (dictionary order)
-  - Boolean values follow false < true
-
-- **Different-Type Comparisons**:
-  - Types follow a strict precedence order: NULL < Boolean < Number < String
-  - This means:
-    - Boolean values are less than any numeric or string value
-    - Numbers (both Integer and Float) are less than any String value
-    - Strings are greater than all other types
-
-This type precedence system is particularly important for operations like `MIN()` and `MAX()` and when sorting values with `ORDER BY`.
 
 ## Limitations
 
