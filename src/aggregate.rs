@@ -1,6 +1,15 @@
 //! Aggregate function module for sqawk
 //!
-//! This module contains implementations of SQL aggregate functions.
+//! This module implements SQL aggregate functions (COUNT, SUM, AVG, MIN, MAX) for the sqawk utility.
+//! It provides the core aggregation functionality for SQL queries with features including:
+//!
+//! - Type-aware aggregation that preserves the appropriate result type (integer vs. float)
+//! - Proper NULL handling according to SQL semantics
+//! - Support for mixed-type aggregation with type coercion
+//! - Comprehensive test coverage for all aggregate operations
+//!
+//! All aggregate functions operate on columns (vectors of values) and return a single
+//! Value representing the result of the operation.
 
 use crate::error::SqawkResult;
 use crate::table::Value;

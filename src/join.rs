@@ -1,6 +1,16 @@
 //! Join module for the sqawk query engine
 //!
-//! This module implements join operations between tables.
+//! This module implements table join operations for SQL queries in the sqawk utility.
+//! It provides functionality for:
+//!
+//! - Cross joins (Cartesian product of rows from both tables)
+//! - Inner joins with filtering based on specified conditions
+//! - A flexible join type system mapping SQL join types to internal representations
+//! - Column naming with qualification to prevent ambiguity in join results
+//!
+//! Currently, the module fully implements cross joins and has a foundation for more
+//! complex join types (inner, left, right, full) with placeholder implementations
+//! that will be expanded in future versions.
 
 use sqlparser::ast::{Expr, JoinOperator};
 

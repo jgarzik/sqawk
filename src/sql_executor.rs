@@ -1,6 +1,17 @@
 //! SQL execution module for sqawk
 //!
-//! This module handles parsing and executing SQL statements.
+//! This module handles parsing and executing SQL statements against in-memory tables. It provides:
+//!
+//! - SQL statement parsing using the sqlparser crate with a generic SQL dialect
+//! - Execution logic for SELECT, INSERT, UPDATE, and DELETE statements
+//! - Support for multi-table operations including cross joins and inner joins
+//! - Column alias handling and resolution for both regular columns and aggregate functions
+//! - ORDER BY implementation with multi-column support and configurable sort direction
+//! - WHERE clause evaluation using a robust type system with SQL-like comparison semantics
+//! - Tracking of modified tables for selective write-back to CSV files
+//!
+//! The module implements a non-destructive approach, modifying only in-memory tables
+//! until explicitly requested to save changes back to the original files.
 
 use std::collections::HashSet;
 
@@ -273,13 +284,17 @@ impl SqlExecutor {
     
     /// Process the FROM clause of a SELECT statement
     ///
-    /// This function handles both single table references and joins.
+    /// This function handles tables and joins specified in the FROM clause. It:
+    /// 1. Processes the first table in the FROM clause
+    /// 2. Handles any explicit JOINs attached to that table
+    /// 3. Processes comma-separated tables as implicit CROSS JOINs
+    /// 4. Combines all tables into a single result table
     ///
     /// # Arguments
     /// * `from` - The FROM clause items from the SELECT statement
     ///
     /// # Returns
-    /// * The resulting table after processing the FROM clause
+    /// * The resulting table after processing the FROM clause with all joins applied
     fn process_from_clause(&self, from: &[TableWithJoins]) -> SqawkResult<Table> {
         // Start with the first table in the FROM clause
         let first_table_with_joins = &from[0];
@@ -316,14 +331,18 @@ impl SqlExecutor {
     
     /// Process joins for a table
     ///
-    /// This function handles all joins specified in the query for one table.
+    /// This function processes a list of explicit JOIN clauses for a table.
+    /// It iterates through each join specification, resolves the right table,
+    /// and applies the appropriate join operation based on the join type.
+    /// Currently, only CROSS JOIN is fully implemented, with other join types 
+    /// returning cross join results or errors.
     ///
     /// # Arguments
-    /// * `left_table` - The left table for the join
-    /// * `joins` - The join specifications
+    /// * `left_table` - The left table for the join operations
+    /// * `joins` - Array of SQL join specifications to process
     ///
     /// # Returns
-    /// * The resulting table after processing all joins
+    /// * A new table resulting from applying all join operations sequentially
     fn process_table_joins(&self, left_table: &Table, joins: &[SqlJoin]) -> SqawkResult<Table> {
         let mut result_table = left_table.clone();
         
@@ -354,6 +373,19 @@ impl SqlExecutor {
     }
 
     /// Execute an INSERT statement
+    ///
+    /// This function inserts new rows into a table based on VALUES provided in the
+    /// SQL statement. It supports specifying a subset of columns to insert into,
+    /// filling the remaining columns with NULL values.
+    ///
+    /// # Arguments
+    /// * `table_name` - The name of the table to insert into
+    /// * `columns` - Optional list of columns to insert into (empty means all columns)
+    /// * `source` - The query source containing values to insert
+    ///
+    /// # Returns
+    /// * `Ok(())` if the insert was successful
+    /// * `Err` if the table doesn't exist or the values don't match the columns
     fn execute_insert(
         &mut self,
         table_name: sqlparser::ast::ObjectName,
@@ -510,6 +542,17 @@ impl SqlExecutor {
     }
 
     /// Extract the table name from a TableWithJoins
+    ///
+    /// Parses the table name from a TableWithJoins structure, handling
+    /// both simple and qualified table names. This function is used by various
+    /// SQL execution methods to resolve the target table for operations.
+    ///
+    /// # Arguments
+    /// * `table_with_joins` - The table reference structure to extract the name from
+    ///
+    /// # Returns
+    /// * `Ok(String)` containing the resolved table name
+    /// * `Err` if the table reference type is not supported
     fn get_table_name(&self, table_with_joins: &TableWithJoins) -> SqawkResult<String> {
         match &table_with_joins.relation {
             sqlparser::ast::TableFactor::Table { name, .. } => Ok(name
@@ -525,17 +568,21 @@ impl SqlExecutor {
     }
 
     /// Resolve SELECT items to column indices and aliases
-    /// Resolve the column indices for a SELECT statement
     ///
-    /// This function takes the SELECT items from a query and resolves them to
-    /// column indices in the source table, along with any aliases.
+    /// This function processes SELECT items from a query and maps them to column indices
+    /// in the source table. It handles:
+    /// - Wildcard (*) expansion to all columns
+    /// - Simple column references like "name"
+    /// - Qualified column references like "table.column"
+    /// - Column aliases using the AS keyword
+    /// - Special handling for aggregate functions
     ///
     /// # Arguments
     /// * `items` - The SELECT items from the query (columns to select)
     /// * `table` - The source table containing the columns
     ///
     /// # Returns
-    /// * A vector of column indices and optional aliases corresponding to the SELECT items
+    /// * A vector of (column_index, optional_alias) pairs for projecting the table
     fn resolve_select_items(&self, items: &[SelectItem], table: &Table) -> SqawkResult<Vec<(usize, Option<String>)>> {
         let mut column_specs = Vec::new();
 
@@ -694,9 +741,11 @@ impl SqlExecutor {
 
     /// Evaluate a condition expression against a row
     ///
-    /// This function evaluates SQL WHERE clause conditions against a specific row.
-    /// It handles various expression types including binary operations (comparisons),
-    /// IS NULL and IS NOT NULL checks.
+    /// This function is the main entry point for evaluating SQL WHERE clause conditions.
+    /// It handles various expression types including:
+    /// - Binary operations (comparisons like =, >, <, etc.)
+    /// - Logical operations (AND, OR with short-circuit evaluation)
+    /// - IS NULL and IS NOT NULL checks
     ///
     /// # Arguments
     /// * `expr` - The SQL expression to evaluate
@@ -706,10 +755,7 @@ impl SqlExecutor {
     /// # Returns
     /// * `Ok(true)` if the condition matches the row
     /// * `Ok(false)` if the condition doesn't match
-    /// * `Err` if there's an error during evaluation (type mismatch, etc.)
-    /// Evaluate a condition expression to a boolean value
-    ///
-    /// This is the main entry point for condition evaluation used in WHERE clauses
+    /// * `Err` if there's an error during evaluation (type mismatch, unsupported feature)
     fn evaluate_condition(&self, expr: &Expr, row: &[Value], table: &Table) -> SqawkResult<bool> {
         match expr {
             Expr::BinaryOp { left, op, right } => {
@@ -744,6 +790,21 @@ impl SqlExecutor {
     }
     
     /// Evaluate a logical AND expression with short-circuit evaluation
+    ///
+    /// This function implements AND logic with short-circuit evaluation
+    /// (stops evaluating as soon as the result is known). If the left condition
+    /// evaluates to false, the right condition is never evaluated.
+    ///
+    /// # Arguments
+    /// * `left` - The left operand of the AND expression
+    /// * `right` - The right operand of the AND expression
+    /// * `row` - The current row data for evaluating column references
+    /// * `table` - The table metadata for column resolution
+    ///
+    /// # Returns
+    /// * `Ok(true)` if both conditions evaluate to true
+    /// * `Ok(false)` if either condition evaluates to false
+    /// * `Err` if there's an error evaluating either condition
     fn evaluate_logical_and(&self, left: &Expr, right: &Expr, row: &[Value], table: &Table) -> SqawkResult<bool> {
         // Evaluate left condition
         let left_result = self.evaluate_condition(left, row, table)?;
@@ -760,6 +821,21 @@ impl SqlExecutor {
     }
     
     /// Evaluate a logical OR expression with short-circuit evaluation
+    ///
+    /// This function implements OR logic with short-circuit evaluation
+    /// (stops evaluating as soon as the result is known). If the left condition
+    /// evaluates to true, the right condition is never evaluated.
+    ///
+    /// # Arguments
+    /// * `left` - The left operand of the OR expression
+    /// * `right` - The right operand of the OR expression
+    /// * `row` - The current row data for evaluating column references
+    /// * `table` - The table metadata for column resolution
+    ///
+    /// # Returns
+    /// * `Ok(true)` if either condition evaluates to true
+    /// * `Ok(false)` if both conditions evaluate to false
+    /// * `Err` if there's an error evaluating either condition
     fn evaluate_logical_or(&self, left: &Expr, right: &Expr, row: &[Value], table: &Table) -> SqawkResult<bool> {
         // Evaluate left condition
         let left_result = self.evaluate_condition(left, row, table)?;
@@ -776,6 +852,22 @@ impl SqlExecutor {
     }
     
     /// Evaluate a comparison expression between two values
+    ///
+    /// This function handles binary comparison operators (=, !=, >, <, >=, <=)
+    /// by first evaluating both left and right expressions into Values, then
+    /// performing the appropriate comparison based on the operator type.
+    ///
+    /// # Arguments
+    /// * `left` - The left expression to evaluate
+    /// * `op` - The binary operator to apply
+    /// * `right` - The right expression to evaluate
+    /// * `row` - The current row data for resolving column references
+    /// * `table` - The table metadata for column name resolution
+    ///
+    /// # Returns
+    /// * `Ok(true)` if the comparison evaluates to true
+    /// * `Ok(false)` if the comparison evaluates to false
+    /// * `Err` if there's an error evaluating the expressions or the comparison is invalid
     fn evaluate_comparison(&self, left: &Expr, op: &sqlparser::ast::BinaryOperator, right: &Expr, row: &[Value], table: &Table) -> SqawkResult<bool> {
         let left_val = self.evaluate_expr_with_row(left, row, table)?;
         let right_val = self.evaluate_expr_with_row(right, row, table)?;
@@ -820,7 +912,25 @@ impl SqlExecutor {
     
     /// Compare two values with a specific operator
     ///
-    /// Helper function to handle type-specific comparisons
+    /// This helper function implements type-aware comparison logic for different data types.
+    /// It supports comparing:
+    /// - Integers with integers
+    /// - Floats with floats
+    /// - Integers with floats (with automatic type conversion)
+    /// - Strings with strings (lexicographically)
+    ///
+    /// It handles type coercion where appropriate (e.g., i64 to f64) and provides
+    /// detailed error messages when incompatible types are compared.
+    ///
+    /// # Arguments
+    /// * `left_val` - The left value to compare
+    /// * `right_val` - The right value to compare
+    /// * `op_symbol` - String representation of the operator (">", "<", ">=", "<=")
+    ///
+    /// # Returns
+    /// * `Ok(true)` if the comparison evaluates to true
+    /// * `Ok(false)` if the comparison evaluates to false
+    /// * `Err` if the comparison is invalid (incompatible types, etc.)
     fn compare_values_with_operator(&self, left_val: &Value, right_val: &Value, op_symbol: &str) -> SqawkResult<bool> {
         match (left_val, right_val) {
             // Integer-Integer comparison
@@ -1020,11 +1130,19 @@ impl SqlExecutor {
     
     /// Check if the SELECT items contain any aggregate functions
     ///
+    /// This function analyzes a list of SELECT items and determines if any of them
+    /// contains an aggregate function (COUNT, SUM, AVG, MIN, MAX, etc.). It checks both
+    /// simple expressions and aliased expressions for aggregate function calls.
+    ///
+    /// This detection is crucial for determining whether to apply aggregate processing
+    /// to a query or process it as a regular row-by-row query.
+    ///
     /// # Arguments
-    /// * `items` - The SELECT items from the query
+    /// * `items` - The SELECT items from the query, potentially containing aggregate functions
     ///
     /// # Returns
     /// * `true` if any of the items contains an aggregate function
+    /// * `false` if no aggregate functions are detected
     fn contains_aggregate_functions(&self, items: &[SelectItem]) -> bool {
         for item in items {
             match item {
@@ -1056,12 +1174,22 @@ impl SqlExecutor {
     
     /// Apply aggregate functions to a table
     ///
+    /// This function processes SELECT items containing aggregate functions (COUNT, SUM, AVG, MIN, MAX)
+    /// and applies them to the table data. It handles both aliased and non-aliased aggregate functions.
+    ///
+    /// The function:
+    /// 1. Extracts the appropriate column values for each function
+    /// 2. Executes the aggregate function on those values
+    /// 3. Creates a new single-row result table with the aggregate results
+    /// 4. Uses column names based on function names or provided aliases
+    ///
     /// # Arguments
-    /// * `items` - The SELECT items from the query
-    /// * `table` - The source table
+    /// * `items` - The SELECT items containing aggregate functions to execute
+    /// * `table` - The source table containing the data to aggregate
     ///
     /// # Returns
-    /// * A new table with the results of the aggregate functions
+    /// * A new single-row table containing the results of all aggregate functions
+    /// * `Err` if any function arguments are invalid or unsupported
     fn apply_aggregate_functions(&self, items: &[SelectItem], table: &Table) -> SqawkResult<Table> {
         let mut result_columns = Vec::new();
         let mut result_values = Vec::new();
@@ -1161,12 +1289,21 @@ impl SqlExecutor {
     
     /// Get values for a function argument
     ///
+    /// This function extracts all values from a table column specified in an aggregate
+    /// function argument. It handles special cases like:
+    /// - COUNT(*) wildcard (returns placeholder values)
+    /// - Simple column references (e.g., "age")
+    /// - Qualified column references (e.g., "users.age")
+    /// - Column name resolution in join results
+    ///
     /// # Arguments
-    /// * `arg` - The function argument
-    /// * `table` - The source table
+    /// * `arg` - The SQL function argument (column reference or wildcard)
+    /// * `table` - The source table containing the column data
     ///
     /// # Returns
-    /// * A vector of values from the specified column or all values for COUNT(*)
+    /// * A vector of all values from the specified column
+    /// * For COUNT(*), a vector of placeholder values (one per row)
+    /// * `Err` if the column doesn't exist or the argument type is unsupported
     fn get_values_for_function_arg(&self, arg: &sqlparser::ast::FunctionArg, table: &Table) -> SqawkResult<Vec<Value>> {
         match arg {
             sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Wildcard) => {
