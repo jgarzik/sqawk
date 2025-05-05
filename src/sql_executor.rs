@@ -2,18 +2,20 @@
 //!
 //! This module handles parsing and executing SQL statements.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use sqlparser::ast::{
-    Assignment, Expr, Query, SelectItem, SetExpr, Statement, TableWithJoins, Value as SqlValue,
+    Assignment, Expr, Join as SqlJoin, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr, 
+    Statement, TableFactor, TableWithJoins, Value as SqlValue,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
 use crate::csv_handler::CsvHandler;
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::{Table, Value};
+use crate::join::{JoinExecutor, JoinType};
+use crate::table::{ColumnRef, Table, Value};
 
 /// SQL statement executor
 pub struct SqlExecutor {
@@ -104,28 +106,26 @@ impl SqlExecutor {
     fn execute_query(&self, query: Query) -> SqawkResult<Option<Table>> {
         match *query.body {
             SetExpr::Select(select) => {
-                // Get the source table
-                if select.from.len() != 1 {
-                    return Err(SqawkError::UnsupportedSqlFeature(
-                        "Only queries with a single table are supported".to_string(),
+                if select.from.is_empty() {
+                    return Err(SqawkError::InvalidSqlQuery(
+                        "SELECT query must have at least one table".to_string(),
                     ));
                 }
 
-                let table_with_joins = &select.from[0];
-                let table_name = self.get_table_name(table_with_joins)?;
-                let source_table = self.csv_handler.get_table(&table_name)?;
+                // Process the FROM clause to get a table or join result
+                let source_table = self.process_from_clause(&select.from)?;
 
                 // Determine which columns to include in the result (for projection)
-                let column_indices = self.resolve_select_items(&select.projection, source_table)?;
+                let column_indices = self.resolve_select_items(&select.projection, &source_table)?;
 
                 // IMPORTANT: First filter rows if WHERE clause is present
                 // We must apply the WHERE clause before projection to ensure all columns
                 // needed for filtering are available during the WHERE evaluation
                 let filtered_table = if let Some(where_clause) = &select.selection {
-                    self.apply_where_clause(source_table.clone(), where_clause)?
+                    self.apply_where_clause(source_table, where_clause)?
                 } else {
                     // If no WHERE clause, just use the source table as is
-                    source_table.clone()
+                    source_table
                 };
 
                 // Then apply projection to get only the requested columns
@@ -138,6 +138,112 @@ impl SqlExecutor {
                 "Only simple SELECT statements are supported".to_string(),
             )),
         }
+    }
+    
+    /// Process the FROM clause of a SELECT statement
+    ///
+    /// This function handles both single table references and joins.
+    ///
+    /// # Arguments
+    /// * `from` - The FROM clause items from the SELECT statement
+    ///
+    /// # Returns
+    /// * The resulting table after processing the FROM clause
+    fn process_from_clause(&self, from: &[TableWithJoins]) -> SqawkResult<Table> {
+        // Start with the first table in the FROM clause
+        let first_table_with_joins = &from[0];
+        let first_table_name = self.get_table_name(first_table_with_joins)?;
+        let mut result_table = self.csv_handler.get_table(&first_table_name)?.clone();
+        
+        // Handle any joins in the first TableWithJoins
+        if !first_table_with_joins.joins.is_empty() {
+            eprintln!("Processing {} joins for table {}", first_table_with_joins.joins.len(), first_table_name);
+            result_table = self.process_table_joins(&result_table, &first_table_with_joins.joins)?;
+        }
+        
+        // If there are multiple tables in the FROM clause, join them
+        // This is the CROSS JOIN case for "FROM table1, table2, ..."
+        if from.len() > 1 {
+            eprintln!("Processing multiple tables in FROM clause as CROSS JOINs");
+            for table_with_joins in &from[1..] {
+                let right_table_name = self.get_table_name(table_with_joins)?;
+                let right_table = self.csv_handler.get_table(&right_table_name)?;
+                
+                // Cross join with the current result table
+                result_table = result_table.cross_join(right_table)?;
+                
+                // Process any joins on this table
+                if !table_with_joins.joins.is_empty() {
+                    eprintln!("Processing {} joins for table {}", table_with_joins.joins.len(), right_table_name);
+                    result_table = self.process_table_joins(&result_table, &table_with_joins.joins)?;
+                }
+            }
+        }
+        
+        Ok(result_table)
+    }
+    
+    /// Process joins for a table
+    ///
+    /// This function handles all joins specified in the query for one table.
+    ///
+    /// # Arguments
+    /// * `left_table` - The left table for the join
+    /// * `joins` - The join specifications
+    ///
+    /// # Returns
+    /// * The resulting table after processing all joins
+    fn process_table_joins(&self, left_table: &Table, joins: &[SqlJoin]) -> SqawkResult<Table> {
+        let mut result_table = left_table.clone();
+        let mut join_executor = JoinExecutor::new();
+        
+        for join in joins {
+            // Get the right table
+            let right_table_name = match &join.relation {
+                TableFactor::Table { name, .. } => name
+                    .0
+                    .iter()
+                    .map(|i| i.value.clone())
+                    .collect::<Vec<_>>()
+                    .join("."),
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Only simple table references are supported in joins".to_string(),
+                    ))
+                }
+            };
+            
+            let right_table = self.csv_handler.get_table(&right_table_name)?;
+            
+            // Determine join type and condition
+            let join_type = JoinType::from(&join.join_operator);
+            let join_condition = match &join.join_operator {
+                JoinOperator::Inner(constraint) | 
+                JoinOperator::LeftOuter(constraint) |
+                JoinOperator::RightOuter(constraint) |
+                JoinOperator::FullOuter(constraint) => {
+                    match constraint {
+                        JoinConstraint::On(expr) => Some(expr),
+                        _ => {
+                            return Err(SqawkError::UnsupportedSqlFeature(
+                                "Only ON constraints are supported in joins".to_string(),
+                            ))
+                        }
+                    }
+                }
+                JoinOperator::CrossJoin => None,
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        format!("Unsupported join type: {:?}", join.join_operator),
+                    ))
+                }
+            };
+            
+            // Execute the join
+            result_table = join_executor.execute_join(&result_table, right_table, join_type, join_condition)?;
+        }
+        
+        Ok(result_table)
     }
 
     /// Execute an INSERT statement
@@ -319,23 +425,82 @@ impl SqlExecutor {
 
         for item in items {
             match item {
-                SelectItem::Wildcard(_) => {
-                    // Select all columns
-                    for i in 0..table.column_count() {
-                        column_indices.push(i);
+                SelectItem::Wildcard(wildcard) => {
+                    match wildcard {
+                        // Regular wildcard (*) - select all columns
+                        None => {
+                            for i in 0..table.column_count() {
+                                column_indices.push(i);
+                            }
+                        },
+                        // Qualified wildcard (table.*) - select all columns from specified table
+                        Some(wildcard_ident) => {
+                            let table_name = &wildcard_ident[0].value;
+                            
+                            // Check if any columns have this table prefix
+                            let mut found_match = false;
+                            for (i, col) in table.columns().iter().enumerate() {
+                                if col.starts_with(&format!("{}.", table_name)) {
+                                    column_indices.push(i);
+                                    found_match = true;
+                                }
+                            }
+                            
+                            if !found_match {
+                                return Err(SqawkError::TableNotFound(table_name.clone()));
+                            }
+                        }
                     }
                 }
                 SelectItem::UnnamedExpr(expr) => {
-                    // For now, only support direct column references
-                    if let Expr::Identifier(ident) = expr {
-                        let idx = table
-                            .column_index(&ident.value)
-                            .ok_or_else(|| SqawkError::ColumnNotFound(ident.value.clone()))?;
-                        column_indices.push(idx);
-                    } else {
-                        return Err(SqawkError::UnsupportedSqlFeature(
-                            "Only direct column references are supported in SELECT".to_string(),
-                        ));
+                    match expr {
+                        // Simple column reference
+                        Expr::Identifier(ident) => {
+                            let idx = table
+                                .column_index(&ident.value)
+                                .ok_or_else(|| {
+                                    // Try as qualified name by checking column patterns
+                                    for (i, col) in table.columns().iter().enumerate() {
+                                        if col.ends_with(&format!(".{}", ident.value)) {
+                                            return Ok(i);
+                                        }
+                                    }
+                                    
+                                    Err(SqawkError::ColumnNotFound(ident.value.clone()))
+                                })?;
+                            column_indices.push(idx);
+                        },
+                        // Qualified column reference (table.column)
+                        Expr::CompoundIdentifier(parts) => {
+                            if parts.len() == 2 {
+                                let table_name = &parts[0].value;
+                                let column_name = &parts[1].value;
+                                let qualified_name = format!("{}.{}", table_name, column_name);
+                                
+                                // First, try to find an exact match for the qualified column
+                                let mut found = false;
+                                for (i, col) in table.columns().iter().enumerate() {
+                                    if col == &qualified_name {
+                                        column_indices.push(i);
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                
+                                if !found {
+                                    return Err(SqawkError::ColumnNotFound(qualified_name));
+                                }
+                            } else {
+                                return Err(SqawkError::UnsupportedSqlFeature(
+                                    "Only table.column references are supported".to_string(),
+                                ));
+                            }
+                        },
+                        _ => {
+                            return Err(SqawkError::UnsupportedSqlFeature(
+                                "Only direct column references are supported in SELECT".to_string(),
+                            ));
+                        }
                     }
                 }
                 SelectItem::ExprWithAlias { .. } => {
