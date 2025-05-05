@@ -1,5 +1,5 @@
 //! sqawk - an SQL-based command-line utility for processing CSV files
-//! 
+//!
 //! This tool loads CSV files into memory as tables, executes SQL queries against
 //! them, and can save modified tables back to CSV files.
 
@@ -27,10 +27,11 @@ fn main() -> Result<()> {
 
     // Create a new CSV handler for loading and saving files
     let mut csv_handler = CsvHandler::new();
-    
+
     // Load all specified CSV files into memory
     for file_spec in &args.files {
-        csv_handler.load_csv(file_spec)
+        csv_handler
+            .load_csv(file_spec)
             .with_context(|| format!("Failed to load CSV file: {}", file_spec))?;
     }
 
@@ -47,10 +48,11 @@ fn main() -> Result<()> {
         if args.verbose {
             println!("Executing SQL: {}", sql);
         }
-        
-        let result = sql_executor.execute(sql)
+
+        let result = sql_executor
+            .execute(sql)
             .with_context(|| format!("Failed to execute SQL: {}", sql))?;
-        
+
         // Print results to stdout
         match result {
             Some(table) => {
@@ -69,7 +71,8 @@ fn main() -> Result<()> {
 
     // Save any modified tables back to CSV files (unless dry run is enabled)
     if !args.dry_run {
-        sql_executor.save_modified_tables()
+        sql_executor
+            .save_modified_tables()
             .context("Failed to save modified tables")?;
     } else if args.verbose {
         println!("Dry run mode: not saving changes to files");

@@ -5,7 +5,9 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
-use sqlparser::ast::{SetExpr, Statement, TableWithJoins, Query, Expr, SelectItem, Value as SqlValue};
+use sqlparser::ast::{
+    Expr, Query, SelectItem, SetExpr, Statement, TableWithJoins, Value as SqlValue,
+};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
@@ -17,7 +19,7 @@ use crate::table::{Table, Value};
 pub struct SqlExecutor {
     /// CSV handler for managing tables
     csv_handler: CsvHandler,
-    
+
     /// Names of tables that have been modified
     modified_tables: HashSet<String>,
 }
@@ -30,60 +32,64 @@ impl SqlExecutor {
             modified_tables: HashSet::new(),
         }
     }
-    
+
     /// Execute an SQL statement
     ///
     /// Returns Some(Table) for SELECT queries, None for other statements.
     pub fn execute(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
         // Parse the SQL statement
         let dialect = GenericDialect {};
-        let statements = Parser::parse_sql(&dialect, sql)
-            .map_err(|e| SqawkError::SqlParseError(e))?;
-        
+        let statements =
+            Parser::parse_sql(&dialect, sql).map_err(|e| SqawkError::SqlParseError(e))?;
+
         if statements.is_empty() {
             return Err(SqawkError::InvalidSqlQuery(
-                "No SQL statements found".to_string()
+                "No SQL statements found".to_string(),
             ));
         }
-        
+
         // Execute each statement
         let mut result = None;
         for statement in statements {
             result = self.execute_statement(statement)?;
         }
-        
+
         Ok(result)
     }
-    
+
     /// Execute a single SQL statement
     fn execute_statement(&mut self, statement: Statement) -> SqawkResult<Option<Table>> {
         match statement {
-            Statement::Query(query) => {
-                self.execute_query(*query)
-            },
-            Statement::Insert { table_name, columns, source, .. } => {
+            Statement::Query(query) => self.execute_query(*query),
+            Statement::Insert {
+                table_name,
+                columns,
+                source,
+                ..
+            } => {
                 self.execute_insert(table_name, columns, source)?;
                 Ok(None)
-            },
-            Statement::Delete { from, selection, .. } => {
+            }
+            Statement::Delete {
+                from, selection, ..
+            } => {
                 if from.len() != 1 {
                     return Err(SqawkError::UnsupportedSqlFeature(
-                        "DELETE with multiple tables is not supported".to_string()
+                        "DELETE with multiple tables is not supported".to_string(),
                     ));
                 }
                 let table_with_joins = &from[0];
                 let deleted_count = self.execute_delete(table_with_joins, selection)?;
                 eprintln!("Deleted {} rows", deleted_count);
                 Ok(None)
-            },
-            _ => {
-                Err(SqawkError::UnsupportedSqlFeature(
-                    format!("Unsupported SQL statement: {:?}", statement)
-                ))
             }
+            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Unsupported SQL statement: {:?}",
+                statement
+            ))),
         }
     }
-    
+
     /// Execute a SELECT query
     fn execute_query(&self, query: Query) -> SqawkResult<Option<Table>> {
         match *query.body {
@@ -91,19 +97,19 @@ impl SqlExecutor {
                 // Get the source table
                 if select.from.len() != 1 {
                     return Err(SqawkError::UnsupportedSqlFeature(
-                        "Only queries with a single table are supported".to_string()
+                        "Only queries with a single table are supported".to_string(),
                     ));
                 }
-                
+
                 let table_with_joins = &select.from[0];
                 let table_name = self.get_table_name(table_with_joins)?;
                 let source_table = self.csv_handler.get_table(&table_name)?;
-                
+
                 // Determine which columns to include in the result (for projection)
                 let column_indices = self.resolve_select_items(&select.projection, source_table)?;
-                
+
                 // IMPORTANT: First filter rows if WHERE clause is present
-                // We must apply the WHERE clause before projection to ensure all columns 
+                // We must apply the WHERE clause before projection to ensure all columns
                 // needed for filtering are available during the WHERE evaluation
                 let filtered_table = if let Some(where_clause) = &select.selection {
                     self.apply_where_clause(source_table.clone(), where_clause)?
@@ -111,53 +117,55 @@ impl SqlExecutor {
                     // If no WHERE clause, just use the source table as is
                     source_table.clone()
                 };
-                
+
                 // Then apply projection to get only the requested columns
                 // This happens AFTER filtering to ensure WHERE clauses can access all columns
                 let result_table = filtered_table.project(&column_indices)?;
-                
+
                 Ok(Some(result_table))
-            },
-            _ => {
-                Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple SELECT statements are supported".to_string()
-                ))
             }
+            _ => Err(SqawkError::UnsupportedSqlFeature(
+                "Only simple SELECT statements are supported".to_string(),
+            )),
         }
     }
-    
+
     /// Execute an INSERT statement
     fn execute_insert(
         &mut self,
         table_name: sqlparser::ast::ObjectName,
         columns: Vec<sqlparser::ast::Ident>,
-        source: Box<Query>
+        source: Box<Query>,
     ) -> SqawkResult<()> {
         // Get the target table name
-        let table_name = table_name.0.into_iter()
+        let table_name = table_name
+            .0
+            .into_iter()
             .map(|i| i.value)
             .collect::<Vec<_>>()
             .join(".");
-        
+
         // Check if the table exists
         let column_count = {
             let table = self.csv_handler.get_table(&table_name)?;
             table.column_count()
         };
-        
+
         // Extract column indices if specified
         let column_indices = if !columns.is_empty() {
             let table = self.csv_handler.get_table(&table_name)?;
-            columns.iter()
+            columns
+                .iter()
                 .map(|ident| {
-                    table.column_index(&ident.value)
+                    table
+                        .column_index(&ident.value)
                         .ok_or_else(|| SqawkError::ColumnNotFound(ident.value.clone()))
                 })
                 .collect::<Result<Vec<_>, _>>()?
         } else {
             (0..column_count).collect()
         };
-        
+
         // Get values to insert
         match *source.body {
             SetExpr::Values(values) => {
@@ -170,35 +178,33 @@ impl SqlExecutor {
                             column_indices.len()
                         )));
                     }
-                    
+
                     // Create a full row with NULL values
                     let mut row = vec![Value::Null; column_count];
-                    
+
                     // Fill in the specified columns
                     for (i, expr) in value_row.iter().enumerate() {
                         let col_idx = column_indices[i];
                         row[col_idx] = self.evaluate_expr(expr)?;
                     }
-                    
+
                     // Add the row to the table
                     let table = self.csv_handler.get_table_mut(&table_name)?;
                     table.add_row(row)?;
                 }
-                
+
                 // Mark the table as modified
                 self.modified_tables.insert(table_name);
-                
+
                 Ok(())
-            },
-            // TODO: Support INSERT ... SELECT
-            _ => {
-                Err(SqawkError::UnsupportedSqlFeature(
-                    "Only INSERT ... VALUES is supported".to_string()
-                ))
             }
+            // TODO: Support INSERT ... SELECT
+            _ => Err(SqawkError::UnsupportedSqlFeature(
+                "Only INSERT ... VALUES is supported".to_string(),
+            )),
         }
     }
-    
+
     /// Execute a DELETE statement
     ///
     /// This function deletes rows from a table based on an optional WHERE condition.
@@ -211,51 +217,55 @@ impl SqlExecutor {
     /// # Returns
     /// * The number of rows that were deleted
     fn execute_delete(
-        &mut self, 
+        &mut self,
         table_with_joins: &TableWithJoins,
-        selection: Option<Expr>
+        selection: Option<Expr>,
     ) -> SqawkResult<usize> {
         // Get the target table name
         let table_name = self.get_table_name(table_with_joins)?;
-        
+
         // If there's a WHERE clause, we need to precompute which rows match before modifying the table
         if let Some(ref where_expr) = selection {
             eprintln!("Executing DELETE with WHERE clause: {:?}", where_expr);
-            
+
             // Create a list of row indices to delete
             let table_ref = self.csv_handler.get_table(&table_name)?;
-            
+
             // Evaluate WHERE condition for each row before modifying the table
             // to avoid borrow checker issues
             let mut rows_to_delete: Vec<usize> = Vec::new();
-            
+
             for (idx, row) in table_ref.rows().iter().enumerate() {
-                if self.evaluate_condition(where_expr, row, table_ref).unwrap_or(false) {
+                if self
+                    .evaluate_condition(where_expr, row, table_ref)
+                    .unwrap_or(false)
+                {
                     rows_to_delete.push(idx);
                 }
             }
-            
+
             // Now get mutable reference and delete the rows
             let table = self.csv_handler.get_table_mut(&table_name)?;
-            
+
             // If we have rows to delete, create a new set of rows excluding the ones to delete
             if !rows_to_delete.is_empty() {
                 let deleted_count = rows_to_delete.len();
-                
+
                 // Create a new row set excluding the rows to delete
-                let mut new_rows: Vec<Vec<Value>> = Vec::with_capacity(table.row_count() - deleted_count);
-                
+                let mut new_rows: Vec<Vec<Value>> =
+                    Vec::with_capacity(table.row_count() - deleted_count);
+
                 for (idx, row) in table.rows().iter().enumerate() {
                     if !rows_to_delete.contains(&idx) {
                         new_rows.push(row.clone());
                     }
                 }
-                
+
                 table.replace_rows(new_rows);
-                
+
                 // Mark the table as modified
                 self.modified_tables.insert(table_name);
-                
+
                 Ok(deleted_count)
             } else {
                 // No rows matched the WHERE condition
@@ -264,45 +274,39 @@ impl SqlExecutor {
         } else {
             // No WHERE clause means delete all rows
             eprintln!("Executing DELETE (all rows)");
-            
+
             let table = self.csv_handler.get_table_mut(&table_name)?;
             let deleted_count = table.row_count();
-            
+
             // Replace with empty row set
             table.replace_rows(Vec::new());
-            
+
             // Mark the table as modified
             self.modified_tables.insert(table_name);
-            
+
             Ok(deleted_count)
         }
     }
-    
+
     /// Extract the table name from a TableWithJoins
     fn get_table_name(&self, table_with_joins: &TableWithJoins) -> SqawkResult<String> {
         match &table_with_joins.relation {
-            sqlparser::ast::TableFactor::Table { name, .. } => {
-                Ok(name.0.iter()
-                    .map(|i| i.value.clone())
-                    .collect::<Vec<_>>()
-                    .join("."))
-            },
-            _ => {
-                Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple table references are supported".to_string()
-                ))
-            }
+            sqlparser::ast::TableFactor::Table { name, .. } => Ok(name
+                .0
+                .iter()
+                .map(|i| i.value.clone())
+                .collect::<Vec<_>>()
+                .join(".")),
+            _ => Err(SqawkError::UnsupportedSqlFeature(
+                "Only simple table references are supported".to_string(),
+            )),
         }
     }
-    
+
     /// Resolve SELECT items to column indices
-    fn resolve_select_items(
-        &self,
-        items: &[SelectItem],
-        table: &Table
-    ) -> SqawkResult<Vec<usize>> {
+    fn resolve_select_items(&self, items: &[SelectItem], table: &Table) -> SqawkResult<Vec<usize>> {
         let mut column_indices = Vec::new();
-        
+
         for item in items {
             match item {
                 SelectItem::Wildcard(_) => {
@@ -310,76 +314,78 @@ impl SqlExecutor {
                     for i in 0..table.column_count() {
                         column_indices.push(i);
                     }
-                },
+                }
                 SelectItem::UnnamedExpr(expr) => {
                     // For now, only support direct column references
                     if let Expr::Identifier(ident) = expr {
-                        let idx = table.column_index(&ident.value)
+                        let idx = table
+                            .column_index(&ident.value)
                             .ok_or_else(|| SqawkError::ColumnNotFound(ident.value.clone()))?;
                         column_indices.push(idx);
                     } else {
                         return Err(SqawkError::UnsupportedSqlFeature(
-                            "Only direct column references are supported in SELECT".to_string()
+                            "Only direct column references are supported in SELECT".to_string(),
                         ));
                     }
-                },
+                }
                 SelectItem::ExprWithAlias { .. } => {
                     return Err(SqawkError::UnsupportedSqlFeature(
-                        "Column aliases are not supported".to_string()
+                        "Column aliases are not supported".to_string(),
                     ));
-                },
+                }
                 _ => {
                     return Err(SqawkError::UnsupportedSqlFeature(
-                        "Unsupported SELECT item".to_string()
+                        "Unsupported SELECT item".to_string(),
                     ));
                 }
             }
         }
-        
+
         Ok(column_indices)
     }
-    
+
     /// Apply a WHERE clause to filter table rows
-    /// 
+    ///
     /// This function creates a new table containing only rows that match the condition
     /// specified in the WHERE clause. It evaluates the condition for each row and includes
     /// only those rows for which the condition evaluates to true.
-    /// 
+    ///
     /// # Arguments
     /// * `table` - The source table to filter
     /// * `where_expr` - The WHERE clause expression to evaluate
-    /// 
+    ///
     /// # Returns
     /// * A new table containing only rows that match the condition
-    /// 
+    ///
     /// # Important
     /// This function is called before column projection to ensure all columns
     /// needed for the WHERE condition evaluation are available.
     fn apply_where_clause(&self, table: Table, where_expr: &Expr) -> SqawkResult<Table> {
         eprintln!("Applying WHERE clause: {:?}", where_expr);
         eprintln!("Table before filtering: {} rows", table.row_count());
-        
+
         // Create a new table that only includes rows matching the WHERE condition
         // by calling the table.select method with a closure that evaluates the condition
         let result = table.select(|row| {
             // For each row, evaluate the WHERE condition expression
             // If evaluation fails (returns an error), default to false (exclude the row)
-            let matches = self.evaluate_condition(where_expr, row, &table)
+            let matches = self
+                .evaluate_condition(where_expr, row, &table)
                 .unwrap_or(false);
-            
+
             // Debug output for each row evaluation
             eprintln!("Row: {:?}, matches condition: {}", row, matches);
             matches
         });
-        
+
         // Log the filter results
         eprintln!("Table after filtering: {} rows", result.row_count());
-        
+
         Ok(result)
     }
-    
+
     /// Evaluate a condition expression against a row
-    /// 
+    ///
     /// This function evaluates SQL WHERE clause conditions against a specific row.
     /// It handles various expression types including binary operations (comparisons),
     /// IS NULL and IS NOT NULL checks.
@@ -398,10 +404,10 @@ impl SqlExecutor {
             Expr::BinaryOp { left, op, right } => {
                 let left_val = self.evaluate_expr_with_row(left, row, table)?;
                 let right_val = self.evaluate_expr_with_row(right, row, table)?;
-                
+
                 // Debug print the values being compared
                 eprintln!("WHERE comparison: {:?} {:?} {:?}", left_val, op, right_val);
-                
+
                 // Handle different comparison operators
                 match op {
                     // Equal (=) operator
@@ -410,101 +416,101 @@ impl SqlExecutor {
                         let result = left_val == right_val;
                         eprintln!("Equality result: {}", result);
                         Ok(result)
-                    },
-                    
+                    }
+
                     // Not equal (!=) operator
                     sqlparser::ast::BinaryOperator::NotEq => Ok(left_val != right_val),
-                    
+
                     // Greater than (>) operator
                     sqlparser::ast::BinaryOperator::Gt => {
                         // Handle each type combination separately for correct numeric comparisons
                         match (&left_val, &right_val) {
                             // Integer-Integer comparison
                             (Value::Integer(a), Value::Integer(b)) => Ok(a > b),
-                            
+
                             // Float-Float comparison
                             (Value::Float(a), Value::Float(b)) => Ok(a > b),
-                            
+
                             // Integer-Float comparison (convert Integer to Float)
                             (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) > *b),
-                            
+
                             // Float-Integer comparison (convert Integer to Float)
                             (Value::Float(a), Value::Integer(b)) => Ok(*a > (*b as f64)),
-                            
+
                             // String-String comparison (lexicographic)
                             (Value::String(a), Value::String(b)) => Ok(a > b),
-                            
+
                             // Error for incompatible types
-                            _ => Err(SqawkError::TypeError(
-                                format!("Cannot compare {:?} and {:?} with >", left_val, right_val)
-                            )),
+                            _ => Err(SqawkError::TypeError(format!(
+                                "Cannot compare {:?} and {:?} with >",
+                                left_val, right_val
+                            ))),
                         }
-                    },
-                    
+                    }
+
                     // Less than (<) operator
-                    sqlparser::ast::BinaryOperator::Lt => {
-                        match (&left_val, &right_val) {
-                            (Value::Integer(a), Value::Integer(b)) => Ok(a < b),
-                            (Value::Float(a), Value::Float(b)) => Ok(a < b),
-                            (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) < *b),
-                            (Value::Float(a), Value::Integer(b)) => Ok(*a < (*b as f64)),
-                            (Value::String(a), Value::String(b)) => Ok(a < b),
-                            _ => Err(SqawkError::TypeError(
-                                format!("Cannot compare {:?} and {:?} with <", left_val, right_val)
-                            )),
-                        }
+                    sqlparser::ast::BinaryOperator::Lt => match (&left_val, &right_val) {
+                        (Value::Integer(a), Value::Integer(b)) => Ok(a < b),
+                        (Value::Float(a), Value::Float(b)) => Ok(a < b),
+                        (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) < *b),
+                        (Value::Float(a), Value::Integer(b)) => Ok(*a < (*b as f64)),
+                        (Value::String(a), Value::String(b)) => Ok(a < b),
+                        _ => Err(SqawkError::TypeError(format!(
+                            "Cannot compare {:?} and {:?} with <",
+                            left_val, right_val
+                        ))),
                     },
-                    
+
                     // Greater than or equal (>=) operator
-                    sqlparser::ast::BinaryOperator::GtEq => {
-                        match (&left_val, &right_val) {
-                            (Value::Integer(a), Value::Integer(b)) => Ok(a >= b),
-                            (Value::Float(a), Value::Float(b)) => Ok(a >= b),
-                            (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) >= *b),
-                            (Value::Float(a), Value::Integer(b)) => Ok(*a >= (*b as f64)),
-                            (Value::String(a), Value::String(b)) => Ok(a >= b),
-                            _ => Err(SqawkError::TypeError(
-                                format!("Cannot compare {:?} and {:?} with >=", left_val, right_val)
-                            )),
-                        }
+                    sqlparser::ast::BinaryOperator::GtEq => match (&left_val, &right_val) {
+                        (Value::Integer(a), Value::Integer(b)) => Ok(a >= b),
+                        (Value::Float(a), Value::Float(b)) => Ok(a >= b),
+                        (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) >= *b),
+                        (Value::Float(a), Value::Integer(b)) => Ok(*a >= (*b as f64)),
+                        (Value::String(a), Value::String(b)) => Ok(a >= b),
+                        _ => Err(SqawkError::TypeError(format!(
+                            "Cannot compare {:?} and {:?} with >=",
+                            left_val, right_val
+                        ))),
                     },
-                    
+
                     // Less than or equal (<=) operator
-                    sqlparser::ast::BinaryOperator::LtEq => {
-                        match (&left_val, &right_val) {
-                            (Value::Integer(a), Value::Integer(b)) => Ok(a <= b),
-                            (Value::Float(a), Value::Float(b)) => Ok(a <= b),
-                            (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) <= *b),
-                            (Value::Float(a), Value::Integer(b)) => Ok(*a <= (*b as f64)),
-                            (Value::String(a), Value::String(b)) => Ok(a <= b),
-                            _ => Err(SqawkError::TypeError(
-                                format!("Cannot compare {:?} and {:?} with <=", left_val, right_val)
-                            )),
-                        }
+                    sqlparser::ast::BinaryOperator::LtEq => match (&left_val, &right_val) {
+                        (Value::Integer(a), Value::Integer(b)) => Ok(a <= b),
+                        (Value::Float(a), Value::Float(b)) => Ok(a <= b),
+                        (Value::Integer(a), Value::Float(b)) => Ok((*a as f64) <= *b),
+                        (Value::Float(a), Value::Integer(b)) => Ok(*a <= (*b as f64)),
+                        (Value::String(a), Value::String(b)) => Ok(a <= b),
+                        _ => Err(SqawkError::TypeError(format!(
+                            "Cannot compare {:?} and {:?} with <=",
+                            left_val, right_val
+                        ))),
                     },
                     // Add more operators as needed
-                    _ => Err(SqawkError::UnsupportedSqlFeature(
-                        format!("Unsupported binary operator: {:?}", op)
-                    )),
+                    _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                        "Unsupported binary operator: {:?}",
+                        op
+                    ))),
                 }
-            },
+            }
             Expr::IsNull(expr) => {
                 let val = self.evaluate_expr_with_row(expr, row, table)?;
                 Ok(val == Value::Null)
-            },
+            }
             Expr::IsNotNull(expr) => {
                 let val = self.evaluate_expr_with_row(expr, row, table)?;
                 Ok(val != Value::Null)
-            },
+            }
             // Add more expression types as needed
-            _ => Err(SqawkError::UnsupportedSqlFeature(
-                format!("Unsupported WHERE condition: {:?}", expr)
-            )),
+            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Unsupported WHERE condition: {:?}",
+                expr
+            ))),
         }
     }
-    
+
     /// Evaluate an expression to a Value
-    /// 
+    ///
     /// This function evaluates SQL expressions like literals, constants, etc.
     /// and converts them to our internal Value type.
     ///
@@ -525,33 +531,26 @@ impl SqlExecutor {
                         } else if let Ok(f) = n.parse::<f64>() {
                             Ok(Value::Float(f))
                         } else {
-                            Err(SqawkError::TypeError(
-                                format!("Invalid number: {}", n)
-                            ))
+                            Err(SqawkError::TypeError(format!("Invalid number: {}", n)))
                         }
-                    },
+                    }
                     SqlValue::SingleQuotedString(s) | SqlValue::DoubleQuotedString(s) => {
                         Ok(Value::String(s.clone()))
-                    },
-                    SqlValue::Boolean(b) => {
-                        Ok(Value::Boolean(*b))
-                    },
-                    SqlValue::Null => {
-                        Ok(Value::Null)
-                    },
-                    _ => {
-                        Err(SqawkError::UnsupportedSqlFeature(
-                            format!("Unsupported SQL value: {:?}", value)
-                        ))
                     }
+                    SqlValue::Boolean(b) => Ok(Value::Boolean(*b)),
+                    SqlValue::Null => Ok(Value::Null),
+                    _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                        "Unsupported SQL value: {:?}",
+                        value
+                    ))),
                 }
-            },
+            }
             // Handle unary operations like - (negation)
             Expr::UnaryOp { op, expr } => {
                 eprintln!("Evaluating UnaryOp: {:?} on expr: {:?}", op, expr);
                 let val = self.evaluate_expr(expr)?;
                 eprintln!("Value before applying unary operator: {:?}", val);
-                
+
                 match op {
                     sqlparser::ast::UnaryOperator::Minus => {
                         // Apply negation to numeric values
@@ -560,50 +559,52 @@ impl SqlExecutor {
                                 let result = Value::Integer(-i);
                                 eprintln!("Applying negation to integer: {} -> {}", i, -i);
                                 Ok(result)
-                            },
+                            }
                             Value::Float(f) => {
                                 let result = Value::Float(-f);
                                 eprintln!("Applying negation to float: {} -> {}", f, -f);
                                 Ok(result)
-                            },
-                            _ => Err(SqawkError::TypeError(
-                                format!("Cannot apply negation to non-numeric value: {:?}", val)
-                            ))
+                            }
+                            _ => Err(SqawkError::TypeError(format!(
+                                "Cannot apply negation to non-numeric value: {:?}",
+                                val
+                            ))),
                         }
-                    },
+                    }
                     sqlparser::ast::UnaryOperator::Plus => {
                         // Plus operator doesn't change the value
                         Ok(val)
-                    },
+                    }
                     sqlparser::ast::UnaryOperator::Not => {
                         // Boolean negation
                         match val {
                             Value::Boolean(b) => Ok(Value::Boolean(!b)),
-                            _ => Err(SqawkError::TypeError(
-                                format!("Cannot apply NOT to non-boolean value: {:?}", val)
-                            ))
+                            _ => Err(SqawkError::TypeError(format!(
+                                "Cannot apply NOT to non-boolean value: {:?}",
+                                val
+                            ))),
                         }
-                    },
-                    _ => Err(SqawkError::UnsupportedSqlFeature(
-                        format!("Unsupported unary operator: {:?}", op)
-                    ))
+                    }
+                    _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                        "Unsupported unary operator: {:?}",
+                        op
+                    ))),
                 }
-            },
-            _ => {
-                Err(SqawkError::UnsupportedSqlFeature(
-                    format!("Unsupported expression: {:?}", expr)
-                ))
             }
+            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Unsupported expression: {:?}",
+                expr
+            ))),
         }
     }
-    
+
     /// Evaluate an expression with a row context
-    /// 
+    ///
     /// This function extends `evaluate_expr` to handle expressions that reference
     /// columns in a specific row (e.g., for WHERE clause evaluation). It first
     /// tries to resolve column references in the current row, and if that doesn't apply,
     /// falls back to standard expression evaluation.
-    /// 
+    ///
     /// # Arguments
     /// * `expr` - The SQL expression to evaluate
     /// * `row` - The row containing values for column references
@@ -616,21 +617,22 @@ impl SqlExecutor {
         &self,
         expr: &Expr,
         row: &[Value],
-        table: &Table
+        table: &Table,
     ) -> SqawkResult<Value> {
         match expr {
             Expr::Identifier(ident) => {
-                let idx = table.column_index(&ident.value)
+                let idx = table
+                    .column_index(&ident.value)
                     .ok_or_else(|| SqawkError::ColumnNotFound(ident.value.clone()))?;
                 Ok(row[idx].clone())
-            },
+            }
             _ => self.evaluate_expr(expr),
         }
     }
-    
+
     /// Save all modified tables back to their source files
-    /// 
-    /// This function writes any tables that have been modified during execution 
+    ///
+    /// This function writes any tables that have been modified during execution
     /// (e.g., through INSERT statements) back to their source CSV files.
     /// Only tables that have been modified will be saved, preserving the original
     /// CSV files if no changes were made.
@@ -643,7 +645,7 @@ impl SqlExecutor {
             // Use the CSV handler to write the table back to its source file
             self.csv_handler.save_table(table_name)?;
         }
-        
+
         Ok(())
     }
 }

@@ -14,13 +14,16 @@ pub struct SqawkArgs {
     pub sql: Vec<String>,
 
     /// CSV files to process - format: [table_name=]file_path.csv
-    #[clap(required = true, help = "CSV files to process as [table_name=]file_path.csv")]
+    #[clap(
+        required = true,
+        help = "CSV files to process as [table_name=]file_path.csv"
+    )]
     pub files: Vec<String>,
 
     /// Verbose output
     #[clap(short, long, help = "Enable verbose output")]
     pub verbose: bool,
-    
+
     /// Dry run mode: don't modify any files
     #[clap(long, help = "Don't write changes back to files (dry run)")]
     pub dry_run: bool,
