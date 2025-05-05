@@ -841,20 +841,20 @@ impl Table {
     pub fn limit(&self, limit: usize, offset: usize) -> SqawkResult<Self> {
         // Create a new table with the same structure
         let mut result = Table::new(&self.name, self.columns.clone(), self.source_file.clone());
-        
+
         // If offset is greater than or equal to the number of rows, return an empty table
         if offset >= self.rows.len() {
             return Ok(result);
         }
-        
+
         // Calculate the end index, capped at the table size
         let end = std::cmp::min(offset + limit, self.rows.len());
-        
+
         // Add rows from offset to end
         for row in &self.rows[offset..end] {
             result.add_row(row.clone())?;
         }
-        
+
         Ok(result)
     }
 }

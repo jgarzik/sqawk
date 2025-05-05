@@ -47,10 +47,16 @@ fn test_limit_basic() -> Result<(), Box<dyn std::error::Error>> {
     assert!(stdout.contains("id,name,age"), "Header should be present");
     assert!(stdout.contains("1,Alice,30"), "First row should be present");
     assert!(stdout.contains("2,Bob,25"), "Second row should be present");
-    
+
     // Make sure limited rows are not present
-    assert!(!stdout.contains("3,Charlie,35"), "Third row should not be present");
-    assert!(!stdout.contains("4,Dave,28"), "Fourth row should not be present");
+    assert!(
+        !stdout.contains("3,Charlie,35"),
+        "Third row should not be present"
+    );
+    assert!(
+        !stdout.contains("4,Dave,28"),
+        "Fourth row should not be present"
+    );
 
     Ok(())
 }
@@ -82,11 +88,20 @@ fn test_limit_with_offset() -> Result<(), Box<dyn std::error::Error>> {
     // Check that the output contains the expected data
     assert!(stdout.contains("id,name,age"), "Header should be present");
     assert!(stdout.contains("2,Bob,25"), "First row should be present");
-    assert!(stdout.contains("3,Charlie,35"), "Second row should be present");
-    
+    assert!(
+        stdout.contains("3,Charlie,35"),
+        "Second row should be present"
+    );
+
     // Make sure limited and offset rows are not present
-    assert!(!stdout.contains("1,Alice,30"), "First original row should not be present due to offset");
-    assert!(!stdout.contains("4,Dave,28"), "Fourth row should not be present due to limit");
+    assert!(
+        !stdout.contains("1,Alice,30"),
+        "First original row should not be present due to offset"
+    );
+    assert!(
+        !stdout.contains("4,Dave,28"),
+        "Fourth row should not be present due to limit"
+    );
 
     Ok(())
 }
@@ -121,12 +136,24 @@ fn test_limit_with_order_by() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check output contains the correct sorted rows with limit
     assert!(stdout.contains("id,name,age"), "Header should be present");
-    assert!(stdout.contains("3,Charlie,35"), "First row (highest age) should be present");
-    assert!(stdout.contains("1,Alice,30"), "Second row (second highest age) should be present");
-    
+    assert!(
+        stdout.contains("3,Charlie,35"),
+        "First row (highest age) should be present"
+    );
+    assert!(
+        stdout.contains("1,Alice,30"),
+        "Second row (second highest age) should be present"
+    );
+
     // Make sure other rows are not present
-    assert!(!stdout.contains("2,Bob,25"), "Row with age 25 should not be present");
-    assert!(!stdout.contains("4,Dave,28"), "Row with age 28 should not be present");
+    assert!(
+        !stdout.contains("2,Bob,25"),
+        "Row with age 25 should not be present"
+    );
+    assert!(
+        !stdout.contains("4,Dave,28"),
+        "Row with age 28 should not be present"
+    );
 
     Ok(())
 }
@@ -168,23 +195,26 @@ fn test_limit_with_aggregates() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Check output contains header and expected departments
-    assert!(stdout.contains("department,count,avg_salary"), "Header should be present");
-    
+    assert!(
+        stdout.contains("department,count,avg_salary"),
+        "Header should be present"
+    );
+
     // Check Engineering department has highest average salary and appears first
     assert!(
-        stdout.contains("Engineering,3,"), 
+        stdout.contains("Engineering,3,"),
         "Row for Engineering department should be present"
     );
-    
+
     // Check Marketing department has second highest average salary
     assert!(
-        stdout.contains("Marketing,2,"), 
+        stdout.contains("Marketing,2,"),
         "Row for Marketing department should be present"
     );
-    
+
     // Finance department should be excluded by the LIMIT
     assert!(
-        !stdout.contains("Finance"), 
+        !stdout.contains("Finance"),
         "Finance department should not be present due to LIMIT"
     );
 
@@ -224,30 +254,33 @@ fn test_distinct_with_limit() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Check output contains the expected header and rows
-    assert!(stdout.contains("department,role"), "Header should be present");
-    
+    assert!(
+        stdout.contains("department,role"),
+        "Header should be present"
+    );
+
     // With department ASC ordering and offset 1, we should skip "Engineering,Developer"
     // and get "Engineering,Manager", "Finance,Analyst", and "HR,Manager"
     assert!(
-        stdout.contains("Engineering,Manager"), 
+        stdout.contains("Engineering,Manager"),
         "Row with Engineering,Manager should be present"
     );
     assert!(
-        stdout.contains("Finance,Analyst"), 
+        stdout.contains("Finance,Analyst"),
         "Row with Finance,Analyst should be present"
     );
     assert!(
-        stdout.contains("HR,Manager"), 
+        stdout.contains("HR,Manager"),
         "Row with HR,Manager should be present"
     );
-    
+
     // Verify that excluded rows are not present
     assert!(
-        !stdout.contains("Engineering,Developer"), 
+        !stdout.contains("Engineering,Developer"),
         "Engineering,Developer should be excluded due to OFFSET"
     );
     assert!(
-        !stdout.contains("Marketing"), 
+        !stdout.contains("Marketing"),
         "Marketing should not be present due to LIMIT"
     );
 
@@ -280,12 +313,24 @@ fn test_zero_limit() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check output contains the header
     assert!(stdout.contains("id,name,age"), "Header should be present");
-    
+
     // Check that no data rows are present
-    assert!(!stdout.contains("Alice"), "Row with Alice should not be present");
-    assert!(!stdout.contains("Bob"), "Row with Bob should not be present");
-    assert!(!stdout.contains("Charlie"), "Row with Charlie should not be present");
-    assert!(!stdout.contains("Dave"), "Row with Dave should not be present");
+    assert!(
+        !stdout.contains("Alice"),
+        "Row with Alice should not be present"
+    );
+    assert!(
+        !stdout.contains("Bob"),
+        "Row with Bob should not be present"
+    );
+    assert!(
+        !stdout.contains("Charlie"),
+        "Row with Charlie should not be present"
+    );
+    assert!(
+        !stdout.contains("Dave"),
+        "Row with Dave should not be present"
+    );
 
     Ok(())
 }
@@ -316,12 +361,24 @@ fn test_offset_beyond_table_size() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check output contains the header
     assert!(stdout.contains("id,name,age"), "Header should be present");
-    
+
     // Check that no data rows are present (offset is beyond table size)
-    assert!(!stdout.contains("Alice"), "Row with Alice should not be present");
-    assert!(!stdout.contains("Bob"), "Row with Bob should not be present");
-    assert!(!stdout.contains("Charlie"), "Row with Charlie should not be present");
-    assert!(!stdout.contains("Dave"), "Row with Dave should not be present");
+    assert!(
+        !stdout.contains("Alice"),
+        "Row with Alice should not be present"
+    );
+    assert!(
+        !stdout.contains("Bob"),
+        "Row with Bob should not be present"
+    );
+    assert!(
+        !stdout.contains("Charlie"),
+        "Row with Charlie should not be present"
+    );
+    assert!(
+        !stdout.contains("Dave"),
+        "Row with Dave should not be present"
+    );
 
     Ok(())
 }

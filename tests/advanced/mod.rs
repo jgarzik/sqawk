@@ -1,6 +1,6 @@
 //! Tests for advanced SQL features and edge cases in sqawk
 //!
-//! This module contains tests for complex features and scenarios that are not 
+//! This module contains tests for complex features and scenarios that are not
 //! covered by the focused test modules.
 
 use crate::helpers::create_temp_dir;
@@ -40,7 +40,7 @@ fn test_is_null_operator() -> Result<(), Box<dyn std::error::Error>> {
     // Create a file with NULL values
     let temp_dir = create_temp_dir()?;
     let file_path = temp_dir.path().join("null_test.csv");
-    
+
     let content = "id,name,department\n1,Alice,Engineering\n2,,Marketing\n3,Charlie,\n";
     fs::write(&file_path, content)?;
 

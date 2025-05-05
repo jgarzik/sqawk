@@ -65,7 +65,7 @@ fn main() -> Result<()> {
     // This is important for debugging and understanding the execution flow
     if args.verbose {
         println!("Running in verbose mode");
-        println!("Arguments: {:?}", args);
+        println!("Arguments: {args:?}");
     }
 
     // Step 2a: Initialize the file handler with optional custom field separator
@@ -77,14 +77,15 @@ fn main() -> Result<()> {
     for file_spec in &args.files {
         file_handler
             .load_file(file_spec)
-            .with_context(|| format!("Failed to load file: {}", file_spec))?;
+            .with_context(|| format!("Failed to load file: {file_spec}"))?;
     }
 
     // Log table loading results in verbose mode
     if args.verbose {
-        println!("Loaded {} tables", file_handler.table_count());
+        let table_count = file_handler.table_count();
+        println!("Loaded {table_count} tables");
         for table_name in file_handler.table_names() {
-            println!("Table '{}' loaded", table_name);
+            println!("Table '{table_name}' loaded");
         }
     }
 
@@ -97,21 +98,22 @@ fn main() -> Result<()> {
     for sql in &args.sql {
         // Log the SQL being executed in verbose mode
         if args.verbose {
-            println!("Executing SQL: {}", sql);
+            println!("Executing SQL: {sql}");
         }
 
         // Execute the SQL statement against the in-memory tables
         // The result may be a table (for SELECT) or None (for UPDATE, DELETE, INSERT)
         let result = sql_executor
             .execute(sql)
-            .with_context(|| format!("Failed to execute SQL: {}", sql))?;
+            .with_context(|| format!("Failed to execute SQL: {sql}"))?;
 
         // Step 4: Output results to stdout (for SELECT queries)
         match result {
             // For SELECT queries that return data
             Some(table) => {
                 if args.verbose {
-                    println!("Query returned {} rows", table.row_count());
+                    let row_count = table.row_count();
+                    println!("Query returned {row_count} rows");
                 }
                 // Print the result table in delimiter-separated format
                 table.print_to_stdout()?;

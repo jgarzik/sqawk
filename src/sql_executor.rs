@@ -161,7 +161,7 @@ impl SqlExecutor {
                             eprintln!("Applying GROUP BY");
                         }
                         // Apply aggregation functions with grouping
-                        self.apply_grouped_aggregate_functions(
+                        SqlExecutor::apply_grouped_aggregate_functions(
                             &select.projection,
                             &filtered_table,
                             &select.group_by,
@@ -188,7 +188,7 @@ impl SqlExecutor {
                         final_result_table =
                             self.apply_order_by(final_result_table, &query.order_by)?;
                     }
-                    
+
                     // Apply LIMIT and OFFSET if present
                     if query.limit.is_some() || query.offset.is_some() {
                         if self.verbose {
@@ -238,7 +238,7 @@ impl SqlExecutor {
                         }
                         result_table = self.apply_order_by(result_table, &query.order_by)?;
                     }
-                    
+
                     // Apply LIMIT and OFFSET if present
                     if query.limit.is_some() || query.offset.is_some() {
                         if self.verbose {
@@ -255,7 +255,7 @@ impl SqlExecutor {
             )),
         }
     }
-    
+
     /// Apply LIMIT and OFFSET clauses to a table
     ///
     /// This function extracts limit and offset values from the SQL query,
@@ -272,16 +272,15 @@ impl SqlExecutor {
         let limit = if let Some(limit_expr) = &query.limit {
             match limit_expr {
                 // Parse the limit value from the SQL expression
-                sqlparser::ast::Expr::Value(SqlValue::Number(n, _)) => {
-                    match n.parse::<usize>() {
-                        Ok(val) => val,
-                        Err(_) => {
-                            return Err(SqawkError::InvalidSqlQuery(
-                                format!("Invalid LIMIT value: {}", n)
-                            ));
-                        }
+                sqlparser::ast::Expr::Value(SqlValue::Number(n, _)) => match n.parse::<usize>() {
+                    Ok(val) => val,
+                    Err(_) => {
+                        return Err(SqawkError::InvalidSqlQuery(format!(
+                            "Invalid LIMIT value: {}",
+                            n
+                        )));
                     }
-                }
+                },
                 _ => {
                     return Err(SqawkError::UnsupportedSqlFeature(
                         "Only constant numeric values are supported for LIMIT".to_string(),
@@ -296,16 +295,15 @@ impl SqlExecutor {
         // Extract OFFSET value (default to 0 if not specified)
         let offset = if let Some(offset_clause) = &query.offset {
             match &offset_clause.value {
-                sqlparser::ast::Expr::Value(SqlValue::Number(n, _)) => {
-                    match n.parse::<usize>() {
-                        Ok(val) => val,
-                        Err(_) => {
-                            return Err(SqawkError::InvalidSqlQuery(
-                                format!("Invalid OFFSET value: {}", n)
-                            ));
-                        }
+                sqlparser::ast::Expr::Value(SqlValue::Number(n, _)) => match n.parse::<usize>() {
+                    Ok(val) => val,
+                    Err(_) => {
+                        return Err(SqawkError::InvalidSqlQuery(format!(
+                            "Invalid OFFSET value: {}",
+                            n
+                        )));
                     }
-                }
+                },
                 _ => {
                     return Err(SqawkError::UnsupportedSqlFeature(
                         "Only constant numeric values are supported for OFFSET".to_string(),
@@ -1558,7 +1556,7 @@ impl SqlExecutor {
     /// # Implementation Details
     /// The GROUP BY implementation follows these steps:
     /// 1. Identify the columns to group by
-    /// 2. Build a HashMap that groups row indices by their group key values
+    /// 2. Build a `HashMap` that groups row indices by their group key values
     /// 3. Process each SELECT item to determine which outputs to include
     /// 4. For each group, generate one output row with:
     ///    - The GROUP BY column values
@@ -1568,7 +1566,6 @@ impl SqlExecutor {
     /// * A new table containing the results of all aggregate functions, one row per group
     /// * `Err` if any function arguments are invalid or unsupported
     fn apply_grouped_aggregate_functions(
-        &self,
         items: &[SelectItem],
         table: &Table,
         group_by: &Vec<sqlparser::ast::Expr>,
