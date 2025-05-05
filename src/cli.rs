@@ -3,7 +3,7 @@
 //! This module handles parsing command-line arguments using the clap crate.
 
 use anyhow::Result;
-use clap::{Parser, Args};
+use clap::Parser;
 
 /// Command-line arguments for sqawk
 #[derive(Parser, Debug)]

@@ -10,7 +10,7 @@ mod sql_executor;
 mod table;
 
 use anyhow::{Context, Result};
-use cli::SqawkArgs;
+// Not explicitly importing SqawkArgs as it's not directly used
 use csv_handler::CsvHandler;
 use sql_executor::SqlExecutor;
 

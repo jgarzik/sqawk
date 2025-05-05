@@ -5,10 +5,11 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use anyhow::{Context, Result};
-use csv::{Reader, Writer};
+// Import removed as it's no longer needed
+// Using csv crate without specific imports
+use csv;
 
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{Table, Value};
@@ -123,6 +124,9 @@ impl CsvHandler {
     }
     
     /// Add a table to the collection
+    /// 
+    /// This method is not currently used but kept for future extensibility
+    #[allow(dead_code)]
     pub fn add_table(&mut self, table: Table) -> SqawkResult<()> {
         let name = table.name().to_string();
         self.tables.insert(name, table);

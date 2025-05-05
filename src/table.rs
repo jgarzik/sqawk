@@ -2,7 +2,7 @@
 //!
 //! This module provides the in-memory table representation for the sqawk utility.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -129,6 +129,7 @@ impl Table {
     }
     
     /// Get the table name
+    #[allow(dead_code)]
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -154,6 +155,7 @@ impl Table {
     }
     
     /// Get a reference to a row by index
+    #[allow(dead_code)]
     pub fn row(&self, index: usize) -> Option<&Row> {
         self.rows.get(index)
     }
@@ -180,6 +182,7 @@ impl Table {
     }
     
     /// Check if the table was modified
+    #[allow(dead_code)]
     pub fn is_modified(&self) -> bool {
         self.modified
     }
