@@ -78,6 +78,7 @@ Sqawk currently supports the following SQL operations:
 |-----------|-------------|---------|
 | `SELECT` | Query data from tables | `SELECT * FROM users WHERE age > 30` |
 | `INSERT` | Add new rows to tables | `INSERT INTO users VALUES (4, 'Dave', 28)` |
+| `UPDATE` | Modify existing rows in tables | `UPDATE users SET age = 29 WHERE name = 'Dave'` |
 | `DELETE` | Remove rows from tables | `DELETE FROM users WHERE age < 18` |
 
 ### SELECT Statement
@@ -96,6 +97,15 @@ The `INSERT` statement supports:
 - Direct value insertion with the `VALUES` clause
 - All columns must be provided in the correct order
 - No column mapping or partial column insertion
+
+### UPDATE Statement
+
+The `UPDATE` statement supports:
+
+- Updating one or more columns in all rows (`UPDATE table SET col = value`)
+- Conditional updates with the `WHERE` clause (`UPDATE table SET col = value WHERE condition`)
+- Simple assignments with literal values (`UPDATE users SET age = 30`)
+- Using the same conditions and operators as in the WHERE clause for filtering
 
 ### DELETE Statement
 

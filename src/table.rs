@@ -244,6 +244,38 @@ impl Table {
         self.rows = new_rows;
         self.modified = true;
     }
+    
+    /// Update a single value in a specific row and column
+    ///
+    /// # Arguments
+    /// * `row_idx` - The index of the row to update
+    /// * `col_idx` - The index of the column to update
+    /// * `value` - The new value to set
+    ///
+    /// # Returns
+    /// * `Ok(())` if the update was successful
+    /// * `Err` if the row or column index is out of bounds
+    pub fn update_value(&mut self, row_idx: usize, col_idx: usize, value: Value) -> SqawkResult<()> {
+        if row_idx >= self.rows.len() {
+            return Err(SqawkError::InvalidSqlQuery(format!(
+                "Row index {} is out of bounds (table has {} rows)",
+                row_idx,
+                self.rows.len()
+            )));
+        }
+        
+        if col_idx >= self.columns.len() {
+            return Err(SqawkError::ColumnNotFound(format!(
+                "Column index {} is out of bounds (table has {} columns)",
+                col_idx,
+                self.columns.len()
+            )));
+        }
+        
+        self.rows[row_idx][col_idx] = value;
+        self.modified = true;
+        Ok(())
+    }
 
     /// Create a new table with only specified columns
     pub fn project(&self, column_indices: &[usize]) -> SqawkResult<Self> {

@@ -2,6 +2,9 @@
 //!
 //! This file contains end-to-end tests for the sqawk application.
 
+// Import update tests submodule
+mod update_tests;
+
 use crate::helpers::{
     create_custom_csv, create_temp_dir, get_static_sample_file, prepare_test_file, run_test_case,
     run_test_case_with_static_file, SqawkTestCase,

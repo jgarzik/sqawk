@@ -47,6 +47,14 @@ args = "Test DELETE Query"
 task = "workflow.run"
 args = "Test DELETE All"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test UPDATE Query"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test UPDATE All Rows"
+
 [[workflows.workflow]]
 name = "sqawk-build-and-run"
 author = "agent"
@@ -120,6 +128,22 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "cd $(pwd) && cargo run --bin sqawk -- -s \"DELETE FROM sample\" -s \"SELECT * FROM sample\" tests/data/sample.csv -v"
+
+[[workflows.workflow]]
+name = "Test UPDATE Query"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"UPDATE sample SET age = 31 WHERE name = 'Alice'\" -s \"SELECT * FROM sample\" tests/data/sample.csv -v"
+
+[[workflows.workflow]]
+name = "Test UPDATE All Rows"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run -- -s \"UPDATE sample SET name = 'Updated'\" -s \"SELECT * FROM sample\" tests/data/sample.csv -v"
 
 [deployment]
 run = ["sh", "-c", "cargo build && echo \"Testing Sqawk with sample data:\" && cargo run -- -s \"SELECT * FROM sample\" tests/data/sample.csv -v"]

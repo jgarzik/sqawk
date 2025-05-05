@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use sqlparser::ast::{
-    Expr, Query, SelectItem, SetExpr, Statement, TableWithJoins, Value as SqlValue,
+    Assignment, Expr, Query, SelectItem, SetExpr, Statement, TableWithJoins, Value as SqlValue,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -68,6 +68,16 @@ impl SqlExecutor {
                 ..
             } => {
                 self.execute_insert(table_name, columns, source)?;
+                Ok(None)
+            }
+            Statement::Update {
+                table,
+                assignments,
+                selection,
+                ..
+            } => {
+                let updated_count = self.execute_update(table, assignments, selection)?;
+                eprintln!("Updated {} rows", updated_count);
                 Ok(None)
             }
             Statement::Delete {
@@ -630,10 +640,104 @@ impl SqlExecutor {
         }
     }
 
+    /// Execute an UPDATE statement
+    ///
+    /// This function updates rows in a table based on the assignments and an optional WHERE condition.
+    /// If no WHERE condition is provided, all rows are updated.
+    ///
+    /// # Arguments
+    /// * `table` - The table reference to update
+    /// * `assignments` - Column assignments to apply
+    /// * `selection` - Optional WHERE clause to filter which rows to update
+    ///
+    /// # Returns
+    /// * The number of rows that were updated
+    fn execute_update(
+        &mut self,
+        table: TableWithJoins,
+        assignments: Vec<Assignment>,
+        selection: Option<Expr>,
+    ) -> SqawkResult<usize> {
+        // Get the target table name as a string
+        let table_name = self.get_table_name(&table)?;
+            
+        eprintln!("Executing UPDATE on table: {}", table_name);
+        
+        // Verify the table exists and get necessary info
+        let table_ref = self.csv_handler.get_table(&table_name)?;
+        
+        // Process assignments to get column indices and their new values
+        let column_assignments: Vec<(usize, Expr)> = assignments
+            .into_iter()
+            .map(|assignment| {
+                // The id is a Vec<Ident> but we only support simple column references
+                if assignment.id.len() != 1 {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Compound column identifiers not supported".to_string(),
+                    ));
+                }
+                
+                let column_name = assignment.id[0].value.clone();
+                
+                let column_idx = table_ref
+                    .column_index(&column_name)
+                    .ok_or_else(|| SqawkError::ColumnNotFound(column_name))?;
+                
+                // Clone the Expr value since we can't take ownership of it
+                Ok((column_idx, assignment.value.clone()))
+            })
+            .collect::<SqawkResult<Vec<_>>>()?;
+            
+        // Find rows to update based on WHERE clause
+        let mut rows_to_update = Vec::new();
+        
+        // Determine which rows match the WHERE clause
+        if let Some(ref where_expr) = selection {
+            eprintln!("Filtering with WHERE clause: {:?}", where_expr);
+            
+            for (idx, row) in table_ref.rows().iter().enumerate() {
+                if self.evaluate_condition(where_expr, row, table_ref).unwrap_or(false) {
+                    rows_to_update.push(idx);
+                }
+            }
+        } else {
+            // If no WHERE clause, update all rows
+            rows_to_update = (0..table_ref.row_count()).collect();
+        }
+        
+        // Compute all values for each assignment before getting a mutable reference
+        // This avoids the borrow checker conflict between evaluate_expr and table_mut
+        let mut updates = Vec::new();
+        
+        // Pre-compute all values to be updated
+        for row_idx in &rows_to_update {
+            for &(col_idx, ref expr) in &column_assignments {
+                let value = self.evaluate_expr(expr)?;
+                updates.push((*row_idx, col_idx, value));
+            }
+        }
+        
+        // Apply updates with a mutable reference, now that all expressions have been evaluated
+        let row_count = rows_to_update.len();
+        if row_count > 0 {
+            let table = self.csv_handler.get_table_mut(&table_name)?;
+            
+            // Apply all the pre-computed updates
+            for (row_idx, col_idx, value) in updates {
+                table.update_value(row_idx, col_idx, value)?;
+            }
+            
+            // Mark the table as modified
+            self.modified_tables.insert(table_name);
+        }
+        
+        Ok(row_count)
+    }
+
     /// Save all modified tables back to their source files
     ///
     /// This function writes any tables that have been modified during execution
-    /// (e.g., through INSERT statements) back to their source CSV files.
+    /// (e.g., through INSERT, UPDATE, or DELETE statements) back to their source CSV files.
     /// Only tables that have been modified will be saved, preserving the original
     /// CSV files if no changes were made.
     ///
