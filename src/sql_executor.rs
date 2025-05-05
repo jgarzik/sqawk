@@ -23,6 +23,9 @@ pub struct SqlExecutor {
 
     /// Names of tables that have been modified
     modified_tables: HashSet<String>,
+    
+    /// Verbose mode flag
+    verbose: bool,
 }
 
 impl SqlExecutor {
@@ -31,6 +34,16 @@ impl SqlExecutor {
         SqlExecutor {
             csv_handler,
             modified_tables: HashSet::new(),
+            verbose: false,
+        }
+    }
+    
+    /// Create a new SQL executor with the given CSV handler and verbose flag
+    pub fn new_with_verbose(csv_handler: CsvHandler, verbose: bool) -> Self {
+        SqlExecutor {
+            csv_handler,
+            modified_tables: HashSet::new(),
+            verbose,
         }
     }
 
@@ -77,7 +90,10 @@ impl SqlExecutor {
                 selection,
                 ..
             } => {
-                let _updated_count = self.execute_update(table, assignments, selection)?;
+                let updated_count = self.execute_update(table, assignments, selection)?;
+                if self.verbose {
+                    eprintln!("Updated {} rows", updated_count);
+                }
                 Ok(None)
             }
             Statement::Delete {
@@ -89,7 +105,10 @@ impl SqlExecutor {
                     ));
                 }
                 let table_with_joins = &from[0];
-                let _deleted_count = self.execute_delete(table_with_joins, selection)?;
+                let deleted_count = self.execute_delete(table_with_joins, selection)?;
+                if self.verbose {
+                    eprintln!("Deleted {} rows", deleted_count);
+                }
                 Ok(None)
             }
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -119,6 +138,9 @@ impl SqlExecutor {
                 // We must apply the WHERE clause before projection to ensure all columns
                 // needed for filtering are available during the WHERE evaluation
                 let filtered_table = if let Some(where_clause) = &select.selection {
+                    if self.verbose {
+                        eprintln!("WHERE comparison");
+                    }
                     self.apply_where_clause(source_table, where_clause)?
                 } else {
                     // If no WHERE clause, just use the source table as is
@@ -160,6 +182,9 @@ impl SqlExecutor {
         // If there are multiple tables in the FROM clause, join them
         // This is the CROSS JOIN case for "FROM table1, table2, ..."
         if from.len() > 1 {
+            if self.verbose {
+                eprintln!("Processing multiple tables in FROM clause as CROSS JOINs");
+            }
             for table_with_joins in &from[1..] {
                 let right_table_name = self.get_table_name(table_with_joins)?;
                 let right_table = self.csv_handler.get_table(&right_table_name)?;

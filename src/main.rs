@@ -43,7 +43,7 @@ fn main() -> Result<()> {
     }
 
     // Create SQL executor and execute all SQL statements
-    let mut sql_executor = SqlExecutor::new(csv_handler);
+    let mut sql_executor = SqlExecutor::new_with_verbose(csv_handler, args.verbose);
     for sql in &args.sql {
         if args.verbose {
             println!("Executing SQL: {}", sql);
