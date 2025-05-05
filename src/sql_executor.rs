@@ -156,11 +156,27 @@ impl SqlExecutor {
                         source_table
                     };
                     
-                    // Apply aggregation functions to the filtered table
-                    let result_table = self.apply_aggregate_functions(&select.projection, &filtered_table)?;
+                    let result_table = if !select.group_by.is_empty() {
+                        if self.verbose {
+                            eprintln!("Applying GROUP BY");
+                        }
+                        // Apply aggregation functions with grouping
+                        self.apply_grouped_aggregate_functions(&select.projection, &filtered_table, &select.group_by)?
+                    } else {
+                        // Apply aggregation functions without grouping (to the whole table)
+                        self.apply_aggregate_functions(&select.projection, &filtered_table)?
+                    };
                     
-                    // GROUP BY not implemented yet, so all aggregate functions apply to the whole column
-                    Ok(Some(result_table))
+                    // Apply ORDER BY if present
+                    let mut ordered_result_table = result_table;
+                    if !query.order_by.is_empty() {
+                        if self.verbose {
+                            eprintln!("Applying ORDER BY");
+                        }
+                        ordered_result_table = self.apply_order_by(ordered_result_table, &query.order_by)?;
+                    }
+                    
+                    Ok(Some(ordered_result_table))
                 } else {
                     // For non-aggregate queries, use the normal column resolution and projection
                     let column_specs = self.resolve_select_items(&select.projection, &source_table)?;
@@ -1287,6 +1303,320 @@ impl SqlExecutor {
         Ok(result_table)
     }
     
+    /// Apply aggregate functions with GROUP BY clause
+    ///
+    /// This function applies aggregate functions like COUNT, SUM, AVG, MIN, MAX
+    /// to groups of data defined by the GROUP BY clause.
+    ///
+    /// # Arguments
+    /// * `items` - The SELECT items from the SQL query, which may contain aggregate functions
+    /// * `table` - The source table to apply aggregate functions to
+    /// * `group_by` - The GROUP BY expressions from the SQL query
+    ///
+    /// # Returns
+    /// * A new table containing the results of all aggregate functions, one row per group
+    /// * `Err` if any function arguments are invalid or unsupported
+    fn apply_grouped_aggregate_functions(
+        &self,
+        items: &[SelectItem],
+        table: &Table,
+        group_by: &Vec<sqlparser::ast::Expr>
+    ) -> SqawkResult<Table> {
+        // Extract GROUP BY columns
+        let mut group_columns = Vec::new();
+        let mut group_column_indices = Vec::new();
+        
+        // Process each GROUP BY expression
+        for expr in group_by {
+                    match expr {
+                        Expr::Identifier(ident) => {
+                            // Simple column reference
+                            let col_name = ident.value.clone();
+                            if let Some(col_idx) = table.column_index(&col_name) {
+                                group_columns.push(col_name);
+                                group_column_indices.push(col_idx);
+                            } else {
+                                // Try suffix match for qualified columns
+                                let suffix = format!(".{}", col_name);
+                                let mut found = false;
+                                for (i, col) in table.columns().iter().enumerate() {
+                                    if col.ends_with(&suffix) {
+                                        found = true;
+                                        group_columns.push(col.clone());
+                                        group_column_indices.push(i);
+                                        break;
+                                    }
+                                }
+                                
+                                if !found {
+                                    return Err(SqawkError::ColumnNotFound(col_name));
+                                }
+                            }
+                        },
+                        Expr::CompoundIdentifier(parts) => {
+                            // Qualified column reference (table.column)
+                            let qualified_name = parts.iter()
+                                .map(|ident| ident.value.clone())
+                                .collect::<Vec<_>>()
+                                .join(".");
+                            
+                            if let Some(col_idx) = table.column_index(&qualified_name) {
+                                group_columns.push(qualified_name);
+                                group_column_indices.push(col_idx);
+                            } else {
+                                // Try suffix match
+                                if parts.len() == 2 {
+                                    let suffix = format!("{}.{}", parts[0].value, parts[1].value);
+                                    
+                                    let mut found = false;
+                                    for (i, col) in table.columns().iter().enumerate() {
+                                        if col.ends_with(&suffix) {
+                                            found = true;
+                                            group_columns.push(col.clone());
+                                            group_column_indices.push(i);
+                                            break;
+                                        }
+                                    }
+                                    
+                                    if !found {
+                                        return Err(SqawkError::ColumnNotFound(qualified_name));
+                                    }
+                                } else {
+                                    return Err(SqawkError::ColumnNotFound(qualified_name));
+                                }
+                            }
+                        },
+                        _ => {
+                            return Err(SqawkError::UnsupportedSqlFeature(
+                                "Only simple column references are supported in GROUP BY".to_string()
+                            ));
+                        }
+                    }
+                }
+        
+        // Group the rows based on GROUP BY columns
+        let mut groups: std::collections::HashMap<Vec<Value>, Vec<usize>> = std::collections::HashMap::new();
+        
+        for (row_idx, row) in table.rows().iter().enumerate() {
+            // Build the group key from the values of GROUP BY columns
+            let group_key: Vec<Value> = group_column_indices.iter()
+                .map(|&col_idx| row[col_idx].clone())
+                .collect();
+            
+            // Add this row's index to the appropriate group
+            groups.entry(group_key).or_insert_with(Vec::new).push(row_idx);
+        }
+        
+        // Prepare the result table columns (GROUP BY columns + aggregate function results)
+        let mut result_columns = group_columns.clone();
+        
+        // Process each SELECT item to identify function columns
+        let mut function_info = Vec::new();
+        for item in items {
+            match item {
+                SelectItem::UnnamedExpr(expr) => {
+                    // Handle simple column references that should match GROUP BY columns
+                    if let Expr::Identifier(ident) = expr {
+                        // Skip if this column is already in result_columns (GROUP BY column)
+                        if table.column_index(&ident.value).is_some() && !group_columns.contains(&ident.value) {
+                            // Non-aggregated column not in GROUP BY is not allowed
+                            return Err(SqawkError::InvalidSqlQuery(
+                                format!("Column '{}' must appear in the GROUP BY clause or be used in an aggregate function", ident.value)
+                            ));
+                        }
+                    } else if let Expr::Function(func) = expr {
+                        // Handle aggregate function
+                        let func_name = func.name.0.first().map(|i| i.value.clone()).unwrap_or_default();
+                        
+                        // Check if this is a supported aggregate function
+                        if let Some(agg_func) = AggregateFunction::from_name(&func_name) {
+                            // Process the function arguments
+                            if func.args.len() != 1 {
+                                return Err(SqawkError::InvalidSqlQuery(
+                                    format!("{} function requires exactly one argument", func_name)
+                                ));
+                            }
+                            
+                            // Add the function column to results
+                            result_columns.push(func_name.clone());
+                            
+                            // Store function info for later execution
+                            function_info.push((func_name, func.args[0].clone(), None));
+                        } else {
+                            return Err(SqawkError::UnsupportedSqlFeature(
+                                format!("Unsupported function: {}", func_name)
+                            ));
+                        }
+                    } else {
+                        return Err(SqawkError::UnsupportedSqlFeature(
+                            "Only column references and aggregate functions are supported in GROUP BY queries".to_string()
+                        ));
+                    }
+                },
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    // Handle expressions with aliases
+                    if let Expr::Function(func) = expr {
+                        let func_name = func.name.0.first().map(|i| i.value.clone()).unwrap_or_default();
+                        
+                        // Check if this is a supported aggregate function
+                        if let Some(agg_func) = AggregateFunction::from_name(&func_name) {
+                            // Process the function arguments
+                            if func.args.len() != 1 {
+                                return Err(SqawkError::InvalidSqlQuery(
+                                    format!("{} function requires exactly one argument", func_name)
+                                ));
+                            }
+                            
+                            // Add the aliased column to results
+                            result_columns.push(alias.value.clone());
+                            
+                            // Store function info for later execution with alias
+                            function_info.push((func_name, func.args[0].clone(), Some(alias.value.clone())));
+                        } else {
+                            return Err(SqawkError::UnsupportedSqlFeature(
+                                format!("Unsupported function: {}", func_name)
+                            ));
+                        }
+                    } else {
+                        return Err(SqawkError::UnsupportedSqlFeature(
+                            "Only aggregate functions can have aliases in GROUP BY queries".to_string()
+                        ));
+                    }
+                },
+                SelectItem::Wildcard(_) => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Wildcard (*) is not supported in GROUP BY queries".to_string()
+                    ));
+                },
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Unsupported SELECT item in GROUP BY query".to_string()
+                    ));
+                }
+            }
+        }
+        
+        // Create the result table
+        let mut result_table = Table::new("grouped_result", result_columns, None);
+        
+        // Generate a row for each group
+        for (group_key, row_indices) in groups {
+            let mut result_row = Vec::new();
+            
+            // Add the GROUP BY column values
+            result_row.extend(group_key);
+            
+            // Apply aggregate functions to each group
+            for (func_name, func_arg, _alias) in &function_info {
+                // Extract values for this function's column in this group
+                let mut group_values = Vec::new();
+                
+                for &row_idx in &row_indices {
+                    if let sqlparser::ast::FunctionArg::Unnamed(expr) = func_arg {
+                        match expr {
+                            sqlparser::ast::FunctionArgExpr::Wildcard => {
+                                // For COUNT(*), one value per row
+                                group_values.push(Value::Integer(1));
+                            },
+                            sqlparser::ast::FunctionArgExpr::QualifiedWildcard(_) => {
+                                // For COUNT(table.*), one value per row like COUNT(*)
+                                group_values.push(Value::Integer(1));
+                            },
+                            sqlparser::ast::FunctionArgExpr::Expr(expr) => {
+                                match expr {
+                                    Expr::Identifier(ident) => {
+                                        // Get column index
+                                        if let Some(col_idx) = table.column_index(&ident.value) {
+                                            group_values.push(table.rows()[row_idx][col_idx].clone());
+                                        } else {
+                                            // Try suffix match for qualified columns
+                                            let suffix = format!(".{}", ident.value);
+                                            let mut found = false;
+                                            let mut value = Value::Null;
+                                            
+                                            for (col_idx, col_name) in table.columns().iter().enumerate() {
+                                                if col_name.ends_with(&suffix) {
+                                                    found = true;
+                                                    value = table.rows()[row_idx][col_idx].clone();
+                                                    break;
+                                                }
+                                            }
+                                            
+                                            if found {
+                                                group_values.push(value);
+                                            } else {
+                                                return Err(SqawkError::ColumnNotFound(ident.value.clone()));
+                                            }
+                                        }
+                                    },
+                                    Expr::CompoundIdentifier(parts) => {
+                                        // Handle qualified column references
+                                        let qualified_name = parts.iter()
+                                            .map(|ident| ident.value.clone())
+                                            .collect::<Vec<_>>()
+                                            .join(".");
+                                        
+                                        if let Some(col_idx) = table.column_index(&qualified_name) {
+                                            group_values.push(table.rows()[row_idx][col_idx].clone());
+                                        } else {
+                                            // Try suffix match
+                                            if parts.len() == 2 {
+                                                let suffix = format!("{}.{}", parts[0].value, parts[1].value);
+                                                
+                                                let mut found = false;
+                                                let mut value = Value::Null;
+                                                
+                                                for (col_idx, col_name) in table.columns().iter().enumerate() {
+                                                    if col_name.ends_with(&suffix) {
+                                                        found = true;
+                                                        value = table.rows()[row_idx][col_idx].clone();
+                                                        break;
+                                                    }
+                                                }
+                                                
+                                                if found {
+                                                    group_values.push(value);
+                                                } else {
+                                                    return Err(SqawkError::ColumnNotFound(qualified_name));
+                                                }
+                                            } else {
+                                                return Err(SqawkError::ColumnNotFound(qualified_name));
+                                            }
+                                        }
+                                    },
+                                    _ => {
+                                        return Err(SqawkError::UnsupportedSqlFeature(
+                                            "Only column references are supported in aggregate functions".to_string()
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        return Err(SqawkError::UnsupportedSqlFeature(
+                            "Only unnamed arguments are supported in aggregate functions".to_string()
+                        ));
+                    }
+                }
+                
+                // Execute the aggregate function on this group's values
+                if let Some(agg_func) = AggregateFunction::from_name(func_name) {
+                    let result_value = agg_func.execute(&group_values)?;
+                    result_row.push(result_value);
+                } else {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        format!("Unsupported function: {}", func_name)
+                    ));
+                }
+            }
+            
+            // Add this group's result row to the table
+            result_table.add_row(result_row)?;
+        }
+        
+        Ok(result_table)
+    }
+    
     /// Get values for a function argument
     ///
     /// This function extracts all values from a table column specified in an aggregate
@@ -1308,6 +1638,10 @@ impl SqlExecutor {
         match arg {
             sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Wildcard) => {
                 // For COUNT(*), return a list of non-null placeholders, one for each row
+                Ok(table.rows().iter().map(|_| Value::Integer(1)).collect())
+            },
+            sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::QualifiedWildcard(_)) => {
+                // For COUNT(table.*), return a list of non-null placeholders, one for each row
                 Ok(table.rows().iter().map(|_| Value::Integer(1)).collect())
             },
             sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(expr)) => {

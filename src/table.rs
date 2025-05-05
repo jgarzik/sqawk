@@ -79,6 +79,43 @@ impl PartialEq for Value {
     }
 }
 
+// Implement the Eq trait for Value
+// This is necessary for HashMap keys
+impl Eq for Value {}
+
+// Implement the Hash trait for Value
+// This is necessary for HashMap keys
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Value::Null => {
+                // Hash a special value for Null
+                0_i32.hash(state);
+            },
+            Value::Integer(i) => {
+                // Hash the integer value
+                1_i32.hash(state);
+                i.hash(state);
+            },
+            Value::Float(f) => {
+                // Convert float to bits for hashing to avoid NaN issues
+                2_i32.hash(state);
+                f.to_bits().hash(state);
+            },
+            Value::String(s) => {
+                // Hash the string value
+                3_i32.hash(state);
+                s.hash(state);
+            },
+            Value::Boolean(b) => {
+                // Hash the boolean value
+                4_i32.hash(state);
+                b.hash(state);
+            },
+        }
+    }
+}
+
 /// Implementation of ordering comparison for Value
 ///
 /// This implementation allows ordering comparison between different types with appropriate
