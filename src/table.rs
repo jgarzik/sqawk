@@ -244,37 +244,7 @@ impl Table {
         self.rows = new_rows;
         self.modified = true;
     }
-    
-    /// Delete rows that match a predicate
-    ///
-    /// This method removes rows that match the given predicate function.
-    /// It's the inverse of select() - it keeps rows where the predicate is false.
-    ///
-    /// # Arguments
-    /// * `predicate` - A function that returns true for rows that should be deleted
-    ///
-    /// # Returns
-    /// The number of rows that were deleted
-    pub fn delete_where<F>(&mut self, predicate: F) -> usize
-    where
-        F: Fn(&Row) -> bool
-    {
-        let original_count = self.rows.len();
         
-        // Keep rows where the predicate is false (inverse of select)
-        let remaining_rows: Vec<Row> = self.rows
-            .iter()
-            .filter(|row| !predicate(row))
-            .cloned()
-            .collect();
-        
-        let new_count = remaining_rows.len();
-        self.replace_rows(remaining_rows);
-        
-        // Return number of deleted rows
-        original_count - new_count
-    }
-    
     /// Create a new table with only specified columns
     pub fn project(&self, column_indices: &[usize]) -> SqawkResult<Self> {
         // Validate column indices
