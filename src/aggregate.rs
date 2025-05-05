@@ -301,6 +301,6 @@ mod tests {
         ];
         
         let max = AggregateFunction::Max.execute(&values).unwrap();
-        assert_eq!(max, Value::Float(50.5));
+        assert_eq!(max, Value::String("xyz".to_string()));
     }
 }

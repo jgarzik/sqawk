@@ -1,0 +1,47 @@
+% RUST_BACKTRACE=1 cargo test
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/sqawk-284f44f3d6d5cfcc)
+
+running 8 tests
+test aggregate::tests::test_avg_function ... ok
+test aggregate::tests::test_count_function ... ok
+test aggregate::tests::test_min_function ... ok
+test aggregate::tests::test_max_function ... ok
+test aggregate::tests::test_min_with_mixed_types ... ok
+test aggregate::tests::test_sum_function ... ok
+test aggregate::tests::test_sum_integers_only ... ok
+test aggregate::tests::test_max_with_mixed_types ... FAILED
+
+failures:
+
+---- aggregate::tests::test_max_with_mixed_types stdout ----
+
+thread 'aggregate::tests::test_max_with_mixed_types' panicked at src/aggregate.rs:304:9:
+assertion `left == right` failed
+  left: String("xyz")
+ right: Float(50.5)
+stack backtrace:
+   0: rust_begin_unwind
+             at /rustc/4eb161250e340c8f48f66e2b929ef4a5bed7c181/library/std/src/panicking.rs:692:5
+   1: core::panicking::panic_fmt
+             at /rustc/4eb161250e340c8f48f66e2b929ef4a5bed7c181/library/core/src/panicking.rs:75:14
+   2: core::panicking::assert_failed_inner
+   3: core::panicking::assert_failed
+             at /rustc/4eb161250e340c8f48f66e2b929ef4a5bed7c181/library/core/src/panicking.rs:364:5
+   4: sqawk::aggregate::tests::test_max_with_mixed_types
+             at ./src/aggregate.rs:304:9
+   5: sqawk::aggregate::tests::test_max_with_mixed_types::{{closure}}
+             at ./src/aggregate.rs:295:35
+   6: core::ops::function::FnOnce::call_once
+             at /rustc/4eb161250e340c8f48f66e2b929ef4a5bed7c181/library/core/src/ops/function.rs:250:5
+   7: core::ops::function::FnOnce::call_once
+             at /rustc/4eb161250e340c8f48f66e2b929ef4a5bed7c181/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    aggregate::tests::test_max_with_mixed_types
+
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `--lib`
