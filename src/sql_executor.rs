@@ -27,7 +27,6 @@ use sqlparser::parser::Parser;
 use crate::aggregate::AggregateFunction;
 use crate::error::{SqawkError, SqawkResult};
 use crate::file_handler::FileHandler;
-use crate::string_functions::StringFunction;
 use crate::table::{SortDirection, Table, Value};
 
 /// SQL statement executor
@@ -1529,37 +1528,6 @@ impl SqlExecutor {
                                 }
                             }
                         }
-                    }
-                } else {
-                    // Check if this is a string function
-                    if let Some(string_func) = StringFunction::from_name(&func_name) {
-                        // Evaluate all function arguments first
-                        let mut arg_values = Vec::new();
-                        for arg in &func.args {
-                            match arg {
-                                sqlparser::ast::FunctionArg::Unnamed(expr) => {
-                                    match expr {
-                                        sqlparser::ast::FunctionArgExpr::Expr(expr) => {
-                                            let value = self.evaluate_expr_with_row(expr, row, table)?;
-                                            arg_values.push(value);
-                                        }
-                                        _ => {
-                                            return Err(SqawkError::UnsupportedSqlFeature(
-                                                "Only expressions as function arguments are supported".to_string(),
-                                            ));
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    return Err(SqawkError::UnsupportedSqlFeature(
-                                        "Only unnamed function arguments are supported".to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                        
-                        // Apply the string function to the arguments
-                        return string_func.apply(&arg_values);
                     }
                 }
 

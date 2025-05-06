@@ -23,5 +23,4 @@ pub mod error;
 pub mod file_handler;
 pub mod join;
 pub mod sql_executor;
-pub mod string_functions;
 pub mod table;
