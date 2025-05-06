@@ -69,10 +69,6 @@ args = "Test Inner Join"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "Debug Join Column Names"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
 args = "Test Inner Join With Correct Names"
 
 [[workflows.workflow.tasks]]
@@ -134,10 +130,6 @@ args = "Test Tab Delimiter"
 [[workflows.workflow.tasks]]
 task = "workflow.run"
 args = "Test Colon Delimiter"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Test Join Debug"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
@@ -322,14 +314,6 @@ task = "shell.exec"
 args = "cd $(pwd) && cargo run --bin sqawk -- -s \"SELECT users.name, products.name, products.price, orders.date FROM users, orders, products WHERE orders.user_id = users.id AND orders.product_id = products.product_id\" tests/data/users.csv tests/data/orders.csv tests/data/products.csv -v"
 
 [[workflows.workflow]]
-name = "Debug Join Column Names"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "cd $(pwd) && cargo run --bin sqawk -- -s \"SELECT * FROM users, orders, products LIMIT 1\" tests/data/users.csv tests/data/orders.csv tests/data/products.csv -v"
-
-[[workflows.workflow]]
 name = "Test Inner Join With Correct Names"
 author = "agent"
 
@@ -456,14 +440,6 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "cd $(pwd) && cargo run -- -s \"SELECT id, name, email FROM contacts WHERE id > 5\" -F ':' tests/data/contacts.txt -v"
-
-[[workflows.workflow]]
-name = "Test Join Debug"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "cd $(pwd) && cargo run --bin sqawk -- -s \"SELECT * FROM users INNER JOIN orders ON users.id = orders.user_id\" tests/data/users.csv tests/data/orders.csv -v"
 
 [[workflows.workflow]]
 name = "Test Inner Join Implementation"
