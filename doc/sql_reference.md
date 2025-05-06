@@ -17,6 +17,7 @@ Sqawk provides a powerful SQL-like query language for processing delimiter-separ
    - [Column Selection](#column-selection)
    - [Column Aliases](#column-aliases)
    - [WHERE Clause](#where-clause)
+   - [String Functions](#string-functions)
    - [ORDER BY Clause](#order-by-clause)
    - [LIMIT and OFFSET Clauses](#limit-and-offset-clauses)
    - [Aggregate Functions](#aggregate-functions)
@@ -260,6 +261,46 @@ SELECT * FROM users WHERE age >= 18
 -- Less than or equal to
 SELECT * FROM users WHERE age <= 65
 ```
+
+### String Functions
+
+Sqawk supports the following string functions for manipulating and comparing text data in WHERE clauses:
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `UPPER(str)` | Converts a string to uppercase | `SELECT * FROM users WHERE UPPER(name) = 'ALICE'` |
+| `LOWER(str)` | Converts a string to lowercase | `SELECT * FROM users WHERE LOWER(email) = 'alice@example.com'` |
+| `TRIM(str)` | Removes leading and trailing whitespace | `SELECT * FROM users WHERE TRIM(username) = 'alice'` |
+| `SUBSTR(str, start[, length])` | Extracts a substring | `SELECT * FROM users WHERE SUBSTR(email, 1, 5) = 'alice'` |
+| `REPLACE(str, find, replace)` | Replaces all occurrences of a substring | `SELECT * FROM users WHERE REPLACE(email, '@example.com', '') = 'alice'` |
+
+These string functions can be used in WHERE clauses to filter rows based on string manipulations:
+
+```sql
+-- Case-insensitive equality using UPPER or LOWER
+SELECT * FROM users WHERE UPPER(name) = 'ALICE'
+
+-- Working with substrings
+SELECT * FROM emails WHERE SUBSTR(email, -4) = '.com'
+
+-- Find users with trimmed whitespace
+SELECT * FROM users WHERE TRIM(username) = 'alice'
+
+-- Replace parts of strings for comparison
+SELECT * FROM contacts WHERE REPLACE(phone, '-', '') = '1234567890'
+
+-- Combining string functions
+SELECT * FROM users WHERE UPPER(SUBSTR(name, 1, 1)) = 'A'
+```
+
+String functions can be nested and combined for more complex string operations. They are particularly useful for:
+
+- Case-insensitive searching
+- Pattern matching when working with text data
+- Data cleaning and normalization
+- Extracting portions of strings for comparison
+
+> **Note:** Currently, string functions are only supported in WHERE clauses and cannot be used directly in the SELECT clause for projection. This limitation is documented in the [Limitations](#limitations) section.
 
 ### ORDER BY Clause
 
@@ -560,6 +601,7 @@ Current limitations of Sqawk's SQL implementation:
 
 - **Query Features**:
   - No complex expressions in WHERE clauses (only simple comparisons)
+  - String functions are only supported in WHERE clauses, not in SELECT clauses for projection
   - No subqueries
   - No window functions
   - No common table expressions (CTEs)
