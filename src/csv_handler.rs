@@ -48,7 +48,7 @@ impl CsvHandler {
     ///
     /// # Arguments
     /// * `file_spec` - File specification in the format `[table_name=]file_path.csv`
-    ///                 If table_name is not specified, the file name without extension is used.
+    ///   If table_name is not specified, the file name without extension is used.
     ///
     /// # Returns
     /// * `Ok(Table)` - The successfully loaded table

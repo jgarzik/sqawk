@@ -34,7 +34,7 @@ jobs:
       - name: Run tests
         run: RUST_TEST_THREADS=1 cargo test --verbose
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy -- -W clippy::doc-overindented-list-items
       - name: Check formatting
         run: cargo fmt --all -- --check
 

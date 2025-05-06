@@ -404,7 +404,7 @@ impl Table {
     ///
     /// # Arguments
     /// * `predicate` - A function that takes a row reference and returns a boolean
-    ///                 indicating whether the row should be included in the result
+    ///   indicating whether the row should be included in the result
     ///
     /// # Returns
     /// * A new table containing only the rows that match the predicate
@@ -579,10 +579,10 @@ impl Table {
     /// # Arguments
     /// * `right` - The right-hand table to join with
     /// * `join_condition` - A closure that evaluates whether a combined row should be included
-    ///     The closure receives:
-    ///     - A combined row from both tables
-    ///     - A reference to the combined table (for column lookups)
-    ///       The closure returns a boolean indicating whether the row satisfies the join condition
+    ///   The closure receives:
+    ///   - A combined row from both tables
+    ///   - A reference to the combined table (for column lookups)
+    ///   The closure returns a boolean indicating whether the row satisfies the join condition
     ///
     /// # Returns
     /// * A new table containing only the rows that satisfy the join condition
