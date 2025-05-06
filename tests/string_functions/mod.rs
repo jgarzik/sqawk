@@ -3,7 +3,7 @@
 //! Tests for UPPER, LOWER, TRIM, SUBSTR, and REPLACE functions in WHERE clauses.
 //! Note: Currently the SQL string functions are supported in WHERE clauses but not in SELECT clauses
 //! due to the current implementation limitation: "Only direct column references are supported in SELECT".
-//! 
+//!
 //! The implementation of these string functions is tested in the unit tests in src/string_functions.rs,
 //! while these integration tests focus on using the functions in WHERE clauses with the full sqawk command.
 
@@ -83,7 +83,7 @@ fn test_lower_function_in_where() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_trim_function_in_where() -> Result<(), Box<dyn std::error::Error>> {
     // Skip this test since we're having issues with the TRIM function in the WHERE clause.
-    // The unit tests in string_functions::tests::test_trim_function pass, so we know the 
+    // The unit tests in string_functions::tests::test_trim_function pass, so we know the
     // basic functionality is working.
     Ok(())
 }

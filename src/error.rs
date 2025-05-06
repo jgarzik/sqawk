@@ -62,7 +62,7 @@ pub enum SqawkError {
     /// Error for division by zero in arithmetic operations
     #[error("Division by zero")]
     DivideByZero,
-    
+
     /// Error for invalid function arguments
     #[error("Invalid function arguments: {0}")]
     InvalidFunctionArguments(String),
@@ -86,7 +86,9 @@ impl PartialEq for SqawkError {
             (SqawkError::TypeError(_), SqawkError::TypeError(_)) => true,
             (SqawkError::InvalidSqlQuery(_), SqawkError::InvalidSqlQuery(_)) => true,
             (SqawkError::DivideByZero, SqawkError::DivideByZero) => true,
-            (SqawkError::InvalidFunctionArguments(_), SqawkError::InvalidFunctionArguments(_)) => true,
+            (SqawkError::InvalidFunctionArguments(_), SqawkError::InvalidFunctionArguments(_)) => {
+                true
+            }
             // If variants are different, they are not equal
             _ => false,
         }

@@ -1530,30 +1530,30 @@ impl SqlExecutor {
                             }
                         }
                     }
-                } 
+                }
                 // Then check if this is a supported string function
                 else if let Some(string_func) = StringFunction::from_name(&func_name) {
                     // Evaluate the string function arguments
                     let mut arg_values = Vec::new();
                     for arg in &func.args {
                         match arg {
-                            sqlparser::ast::FunctionArg::Unnamed(expr) => {
-                                match expr {
-                                    sqlparser::ast::FunctionArgExpr::Expr(expr) => {
-                                        let val = self.evaluate_expr_with_row(expr, row, table)?;
-                                        arg_values.push(val);
-                                    }
-                                    _ => {
-                                        return Err(SqawkError::UnsupportedSqlFeature(
-                                            format!("Unsupported function argument: {:?}", expr)
-                                        ));
-                                    }
+                            sqlparser::ast::FunctionArg::Unnamed(expr) => match expr {
+                                sqlparser::ast::FunctionArgExpr::Expr(expr) => {
+                                    let val = self.evaluate_expr_with_row(expr, row, table)?;
+                                    arg_values.push(val);
                                 }
-                            }
+                                _ => {
+                                    return Err(SqawkError::UnsupportedSqlFeature(format!(
+                                        "Unsupported function argument: {:?}",
+                                        expr
+                                    )));
+                                }
+                            },
                             _ => {
-                                return Err(SqawkError::UnsupportedSqlFeature(
-                                    format!("Named arguments are not supported: {:?}", arg)
-                                ));
+                                return Err(SqawkError::UnsupportedSqlFeature(format!(
+                                    "Named arguments are not supported: {:?}",
+                                    arg
+                                )));
                             }
                         }
                     }

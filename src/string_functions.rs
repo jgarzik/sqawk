@@ -62,10 +62,10 @@ impl StringFunction {
         match &args[0] {
             // Pass NULL through
             Value::Null => Ok(Value::Null),
-            
+
             // Convert string to lowercase
             Value::String(s) => Ok(Value::String(s.to_lowercase())),
-            
+
             // Error for non-string inputs
             _ => Err(SqawkError::TypeError(format!(
                 "LOWER function requires a string argument, got {:?}",
@@ -87,10 +87,10 @@ impl StringFunction {
         match &args[0] {
             // Pass NULL through
             Value::Null => Ok(Value::Null),
-            
+
             // Convert string to uppercase
             Value::String(s) => Ok(Value::String(s.to_uppercase())),
-            
+
             // Error for non-string inputs
             _ => Err(SqawkError::TypeError(format!(
                 "UPPER function requires a string argument, got {:?}",
@@ -112,10 +112,10 @@ impl StringFunction {
         match &args[0] {
             // Pass NULL through
             Value::Null => Ok(Value::Null),
-            
+
             // Trim string
             Value::String(s) => Ok(Value::String(s.trim().to_string())),
-            
+
             // Error for non-string inputs
             _ => Err(SqawkError::TypeError(format!(
                 "TRIM function requires a string argument, got {:?}",
@@ -184,7 +184,7 @@ impl StringFunction {
                             "Length in SUBSTR must be non-negative".to_string(),
                         ));
                     }
-                    
+
                     // Get the substring of specified length
                     let end_index = string.len().min(start_index + *n as usize);
                     string[start_index..end_index].to_string()
@@ -264,61 +264,64 @@ mod tests {
     #[test]
     fn test_upper_function() {
         let func = StringFunction::Upper;
-        
+
         // Test with valid string
         let result = func.apply(&[Value::String("hello".to_string())]);
         assert!(match &result {
             Ok(Value::String(s)) => s == "HELLO",
-            _ => false
+            _ => false,
         });
-        
+
         // Test with NULL
         let result = func.apply(&[Value::Null]);
         assert!(match &result {
             Ok(Value::Null) => true,
-            _ => false
+            _ => false,
         });
-        
+
         // Test with wrong argument type
         let result = func.apply(&[Value::Integer(42)]);
         assert!(result.is_err());
-        
+
         // Test with wrong argument count
         let result = func.apply(&[]);
         assert!(result.is_err());
-        let result = func.apply(&[Value::String("a".to_string()), Value::String("b".to_string())]);
+        let result = func.apply(&[
+            Value::String("a".to_string()),
+            Value::String("b".to_string()),
+        ]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_lower_function() {
         let func = StringFunction::Lower;
-        
+
         // Test with valid string
         let result = func.apply(&[Value::String("HELLO".to_string())]);
         assert!(match &result {
             Ok(Value::String(s)) => s == "hello",
-            _ => false
+            _ => false,
         });
-        
+
         // Test with mixed case
         let result = func.apply(&[Value::String("HeLLo".to_string())]);
         assert!(match &result {
             Ok(Value::String(s)) => s == "hello",
-            _ => false
+            _ => false,
         });
-        
+
         // Test with NULL
         let result = func.apply(&[Value::Null]);
         assert!(match &result {
             Ok(Value::Null) => true,
-            _ => false
+            _ => false,
         });
-        
+
         // Test with wrong argument type
         let result = func.apply(&[Value::Integer(42)]);
         assert!(result.is_err());
-        
+
         // Test with wrong argument count
         let result = func.apply(&[]);
         assert!(result.is_err());
@@ -327,46 +330,46 @@ mod tests {
     #[test]
     fn test_trim_function() {
         let func = StringFunction::Trim;
-        
+
         // Test with spaces on both sides
         let result = func.apply(&[Value::String("  hello  ".to_string())]);
         assert!(match &result {
             Ok(Value::String(s)) => s == "hello",
-            _ => false
+            _ => false,
         });
-        
+
         // Test with spaces on left side only
         let result = func.apply(&[Value::String("  hello".to_string())]);
         assert!(match &result {
             Ok(Value::String(s)) => s == "hello",
-            _ => false
+            _ => false,
         });
-        
+
         // Test with spaces on right side only
         let result = func.apply(&[Value::String("hello  ".to_string())]);
         assert!(match &result {
             Ok(Value::String(s)) => s == "hello",
-            _ => false
+            _ => false,
         });
-        
+
         // Test with no spaces
         let result = func.apply(&[Value::String("hello".to_string())]);
         assert!(match &result {
             Ok(Value::String(s)) => s == "hello",
-            _ => false
+            _ => false,
         });
-        
+
         // Test with NULL
         let result = func.apply(&[Value::Null]);
         assert!(match &result {
             Ok(Value::Null) => true,
-            _ => false
+            _ => false,
         });
-        
+
         // Test with wrong argument type
         let result = func.apply(&[Value::Integer(42)]);
         assert!(result.is_err());
-        
+
         // Test with wrong argument count
         let result = func.apply(&[]);
         assert!(result.is_err());
@@ -375,17 +378,14 @@ mod tests {
     #[test]
     fn test_substr_function() {
         let func = StringFunction::Substr;
-        
+
         // Test basic substring (start, no length)
-        let result = func.apply(&[
-            Value::String("hello world".to_string()),
-            Value::Integer(7),
-        ]);
+        let result = func.apply(&[Value::String("hello world".to_string()), Value::Integer(7)]);
         assert!(match &result {
             Ok(Value::String(s)) => s == "world",
-            _ => false
+            _ => false,
         });
-        
+
         // Test with start and length
         let result = func.apply(&[
             Value::String("hello world".to_string()),
@@ -394,19 +394,16 @@ mod tests {
         ]);
         assert!(match &result {
             Ok(Value::String(s)) => s == "hello",
-            _ => false
+            _ => false,
         });
-        
+
         // Test with start beyond string length
-        let result = func.apply(&[
-            Value::String("hello".to_string()),
-            Value::Integer(10),
-        ]);
+        let result = func.apply(&[Value::String("hello".to_string()), Value::Integer(10)]);
         assert!(match &result {
             Ok(Value::String(s)) => s.is_empty(),
-            _ => false
+            _ => false,
         });
-        
+
         // Test with length beyond string end
         let result = func.apply(&[
             Value::String("hello".to_string()),
@@ -415,23 +412,20 @@ mod tests {
         ]);
         assert!(match &result {
             Ok(Value::String(s)) => s == "hello",
-            _ => false
+            _ => false,
         });
-        
+
         // Test with NULL
         let result = func.apply(&[Value::Null, Value::Integer(1)]);
         assert!(match &result {
             Ok(Value::Null) => true,
-            _ => false
+            _ => false,
         });
-        
+
         // Test with invalid start position
-        let result = func.apply(&[
-            Value::String("hello".to_string()),
-            Value::Integer(0),
-        ]);
+        let result = func.apply(&[Value::String("hello".to_string()), Value::Integer(0)]);
         assert!(result.is_err());
-        
+
         // Test with negative length
         let result = func.apply(&[
             Value::String("hello".to_string()),
@@ -439,14 +433,14 @@ mod tests {
             Value::Integer(-5),
         ]);
         assert!(result.is_err());
-        
+
         // Test with wrong argument types
         let result = func.apply(&[
             Value::String("hello".to_string()),
             Value::String("world".to_string()),
         ]);
         assert!(result.is_err());
-        
+
         // Test with wrong argument count
         let result = func.apply(&[Value::String("hello".to_string())]);
         assert!(result.is_err());
@@ -462,7 +456,7 @@ mod tests {
     #[test]
     fn test_replace_function() {
         let func = StringFunction::Replace;
-        
+
         // Test basic replacement
         let result = func.apply(&[
             Value::String("hello world".to_string()),
@@ -471,9 +465,9 @@ mod tests {
         ]);
         assert!(match &result {
             Ok(Value::String(s)) => s == "hello Rust",
-            _ => false
+            _ => false,
         });
-        
+
         // Test replacement with empty string (deletion)
         let result = func.apply(&[
             Value::String("hello world".to_string()),
@@ -482,9 +476,9 @@ mod tests {
         ]);
         assert!(match &result {
             Ok(Value::String(s)) => s == "hell wrld",
-            _ => false
+            _ => false,
         });
-        
+
         // Test with pattern not found
         let result = func.apply(&[
             Value::String("hello world".to_string()),
@@ -493,9 +487,9 @@ mod tests {
         ]);
         assert!(match &result {
             Ok(Value::String(s)) => s == "hello world",
-            _ => false
+            _ => false,
         });
-        
+
         // Test with NULL
         let result = func.apply(&[
             Value::Null,
@@ -504,9 +498,9 @@ mod tests {
         ]);
         assert!(match &result {
             Ok(Value::Null) => true,
-            _ => false
+            _ => false,
         });
-        
+
         // Test with wrong argument types
         let result = func.apply(&[
             Value::String("hello".to_string()),
@@ -514,7 +508,7 @@ mod tests {
             Value::String("world".to_string()),
         ]);
         assert!(result.is_err());
-        
+
         // Test with wrong argument count
         let result = func.apply(&[
             Value::String("hello".to_string()),
@@ -526,17 +520,41 @@ mod tests {
     #[test]
     fn test_from_name() {
         // Test exact matches
-        assert_eq!(StringFunction::from_name("UPPER"), Some(StringFunction::Upper));
-        assert_eq!(StringFunction::from_name("LOWER"), Some(StringFunction::Lower));
-        assert_eq!(StringFunction::from_name("TRIM"), Some(StringFunction::Trim));
-        assert_eq!(StringFunction::from_name("SUBSTR"), Some(StringFunction::Substr));
-        assert_eq!(StringFunction::from_name("REPLACE"), Some(StringFunction::Replace));
-        
+        assert_eq!(
+            StringFunction::from_name("UPPER"),
+            Some(StringFunction::Upper)
+        );
+        assert_eq!(
+            StringFunction::from_name("LOWER"),
+            Some(StringFunction::Lower)
+        );
+        assert_eq!(
+            StringFunction::from_name("TRIM"),
+            Some(StringFunction::Trim)
+        );
+        assert_eq!(
+            StringFunction::from_name("SUBSTR"),
+            Some(StringFunction::Substr)
+        );
+        assert_eq!(
+            StringFunction::from_name("REPLACE"),
+            Some(StringFunction::Replace)
+        );
+
         // Test case insensitivity
-        assert_eq!(StringFunction::from_name("upper"), Some(StringFunction::Upper));
-        assert_eq!(StringFunction::from_name("Lower"), Some(StringFunction::Lower));
-        assert_eq!(StringFunction::from_name("trim"), Some(StringFunction::Trim));
-        
+        assert_eq!(
+            StringFunction::from_name("upper"),
+            Some(StringFunction::Upper)
+        );
+        assert_eq!(
+            StringFunction::from_name("Lower"),
+            Some(StringFunction::Lower)
+        );
+        assert_eq!(
+            StringFunction::from_name("trim"),
+            Some(StringFunction::Trim)
+        );
+
         // Test non-existent function
         assert_eq!(StringFunction::from_name("UNKNOWN"), None);
         assert_eq!(StringFunction::from_name(""), None);

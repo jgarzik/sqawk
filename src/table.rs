@@ -578,10 +578,11 @@ impl Table {
     ///
     /// # Arguments
     /// * `right` - The right-hand table to join with
-    /// * `join_condition` - A closure that evaluates whether a combined row should be included
+    /// * `join_condition` - A closure that evaluates whether a combined row should be included.
     ///   The closure receives:
-    ///   - A combined row from both tables
-    ///   - A reference to the combined table (for column lookups)
+    ///     - A combined row from both tables
+    ///     - A reference to the combined table (for column lookups)
+    ///     
     ///   The closure returns a boolean indicating whether the row satisfies the join condition
     ///
     /// # Returns
