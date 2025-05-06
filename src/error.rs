@@ -62,6 +62,35 @@ pub enum SqawkError {
     /// Error for division by zero in arithmetic operations
     #[error("Division by zero")]
     DivideByZero,
+    
+    /// Error for invalid function arguments
+    #[error("Invalid function arguments: {0}")]
+    InvalidFunctionArguments(String),
+}
+
+// Custom implementation of PartialEq for SqawkError
+// This implementation only compares the variant names, not their content
+// This is useful for testing, where we want to check if an error is of the right type
+// but don't care about the exact error message
+impl PartialEq for SqawkError {
+    fn eq(&self, other: &Self) -> bool {
+        // Match on self and other to check if they are the same variant
+        match (self, other) {
+            (SqawkError::IoError(_), SqawkError::IoError(_)) => true,
+            (SqawkError::CsvError(_), SqawkError::CsvError(_)) => true,
+            (SqawkError::SqlParseError(_), SqawkError::SqlParseError(_)) => true,
+            (SqawkError::TableNotFound(_), SqawkError::TableNotFound(_)) => true,
+            (SqawkError::ColumnNotFound(_), SqawkError::ColumnNotFound(_)) => true,
+            (SqawkError::InvalidFileSpec(_), SqawkError::InvalidFileSpec(_)) => true,
+            (SqawkError::UnsupportedSqlFeature(_), SqawkError::UnsupportedSqlFeature(_)) => true,
+            (SqawkError::TypeError(_), SqawkError::TypeError(_)) => true,
+            (SqawkError::InvalidSqlQuery(_), SqawkError::InvalidSqlQuery(_)) => true,
+            (SqawkError::DivideByZero, SqawkError::DivideByZero) => true,
+            (SqawkError::InvalidFunctionArguments(_), SqawkError::InvalidFunctionArguments(_)) => true,
+            // If variants are different, they are not equal
+            _ => false,
+        }
+    }
 }
 
 /// Result type alias for operations that can produce a SqawkError

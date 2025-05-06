@@ -33,6 +33,7 @@ mod delim_handler;
 mod error;
 mod file_handler;
 mod sql_executor;
+mod string_functions;
 mod table;
 
 use anyhow::{Context, Result};

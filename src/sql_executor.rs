@@ -27,6 +27,7 @@ use sqlparser::parser::Parser;
 use crate::aggregate::AggregateFunction;
 use crate::error::{SqawkError, SqawkResult};
 use crate::file_handler::FileHandler;
+use crate::string_functions::StringFunction;
 use crate::table::{SortDirection, Table, Value};
 
 /// SQL statement executor
@@ -1447,7 +1448,7 @@ impl SqlExecutor {
             Expr::CompoundIdentifier(parts) => {
                 self.resolve_qualified_column_reference(parts, row, table)
             }
-            // Handle aggregate functions directly in HAVING clauses
+            // Handle aggregate and string functions
             Expr::Function(func) => {
                 let func_name = func
                     .name
@@ -1456,7 +1457,7 @@ impl SqlExecutor {
                     .map(|i| i.value.clone())
                     .unwrap_or_default();
 
-                // Check if this is a supported aggregate function
+                // First check if this is a supported aggregate function
                 if let Some(_agg_func) = AggregateFunction::from_name(&func_name) {
                     // For aggregate functions in HAVING, look for the result in the current row
 
@@ -1529,6 +1530,36 @@ impl SqlExecutor {
                             }
                         }
                     }
+                } 
+                // Then check if this is a supported string function
+                else if let Some(string_func) = StringFunction::from_name(&func_name) {
+                    // Evaluate the string function arguments
+                    let mut arg_values = Vec::new();
+                    for arg in &func.args {
+                        match arg {
+                            sqlparser::ast::FunctionArg::Unnamed(expr) => {
+                                match expr {
+                                    sqlparser::ast::FunctionArgExpr::Expr(expr) => {
+                                        let val = self.evaluate_expr_with_row(expr, row, table)?;
+                                        arg_values.push(val);
+                                    }
+                                    _ => {
+                                        return Err(SqawkError::UnsupportedSqlFeature(
+                                            format!("Unsupported function argument: {:?}", expr)
+                                        ));
+                                    }
+                                }
+                            }
+                            _ => {
+                                return Err(SqawkError::UnsupportedSqlFeature(
+                                    format!("Named arguments are not supported: {:?}", arg)
+                                ));
+                            }
+                        }
+                    }
+
+                    // Apply the string function with the evaluated arguments
+                    return string_func.apply(&arg_values);
                 }
 
                 // Fall back to standard expression evaluation
