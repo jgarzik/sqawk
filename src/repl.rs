@@ -83,6 +83,10 @@ enum ReplCommand {
     Version,
     /// Save changes to modified tables
     Save(Option<String>),
+    /// Show current settings and metadata
+    Show(Option<String>),
+    /// Show statistics or toggle statistics mode
+    Stats(Option<String>),
     /// Unknown command
     Unknown(String),
 }
@@ -103,6 +107,8 @@ pub struct Repl {
     _field_separator: Option<String>,
     /// Whether to show number of rows changed by SQL statements
     show_changes: bool,
+    /// Whether to show query statistics
+    show_stats: bool,
 }
 
 impl Repl {
@@ -127,6 +133,7 @@ impl Repl {
             running: true,
             _field_separator: field_separator,
             show_changes: false, // Default to not showing changes
+            show_stats: false,   // Default to not showing stats
         }
     }
 
@@ -260,6 +267,20 @@ impl Repl {
                         ReplCommand::Save(None)
                     }
                 },
+                "show" => {
+                    if parts.len() > 1 {
+                        ReplCommand::Show(Some(parts[1].trim().to_string()))
+                    } else {
+                        ReplCommand::Show(None)
+                    }
+                },
+                "stats" => {
+                    if parts.len() > 1 {
+                        ReplCommand::Stats(Some(parts[1].trim().to_string()))
+                    } else {
+                        ReplCommand::Stats(None)
+                    }
+                },
                 _ => ReplCommand::Unknown(format!("Unknown command: .{}", command)),
             }
         } else if !input.is_empty() {
@@ -282,6 +303,8 @@ impl Repl {
             ReplCommand::ChangeDirectory(dir) => self.change_directory(&dir),
             ReplCommand::Changes(arg) => self.toggle_changes(arg.as_deref()),
             ReplCommand::Save(table_name) => self.save_tables(table_name.as_deref()),
+            ReplCommand::Show(option) => self.show_settings(option.as_deref()),
+            ReplCommand::Stats(option) => self.show_stats(option.as_deref()),
             ReplCommand::Print(text) => {
                 println!("{}", text);
                 Ok(())
@@ -296,6 +319,13 @@ impl Repl {
 
     /// Execute SQL statement
     fn execute_sql(&mut self, sql: &str) -> Result<()> {
+        // Record start time if statistics are enabled
+        let start_time = if self.show_stats {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        
         let result = match self.executor.execute_sql(sql) {
             Ok(result) => result,
             Err(err) => return Err(ReplError::SqlExecutor(err)),
@@ -323,6 +353,12 @@ impl Repl {
                     println!("{} rows affected", affected_rows);
                 }
             }
+        }
+        
+        // Display query statistics if enabled
+        if let Some(start_time) = start_time {
+            let execution_time = start_time.elapsed();
+            println!("Run Time: {:.3} ms", execution_time.as_secs_f64() * 1000.0);
         }
 
         // Save changes if write mode is enabled
@@ -428,6 +464,11 @@ impl Repl {
         println!("  .quit                 Exit the REPL");
         println!("  .save ?TABLE?         Save changes to all tables or a specific TABLE");
         println!("  .schema ?TABLE?       Show schema for a specific table or all tables");
+        println!("  .show ?WHAT?          Show current settings and status information");
+        println!(
+            "  .stats [on|off]       Toggle statistics display (currently: {})",
+            if self.show_stats { "ON" } else { "OFF" }
+        );
         println!("  .tables ?TABLE?       List names of tables matching LIKE pattern TABLE");
         println!("  .version              Show source, library and compiler versions");
         println!(
@@ -639,5 +680,99 @@ impl Repl {
             }
         }
         Ok(())
+    }
+
+    /// Show current settings and configuration
+    fn show_settings(&self, option: Option<&str>) -> Result<()> {
+        match option {
+            Some("tables") => {
+                // Show detailed table information
+                self.show_tables_metadata()
+            }
+            _ => {
+                // Show general settings
+                println!("Sqawk Settings:");
+                println!("  Write Mode:   {}", if self.write { "ON" } else { "OFF" });
+                println!("  Changes Display: {}", if self.show_changes { "ON" } else { "OFF" });
+                println!("  Statistics:  {}", if self.show_stats { "ON" } else { "OFF" });
+                
+                // Show field separator if defined
+                if let Some(sep) = &self._field_separator {
+                    println!("  Field Separator: '{}'", sep);
+                } else {
+                    println!("  Field Separator: Default (auto-detect)");
+                }
+                
+                // Show counts
+                let tables = self.executor.table_names();
+                let modified_count = tables.iter()
+                    .filter(|t| self.executor.is_table_modified(t))
+                    .count();
+                
+                println!("  Tables Loaded: {}", tables.len());
+                println!("  Modified Tables: {}", modified_count);
+                
+                Ok(())
+            }
+        }
+    }
+    
+    /// Show detailed metadata for all tables
+    fn show_tables_metadata(&self) -> Result<()> {
+        let tables = self.executor.table_names();
+        if tables.is_empty() {
+            println!("No tables loaded");
+            return Ok(());
+        }
+        
+        println!("Table Information:");
+        for table_name in tables {
+            // Get table metadata
+            let is_modified = self.executor.is_table_modified(&table_name);
+            let column_count = match self.executor.get_table_columns(&table_name) {
+                Ok(cols) => cols.len(),
+                Err(_) => 0,
+            };
+            
+            println!("  Table: {}", table_name);
+            println!("    Status: {}", if is_modified { "MODIFIED" } else { "Unchanged" });
+            println!("    Columns: {}", column_count);
+            // We don't have direct access to row count or filename in current implementation
+            // These would be good additions to the API in the future
+            
+            println!("");
+        }
+        
+        Ok(())
+    }
+    
+    /// Show statistics or toggle statistics mode
+    fn show_stats(&mut self, option: Option<&str>) -> Result<()> {
+        match option {
+            Some("on") => {
+                self.show_stats = true;
+                println!("Statistics display enabled");
+                Ok(())
+            }
+            Some("off") => {
+                self.show_stats = false;
+                println!("Statistics display disabled");
+                Ok(())
+            }
+            None => {
+                // Toggle the current state
+                self.show_stats = !self.show_stats;
+                println!(
+                    "Statistics display {}",
+                    if self.show_stats { "enabled" } else { "disabled" }
+                );
+                Ok(())
+            }
+            Some(_) => {
+                println!("Unknown option for .stats");
+                println!("Usage: .stats [on|off]");
+                Ok(())
+            }
+        }
     }
 }
