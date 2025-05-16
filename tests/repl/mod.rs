@@ -154,3 +154,40 @@ fn test_repl_multiline_statements() {
     let status = process.wait().expect("Failed to wait for sqawk process");
     assert!(status.success(), "Process did not exit successfully");
 }
+
+#[test]
+fn test_repl_save_command() {
+    // Commands to test the .save command
+    let test_commands = 
+        "UPDATE sample SET age = 33 WHERE id = 1;\n.save\nUPDATE sample SET age = 34 WHERE id = 2;\n.save sample\n.exit\n";
+
+    // Start the sqawk process with sample data loaded
+    let mut process = Command::new("cargo")
+        .args(&[
+            "run",
+            "--bin",
+            "sqawk",
+            "tests/data/sample.csv",
+            "--interactive",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to start sqawk process");
+
+    // Get handle to stdin and take stdout to prevent blocking
+    let mut stdin = process.stdin.take().expect("Failed to open stdin");
+    let _stdout = process.stdout.take().expect("Failed to open stdout");
+
+    // Give the process a moment to start up
+    thread::sleep(Duration::from_millis(100));
+
+    // Write test commands to REPL
+    stdin
+        .write_all(test_commands.as_bytes())
+        .expect("Failed to write to stdin");
+
+    // Wait for process to complete
+    let status = process.wait().expect("Failed to wait for sqawk process");
+    assert!(status.success(), "Process did not exit successfully");
+}

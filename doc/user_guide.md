@@ -172,12 +172,13 @@ This opens an interactive SQL prompt where you can:
 
 | Command | Description |
 |---------|-------------|
-| `.help` | Display help information about available commands |
 | `.exit` or `.quit` | Exit the REPL |
-| `.tables` | List all available tables |
+| `.help` | Display help information about available commands |
+| `.save [table]` | Immediately save changes to all modified tables or a specific table |
 | `.schema [table]` | Show schema for a specific table or all tables |
-| `.write [on/off]` | Toggle write mode on/off (default is off) |
+| `.tables` | List all available tables |
 | `.verbose [on/off]` | Toggle verbose mode on/off |
+| `.write [on/off]` | Toggle write mode on/off (default is off) |
 
 **Example REPL Session:**
 
@@ -207,6 +208,15 @@ Write mode enabled. Changes will be saved to files.
 
 sqawk> UPDATE employees SET salary = salary * 1.1 WHERE department = 'Engineering';
 Updated 2 rows
+
+sqawk> .write off
+Write mode disabled. Changes will not be saved to files.
+
+sqawk> UPDATE sales SET amount = amount * 0.9 WHERE date = '2023-12-15';
+Updated 5 rows
+
+sqawk> .save sales
+Changes saved to table 'sales'
 
 sqawk> .exit
 ```
