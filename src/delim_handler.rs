@@ -75,9 +75,12 @@ impl DelimHandler {
         };
 
         // Create a CSV reader with custom delimiter
+        // Also add support for comment lines (starting with #) for system files like /etc/passwd
         let mut csv_reader = csv::ReaderBuilder::new()
             .has_headers(true)
             .delimiter(delimiter_byte)
+            .comment(Some(b'#'))  // Support for comment lines starting with #
+            .flexible(true)       // Allow for variable number of fields
             .from_reader(reader);
 
         // Get headers
