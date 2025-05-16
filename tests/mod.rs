@@ -14,6 +14,7 @@ mod update; // UPDATE statement tests
 mod advanced; // Tests for advanced SQL features and edge cases
 mod aggregate; // Tests for aggregate functions (COUNT, SUM, AVG, MIN, MAX)
 mod alias; // Tests for column aliases (AS keyword)
+mod csv_handler; // Tests for CSV handler features (comments, error recovery)
 mod delimiter; // Tests for delimiter options (-F flag)
 mod group_by; // Tests for GROUP BY functionality
 mod join_on; // Tests for JOIN ON syntax (as opposed to WHERE for joins)

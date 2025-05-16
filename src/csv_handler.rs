@@ -81,6 +81,7 @@ impl CsvHandler {
         let mut csv_reader = csv::ReaderBuilder::new()
             .has_headers(true)
             .comment(Some(b'#'))  // Support comment lines starting with #
+            .flexible(true)      // Allow flexible handling of different field counts
             .from_reader(reader);
 
         // Get headers or use custom column names if provided
