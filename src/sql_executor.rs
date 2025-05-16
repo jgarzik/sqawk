@@ -2610,6 +2610,7 @@ impl SqlExecutor {
     ///
     /// # Returns
     /// * `Result<()>` - Result indicating success or failure
+    #[allow(dead_code)]
     pub fn save_table(&self, table_name: &str) -> Result<()> {
         Ok(self.file_handler.save_table(table_name)?)
     }
