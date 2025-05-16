@@ -50,11 +50,38 @@ impl CsvHandler {
     /// * `file_spec` - File specification in the format `[table_name=]file_path.csv`
     ///   If table_name is not specified, the file name without extension is used.
     /// * `custom_columns` - Optional custom column names to use instead of detected/generated ones
+    /// * `recover_errors` - When true, malformed rows will be skipped instead of causing the operation to fail
+    ///
+    /// # Features
+    /// * Supports comments in CSV files (lines starting with #)
+    /// * Can recover from malformed rows by skipping them
+    /// * Provides detailed error information including line numbers
     ///
     /// # Returns
     /// * `Ok(Table)` - The successfully loaded table
     /// * `Err` if there was an error parsing the file spec, opening the file, or parsing the CSV data
     pub fn load_csv(&self, file_spec: &str, custom_columns: Option<Vec<String>>) -> SqawkResult<Table> {
+        // Call the enhanced version with recovery disabled
+        self.load_csv_with_recovery(file_spec, custom_columns, None)
+    }
+    
+    /// Load a CSV file into an in-memory table with enhanced error handling
+    ///
+    /// This method extends the standard load_csv with additional error handling capabilities
+    /// including the ability to recover from malformed rows by skipping them.
+    ///
+    /// # Arguments
+    /// * `file_spec` - File specification in the format `[table_name=]file_path.csv`
+    /// * `custom_columns` - Optional custom column names to use instead of detected/generated ones
+    /// * `recover_errors` - When true, malformed rows will be skipped instead of causing the operation to fail
+    ///
+    /// # Returns
+    /// * `Ok(Table)` - The successfully loaded table
+    /// * `Err` if there was an unrecoverable error
+    pub fn load_csv_with_recovery(&self, 
+                   file_spec: &str, 
+                   custom_columns: Option<Vec<String>>,
+                   recover_errors: Option<bool>) -> SqawkResult<Table> {
         // Parse file spec to get table name and file path
         let (table_name, file_path) = self.parse_file_spec(file_spec)?;
 
@@ -62,9 +89,10 @@ impl CsvHandler {
         let file = File::open(&file_path)?;
         let reader = BufReader::new(file);
 
-        // Create a CSV reader
+        // Create a CSV reader with enhanced options
         let mut csv_reader = csv::ReaderBuilder::new()
             .has_headers(true)
+            .comment(Some(b'#'))  // Support comment lines starting with #
             .from_reader(reader);
 
         // Get headers or use custom column names if provided
@@ -84,14 +112,45 @@ impl CsvHandler {
         // Create a new table
         let mut table = Table::new(&table_name, headers, Some(file_path.clone()));
 
-        // Read rows
+        // Read rows with enhanced error handling
+        let should_recover = recover_errors.unwrap_or(false);
+        let mut skipped_rows = 0;
+        let mut row_number = 0;
+        
         for result in csv_reader.records() {
-            let record = result.map_err(SqawkError::CsvError)?;
-
-            // Convert record to a row of values
-            let row = record.iter().map(Value::from).collect();
-
-            table.add_row(row)?;
+            row_number += 1;
+            
+            match result {
+                Ok(record) => {
+                    // Convert record to a row of values
+                    let row = record.iter().map(Value::from).collect();
+                    table.add_row(row)?;
+                },
+                Err(csv_err) if should_recover => {
+                    // Skip this row and continue processing if recovery is enabled
+                    skipped_rows += 1;
+                    eprintln!(
+                        "Warning: Skipping malformed row at line {}: {}",
+                        row_number + 1, // +1 for header row
+                        csv_err
+                    );
+                },
+                Err(csv_err) => {
+                    // Provide detailed error context when failing
+                    return Err(SqawkError::CsvParseError {
+                        file: file_path.to_string_lossy().to_string(),
+                        line: row_number + 1, // +1 for header row
+                        error: format!("{}", csv_err),
+                    });
+                }
+            }
+        }
+        
+        // Report the number of skipped rows if there were any and we're in recovery mode
+        if should_recover && skipped_rows > 0 {
+            eprintln!("Note: Skipped {} malformed rows while loading {}", 
+                      skipped_rows, 
+                      file_path.to_string_lossy());
         }
 
         Ok(table)

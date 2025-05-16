@@ -30,6 +30,14 @@ pub enum SqawkError {
     /// Error while parsing or processing delimited file data
     #[error("File parsing error: {0}")]
     CsvError(#[from] csv::Error),
+    
+    /// Enhanced CSV parsing error with file location information
+    #[error("CSV parse error in {file} at line {line}: {error}")]
+    CsvParseError {
+        file: String,
+        line: usize,
+        error: String,
+    },
 
     /// Error during SQL query parsing with sqlparser
     #[error("SQL parsing error: {0}")]
@@ -78,6 +86,7 @@ impl PartialEq for SqawkError {
         match (self, other) {
             (SqawkError::IoError(_), SqawkError::IoError(_)) => true,
             (SqawkError::CsvError(_), SqawkError::CsvError(_)) => true,
+            (SqawkError::CsvParseError { .. }, SqawkError::CsvParseError { .. }) => true,
             (SqawkError::SqlParseError(_), SqawkError::SqlParseError(_)) => true,
             (SqawkError::TableNotFound(_), SqawkError::TableNotFound(_)) => true,
             (SqawkError::ColumnNotFound(_), SqawkError::ColumnNotFound(_)) => true,
