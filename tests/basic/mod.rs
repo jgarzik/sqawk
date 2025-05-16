@@ -42,19 +42,7 @@ fn test_filtered_select() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_insert() -> Result<(), Box<dyn std::error::Error>> {
-    // We don't use this test_case directly, so we prefix with _
-    let _test_case = SqawkTestCase {
-        sql: "INSERT INTO people (id, name, age) VALUES (4, 'Dave', 40)".to_string(),
-        args: vec!["-s".to_string(), "SELECT * FROM people".to_string()],
-        expected_stdout: vec![
-            "id,name,age".to_string(),
-            "1,Alice,32".to_string(),
-            "2,Bob,25".to_string(),
-            "3,Charlie,35".to_string(),
-            "4,Dave,40".to_string(),
-        ],
-        ..Default::default()
-    };
+    // Removed unused test_case definition
 
     // We need to verify the file was modified, so we'll use a custom test function
     let temp_dir = create_temp_dir()?;

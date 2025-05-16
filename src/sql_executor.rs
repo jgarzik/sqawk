@@ -1518,7 +1518,6 @@ impl SqlExecutor {
     /// # Returns
     /// * `Ok(Value)` - The resulting value after evaluation
     /// * `Err` - If the expression can't be evaluated or contains unsupported features
-    #[allow(clippy::only_used_in_recursion)]
     fn evaluate_expr(&self, expr: &Expr) -> SqawkResult<Value> {
         match expr {
             Expr::Value(value) => self.evaluate_sql_value(value),
