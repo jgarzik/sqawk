@@ -2603,17 +2603,6 @@ impl SqlExecutor {
         self.file_handler.get_table_columns(table_name)
     }
     
-    /// Save a specific table back to its original file
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table to save
-    ///
-    /// # Returns
-    /// * `Result<()>` - Result indicating success or failure
-    #[allow(dead_code)]
-    pub fn save_table(&self, table_name: &str) -> Result<()> {
-        Ok(self.file_handler.save_table(table_name)?)
-    }
     
     /// Check if any tables have been modified
     ///

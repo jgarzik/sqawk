@@ -8,19 +8,19 @@ use crate::sql_executor::SqlExecutor;
 // Define a custom error type for the REPL
 #[derive(Debug)]
 pub enum ReplError {
-    SqlExecutorError(anyhow::Error),
-    ReadlineError(ReadlineError),
-    IoError(std::io::Error),
-    SqawkError(SqawkError),
+    SqlExecutor(anyhow::Error),
+    Readline(ReadlineError),
+    Io(std::io::Error),
+    Sqawk(SqawkError),
 }
 
 impl fmt::Display for ReplError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ReplError::SqlExecutorError(err) => write!(f, "SQL execution error: {}", err),
-            ReplError::ReadlineError(err) => write!(f, "Input error: {}", err),
-            ReplError::IoError(err) => write!(f, "I/O error: {}", err),
-            ReplError::SqawkError(err) => write!(f, "Sqawk error: {}", err),
+            ReplError::SqlExecutor(err) => write!(f, "SQL execution error: {}", err),
+            ReplError::Readline(err) => write!(f, "Input error: {}", err),
+            ReplError::Io(err) => write!(f, "I/O error: {}", err),
+            ReplError::Sqawk(err) => write!(f, "Sqawk error: {}", err),
         }
     }
 }
@@ -29,25 +29,25 @@ impl std::error::Error for ReplError {}
 
 impl From<anyhow::Error> for ReplError {
     fn from(err: anyhow::Error) -> Self {
-        ReplError::SqlExecutorError(err)
+        ReplError::SqlExecutor(err)
     }
 }
 
 impl From<ReadlineError> for ReplError {
     fn from(err: ReadlineError) -> Self {
-        ReplError::ReadlineError(err)
+        ReplError::Readline(err)
     }
 }
 
 impl From<std::io::Error> for ReplError {
     fn from(err: std::io::Error) -> Self {
-        ReplError::IoError(err)
+        ReplError::Io(err)
     }
 }
 
 impl From<SqawkError> for ReplError {
     fn from(err: SqawkError) -> Self {
-        ReplError::SqawkError(err)
+        ReplError::Sqawk(err)
     }
 }
 
@@ -167,8 +167,8 @@ impl Repl {
     fn parse_command(&self, input: &str) -> Command {
         let input = input.trim();
         
-        if input.starts_with('.') {
-            let parts: Vec<&str> = input[1..].splitn(2, ' ').collect();
+        if let Some(stripped) = input.strip_prefix('.') {
+            let parts: Vec<&str> = stripped.splitn(2, ' ').collect();
             let command = parts[0].to_lowercase();
             
             match command.as_str() {
@@ -229,7 +229,7 @@ impl Repl {
     fn execute_sql(&mut self, sql: &str) -> Result<()> {
         let result = match self.executor.execute_sql(sql) {
             Ok(result) => result,
-            Err(err) => return Err(ReplError::SqlExecutorError(err)),
+            Err(err) => return Err(ReplError::SqlExecutor(err)),
         };
         
         // Print results
@@ -252,7 +252,7 @@ impl Repl {
         if self.write {
             let saved_count = match self.executor.save_modified_tables() {
                 Ok(count) => count,
-                Err(err) => return Err(ReplError::SqlExecutorError(err)),
+                Err(err) => return Err(ReplError::SqlExecutor(err)),
             };
             
             if saved_count > 0 {
@@ -269,7 +269,7 @@ impl Repl {
     fn load_file(&mut self, file_spec: &str) -> Result<()> {
         let result = match self.executor.load_file(file_spec) {
             Ok(result) => result,
-            Err(err) => return Err(ReplError::SqawkError(err)),
+            Err(err) => return Err(ReplError::Sqawk(err)),
         };
         
         match result {
@@ -313,7 +313,7 @@ impl Repl {
                 }
                 Ok(())
             },
-            Err(e) => Err(ReplError::SqawkError(e)),
+            Err(e) => Err(ReplError::Sqawk(e)),
         }
     }
     
