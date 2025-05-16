@@ -122,7 +122,7 @@ impl CsvHandler {
                         for i in 0..table.column_count() {
                             if i < record.len() {
                                 // Use the value if it exists
-                                row.push(Value::from(record.get(i).unwrap_or(&"")));
+                                row.push(Value::from(record.get(i).unwrap_or("")));
                             } else {
                                 // Pad with null values if we need more
                                 row.push(Value::Null);

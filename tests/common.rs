@@ -1,9 +1,9 @@
+use std::fs;
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
-use std::fs;
-use std::path::Path;
 
 /// Run a sqawk REPL script with the provided commands and return the output
 pub fn run_repl_script(
@@ -14,24 +14,24 @@ pub fn run_repl_script(
 ) -> String {
     // Build command args
     let mut args = vec!["run", "--bin", "sqawk"];
-    
+
     // Add input files
     args.extend(input_files);
-    
+
     // Add field separator if provided
     if let Some(sep) = field_separator {
         args.push("--field-separator");
         args.push(sep);
     }
-    
+
     // Add verbose flag if needed
     if verbose {
         args.push("--verbose");
     }
-    
+
     // Add interactive flag
     args.push("--interactive");
-    
+
     // Start the sqawk process
     let mut process = Command::new("cargo")
         .args(&args)
@@ -40,29 +40,31 @@ pub fn run_repl_script(
         .stderr(Stdio::piped())
         .spawn()
         .expect("Failed to start sqawk process");
-    
+
     // Get handles to stdin and stdout
     let mut stdin = process.stdin.take().expect("Failed to open stdin");
     let _stdout = process.stdout.take().expect("Failed to open stdout");
-    
+
     // Give the process a moment to start up
     thread::sleep(Duration::from_millis(100));
-    
+
     // Write commands to REPL
     stdin
         .write_all(commands.as_bytes())
         .expect("Failed to write to stdin");
-    
+
     // Wait for process to complete
-    let output = process.wait_with_output().expect("Failed to wait for sqawk process");
-    
+    let output = process
+        .wait_with_output()
+        .expect("Failed to wait for sqawk process");
+
     // Combine stdout and stderr
     let mut result = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.stderr.is_empty() {
         result.push_str("\n");
         result.push_str(&String::from_utf8_lossy(&output.stderr));
     }
-    
+
     result
 }
 

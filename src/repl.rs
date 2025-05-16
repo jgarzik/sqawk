@@ -2,7 +2,6 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::fmt;
 use std::process::Command;
-use regex;
 
 use crate::error::SqawkError;
 use crate::sql_executor::SqlExecutor;
@@ -191,7 +190,7 @@ impl Repl {
                     } else {
                         ReplCommand::Exit(None)
                     }
-                },
+                }
                 "quit" => ReplCommand::Exit(None),
                 "tables" => {
                     if parts.len() > 1 {
@@ -199,7 +198,7 @@ impl Repl {
                     } else {
                         ReplCommand::Tables(None)
                     }
-                },
+                }
                 "schema" => {
                     if parts.len() > 1 {
                         ReplCommand::Schema(Some(parts[1].trim().to_string()))
@@ -359,7 +358,7 @@ impl Repl {
             println!("No tables loaded");
             return Ok(());
         }
-        
+
         println!("Tables:");
         match pattern {
             Some(pat) => {
@@ -368,12 +367,10 @@ impl Repl {
                 let regex_pattern = pat.replace("%", ".*").replace("_", ".");
                 let regex = regex::Regex::new(&format!("^{}$", regex_pattern))
                     .unwrap_or_else(|_| regex::Regex::new(".*").unwrap()); // Fallback to match all if regex is invalid
-                
-                let matching_tables: Vec<&String> = tables
-                    .iter()
-                    .filter(|name| regex.is_match(name))
-                    .collect();
-                
+
+                let matching_tables: Vec<&String> =
+                    tables.iter().filter(|name| regex.is_match(name)).collect();
+
                 if matching_tables.is_empty() {
                     println!("  No tables match pattern: {}", pat);
                 } else {
@@ -399,7 +396,7 @@ impl Repl {
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -429,11 +426,11 @@ impl Repl {
         println!("  SQL_STATEMENT         Execute SQL statement");
         Ok(())
     }
-    
+
     /// Exit the REPL with an optional exit code
     fn exit_repl(&mut self, code: Option<&str>) -> Result<()> {
         self.running = false;
-        
+
         // If an exit code is provided, we'll just acknowledge it
         // In a real program, this would set the process exit code
         if let Some(code_str) = code {
@@ -446,10 +443,10 @@ impl Repl {
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Display schema information for a table or all tables
     fn show_schema(&self, table_name: Option<&str>) -> Result<()> {
         match table_name {
@@ -459,7 +456,7 @@ impl Repl {
                     Ok(columns) => {
                         println!("CREATE TABLE {} (", name);
                         for (i, column) in columns.iter().enumerate() {
-                            // For now, we'll just use TEXT as the type 
+                            // For now, we'll just use TEXT as the type
                             // since we don't have direct type information
                             let data_type = "TEXT";
                             if i < columns.len() - 1 {
@@ -469,7 +466,7 @@ impl Repl {
                             }
                         }
                         println!(");");
-                    },
+                    }
                     Err(_) => {
                         eprintln!("No such table: {}", name);
                     }
@@ -496,7 +493,7 @@ impl Repl {
         }
         Ok(())
     }
-    
+
     /// Change the current working directory
     fn change_directory(&self, dir: &str) -> Result<()> {
         match std::env::set_current_dir(dir) {
@@ -510,7 +507,7 @@ impl Repl {
             }
         }
     }
-    
+
     /// Toggle showing number of rows changed by SQL statements
     fn toggle_changes(&mut self, arg: Option<&str>) -> Result<()> {
         match arg {
@@ -527,13 +524,17 @@ impl Repl {
                 self.show_changes = !self.show_changes;
                 println!(
                     "Changes display {}",
-                    if self.show_changes { "enabled" } else { "disabled" }
+                    if self.show_changes {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
                 );
             }
         }
         Ok(())
     }
-    
+
     /// Show version information
     fn show_version(&self) -> Result<()> {
         println!("Sqawk version 0.1.1");
