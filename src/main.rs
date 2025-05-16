@@ -100,7 +100,10 @@ fn main() -> Result<()> {
     if args.interactive {
         // Start REPL (Read-Eval-Print Loop) for interactive SQL entry
         let mut repl = Repl::new(sql_executor, args.verbose, args.write, args.field_separator);
-        return repl.run().context("Failed to run interactive mode");
+        match repl.run() {
+            Ok(_) => return Ok(()),
+            Err(e) => return Err(anyhow::anyhow!("Failed to run interactive mode: {}", e)),
+        }
     }
 
     // Process each SQL statement in the order specified on the command line

@@ -1,10 +1,57 @@
 use rustyline::error::ReadlineError;
-use rustyline::{DefaultEditor, Editor, History};
-use rustyline::history::DefaultHistory;
-use std::io::Write;
+use rustyline::DefaultEditor;
+use std::fmt;
 
-use crate::error::{SqawkError, SqawkResult};
+use crate::error::SqawkError;
 use crate::sql_executor::SqlExecutor;
+
+// Define a custom error type for the REPL
+#[derive(Debug)]
+pub enum ReplError {
+    SqlExecutorError(anyhow::Error),
+    ReadlineError(ReadlineError),
+    IoError(std::io::Error),
+    SqawkError(SqawkError),
+}
+
+impl fmt::Display for ReplError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReplError::SqlExecutorError(err) => write!(f, "SQL execution error: {}", err),
+            ReplError::ReadlineError(err) => write!(f, "Input error: {}", err),
+            ReplError::IoError(err) => write!(f, "I/O error: {}", err),
+            ReplError::SqawkError(err) => write!(f, "Sqawk error: {}", err),
+        }
+    }
+}
+
+impl std::error::Error for ReplError {}
+
+impl From<anyhow::Error> for ReplError {
+    fn from(err: anyhow::Error) -> Self {
+        ReplError::SqlExecutorError(err)
+    }
+}
+
+impl From<ReadlineError> for ReplError {
+    fn from(err: ReadlineError) -> Self {
+        ReplError::ReadlineError(err)
+    }
+}
+
+impl From<std::io::Error> for ReplError {
+    fn from(err: std::io::Error) -> Self {
+        ReplError::IoError(err)
+    }
+}
+
+impl From<SqawkError> for ReplError {
+    fn from(err: SqawkError) -> Self {
+        ReplError::SqawkError(err)
+    }
+}
+
+pub type Result<T> = std::result::Result<T, ReplError>;
 
 const HISTORY_FILE: &str = ".sqawk_history";
 
@@ -34,15 +81,15 @@ pub struct Repl {
     /// SQL executor for running queries
     executor: SqlExecutor,
     /// Rustyline editor for command line editing
-    editor: Editor<()>,
+    editor: DefaultEditor,
     /// Whether to print verbose output
-    verbose: bool,
+    _verbose: bool,
     /// Whether to write changes to files
     write: bool,
     /// Whether the REPL is running
     running: bool,
     /// Field separator for delimited files
-    field_separator: Option<String>,
+    _field_separator: Option<String>,
 }
 
 impl Repl {
@@ -53,16 +100,19 @@ impl Repl {
         write: bool,
         field_separator: Option<String>,
     ) -> Self {
-        let mut editor = Editor::<()>::new();
+        let mut editor = DefaultEditor::new().unwrap_or_else(|err| {
+            eprintln!("Warning: Failed to initialize editor: {}", err);
+            DefaultEditor::new().expect("Critical error initializing editor")
+        });
         let _ = editor.load_history(HISTORY_FILE);
         
         Self {
             executor,
             editor,
-            verbose,
+            _verbose: verbose,
             write,
             running: true,
-            field_separator,
+            _field_separator: field_separator,
         }
     }
 
@@ -107,7 +157,7 @@ impl Repl {
         let input = self.editor.readline(prompt)?;
         
         if !input.trim().is_empty() {
-            self.editor.add_history_entry(&input);
+            let _ = self.editor.add_history_entry(&input);
         }
         
         Ok(self.parse_command(&input))
@@ -177,7 +227,10 @@ impl Repl {
     
     /// Execute SQL statement
     fn execute_sql(&mut self, sql: &str) -> Result<()> {
-        let result = self.executor.execute_sql(sql)?;
+        let result = match self.executor.execute_sql(sql) {
+            Ok(result) => result,
+            Err(err) => return Err(ReplError::SqlExecutorError(err)),
+        };
         
         // Print results
         if let Some(result_set) = result {
@@ -197,7 +250,11 @@ impl Repl {
         
         // Save changes if write mode is enabled
         if self.write {
-            let saved_count = self.executor.save_modified_tables()?;
+            let saved_count = match self.executor.save_modified_tables() {
+                Ok(count) => count,
+                Err(err) => return Err(ReplError::SqlExecutorError(err)),
+            };
+            
             if saved_count > 0 {
                 println!("Changes saved to {} tables", saved_count);
             }
@@ -210,7 +267,12 @@ impl Repl {
     
     /// Load a file into a table
     fn load_file(&mut self, file_spec: &str) -> Result<()> {
-        match self.executor.load_file(file_spec)? {
+        let result = match self.executor.load_file(file_spec) {
+            Ok(result) => result,
+            Err(err) => return Err(ReplError::SqawkError(err)),
+        };
+        
+        match result {
             Some((table_name, file_path)) => {
                 println!("Loaded table '{}' from '{}'", table_name, file_path);
                 Ok(())
@@ -251,7 +313,7 @@ impl Repl {
                 }
                 Ok(())
             },
-            Err(e) => Err(e.into()),
+            Err(e) => Err(ReplError::SqawkError(e)),
         }
     }
     
