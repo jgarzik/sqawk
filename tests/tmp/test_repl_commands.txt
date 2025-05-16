@@ -1,0 +1,8 @@
+.tables
+.tables s%
+SELECT * FROM sample;
+.changes on
+INSERT INTO sample VALUES (4, 'David', 28);
+.changes
+.version
+.exit

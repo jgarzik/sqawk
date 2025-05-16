@@ -6,12 +6,12 @@ fn test_repl_from_file() {
     // Create a temporary directory for test outputs (unused but kept for future expansion)
     let _temp_dir = tempdir().unwrap();
     
-    // Run sqawk with input from repl_commands.txt 
+    // Run sqawk with input from repl_commands.txt in the tmp directory
     let mut cmd = Command::cargo_bin("sqawk").unwrap();
     let assert = cmd
         .arg("--interactive")
         .arg("tests/data/sample.csv")
-        .pipe_stdin("tests/data/repl_commands.txt").unwrap()
+        .pipe_stdin("tests/tmp/test_repl_commands.txt").unwrap()
         .assert()
         .success();
     
