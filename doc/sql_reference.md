@@ -82,6 +82,35 @@ Sqawk uses the following logic to determine which file format handler to use:
 - Files with a `.csv` extension are treated as standard CSV files
 - Other file extensions without a specified delimiter are treated as tab-delimited by default
 
+### Comment Support in CSV Files
+
+Sqawk supports comment lines in CSV files. Lines that begin with a comment character (typically '#') are ignored during processing:
+
+```csv
+# This is a comment and will be ignored
+id,name,age
+1,Alice,32
+# Another comment
+2,Bob,25
+```
+
+Comment support is particularly useful for:
+- Adding metadata or documentation within the file
+- Temporarily excluding rows from processing
+- Adding version information or data provenance details
+
+### Error Recovery Options
+
+When processing CSV or other delimiter-separated files, Sqawk can handle malformed rows in several ways:
+
+- **Strict Mode**: By default, malformed rows (those with too few or too many fields) cause an error
+- **Recovery Mode**: With appropriate options, Sqawk can:
+  - Skip malformed rows entirely
+  - Pad malformed rows with NULL values if they have too few fields
+  - Truncate malformed rows if they have too many fields
+
+This error recovery capability is especially useful when working with imperfect data sources where strict conformance to the expected format isn't guaranteed.
+
 ## Chaining SQL Statements
 
 Sqawk allows you to execute multiple SQL statements in sequence, with each statement operating on the result of the previous ones:
@@ -194,6 +223,20 @@ When using DISTINCT:
 - DISTINCT is applied after WHERE filtering but before ORDER BY
 - DISTINCT can be used with JOINs to find unique combinations across tables
 - DISTINCT is particularly useful for finding unique values or removing redundant results
+
+DISTINCT has two different applications in SQL:
+
+1. **Query-level DISTINCT** - Applied to the entire result set:
+   ```sql
+   SELECT DISTINCT department, location FROM employees
+   ```
+
+2. **Aggregate function DISTINCT** - Applied to the values within an aggregate function:
+   ```sql
+   SELECT COUNT(DISTINCT department) FROM employees
+   ```
+
+In the second case, the COUNT operation is performed only on unique department values, rather than counting duplicates.
 
 ### Column Selection
 
@@ -598,10 +641,14 @@ Current limitations of Sqawk's SQL implementation:
 - **Join Operations**:
   - INNER JOIN with ON conditions is supported
   - No outer joins (LEFT, RIGHT, or FULL OUTER) are supported
-
+  
 - **Query Features**:
-  - No complex expressions in WHERE clauses (only simple comparisons)
+  - WHERE clauses support a variety of expressions including comparisons, logical operators, and string functions
   - String functions are only supported in WHERE clauses, not in SELECT clauses for projection
+  
+- **Error Handling**:
+  - Errors are reported with detailed messages and context
+  - CSV parsing errors include line numbers to help locate issues
   - No subqueries
   - No window functions
   - No common table expressions (CTEs)
