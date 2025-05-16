@@ -1494,7 +1494,7 @@ impl SqlExecutor {
             _ => self.unsupported_expression_error(expr),
         }
     }
-    
+
     /// Evaluate a SQL value literal
     ///
     /// # Arguments
@@ -1517,7 +1517,7 @@ impl SqlExecutor {
             ))),
         }
     }
-    
+
     /// Parse a number string into an Integer or Float Value
     ///
     /// # Arguments
@@ -1536,7 +1536,7 @@ impl SqlExecutor {
             Err(SqawkError::TypeError(format!("Invalid number: {}", n)))
         }
     }
-    
+
     /// Evaluate a unary operation (e.g., negation, plus, not)
     ///
     /// # Arguments
@@ -1546,7 +1546,11 @@ impl SqlExecutor {
     /// # Returns
     /// * `Ok(Value)` - The resulting value after applying the operator
     /// * `Err` - If the operation is invalid
-    fn evaluate_unary_operation(&self, op: &sqlparser::ast::UnaryOperator, expr: &Expr) -> SqawkResult<Value> {
+    fn evaluate_unary_operation(
+        &self,
+        op: &sqlparser::ast::UnaryOperator,
+        expr: &Expr,
+    ) -> SqawkResult<Value> {
         let val = self.evaluate_expr(expr)?;
 
         match op {
@@ -1559,7 +1563,7 @@ impl SqlExecutor {
             ))),
         }
     }
-    
+
     /// Apply negation to a value (for the minus unary operator)
     ///
     /// # Arguments
@@ -1578,7 +1582,7 @@ impl SqlExecutor {
             ))),
         }
     }
-    
+
     /// Apply boolean NOT to a value
     ///
     /// # Arguments
@@ -1596,7 +1600,7 @@ impl SqlExecutor {
             ))),
         }
     }
-    
+
     /// Create an error for an unsupported expression
     ///
     /// # Arguments
