@@ -1083,12 +1083,53 @@ impl SqlExecutor {
     /// * `Ok(bool)` - The converted boolean value
     fn value_to_boolean(&self, val: &Value) -> SqawkResult<bool> {
         match val {
-            Value::Integer(i) => Ok(*i > 0),
-            Value::Float(f) => Ok(*f > 0.0),
+            Value::Integer(i) => self.integer_to_boolean(*i),
+            Value::Float(f) => self.float_to_boolean(*f),
             Value::Boolean(b) => Ok(*b),
-            Value::String(s) => Ok(!s.is_empty()),
-            Value::Null => Ok(false),
+            Value::String(s) => self.string_to_boolean(s),
+            Value::Null => self.null_to_boolean(),
         }
+    }
+    
+    /// Convert an integer to boolean using SQL-like semantics (true if > 0)
+    ///
+    /// # Arguments
+    /// * `value` - The integer value to convert
+    ///
+    /// # Returns
+    /// * `Ok(bool)` - The converted boolean value
+    fn integer_to_boolean(&self, value: i64) -> SqawkResult<bool> {
+        Ok(value > 0)
+    }
+    
+    /// Convert a float to boolean using SQL-like semantics (true if > 0.0)
+    ///
+    /// # Arguments
+    /// * `value` - The float value to convert
+    ///
+    /// # Returns
+    /// * `Ok(bool)` - The converted boolean value
+    fn float_to_boolean(&self, value: f64) -> SqawkResult<bool> {
+        Ok(value > 0.0)
+    }
+    
+    /// Convert a string to boolean using SQL-like semantics (true if non-empty)
+    ///
+    /// # Arguments
+    /// * `value` - The string value to convert
+    ///
+    /// # Returns
+    /// * `Ok(bool)` - The converted boolean value
+    fn string_to_boolean(&self, value: &str) -> SqawkResult<bool> {
+        Ok(!value.is_empty())
+    }
+    
+    /// Convert NULL to boolean (always false in SQL semantics)
+    ///
+    /// # Returns
+    /// * `Ok(bool)` - Always returns Ok(false)
+    fn null_to_boolean(&self) -> SqawkResult<bool> {
+        Ok(false)
     }
     
     fn evaluate_logical_and(
@@ -1179,33 +1220,28 @@ impl SqlExecutor {
 
         match op {
             // Equal (=) operator
-            sqlparser::ast::BinaryOperator::Eq => {
-                // Use the Value's implementation of PartialEq which handles type conversions
-                Ok(left_val == right_val)
-            }
+            sqlparser::ast::BinaryOperator::Eq => 
+                self.evaluate_equality(&left_val, &right_val),
 
             // Not equal (!=) operator
-            sqlparser::ast::BinaryOperator::NotEq => Ok(left_val != right_val),
+            sqlparser::ast::BinaryOperator::NotEq => 
+                self.evaluate_inequality(&left_val, &right_val),
 
             // Greater than (>) operator
-            sqlparser::ast::BinaryOperator::Gt => {
-                self.compare_values_with_operator(&left_val, &right_val, ">")
-            }
+            sqlparser::ast::BinaryOperator::Gt => 
+                self.compare_values_with_operator(&left_val, &right_val, ">"),
 
             // Less than (<) operator
-            sqlparser::ast::BinaryOperator::Lt => {
-                self.compare_values_with_operator(&left_val, &right_val, "<")
-            }
+            sqlparser::ast::BinaryOperator::Lt => 
+                self.compare_values_with_operator(&left_val, &right_val, "<"),
 
             // Greater than or equal (>=) operator
-            sqlparser::ast::BinaryOperator::GtEq => {
-                self.compare_values_with_operator(&left_val, &right_val, ">=")
-            }
+            sqlparser::ast::BinaryOperator::GtEq => 
+                self.compare_values_with_operator(&left_val, &right_val, ">="),
 
             // Less than or equal (<=) operator
-            sqlparser::ast::BinaryOperator::LtEq => {
-                self.compare_values_with_operator(&left_val, &right_val, "<=")
-            }
+            sqlparser::ast::BinaryOperator::LtEq => 
+                self.compare_values_with_operator(&left_val, &right_val, "<="),
 
             // Add more operators as needed
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -1213,6 +1249,36 @@ impl SqlExecutor {
                 op
             ))),
         }
+    }
+    
+    /// Evaluate equality between two values
+    ///
+    /// Uses the Value's implementation of PartialEq which handles type conversions
+    ///
+    /// # Arguments
+    /// * `left_val` - The left value to compare
+    /// * `right_val` - The right value to compare
+    ///
+    /// # Returns
+    /// * `Ok(true)` if the values are equal
+    /// * `Ok(false)` if the values are not equal
+    fn evaluate_equality(&self, left_val: &Value, right_val: &Value) -> SqawkResult<bool> {
+        Ok(left_val == right_val)
+    }
+    
+    /// Evaluate inequality between two values
+    ///
+    /// Uses the Value's implementation of PartialEq which handles type conversions
+    ///
+    /// # Arguments
+    /// * `left_val` - The left value to compare
+    /// * `right_val` - The right value to compare
+    ///
+    /// # Returns
+    /// * `Ok(true)` if the values are not equal
+    /// * `Ok(false)` if the values are equal
+    fn evaluate_inequality(&self, left_val: &Value, right_val: &Value) -> SqawkResult<bool> {
+        Ok(left_val != right_val)
     }
 
     /// Compare two values with a specific operator
@@ -1244,87 +1310,160 @@ impl SqlExecutor {
     ) -> SqawkResult<bool> {
         match (left_val, right_val) {
             // Integer-Integer comparison
-            (Value::Integer(a), Value::Integer(b)) => Ok(match op_symbol {
-                ">" => a > b,
-                "<" => a < b,
-                ">=" => a >= b,
-                "<=" => a <= b,
-                _ => {
-                    return Err(SqawkError::InvalidSqlQuery(format!(
-                        "Unexpected operator symbol: {}",
-                        op_symbol
-                    )))
-                }
-            }),
+            (Value::Integer(a), Value::Integer(b)) => 
+                self.compare_integers(*a, *b, op_symbol),
 
             // Float-Float comparison
-            (Value::Float(a), Value::Float(b)) => Ok(match op_symbol {
-                ">" => a > b,
-                "<" => a < b,
-                ">=" => a >= b,
-                "<=" => a <= b,
-                _ => {
-                    return Err(SqawkError::InvalidSqlQuery(format!(
-                        "Unexpected operator symbol: {}",
-                        op_symbol
-                    )))
-                }
-            }),
+            (Value::Float(a), Value::Float(b)) => 
+                self.compare_floats(*a, *b, op_symbol),
 
             // Integer-Float comparison (convert Integer to Float)
-            (Value::Integer(a), Value::Float(b)) => {
-                let a_float = *a as f64;
-                Ok(match op_symbol {
-                    ">" => a_float > *b,
-                    "<" => a_float < *b,
-                    ">=" => a_float >= *b,
-                    "<=" => a_float <= *b,
-                    _ => {
-                        return Err(SqawkError::InvalidSqlQuery(format!(
-                            "Unexpected operator symbol: {}",
-                            op_symbol
-                        )))
-                    }
-                })
-            }
+            (Value::Integer(a), Value::Float(b)) => 
+                self.compare_integer_and_float(*a, *b, op_symbol),
 
             // Float-Integer comparison (convert Integer to Float)
-            (Value::Float(a), Value::Integer(b)) => {
-                let b_float = *b as f64;
-                Ok(match op_symbol {
-                    ">" => *a > b_float,
-                    "<" => *a < b_float,
-                    ">=" => *a >= b_float,
-                    "<=" => *a <= b_float,
-                    _ => {
-                        return Err(SqawkError::InvalidSqlQuery(format!(
-                            "Unexpected operator symbol: {}",
-                            op_symbol
-                        )))
-                    }
-                })
-            }
+            (Value::Float(a), Value::Integer(b)) => 
+                self.compare_float_and_integer(*a, *b, op_symbol),
 
             // String-String comparison (lexicographic)
-            (Value::String(a), Value::String(b)) => Ok(match op_symbol {
-                ">" => a > b,
-                "<" => a < b,
-                ">=" => a >= b,
-                "<=" => a <= b,
-                _ => {
-                    return Err(SqawkError::InvalidSqlQuery(format!(
-                        "Unexpected operator symbol: {}",
-                        op_symbol
-                    )))
-                }
-            }),
+            (Value::String(a), Value::String(b)) => 
+                self.compare_strings(a, b, op_symbol),
 
             // Error for incompatible types
-            _ => Err(SqawkError::TypeError(format!(
-                "Cannot compare {:?} and {:?} with {}",
-                left_val, right_val, op_symbol
-            ))),
+            _ => self.report_incompatible_types(left_val, right_val, op_symbol),
         }
+    }
+    
+    /// Compare two integers with the specified operator
+    ///
+    /// # Arguments
+    /// * `a` - First integer
+    /// * `b` - Second integer
+    /// * `op_symbol` - Operator symbol (>, <, >=, <=)
+    ///
+    /// # Returns
+    /// * `Ok(bool)` - Result of the comparison
+    /// * `Err` - If the operator is not supported
+    fn compare_integers(&self, a: i64, b: i64, op_symbol: &str) -> SqawkResult<bool> {
+        Ok(match op_symbol {
+            ">" => a > b,
+            "<" => a < b,
+            ">=" => a >= b,
+            "<=" => a <= b,
+            _ => return self.invalid_operator_error(op_symbol),
+        })
+    }
+    
+    /// Compare two floats with the specified operator
+    ///
+    /// # Arguments
+    /// * `a` - First float
+    /// * `b` - Second float
+    /// * `op_symbol` - Operator symbol (>, <, >=, <=)
+    ///
+    /// # Returns
+    /// * `Ok(bool)` - Result of the comparison
+    /// * `Err` - If the operator is not supported
+    fn compare_floats(&self, a: f64, b: f64, op_symbol: &str) -> SqawkResult<bool> {
+        Ok(match op_symbol {
+            ">" => a > b,
+            "<" => a < b,
+            ">=" => a >= b,
+            "<=" => a <= b,
+            _ => return self.invalid_operator_error(op_symbol),
+        })
+    }
+    
+    /// Compare an integer and a float with the specified operator
+    ///
+    /// # Arguments
+    /// * `a` - Integer value
+    /// * `b` - Float value
+    /// * `op_symbol` - Operator symbol (>, <, >=, <=)
+    ///
+    /// # Returns
+    /// * `Ok(bool)` - Result of the comparison
+    /// * `Err` - If the operator is not supported
+    fn compare_integer_and_float(&self, a: i64, b: f64, op_symbol: &str) -> SqawkResult<bool> {
+        let a_float = a as f64;
+        Ok(match op_symbol {
+            ">" => a_float > b,
+            "<" => a_float < b,
+            ">=" => a_float >= b,
+            "<=" => a_float <= b,
+            _ => return self.invalid_operator_error(op_symbol),
+        })
+    }
+    
+    /// Compare a float and an integer with the specified operator
+    ///
+    /// # Arguments
+    /// * `a` - Float value
+    /// * `b` - Integer value
+    /// * `op_symbol` - Operator symbol (>, <, >=, <=)
+    ///
+    /// # Returns
+    /// * `Ok(bool)` - Result of the comparison
+    /// * `Err` - If the operator is not supported
+    fn compare_float_and_integer(&self, a: f64, b: i64, op_symbol: &str) -> SqawkResult<bool> {
+        let b_float = b as f64;
+        Ok(match op_symbol {
+            ">" => a > b_float,
+            "<" => a < b_float,
+            ">=" => a >= b_float,
+            "<=" => a <= b_float,
+            _ => return self.invalid_operator_error(op_symbol),
+        })
+    }
+    
+    /// Compare two strings with the specified operator
+    ///
+    /// # Arguments
+    /// * `a` - First string
+    /// * `b` - Second string
+    /// * `op_symbol` - Operator symbol (>, <, >=, <=)
+    ///
+    /// # Returns
+    /// * `Ok(bool)` - Result of the comparison
+    /// * `Err` - If the operator is not supported
+    fn compare_strings(&self, a: &str, b: &str, op_symbol: &str) -> SqawkResult<bool> {
+        Ok(match op_symbol {
+            ">" => a > b,
+            "<" => a < b,
+            ">=" => a >= b,
+            "<=" => a <= b,
+            _ => return self.invalid_operator_error(op_symbol),
+        })
+    }
+    
+    /// Create an error for an invalid operator
+    ///
+    /// # Arguments
+    /// * `op_symbol` - The invalid operator symbol
+    ///
+    /// # Returns
+    /// * An appropriate error for the invalid operator
+    fn invalid_operator_error(&self, op_symbol: &str) -> SqawkResult<bool> {
+        Err(SqawkError::InvalidSqlQuery(format!(
+            "Unexpected operator symbol: {}",
+            op_symbol
+        )))
+    }
+    
+    /// Report an error for incompatible types in a comparison
+    ///
+    /// # Arguments
+    /// * `left_val` - The left value
+    /// * `right_val` - The right value
+    /// * `op_symbol` - The operator symbol
+    ///
+    /// # Returns
+    /// * An appropriate error for incompatible types
+    fn report_incompatible_types(&self, left_val: &Value, right_val: &Value, op_symbol: &str) -> SqawkResult<bool> {
+        Err(SqawkError::TypeError(format!(
+            "Cannot compare {:?} and {:?} with {}",
+            left_val, right_val, op_symbol
+        )))
     }
 
     /// Evaluate an expression to a Value
