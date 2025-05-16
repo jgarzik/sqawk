@@ -163,10 +163,7 @@ fn test_where_greater_than() -> Result<(), Box<dyn std::error::Error>> {
 fn test_where_less_than() -> Result<(), Box<dyn std::error::Error>> {
     let test_case = SqawkTestCase {
         sql: "SELECT * FROM people WHERE age <= 30".to_string(),
-        expected_stdout: vec![
-            "id,name,age".to_string(),
-            "2,Bob,25".to_string(),
-        ],
+        expected_stdout: vec!["id,name,age".to_string(), "2,Bob,25".to_string()],
         verbose: true,
         ..Default::default()
     };

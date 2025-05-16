@@ -335,7 +335,7 @@ impl Table {
         self.modified = true;
         Ok(())
     }
-    
+
     /// Add a row without validation for recovery mode
     ///
     /// This method is used internally by the CSV handler in recovery mode

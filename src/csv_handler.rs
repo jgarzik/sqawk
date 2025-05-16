@@ -117,7 +117,7 @@ impl CsvHandler {
                     if should_recover && record.len() != table.column_count() {
                         // In recovery mode, handle rows with different column counts
                         let mut row = Vec::new();
-                        
+
                         // For each column in our table
                         for i in 0..table.column_count() {
                             if i < record.len() {
@@ -128,7 +128,7 @@ impl CsvHandler {
                                 row.push(Value::Null);
                             }
                         }
-                        
+
                         // Now we have a properly sized row, add it without validation
                         table.add_row_recovery(row)?;
                     } else {

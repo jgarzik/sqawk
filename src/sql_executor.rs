@@ -18,8 +18,8 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use sqlparser::ast::{
-    Assignment, Expr, Join as SqlJoin, JoinConstraint, JoinOperator, Query, Select, SelectItem, SetExpr,
-    Statement, TableFactor, TableWithJoins, Value as SqlValue,
+    Assignment, Expr, Join as SqlJoin, JoinConstraint, JoinOperator, Query, Select, SelectItem,
+    SetExpr, Statement, TableFactor, TableWithJoins, Value as SqlValue,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -153,7 +153,7 @@ impl SqlExecutor {
             )),
         }
     }
-    
+
     /// Executes a query that contains aggregate functions
     fn execute_aggregate_query(
         &self,
@@ -208,17 +208,17 @@ impl SqlExecutor {
 
         // Apply projection to get only the requested columns with aliases
         let result_table = filtered_table.project_with_aliases(&column_specs)?;
-        
+
         // Apply post-processing steps (DISTINCT, ORDER BY, LIMIT, OFFSET)
         let final_result = self.apply_post_processing_steps(result_table, select, query)?;
         Ok(Some(final_result))
     }
-    
+
     /// Helper function to apply WHERE clause if present
     fn apply_where_clause_if_present(
-        &self, 
-        table: Table, 
-        selection: &Option<Expr>
+        &self,
+        table: Table,
+        selection: &Option<Expr>,
     ) -> SqawkResult<Table> {
         if let Some(where_clause) = selection {
             if self.verbose {
@@ -230,7 +230,7 @@ impl SqlExecutor {
             Ok(table)
         }
     }
-    
+
     /// Applies post-processing steps to a query result: DISTINCT, ORDER BY, LIMIT/OFFSET
     fn apply_post_processing_steps(
         &self,
@@ -261,7 +261,7 @@ impl SqlExecutor {
             }
             table = self.apply_limit_offset(table, query)?;
         }
-        
+
         Ok(table)
     }
 
@@ -1038,7 +1038,7 @@ impl SqlExecutor {
             Expr::Function(_func) => {
                 // Evaluate the function to get its result
                 let val = self.evaluate_expr_with_row(expr, row, table)?;
-                
+
                 // Determine boolean result from the value
                 self.value_to_boolean(&val)
             }
@@ -1066,7 +1066,7 @@ impl SqlExecutor {
     /// * `Ok(true)` if both conditions evaluate to true
     /// * `Ok(false)` if either condition evaluates to false
     /// * `Err` if there's an error evaluating either condition
-    
+
     /// Convert a Value to a boolean result, following SQL-like conversion rules
     ///
     /// This helper method centralizes the logic for converting different value types to boolean results:
@@ -1090,7 +1090,7 @@ impl SqlExecutor {
             Value::Null => self.null_to_boolean(),
         }
     }
-    
+
     /// Convert an integer to boolean using SQL-like semantics (true if > 0)
     ///
     /// # Arguments
@@ -1101,7 +1101,7 @@ impl SqlExecutor {
     fn integer_to_boolean(&self, value: i64) -> SqawkResult<bool> {
         Ok(value > 0)
     }
-    
+
     /// Convert a float to boolean using SQL-like semantics (true if > 0.0)
     ///
     /// # Arguments
@@ -1112,7 +1112,7 @@ impl SqlExecutor {
     fn float_to_boolean(&self, value: f64) -> SqawkResult<bool> {
         Ok(value > 0.0)
     }
-    
+
     /// Convert a string to boolean using SQL-like semantics (true if non-empty)
     ///
     /// # Arguments
@@ -1123,7 +1123,7 @@ impl SqlExecutor {
     fn string_to_boolean(&self, value: &str) -> SqawkResult<bool> {
         Ok(!value.is_empty())
     }
-    
+
     /// Convert NULL to boolean (always false in SQL semantics)
     ///
     /// # Returns
@@ -1131,7 +1131,7 @@ impl SqlExecutor {
     fn null_to_boolean(&self) -> SqawkResult<bool> {
         Ok(false)
     }
-    
+
     fn evaluate_logical_and(
         &self,
         left: &Expr,
@@ -1220,28 +1220,32 @@ impl SqlExecutor {
 
         match op {
             // Equal (=) operator
-            sqlparser::ast::BinaryOperator::Eq => 
-                self.evaluate_equality(&left_val, &right_val),
+            sqlparser::ast::BinaryOperator::Eq => self.evaluate_equality(&left_val, &right_val),
 
             // Not equal (!=) operator
-            sqlparser::ast::BinaryOperator::NotEq => 
-                self.evaluate_inequality(&left_val, &right_val),
+            sqlparser::ast::BinaryOperator::NotEq => {
+                self.evaluate_inequality(&left_val, &right_val)
+            }
 
             // Greater than (>) operator
-            sqlparser::ast::BinaryOperator::Gt => 
-                self.compare_values_with_operator(&left_val, &right_val, ">"),
+            sqlparser::ast::BinaryOperator::Gt => {
+                self.compare_values_with_operator(&left_val, &right_val, ">")
+            }
 
             // Less than (<) operator
-            sqlparser::ast::BinaryOperator::Lt => 
-                self.compare_values_with_operator(&left_val, &right_val, "<"),
+            sqlparser::ast::BinaryOperator::Lt => {
+                self.compare_values_with_operator(&left_val, &right_val, "<")
+            }
 
             // Greater than or equal (>=) operator
-            sqlparser::ast::BinaryOperator::GtEq => 
-                self.compare_values_with_operator(&left_val, &right_val, ">="),
+            sqlparser::ast::BinaryOperator::GtEq => {
+                self.compare_values_with_operator(&left_val, &right_val, ">=")
+            }
 
             // Less than or equal (<=) operator
-            sqlparser::ast::BinaryOperator::LtEq => 
-                self.compare_values_with_operator(&left_val, &right_val, "<="),
+            sqlparser::ast::BinaryOperator::LtEq => {
+                self.compare_values_with_operator(&left_val, &right_val, "<=")
+            }
 
             // Add more operators as needed
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -1250,7 +1254,7 @@ impl SqlExecutor {
             ))),
         }
     }
-    
+
     /// Evaluate equality between two values
     ///
     /// Uses the Value's implementation of PartialEq which handles type conversions
@@ -1265,7 +1269,7 @@ impl SqlExecutor {
     fn evaluate_equality(&self, left_val: &Value, right_val: &Value) -> SqawkResult<bool> {
         Ok(left_val == right_val)
     }
-    
+
     /// Evaluate inequality between two values
     ///
     /// Uses the Value's implementation of PartialEq which handles type conversions
@@ -1310,30 +1314,29 @@ impl SqlExecutor {
     ) -> SqawkResult<bool> {
         match (left_val, right_val) {
             // Integer-Integer comparison
-            (Value::Integer(a), Value::Integer(b)) => 
-                self.compare_integers(*a, *b, op_symbol),
+            (Value::Integer(a), Value::Integer(b)) => self.compare_integers(*a, *b, op_symbol),
 
             // Float-Float comparison
-            (Value::Float(a), Value::Float(b)) => 
-                self.compare_floats(*a, *b, op_symbol),
+            (Value::Float(a), Value::Float(b)) => self.compare_floats(*a, *b, op_symbol),
 
             // Integer-Float comparison (convert Integer to Float)
-            (Value::Integer(a), Value::Float(b)) => 
-                self.compare_integer_and_float(*a, *b, op_symbol),
+            (Value::Integer(a), Value::Float(b)) => {
+                self.compare_integer_and_float(*a, *b, op_symbol)
+            }
 
             // Float-Integer comparison (convert Integer to Float)
-            (Value::Float(a), Value::Integer(b)) => 
-                self.compare_float_and_integer(*a, *b, op_symbol),
+            (Value::Float(a), Value::Integer(b)) => {
+                self.compare_float_and_integer(*a, *b, op_symbol)
+            }
 
             // String-String comparison (lexicographic)
-            (Value::String(a), Value::String(b)) => 
-                self.compare_strings(a, b, op_symbol),
+            (Value::String(a), Value::String(b)) => self.compare_strings(a, b, op_symbol),
 
             // Error for incompatible types
             _ => self.report_incompatible_types(left_val, right_val, op_symbol),
         }
     }
-    
+
     /// Compare two integers with the specified operator
     ///
     /// # Arguments
@@ -1353,7 +1356,7 @@ impl SqlExecutor {
             _ => return self.invalid_operator_error(op_symbol),
         })
     }
-    
+
     /// Compare two floats with the specified operator
     ///
     /// # Arguments
@@ -1373,7 +1376,7 @@ impl SqlExecutor {
             _ => return self.invalid_operator_error(op_symbol),
         })
     }
-    
+
     /// Compare an integer and a float with the specified operator
     ///
     /// # Arguments
@@ -1394,7 +1397,7 @@ impl SqlExecutor {
             _ => return self.invalid_operator_error(op_symbol),
         })
     }
-    
+
     /// Compare a float and an integer with the specified operator
     ///
     /// # Arguments
@@ -1415,7 +1418,7 @@ impl SqlExecutor {
             _ => return self.invalid_operator_error(op_symbol),
         })
     }
-    
+
     /// Compare two strings with the specified operator
     ///
     /// # Arguments
@@ -1435,7 +1438,7 @@ impl SqlExecutor {
             _ => return self.invalid_operator_error(op_symbol),
         })
     }
-    
+
     /// Create an error for an invalid operator
     ///
     /// # Arguments
@@ -1449,7 +1452,7 @@ impl SqlExecutor {
             op_symbol
         )))
     }
-    
+
     /// Report an error for incompatible types in a comparison
     ///
     /// # Arguments
@@ -1459,7 +1462,12 @@ impl SqlExecutor {
     ///
     /// # Returns
     /// * An appropriate error for incompatible types
-    fn report_incompatible_types(&self, left_val: &Value, right_val: &Value, op_symbol: &str) -> SqawkResult<bool> {
+    fn report_incompatible_types(
+        &self,
+        left_val: &Value,
+        right_val: &Value,
+        op_symbol: &str,
+    ) -> SqawkResult<bool> {
         Err(SqawkError::TypeError(format!(
             "Cannot compare {:?} and {:?} with {}",
             left_val, right_val, op_symbol
@@ -1480,76 +1488,127 @@ impl SqlExecutor {
     #[allow(clippy::only_used_in_recursion)]
     fn evaluate_expr(&self, expr: &Expr) -> SqawkResult<Value> {
         match expr {
-            Expr::Value(value) => {
-                match value {
-                    SqlValue::Number(n, _) => {
-                        // Try to parse as integer first, then as float
-                        if let Ok(i) = n.parse::<i64>() {
-                            Ok(Value::Integer(i))
-                        } else if let Ok(f) = n.parse::<f64>() {
-                            Ok(Value::Float(f))
-                        } else {
-                            Err(SqawkError::TypeError(format!("Invalid number: {}", n)))
-                        }
-                    }
-                    SqlValue::SingleQuotedString(s) | SqlValue::DoubleQuotedString(s) => {
-                        Ok(Value::String(s.clone()))
-                    }
-                    SqlValue::Boolean(b) => Ok(Value::Boolean(*b)),
-                    SqlValue::Null => Ok(Value::Null),
-                    _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                        "Unsupported SQL value: {:?}",
-                        value
-                    ))),
-                }
-            }
+            Expr::Value(value) => self.evaluate_sql_value(value),
             // Handle unary operations like - (negation)
-            Expr::UnaryOp { op, expr } => {
-                let val = self.evaluate_expr(expr)?;
-
-                match op {
-                    sqlparser::ast::UnaryOperator::Minus => {
-                        // Apply negation to numeric values
-                        match val {
-                            Value::Integer(i) => {
-                                let result = Value::Integer(-i);
-                                Ok(result)
-                            }
-                            Value::Float(f) => {
-                                let result = Value::Float(-f);
-                                Ok(result)
-                            }
-                            _ => Err(SqawkError::TypeError(format!(
-                                "Cannot apply negation to non-numeric value: {:?}",
-                                val
-                            ))),
-                        }
-                    }
-                    sqlparser::ast::UnaryOperator::Plus => {
-                        // Plus operator doesn't change the value
-                        Ok(val)
-                    }
-                    sqlparser::ast::UnaryOperator::Not => {
-                        // Boolean negation
-                        match val {
-                            Value::Boolean(b) => Ok(Value::Boolean(!b)),
-                            _ => Err(SqawkError::TypeError(format!(
-                                "Cannot apply NOT to non-boolean value: {:?}",
-                                val
-                            ))),
-                        }
-                    }
-                    _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                        "Unsupported unary operator: {:?}",
-                        op
-                    ))),
-                }
+            Expr::UnaryOp { op, expr } => self.evaluate_unary_operation(op, expr),
+            _ => self.unsupported_expression_error(expr),
+        }
+    }
+    
+    /// Evaluate a SQL value literal
+    ///
+    /// # Arguments
+    /// * `value` - The SQL value to evaluate
+    ///
+    /// # Returns
+    /// * `Ok(Value)` - The resulting value
+    /// * `Err` - If the value can't be evaluated
+    fn evaluate_sql_value(&self, value: &SqlValue) -> SqawkResult<Value> {
+        match value {
+            SqlValue::Number(n, _) => self.parse_number(n),
+            SqlValue::SingleQuotedString(s) | SqlValue::DoubleQuotedString(s) => {
+                Ok(Value::String(s.clone()))
             }
+            SqlValue::Boolean(b) => Ok(Value::Boolean(*b)),
+            SqlValue::Null => Ok(Value::Null),
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported expression: {:?}",
-                expr
+                "Unsupported SQL value: {:?}",
+                value
             ))),
         }
+    }
+    
+    /// Parse a number string into an Integer or Float Value
+    ///
+    /// # Arguments
+    /// * `n` - The number string to parse
+    ///
+    /// # Returns
+    /// * `Ok(Value)` - The resulting Value::Integer or Value::Float
+    /// * `Err` - If the string can't be parsed as a number
+    fn parse_number(&self, n: &str) -> SqawkResult<Value> {
+        // Try to parse as integer first, then as float
+        if let Ok(i) = n.parse::<i64>() {
+            Ok(Value::Integer(i))
+        } else if let Ok(f) = n.parse::<f64>() {
+            Ok(Value::Float(f))
+        } else {
+            Err(SqawkError::TypeError(format!("Invalid number: {}", n)))
+        }
+    }
+    
+    /// Evaluate a unary operation (e.g., negation, plus, not)
+    ///
+    /// # Arguments
+    /// * `op` - The unary operator
+    /// * `expr` - The expression to apply the operator to
+    ///
+    /// # Returns
+    /// * `Ok(Value)` - The resulting value after applying the operator
+    /// * `Err` - If the operation is invalid
+    fn evaluate_unary_operation(&self, op: &sqlparser::ast::UnaryOperator, expr: &Expr) -> SqawkResult<Value> {
+        let val = self.evaluate_expr(expr)?;
+
+        match op {
+            sqlparser::ast::UnaryOperator::Minus => self.apply_negation(&val),
+            sqlparser::ast::UnaryOperator::Plus => Ok(val), // Plus operator doesn't change the value
+            sqlparser::ast::UnaryOperator::Not => self.apply_boolean_not(&val),
+            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Unsupported unary operator: {:?}",
+                op
+            ))),
+        }
+    }
+    
+    /// Apply negation to a value (for the minus unary operator)
+    ///
+    /// # Arguments
+    /// * `val` - The value to negate
+    ///
+    /// # Returns
+    /// * `Ok(Value)` - The negated value
+    /// * `Err` - If the value can't be negated
+    fn apply_negation(&self, val: &Value) -> SqawkResult<Value> {
+        match val {
+            Value::Integer(i) => Ok(Value::Integer(-i)),
+            Value::Float(f) => Ok(Value::Float(-f)),
+            _ => Err(SqawkError::TypeError(format!(
+                "Cannot apply negation to non-numeric value: {:?}",
+                val
+            ))),
+        }
+    }
+    
+    /// Apply boolean NOT to a value
+    ///
+    /// # Arguments
+    /// * `val` - The value to apply NOT to
+    ///
+    /// # Returns
+    /// * `Ok(Value)` - The resulting value
+    /// * `Err` - If the value can't have NOT applied to it
+    fn apply_boolean_not(&self, val: &Value) -> SqawkResult<Value> {
+        match val {
+            Value::Boolean(b) => Ok(Value::Boolean(!b)),
+            _ => Err(SqawkError::TypeError(format!(
+                "Cannot apply NOT to non-boolean value: {:?}",
+                val
+            ))),
+        }
+    }
+    
+    /// Create an error for an unsupported expression
+    ///
+    /// # Arguments
+    /// * `expr` - The unsupported expression
+    ///
+    /// # Returns
+    /// * An appropriate error
+    fn unsupported_expression_error(&self, expr: &Expr) -> SqawkResult<Value> {
+        Err(SqawkError::UnsupportedSqlFeature(format!(
+            "Unsupported expression: {:?}",
+            expr
+        )))
     }
 
     /// Evaluate an expression with a row context
