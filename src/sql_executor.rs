@@ -85,6 +85,29 @@ impl SqlExecutor {
     }
 
     /// Execute a single SQL statement
+    ///
+    /// This is the primary entry point for SQL execution in the Sqawk engine. It serves
+    /// as a dispatcher that:
+    /// 1. Examines the SQL statement type
+    /// 2. Routes to the appropriate specialized handler:
+    ///    - SELECT: execute_query() - Returns a virtual result table
+    ///    - INSERT: execute_insert() - Adds new rows to a table
+    ///    - UPDATE: execute_update() - Modifies existing rows based on criteria
+    ///    - DELETE: execute_delete() - Removes rows from a table based on criteria
+    /// 3. Tracks operation status including affected row counts
+    /// 4. Formats the appropriate return value based on operation type
+    ///
+    /// The function centralizes error handling and ensures consistent behavior across
+    /// all SQL operations. For data manipulation operations (INSERT/UPDATE/DELETE),
+    /// it also marks affected tables as modified for later write operations.
+    ///
+    /// # Arguments
+    /// * `statement` - The parsed SQL statement to execute (from sqlparser)
+    ///
+    /// # Returns
+    /// * `Ok(Some(Table))` for SELECT queries with the result set
+    /// * `Ok(None)` for other statement types (INSERT, UPDATE, DELETE)
+    /// * `Err` if the statement cannot be executed or contains unsupported features
     fn execute_statement(&mut self, statement: Statement) -> SqawkResult<Option<Table>> {
         match statement {
             Statement::Query(query) => self.execute_query(*query),
@@ -152,7 +175,30 @@ impl SqlExecutor {
         }
     }
 
-    /// Execute a SELECT query
+    /// Execute a SQL SELECT query
+    ///
+    /// This function implements the core SQL SELECT processing workflow by:
+    /// 1. Analyzing the query structure to determine its complexity
+    /// 2. Detecting the presence of aggregate functions
+    /// 3. Routing to specialized handlers based on query characteristics:
+    ///    - Simple queries use standard row-by-row processing
+    ///    - Aggregate queries require grouping and aggregate function evaluation
+    ///    - DISTINCT queries require duplicate elimination
+    ///    - ORDER BY requires result sorting
+    ///    - LIMIT/OFFSET requires pagination handling
+    ///
+    /// The function serves as a dispatcher that examines query features and directs
+    /// to the appropriate specialized query handlers. It handles the full SQL logical
+    /// processing order: FROM/JOIN → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → 
+    /// ORDER BY → LIMIT/OFFSET.
+    ///
+    /// # Arguments
+    /// * `query` - The parsed Query object containing the SELECT statement
+    ///
+    /// # Returns
+    /// * `Ok(Some(Table))` with the query results as a new virtual table
+    /// * `Ok(None)` for empty result sets or certain operations
+    /// * `Err` if the query is invalid or contains unsupported features
     fn execute_query(&self, query: Query) -> SqawkResult<Option<Table>> {
         match *query.body {
             SetExpr::Select(ref select) => {
@@ -185,6 +231,23 @@ impl SqlExecutor {
     }
 
     /// Executes a query that contains aggregate functions
+    ///
+    /// Handles the execution of SQL queries containing aggregate functions like 
+    /// SUM, AVG, COUNT, MIN, MAX. Follows the proper SQL execution order:
+    /// 1. Applies WHERE clause filtering first
+    /// 2. Groups data if GROUP BY is present
+    /// 3. Applies aggregate functions to each group (or the entire table)
+    /// 4. Applies HAVING clause to filter groups
+    /// 5. Applies post-processing (DISTINCT, ORDER BY, LIMIT/OFFSET)
+    ///
+    /// # Arguments
+    /// * `source_table` - The table to query against
+    /// * `select` - The SELECT statement details (projection, where, group by, having)
+    /// * `query` - The full query object (contains order by, limit, offset)
+    ///
+    /// # Returns
+    /// * `Ok(Some(Table))` with the aggregated results
+    /// * `Err` if there's an error during aggregation processing
     fn execute_aggregate_query(
         &self,
         source_table: Table,
@@ -224,6 +287,22 @@ impl SqlExecutor {
     }
 
     /// Executes a simple query without aggregate functions
+    ///
+    /// Handles standard SELECT queries without aggregate functions. Follows standard SQL
+    /// execution order:
+    /// 1. Resolves column references and aliases
+    /// 2. Applies WHERE clause filtering
+    /// 3. Projects columns (selects only requested columns)
+    /// 4. Applies post-processing (DISTINCT, ORDER BY, LIMIT/OFFSET)
+    ///
+    /// # Arguments
+    /// * `source_table` - The table to query against
+    /// * `select` - The SELECT statement details (projection, where)
+    /// * `query` - The full query object (contains order by, limit, offset)
+    ///
+    /// # Returns
+    /// * `Ok(Some(Table))` with the query results
+    /// * `Err` if there's an error during query processing
     fn execute_simple_query(
         &self,
         source_table: Table,
@@ -245,6 +324,17 @@ impl SqlExecutor {
     }
 
     /// Helper function to apply WHERE clause if present
+    ///
+    /// Conditionally applies a WHERE clause filter to a table if the clause exists.
+    /// This allows for uniform handling of tables with and without filtering.
+    ///
+    /// # Arguments
+    /// * `table` - The source table to filter
+    /// * `selection` - Optional WHERE clause expression
+    ///
+    /// # Returns
+    /// * A new filtered table if WHERE clause is present
+    /// * The original table unchanged if WHERE clause is not present
     fn apply_where_clause_if_present(
         &self,
         table: Table,
@@ -262,6 +352,21 @@ impl SqlExecutor {
     }
 
     /// Applies post-processing steps to a query result: DISTINCT, ORDER BY, LIMIT/OFFSET
+    ///
+    /// This function handles the final stages of SQL query execution after the initial
+    /// query processing (WHERE filtering, GROUP BY, etc.) has been completed. It applies
+    /// operations in the proper SQL execution order:
+    /// 1. DISTINCT - Removes duplicate rows
+    /// 2. ORDER BY - Sorts the result set
+    /// 3. LIMIT/OFFSET - Applies pagination
+    ///
+    /// # Arguments
+    /// * `table` - The table after initial query processing
+    /// * `select` - The SELECT statement for DISTINCT
+    /// * `query` - The Query object containing ORDER BY, LIMIT, and OFFSET clauses
+    ///
+    /// # Returns
+    /// * A new table with all post-processing steps applied
     fn apply_post_processing_steps(
         &self,
         mut table: Table,
@@ -442,19 +547,30 @@ impl SqlExecutor {
         table.sort(sort_columns)
     }
 
-    /// Process the FROM clause of a SELECT statement
+    /// Process the FROM clause of a SQL query, including all types of table joins
     ///
-    /// This function handles tables and joins specified in the FROM clause. It:
-    /// 1. Processes the first table in the FROM clause
-    /// 2. Handles any explicit JOINs attached to that table
-    /// 3. Processes comma-separated tables as implicit CROSS JOINs
-    /// 4. Combines all tables into a single result table
+    /// This function implements the first step in SQL logical processing order by:
+    /// 1. Identifying and loading the base table (first table in FROM clause)
+    /// 2. Determining join types (INNER, CROSS) from SQL syntax
+    /// 3. Building the proper join conditions from ON clauses or WHERE conditions
+    /// 4. Executing the join operations to create unified working table
+    /// 5. Preserving column origins for later reference qualification
     ///
+    /// The function handles multiple join syntax forms in SQL:
+    /// - Explicit INNER JOIN with ON clause: `table1 JOIN table2 ON condition`
+    /// - Explicit CROSS JOIN: `table1 CROSS JOIN table2`
+    /// - Implicit CROSS JOIN with comma: `table1, table2`
+    /// - Multi-way joins combining any of the above forms
+    ///
+    /// Each join produces a temporary working table that combines columns from both
+    /// source tables, maintaining column name qualification for later reference.
+    /// 
     /// # Arguments
-    /// * `from` - The FROM clause items from the SELECT statement
+    /// * `from` - Array of FROM clause items from the SELECT statement
     ///
     /// # Returns
-    /// * The resulting table after processing the FROM clause with all joins applied
+    /// * `SqawkResult<Table>` containing the joined result table with all columns
+    ///   properly qualified for later processing steps
     fn process_from_clause(&self, from: &[TableWithJoins]) -> SqawkResult<Table> {
         // Start with the first table in the FROM clause
         let first_table_with_joins = &from[0];
@@ -608,16 +724,25 @@ impl SqlExecutor {
         Ok(result_table)
     }
 
-    /// Execute an INSERT statement
+    /// Execute a SQL INSERT statement
     ///
-    /// This function inserts new rows into a table based on VALUES provided in the
-    /// SQL statement. It supports specifying a subset of columns to insert into,
-    /// filling the remaining columns with NULL values.
+    /// This function implements the SQL INSERT operation by:
+    /// 1. Identifying the target table
+    /// 2. Processing the column specifications (if provided)
+    /// 3. Evaluating the source query to obtain values
+    /// 4. Validating value types against column definitions
+    /// 5. Adding new rows to the table structure
+    /// 6. Tracking the table as modified for later write operations
+    /// 7. Tracking the number of affected rows for reporting
+    ///
+    /// It supports inserting into a subset of columns (others filled with NULL) and
+    /// can insert multiple rows in a single operation. The implementation performs
+    /// type validation to ensure data consistency.
     ///
     /// # Arguments
     /// * `table_name` - The name of the table to insert into
     /// * `columns` - Optional list of columns to insert into (empty means all columns)
-    /// * `source` - The query source containing values to insert
+    /// * `source` - The query source containing values to insert (VALUES clause or sub-query)
     ///
     /// # Returns
     /// * `Ok(())` if the insert was successful
@@ -696,10 +821,17 @@ impl SqlExecutor {
         }
     }
 
-    /// Execute a DELETE statement
+    /// Execute a SQL DELETE statement
+    /// 
+    /// This function implements the SQL DELETE operation by:
+    /// 1. Identifying the target table
+    /// 2. Applying WHERE clause filtering (if present)
+    /// 3. Removing matching rows from the table
+    /// 4. Tracking the table as modified for later write operations
+    /// 5. Tracking the number of affected rows for reporting
     ///
-    /// This function deletes rows from a table based on an optional WHERE condition.
-    /// If no WHERE condition is provided, all rows are deleted.
+    /// If no WHERE condition is provided, all rows in the table will be deleted.
+    /// The operation maintains the original column structure of the table.
     ///
     /// # Arguments
     /// * `table_with_joins` - The table reference to delete rows from
@@ -1162,6 +1294,22 @@ impl SqlExecutor {
         Ok(false)
     }
 
+    /// Evaluates a logical AND expression with short-circuit evaluation
+    ///
+    /// This function implements SQL's logical AND operator with short-circuit evaluation,
+    /// which means if the left condition is false, the right condition is not evaluated.
+    /// This provides both performance benefits and expected SQL behavior.
+    ///
+    /// # Arguments
+    /// * `left` - The left-side expression of the AND operation
+    /// * `right` - The right-side expression of the AND operation
+    /// * `row` - The row data to evaluate the expressions against
+    /// * `table` - The table containing column metadata for the row
+    ///
+    /// # Returns
+    /// * `Ok(true)` if both left and right conditions evaluate to true
+    /// * `Ok(false)` if either condition evaluates to false
+    /// * `Err` if there's an error evaluating either condition
     fn evaluate_logical_and(
         &self,
         left: &Expr,
@@ -2635,14 +2783,21 @@ impl SqlExecutor {
         }
     }
 
-    /// Execute an UPDATE statement
+    /// Execute a SQL UPDATE statement
+    /// 
+    /// This function implements the SQL UPDATE operation by:
+    /// 1. Identifying the target table
+    /// 2. Applying WHERE clause filtering (if present)
+    /// 3. Modifying the specified columns on matching rows
+    /// 4. Tracking the table as modified for later write operations
+    /// 5. Tracking the number of affected rows for reporting
     ///
-    /// This function updates rows in a table based on the assignments and an optional WHERE condition.
-    /// If no WHERE condition is provided, all rows are updated.
+    /// If no WHERE condition is provided, all rows in the table will be updated.
+    /// The operation maintains SQL semantics for type conversions during assignment.
     ///
     /// # Arguments
     /// * `table` - The table reference to update
-    /// * `assignments` - Column assignments to apply
+    /// * `assignments` - Column assignments to apply (column-value pairs)
     /// * `selection` - Optional WHERE clause to filter which rows to update
     ///
     /// # Returns
