@@ -3,10 +3,10 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-/// Test for sqlite3-compatible commands implemented in the REPL
+/// Test for basic REPL commands
 #[test]
-fn test_repl_sqlite_commands() {
-    // Commands to test SQLite-compatible commands
+fn test_repl_basic_dot_commands() {
+    // Commands to test REPL commands
     let test_commands = ".help\n.version\n.tables\n.cd .\n.changes on\n.changes off\n.exit\n";
 
     // Start the sqawk process with sample data loaded
