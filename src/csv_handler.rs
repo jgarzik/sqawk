@@ -60,25 +60,13 @@ impl CsvHandler {
     /// # Returns
     /// * `Ok(Table)` - The successfully loaded table
     /// * `Err` if there was an error parsing the file spec, opening the file, or parsing the CSV data
-    pub fn load_csv(&self, file_spec: &str, custom_columns: Option<Vec<String>>) -> SqawkResult<Table> {
-        // Call the enhanced version with recovery disabled
-        self.load_csv_with_recovery(file_spec, custom_columns, None)
-    }
-    
-    /// Load a CSV file into an in-memory table with enhanced error handling
     ///
-    /// This method extends the standard load_csv with additional error handling capabilities
-    /// including the ability to recover from malformed rows by skipping them.
-    ///
-    /// # Arguments
-    /// * `file_spec` - File specification in the format `[table_name=]file_path.csv`
-    /// * `custom_columns` - Optional custom column names to use instead of detected/generated ones
-    /// * `recover_errors` - When true, malformed rows will be skipped instead of causing the operation to fail
-    ///
-    /// # Returns
-    /// * `Ok(Table)` - The successfully loaded table
-    /// * `Err` if there was an unrecoverable error
-    pub fn load_csv_with_recovery(&self, 
+    /// # Enhanced Error Handling
+    /// When the optional `recover_errors` parameter is set to true, the function will:
+    /// * Skip malformed rows instead of failing
+    /// * Log detailed error information including line numbers
+    /// * Continue processing the file to extract all valid rows
+    pub fn load_csv(&self, 
                    file_spec: &str, 
                    custom_columns: Option<Vec<String>>,
                    recover_errors: Option<bool>) -> SqawkResult<Table> {

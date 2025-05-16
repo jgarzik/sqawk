@@ -109,7 +109,7 @@ impl FileHandler {
 
         match format {
             FileFormat::Csv => {
-                let table = self.csv_handler.load_csv(file_spec, custom_columns)?;
+                let table = self.csv_handler.load_csv(file_spec, custom_columns, None)?;
                 self.tables.insert(table_name.clone(), table);
             }
             FileFormat::Delimited => {
