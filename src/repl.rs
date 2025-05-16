@@ -81,6 +81,8 @@ enum ReplCommand {
     Print(String),
     /// Show version information
     Version,
+    /// Save changes to modified tables
+    Save(Option<String>),
     /// Unknown command
     Unknown(String),
 }
@@ -251,6 +253,13 @@ impl Repl {
                 }
                 "version" => ReplCommand::Version,
                 "help" => ReplCommand::Help,
+                "save" => {
+                    if parts.len() > 1 {
+                        ReplCommand::Save(Some(parts[1].trim().to_string()))
+                    } else {
+                        ReplCommand::Save(None)
+                    }
+                },
                 _ => ReplCommand::Unknown(format!("Unknown command: .{}", command)),
             }
         } else if !input.is_empty() {
@@ -272,6 +281,7 @@ impl Repl {
             ReplCommand::Exit(code) => self.exit_repl(code.as_deref()),
             ReplCommand::ChangeDirectory(dir) => self.change_directory(&dir),
             ReplCommand::Changes(arg) => self.toggle_changes(arg.as_deref()),
+            ReplCommand::Save(table_name) => self.save_tables(table_name.as_deref()),
             ReplCommand::Print(text) => {
                 println!("{}", text);
                 Ok(())
@@ -416,6 +426,7 @@ impl Repl {
         println!("  .load [TABLE=]FILE    Load FILE into TABLE");
         println!("  .print STRING...      Print literal STRING");
         println!("  .quit                 Exit the REPL");
+        println!("  .save ?TABLE?         Save changes to all tables or a specific TABLE");
         println!("  .schema ?TABLE?       Show schema for a specific table or all tables");
         println!("  .tables ?TABLE?       List names of tables matching LIKE pattern TABLE");
         println!("  .version              Show source, library and compiler versions");
@@ -540,6 +551,52 @@ impl Repl {
         println!("Sqawk version 0.1.1");
         println!("Running on Rust {}", get_rustc_version());
         Ok(())
+    }
+    
+    /// Save changes to tables
+    ///
+    /// Explicitly writes changes to disk for all modified tables or a specific table
+    /// if one is specified. This is useful when write mode is off but you want to
+    /// save specific changes.
+    fn save_tables(&mut self, table_name: Option<&str>) -> Result<()> {
+        match table_name {
+            Some(name) => {
+                // Save a specific table if it exists and is modified
+                if !self.executor.table_exists(name) {
+                    return Err(ReplError::Sqawk(crate::error::SqawkError::TableNotFound(
+                        name.to_string(),
+                    )));
+                }
+                
+                if !self.executor.table_is_modified(name) {
+                    println!("Table '{}' has no changes to save", name);
+                    return Ok(());
+                }
+                
+                match self.executor.save_table(name) {
+                    Ok(_) => {
+                        println!("Changes saved to table '{}'", name);
+                        Ok(())
+                    }
+                    Err(err) => Err(ReplError::Sqawk(err)),
+                }
+            }
+            None => {
+                // Save all modified tables
+                if !self.executor.has_modified_tables() {
+                    println!("No modified tables to save");
+                    return Ok(());
+                }
+                
+                match self.executor.save_modified_tables() {
+                    Ok(count) => {
+                        println!("Changes saved to {} tables", count);
+                        Ok(())
+                    }
+                    Err(err) => Err(ReplError::SqlExecutor(err)),
+                }
+            }
+        }
     }
 }
 

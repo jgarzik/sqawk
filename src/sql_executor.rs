@@ -3178,6 +3178,48 @@ impl SqlExecutor {
             rows: table.rows_as_strings(),
         }))
     }
+
+    /// Check if a table exists
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table to check
+    ///
+    /// # Returns
+    /// * `bool` - True if the table exists
+    pub fn table_exists(&self, table_name: &str) -> bool {
+        self.file_handler.table_exists(table_name)
+    }
+
+    /// Check if a table is modified
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table to check
+    ///
+    /// # Returns
+    /// * `bool` - True if the table has been modified
+    pub fn table_is_modified(&self, table_name: &str) -> bool {
+        self.modified_tables.contains(table_name)
+    }
+
+    /// Save a specific table
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table to save
+    ///
+    /// # Returns
+    /// * `SqawkResult<()>` - Success or error
+    pub fn save_table(&self, table_name: &str) -> SqawkResult<()> {
+        if !self.file_handler.table_exists(table_name) {
+            return Err(SqawkError::TableNotFound(table_name.to_string()));
+        }
+        
+        if !self.modified_tables.contains(table_name) {
+            // Table exists but isn't modified, just return success
+            return Ok(());
+        }
+        
+        self.file_handler.save_table(table_name)
+    }
 }
 
 /// Result set structure for REPL output

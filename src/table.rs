@@ -365,6 +365,18 @@ impl Table {
     pub fn source_file(&self) -> Option<&PathBuf> {
         self.source_file.as_ref()
     }
+    
+    /// Check if the table has been modified since loading
+    ///
+    /// This method returns the current modification state of the table,
+    /// which tracks whether any operations have altered the table data
+    /// since it was loaded from its source file.
+    ///
+    /// # Returns
+    /// * `bool` - True if the table has been modified
+    pub fn is_modified(&self) -> bool {
+        self.modified
+    }
 
     /// Get the index of a column by name
     ///
