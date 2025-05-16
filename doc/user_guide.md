@@ -289,6 +289,35 @@ File format detection follows these rules:
 3. Files with `.tsv` extension use tab as the default delimiter
 4. Other file extensions default to comma unless specified otherwise
 
+#### Comment Support
+
+Sqawk supports comment lines in CSV and other delimiter-separated files. Lines that begin with a comment character (typically '#') are ignored during processing:
+
+```csv
+# This line is a comment and will be ignored
+id,name,department,salary
+1,Alice,Engineering,75000
+# Another comment line
+2,Bob,Marketing,65000
+```
+
+Comment support is useful for:
+- Adding metadata or documentation within data files
+- Temporarily excluding rows from processing
+- Adding version information or data provenance details
+
+#### Error Recovery Options
+
+When processing CSV or other delimiter-separated files, Sqawk provides options for handling malformed rows:
+
+- **Strict Mode** (Default): Malformed rows (those with too few or too many fields) cause an error
+- **Recovery Mode**: Available through certain command line options, enabling Sqawk to:
+  - Skip malformed rows entirely
+  - Pad malformed rows with NULL values if they have too few fields
+  - Truncate malformed rows if they have too many fields
+
+This error recovery capability is essential when working with imperfect data sources where strict format conformance isn't guaranteed.
+
 ### Table Naming
 
 By default, the table name is derived from the filename (without extension):
@@ -541,6 +570,7 @@ Sqawk loads all data into memory, which provides excellent performance but requi
 1. **"Table not found" error**:
    - Check that the filename matches the table name in your SQL
    - If using custom table names, verify the syntax: `tablename=filename.csv`
+   - Ensure file paths are correct and files are accessible
 
 2. **Delimiter issues**:
    - Use the `-F` option to specify the correct delimiter
@@ -550,14 +580,36 @@ Sqawk loads all data into memory, which provides excellent performance but requi
 3. **Type conversion errors**:
    - Sqawk automatically infers types but sometimes needs hints
    - Use explicit casts in SQL when needed: `CAST(value AS INT)`
+   - Check that numeric columns don't contain non-numeric characters
 
-4. **Memory limitations**:
+4. **CSV parsing errors with malformed rows**:
+   - Error messages about "field count mismatch" indicate rows with inconsistent numbers of fields
+   - Error messages include line numbers to help locate problematic rows
+   - Common causes include:
+     - Missing fields or extra delimiters
+     - Improperly escaped quotes inside fields
+     - Newlines within quoted fields
+   - Use the error recovery options described in the File Format Support section to handle malformed rows
+
+5. **Issues with comment lines**:
+   - Comments must start at the beginning of a line with the comment character
+   - Comment characters appearing within data (not at the start of a line) are treated as regular data
+   - If you're seeing unexpected parsing errors, check if comment lines are properly formatted
+
+6. **Memory limitations**:
    - If processing very large files, filter data early in your queries
    - Consider processing in batches or using more targeted queries
+   - Select only the columns you need rather than using SELECT *
 
-5. **Changes not saved**:
+7. **Changes not saved**:
    - Remember to use the `--write` flag to save changes
    - Only modified tables are written back
+   - Check verbose output (`-v`) to confirm which tables were modified
+
+8. **SQL syntax errors**:
+   - Try running your query in interactive mode to get immediate feedback
+   - Use the `-v` verbose flag to see the exact SQL being executed
+   - Verify SQL statement syntax, particularly quotes, parentheses, and required clauses
 
 6. **Special characters in files**:
    - For files with quotes or special characters, Sqawk follows CSV escaping rules
