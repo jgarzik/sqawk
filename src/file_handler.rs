@@ -211,21 +211,6 @@ impl FileHandler {
     pub fn table_exists(&self, table_name: &str) -> bool {
         self.tables.contains_key(table_name)
     }
-    
-    /// Check if a table is modified
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table to check
-    ///
-    /// # Returns
-    /// * `bool` - True if the table is modified from its original state
-    #[allow(dead_code)]
-    pub fn table_is_modified(&self, table_name: &str) -> bool {
-        match self.tables.get(table_name) {
-            Some(table) => table.is_modified(),
-            None => false,
-        }
-    }
 
     /// Parse a file specification into table name and file path
     ///
