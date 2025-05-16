@@ -219,6 +219,7 @@ impl FileHandler {
     ///
     /// # Returns
     /// * `bool` - True if the table is modified from its original state
+    #[allow(dead_code)]
     pub fn table_is_modified(&self, table_name: &str) -> bool {
         match self.tables.get(table_name) {
             Some(table) => table.is_modified(),

@@ -374,6 +374,7 @@ impl Table {
     ///
     /// # Returns
     /// * `bool` - True if the table has been modified
+    #[allow(dead_code)]
     pub fn is_modified(&self) -> bool {
         self.modified
     }
