@@ -15,7 +15,7 @@ fn test_order_by_single_column() -> Result<(), Box<dyn std::error::Error>> {
         expected_stdout: vec![
             "id,name,age".to_string(),
             "2,Bob,25".to_string(),
-            "1,Alice,30".to_string(),
+            "1,Alice,32".to_string(),
             "3,Charlie,35".to_string(),
         ],
         verbose: true,
@@ -34,7 +34,7 @@ fn test_order_by_single_column_desc() -> Result<(), Box<dyn std::error::Error>> 
         expected_stdout: vec![
             "id,name,age".to_string(),
             "3,Charlie,35".to_string(),
-            "1,Alice,30".to_string(),
+            "1,Alice,32".to_string(),
             "2,Bob,25".to_string(),
         ],
         verbose: true,

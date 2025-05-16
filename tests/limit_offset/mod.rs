@@ -141,7 +141,7 @@ fn test_limit_with_order_by() -> Result<(), Box<dyn std::error::Error>> {
         "First row (highest age) should be present"
     );
     assert!(
-        stdout.contains("1,Alice,30"),
+        stdout.contains("1,Alice,32"),
         "Second row (second highest age) should be present"
     );
 

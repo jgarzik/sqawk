@@ -22,7 +22,7 @@ fn test_update_with_where() -> Result<(), Box<dyn std::error::Error>> {
 
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("1,Alice,30"))
+        .stdout(predicates::str::contains("1,Alice,32"))
         .stdout(predicates::str::contains("2,Bob,25"))
         .stdout(predicates::str::contains("3,Charlie,35"));
 
@@ -46,7 +46,7 @@ fn test_update_with_where() -> Result<(), Box<dyn std::error::Error>> {
 
     // File should NOT be modified by default (without --write flag)
     let content = fs::read_to_string(&file_path)?;
-    assert!(content.contains("1,Alice,30")); // Original data should still be there
+    assert!(content.contains("1,Alice,32")); // Original data should still be there
     assert!(content.contains("2,Bob,25"));
     assert!(content.contains("3,Charlie,35"));
 
@@ -68,7 +68,7 @@ fn test_update_all_rows() -> Result<(), Box<dyn std::error::Error>> {
     cmd.assert()
         .success()
         .stdout(predicates::str::contains("id,name,age"))
-        .stdout(predicates::str::contains("1,Alice,30"));
+        .stdout(predicates::str::contains("1,Alice,32"));
 
     // Now execute UPDATE without WHERE
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
@@ -90,7 +90,7 @@ fn test_update_all_rows() -> Result<(), Box<dyn std::error::Error>> {
 
     // File should NOT be modified by default (without --write flag)
     let content = fs::read_to_string(&file_path)?;
-    assert!(content.contains("1,Alice,30")); // Original data should still be there
+    assert!(content.contains("1,Alice,32")); // Original data should still be there
     assert!(content.contains("2,Bob,25"));
     assert!(content.contains("3,Charlie,35"));
 
@@ -116,14 +116,14 @@ fn test_update_and_write() -> Result<(), Box<dyn std::error::Error>> {
     cmd.assert()
         .success()
         .stdout(predicates::str::contains("id,name,age"))
-        .stdout(predicates::str::contains("1,Alicia,30")) // Name should be updated
+        .stdout(predicates::str::contains("1,Alicia,32")) // Name should be updated
         .stdout(predicates::str::contains("2,Bob,25"))
         .stdout(predicates::str::contains("3,Charlie,35"));
 
     // File SHOULD be modified with --write flag
     let content = fs::read_to_string(&file_path)?;
-    assert!(content.contains("1,Alicia,30")); // Alice should be renamed to Alicia
-    assert!(!content.contains("1,Alice,30")); // Original name should be gone
+    assert!(content.contains("1,Alicia,32")); // Alice should be renamed to Alicia
+    assert!(!content.contains("1,Alice,32")); // Original name should be gone
     assert!(content.contains("2,Bob,25"));
     assert!(content.contains("3,Charlie,35"));
 

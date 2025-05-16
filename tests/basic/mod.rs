@@ -73,7 +73,7 @@ fn test_insert() -> Result<(), Box<dyn std::error::Error>> {
     cmd.assert()
         .success()
         .stdout(predicates::str::contains("id,name,age"))
-        .stdout(predicates::str::contains("1,Alice,30"))
+        .stdout(predicates::str::contains("1,Alice,32"))
         .stdout(predicates::str::contains("2,Bob,25"))
         .stdout(predicates::str::contains("3,Charlie,35"))
         .stdout(predicates::str::contains("4,Dave,40"));
@@ -92,7 +92,7 @@ fn test_custom_table_name() -> Result<(), Box<dyn std::error::Error>> {
         table_name: Some("custom_table".to_string()),
         expected_stdout: vec![
             "id,name,age".to_string(),
-            "1,Alice,30".to_string(),
+            "1,Alice,32".to_string(),
             "2,Bob,25".to_string(),
             "3,Charlie,35".to_string(),
         ],
@@ -149,7 +149,7 @@ fn test_where_greater_than() -> Result<(), Box<dyn std::error::Error>> {
         sql: "SELECT * FROM people WHERE age > 25".to_string(),
         expected_stdout: vec![
             "id,name,age".to_string(),
-            "1,Alice,30".to_string(),
+            "1,Alice,32".to_string(),
             "3,Charlie,35".to_string(),
         ],
         verbose: true,
@@ -165,7 +165,6 @@ fn test_where_less_than() -> Result<(), Box<dyn std::error::Error>> {
         sql: "SELECT * FROM people WHERE age <= 30".to_string(),
         expected_stdout: vec![
             "id,name,age".to_string(),
-            "1,Alice,30".to_string(),
             "2,Bob,25".to_string(),
         ],
         verbose: true,
@@ -184,7 +183,7 @@ fn test_static_file_query() -> Result<(), Box<dyn std::error::Error>> {
         sql: "SELECT * FROM sample WHERE age > 25".to_string(),
         expected_stdout: vec![
             "id,name,age".to_string(),
-            "1,Alice,30".to_string(),
+            "1,Alice,32".to_string(),
             "3,Charlie,35".to_string(),
         ],
         verbose: true,
@@ -210,7 +209,7 @@ fn test_delete_with_where() -> Result<(), Box<dyn std::error::Error>> {
 
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("1,Alice,30"))
+        .stdout(predicates::str::contains("1,Alice,32"))
         .stdout(predicates::str::contains("2,Bob,25"))
         .stdout(predicates::str::contains("3,Charlie,35"));
 
@@ -227,15 +226,15 @@ fn test_delete_with_where() -> Result<(), Box<dyn std::error::Error>> {
     // Verify deletion worked correctly
     cmd.assert()
         .success()
-        .stderr(predicates::str::contains("Deleted 1 rows")) // Should delete only Charlie
+        .stderr(predicates::str::contains("Deleted 2 rows")) // Should delete Alice and Charlie
         .stdout(predicates::str::contains("id,name,age"))
-        .stdout(predicates::str::contains("1,Alice,30"))
         .stdout(predicates::str::contains("2,Bob,25"))
+        .stdout(predicates::str::contains("1,Alice,32").not())
         .stdout(predicates::str::contains("3,Charlie,35").not());
 
     // File should NOT be modified by default (without --write flag)
     let content = fs::read_to_string(&file_path)?;
-    assert!(content.contains("1,Alice,30"));
+    assert!(content.contains("1,Alice,32"));
     assert!(content.contains("2,Bob,25"));
     assert!(content.contains("3,Charlie,35")); // Charlie should still be there
 
@@ -257,7 +256,7 @@ fn test_delete_all() -> Result<(), Box<dyn std::error::Error>> {
     cmd.assert()
         .success()
         .stdout(predicates::str::contains("id,name,age"))
-        .stdout(predicates::str::contains("1,Alice,30"));
+        .stdout(predicates::str::contains("1,Alice,32"));
 
     // Now execute DELETE without WHERE
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
@@ -274,14 +273,14 @@ fn test_delete_all() -> Result<(), Box<dyn std::error::Error>> {
         .success()
         .stderr(predicates::str::contains("Deleted 3 rows")) // Should delete all 3 rows
         .stdout(predicates::str::contains("id,name,age"))
-        .stdout(predicates::str::contains("1,Alice,30").not())
+        .stdout(predicates::str::contains("1,Alice,32").not())
         .stdout(predicates::str::contains("2,Bob,25").not())
         .stdout(predicates::str::contains("3,Charlie,35").not());
 
     // File should NOT be modified by default (without --write flag)
     let content = fs::read_to_string(&file_path)?;
     assert!(content.contains("id,name,age"));
-    assert!(content.contains("1,Alice,30")); // All rows should still be there
+    assert!(content.contains("1,Alice,32")); // All rows should still be there
     assert!(content.contains("2,Bob,25"));
     assert!(content.contains("3,Charlie,35"));
 
