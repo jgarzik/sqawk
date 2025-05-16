@@ -67,7 +67,7 @@ impl FileHandler {
     }
 
     /// Load a file into an in-memory table with explicit return of table name and path
-    /// 
+    ///
     /// # Arguments
     /// * `file_spec` - File specification in format [table_name=]file_path
     ///
@@ -158,7 +158,7 @@ impl FileHandler {
     pub fn table_count(&self) -> usize {
         self.tables.len()
     }
-    
+
     /// Get column names for a specific table
     ///
     /// # Arguments

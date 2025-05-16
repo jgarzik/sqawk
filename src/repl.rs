@@ -105,7 +105,7 @@ impl Repl {
             DefaultEditor::new().expect("Critical error initializing editor")
         });
         let _ = editor.load_history(HISTORY_FILE);
-        
+
         Self {
             executor,
             editor,
@@ -121,7 +121,7 @@ impl Repl {
         println!("Welcome to Sqawk interactive mode!");
         println!("Enter SQL statements or commands, terminate with ';'.");
         println!("Type .help for available commands.");
-        
+
         while self.running {
             match self.read_command() {
                 Ok(command) => {
@@ -143,34 +143,34 @@ impl Repl {
                 }
             }
         }
-        
+
         self.editor.save_history(HISTORY_FILE).unwrap_or_else(|e| {
             eprintln!("Failed to save history: {}", e);
         });
-        
+
         Ok(())
     }
-    
+
     /// Read a command from the user
     fn read_command(&mut self) -> rustyline::Result<Command> {
         let prompt = "sqawk> ";
         let input = self.editor.readline(prompt)?;
-        
+
         if !input.trim().is_empty() {
             let _ = self.editor.add_history_entry(&input);
         }
-        
+
         Ok(self.parse_command(&input))
     }
-    
+
     /// Parse a command from user input
     fn parse_command(&self, input: &str) -> Command {
         let input = input.trim();
-        
+
         if let Some(stripped) = input.strip_prefix('.') {
             let parts: Vec<&str> = stripped.splitn(2, ' ').collect();
             let command = parts[0].to_lowercase();
-            
+
             match command.as_str() {
                 "exit" | "quit" => Command::Exit,
                 "tables" => Command::Tables,
@@ -180,21 +180,21 @@ impl Repl {
                     } else {
                         Command::Unknown("Table name required for .columns command".to_string())
                     }
-                },
+                }
                 "load" => {
                     if parts.len() > 1 {
                         Command::Load(parts[1].trim().to_string())
                     } else {
                         Command::Unknown("File path required for .load command".to_string())
                     }
-                },
+                }
                 "write" => {
                     if parts.len() > 1 {
                         Command::WriteMode(Some(parts[1].trim().to_string()))
                     } else {
                         Command::WriteMode(None)
                     }
-                },
+                }
                 "help" => Command::Help,
                 _ => Command::Unknown(format!("Unknown command: .{}", command)),
             }
@@ -204,7 +204,7 @@ impl Repl {
             Command::Unknown("Empty command".to_string())
         }
     }
-    
+
     /// Execute a command
     fn execute_command(&mut self, command: Command) -> Result<()> {
         match command {
@@ -217,21 +217,21 @@ impl Repl {
             Command::Exit => {
                 self.running = false;
                 Ok(())
-            },
+            }
             Command::Unknown(msg) => {
                 eprintln!("{}", msg);
                 Ok(())
-            },
+            }
         }
     }
-    
+
     /// Execute SQL statement
     fn execute_sql(&mut self, sql: &str) -> Result<()> {
         let result = match self.executor.execute_sql(sql) {
             Ok(result) => result,
             Err(err) => return Err(ReplError::SqlExecutor(err)),
         };
-        
+
         // Print results
         if let Some(result_set) = result {
             if result_set.rows.is_empty() {
@@ -240,50 +240,50 @@ impl Repl {
                 println!("Query returned {} rows", result_set.rows.len());
                 // Print column headers
                 println!("{}", result_set.columns.join(","));
-                
+
                 // Print rows
                 for row in result_set.rows {
                     println!("{}", row.join(","));
                 }
             }
         }
-        
+
         // Save changes if write mode is enabled
         if self.write {
             let saved_count = match self.executor.save_modified_tables() {
                 Ok(count) => count,
                 Err(err) => return Err(ReplError::SqlExecutor(err)),
             };
-            
+
             if saved_count > 0 {
                 println!("Changes saved to {} tables", saved_count);
             }
         } else if self.executor.has_modified_tables() {
             println!("Changes not saved: use .write to save changes to files");
         }
-        
+
         Ok(())
     }
-    
+
     /// Load a file into a table
     fn load_file(&mut self, file_spec: &str) -> Result<()> {
         let result = match self.executor.load_file(file_spec) {
             Ok(result) => result,
             Err(err) => return Err(ReplError::Sqawk(err)),
         };
-        
+
         match result {
             Some((table_name, file_path)) => {
                 println!("Loaded table '{}' from '{}'", table_name, file_path);
                 Ok(())
-            },
+            }
             None => {
                 println!("No table created");
                 Ok(())
             }
         }
     }
-    
+
     /// Show the list of tables
     fn show_tables(&self) -> Result<()> {
         let tables = self.executor.table_names();
@@ -302,7 +302,7 @@ impl Repl {
         }
         Ok(())
     }
-    
+
     /// Show the columns of a table
     fn show_columns(&self, table_name: &str) -> Result<()> {
         match self.executor.get_table_columns(table_name) {
@@ -312,11 +312,11 @@ impl Repl {
                     println!("  {}", column);
                 }
                 Ok(())
-            },
+            }
             Err(e) => Err(ReplError::Sqawk(e)),
         }
     }
-    
+
     /// Show help message
     fn show_help(&self) -> Result<()> {
         println!("Available commands:");
@@ -325,12 +325,14 @@ impl Repl {
         println!("  .tables               List all tables");
         println!("  .columns TABLE        Show columns for TABLE");
         println!("  .load [TABLE=]FILE    Load FILE into TABLE");
-        println!("  .write [on|off]       Toggle writing changes to files (currently: {})", 
-                 if self.write { "ON" } else { "OFF" });
+        println!(
+            "  .write [on|off]       Toggle writing changes to files (currently: {})",
+            if self.write { "ON" } else { "OFF" }
+        );
         println!("  SQL_STATEMENT         Execute SQL statement");
         Ok(())
     }
-    
+
     /// Toggle writing changes to files
     fn toggle_write(&mut self, arg: Option<&str>) -> Result<()> {
         match arg {
@@ -345,7 +347,10 @@ impl Repl {
             _ => {
                 // Toggle current state
                 self.write = !self.write;
-                println!("Write mode {}", if self.write { "enabled" } else { "disabled" });
+                println!(
+                    "Write mode {}",
+                    if self.write { "enabled" } else { "disabled" }
+                );
             }
         }
         Ok(())

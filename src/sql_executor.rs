@@ -2572,7 +2572,7 @@ impl SqlExecutor {
 
         Ok(count)
     }
-    
+
     /// Check if a specific table has been modified
     ///
     /// # Arguments
@@ -2583,7 +2583,7 @@ impl SqlExecutor {
     pub fn is_table_modified(&self, table_name: &str) -> bool {
         self.modified_tables.contains(table_name)
     }
-    
+
     /// Get a list of all available table names
     ///
     /// # Returns
@@ -2591,7 +2591,7 @@ impl SqlExecutor {
     pub fn table_names(&self) -> Vec<String> {
         self.file_handler.table_names()
     }
-    
+
     /// Get column names for a specific table
     ///
     /// # Arguments
@@ -2602,8 +2602,7 @@ impl SqlExecutor {
     pub fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<String>> {
         self.file_handler.get_table_columns(table_name)
     }
-    
-    
+
     /// Check if any tables have been modified
     ///
     /// # Returns
@@ -2611,9 +2610,9 @@ impl SqlExecutor {
     pub fn has_modified_tables(&self) -> bool {
         !self.modified_tables.is_empty()
     }
-    
+
     /// Load a file as a table
-    /// 
+    ///
     /// # Arguments
     /// * `file_spec` - File specification in format [table_name=]file_path
     ///
@@ -2622,7 +2621,7 @@ impl SqlExecutor {
     pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<Option<(String, String)>> {
         self.file_handler.load_file(file_spec)
     }
-    
+
     /// Execute SQL statement and return a ResultSet for REPL mode
     ///
     /// # Arguments
@@ -2632,7 +2631,7 @@ impl SqlExecutor {
     /// * `Result<Option<ResultSet>>` - Optional ResultSet containing query results
     pub fn execute_sql(&mut self, sql: &str) -> Result<Option<ResultSet>> {
         let result = self.execute(sql)?;
-        
+
         Ok(result.map(|table| ResultSet {
             columns: table.columns().to_vec(),
             rows: table.rows_as_strings(),

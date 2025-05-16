@@ -596,7 +596,7 @@ impl Table {
     ///   The closure receives:
     ///     - A combined row from both tables
     ///     - A reference to the combined table (for column lookups)
-    ///     
+    ///
     ///   The closure returns a boolean indicating whether the row satisfies the join condition
     ///
     /// # Returns

@@ -1,6 +1,6 @@
 [package]
 name = "sqawk"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Jeff Garzik <jgarzik@pobox.com>"]
 description = "An SQL-based command-line tool for processing delimiter-separated files (CSV, TSV, etc.), inspired by awk"
