@@ -13,6 +13,7 @@
    - [How Sqawk Processes Files](#how-sqawk-processes-files)
 4. [Command Line Options](#command-line-options)
    - [SQL Statement Option (-s)](#sql-statement-option--s)
+   - [Interactive Mode (-i)](#interactive-mode--i)
    - [Write Flag (--write)](#write-flag---write)
    - [Field Separator Option (-F)](#field-separator-option--f)
    - [Verbose Mode (-v)](#verbose-mode--v)
@@ -45,6 +46,7 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 - No database setup or schema definition required
 - Automatic type inference and cross-file operations
 - Powerful SQL dialect including joins, sorting, filtering, and aggregations
+- Interactive REPL mode for SQL exploration and execution
 - Safe operation with explicit write-back control
 
 Sqawk is designed for data analysts, developers, system administrators, and anyone who works with tabular data files and wants the power of SQL without the overhead of a full database system.
@@ -151,6 +153,69 @@ sqawk -s "SELECT COUNT(*) FROM data" -s "SELECT AVG(value) FROM data" data.csv
 ```
 
 Statements are executed in sequence, with each operating on the current state of the tables.
+
+### Interactive Mode (-i)
+
+The `-i` (or `--interactive`) option launches Sqawk in REPL (Read-Eval-Print Loop) mode, providing an interactive SQL shell similar to the sqlite3 command-line utility:
+
+```sh
+sqawk -i data.csv employees.csv
+```
+
+This opens an interactive SQL prompt where you can:
+- Enter SQL statements and execute them immediately
+- Explore tables and schema interactively
+- Execute multiple statements in sequence
+- Toggle settings like write mode
+
+**REPL Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `.help` | Display help information about available commands |
+| `.exit` or `.quit` | Exit the REPL |
+| `.tables` | List all available tables |
+| `.schema [table]` | Show schema for a specific table or all tables |
+| `.write [on/off]` | Toggle write mode on/off (default is off) |
+| `.verbose [on/off]` | Toggle verbose mode on/off |
+
+**Example REPL Session:**
+
+```
+$ sqawk -i employees.csv sales.csv
+
+Sqawk SQL Shell
+Enter SQL statements or .help for available commands.
+sqawk> SELECT name, department FROM employees WHERE salary > 70000;
+name,department
+Alice,Engineering
+Charlie,Engineering
+
+sqawk> .tables
+employees sales
+
+sqawk> .schema employees
+CREATE TABLE employees (
+  id INTEGER,
+  name TEXT,
+  department TEXT,
+  salary INTEGER
+);
+
+sqawk> .write on
+Write mode enabled. Changes will be saved to files.
+
+sqawk> UPDATE employees SET salary = salary * 1.1 WHERE department = 'Engineering';
+Updated 2 rows
+
+sqawk> .exit
+```
+
+The interactive mode is particularly useful for:
+- Exploring datasets without writing multiple commands
+- Testing and refining complex queries
+- Performing multiple operations in sequence
+- Learning and experimenting with SQL
 
 ### Write Flag (--write)
 
@@ -301,6 +366,67 @@ sqawk -s "SELECT COUNT(DISTINCT category) AS unique_categories FROM data" data.c
 # Find unique combinations of columns
 sqawk -s "SELECT DISTINCT department, role FROM employees" employees.csv
 ```
+
+**Using the Interactive REPL for Data Exploration:**
+
+The interactive REPL mode is especially powerful for iterative data exploration:
+
+```sh
+# Launch the REPL with your data files
+sqawk -i sales.csv customers.csv products.csv
+```
+
+Once in the REPL, you can rapidly explore your data:
+
+```
+# Check available tables
+sqawk> .tables
+customers products sales
+
+# Examine table structure
+sqawk> .schema sales
+CREATE TABLE sales (
+  id INTEGER,
+  customer_id INTEGER,
+  product_id INTEGER,
+  date TEXT,
+  quantity INTEGER,
+  amount FLOAT
+);
+
+# Start with a simple exploration
+sqawk> SELECT COUNT(*) FROM sales;
+count
+1250
+
+# Drill down into specific segments
+sqawk> SELECT date, SUM(amount) FROM sales GROUP BY date ORDER BY date DESC LIMIT 5;
+date,sum
+2023-12-15,12580.75
+2023-12-14,9845.50
+2023-12-13,11267.25
+2023-12-12,8976.00
+2023-12-11,10432.50
+
+# Join tables to get a richer view
+sqawk> SELECT c.name, COUNT(*) AS order_count, SUM(s.amount) AS total_spent
+       FROM customers c
+       JOIN sales s ON c.id = s.customer_id
+       GROUP BY c.name
+       ORDER BY total_spent DESC
+       LIMIT 3;
+name,order_count,total_spent
+Enterprise Corp,42,58750.25
+Acme Inc,38,45620.75
+Global Services,35,42180.50
+```
+
+The REPL enables a more natural workflow for data analysis, allowing you to:
+- Build queries incrementally
+- See immediate results
+- Refine and adjust as you go
+- Explore relationships between tables
+- Maintain context across multiple queries
 
 ### Data Cleanup
 
