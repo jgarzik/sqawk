@@ -14,7 +14,6 @@ use std::fmt;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 
 /// Represents a reference to a column, which can be qualified with a table name
 ///
@@ -43,7 +42,7 @@ use crate::error::{SqawkError, SqawkResult};
 /// This enum provides the possible data types for a cell value in a table.
 /// It supports the common SQL data types and allows for type conversions
 /// between numeric types (Integer <-> Float) for comparison operations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum Value {
     /// Represents a NULL or missing value
     Null,

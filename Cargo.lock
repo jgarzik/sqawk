@@ -530,7 +530,6 @@ dependencies = [
  "predicates",
  "regex",
  "rustyline",
- "serde",
  "sqlparser",
  "tempfile",
  "thiserror",
