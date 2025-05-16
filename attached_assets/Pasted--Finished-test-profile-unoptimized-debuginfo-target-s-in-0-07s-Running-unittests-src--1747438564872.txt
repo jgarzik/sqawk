@@ -1,0 +1,392 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (target/debug/deps/sqawk-079419b780be996b)
+
+running 14 tests
+test aggregate::tests::test_avg_function ... ok
+test aggregate::tests::test_count_function ... ok
+test aggregate::tests::test_max_function ... ok
+test aggregate::tests::test_sum_integers_only ... ok
+test aggregate::tests::test_sum_function ... ok
+test aggregate::tests::test_max_with_mixed_types ... ok
+test aggregate::tests::test_min_function ... ok
+test aggregate::tests::test_min_with_mixed_types ... ok
+test string_functions::tests::test_from_name ... ok
+test string_functions::tests::test_lower_function ... ok
+test string_functions::tests::test_replace_function ... ok
+test string_functions::tests::test_substr_function ... ok
+test string_functions::tests::test_trim_function ... ok
+test string_functions::tests::test_upper_function ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/sqawk-2647bb83a695782c)
+
+running 14 tests
+test aggregate::tests::test_avg_function ... ok
+test aggregate::tests::test_count_function ... ok
+test aggregate::tests::test_sum_function ... ok
+test aggregate::tests::test_min_function ... ok
+test aggregate::tests::test_min_with_mixed_types ... ok
+test aggregate::tests::test_max_function ... ok
+test aggregate::tests::test_sum_integers_only ... ok
+test aggregate::tests::test_max_with_mixed_types ... ok
+test string_functions::tests::test_from_name ... ok
+test string_functions::tests::test_lower_function ... ok
+test string_functions::tests::test_replace_function ... ok
+test string_functions::tests::test_substr_function ... ok
+test string_functions::tests::test_trim_function ... ok
+test string_functions::tests::test_upper_function ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/common.rs (target/debug/deps/common-96894dde5905b512)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mod.rs (target/debug/deps/mod-ae7655b9e17a5c0d)
+
+running 86 tests
+test advanced::test_complex_where_expressions ... ok
+test aggregate::test_aggregate_on_basic_table ... FAILED
+test aggregate::test_aggregate_functions_with_filter ... ok
+test basic::test_custom_table_name ... ok
+test alias::test_mixed_aliases_and_regular_columns ... ok
+test basic::test_basic_select ... ok
+test advanced::test_sequential_sql_statements ... ok
+test aggregate::test_aggregate_functions_with_aliases ... ok
+test aggregate::test_basic_aggregate_functions ... ok
+test advanced::test_is_null_operator ... ok
+test basic::test_delete_all ... ok
+test basic::test_filtered_select ... ok
+test basic::test_static_file_query ... FAILED
+test alias::test_basic_column_aliases ... ok
+test alias::test_aliases_with_where_clause ... ok
+test basic::test_invalid_sql ... ok
+test basic::test_insert ... ok
+test basic::test_where_greater_than ... ok
+test basic::test_multiple_files ... ok
+test csv_handler::test_csv_with_comments ... ok
+test csv_handler::test_csv_with_custom_columns ... ok
+test csv_handler::test_malformed_csv_without_recovery ... ok
+test csv_handler::test_malformed_csv_with_error_recovery ... ok
+test basic::test_where_less_than ... ok
+test comparison::test_equals_with_no_matches ... ok
+test comparison::test_equals_operator ... FAILED
+test basic::test_delete_with_where ... ok
+test comparison::test_greater_than_operator ... ok
+test comparison::test_greater_than_or_equal_operator ... FAILED
+test comparison::test_less_than_operator ... FAILED
+test comparison::test_less_than_or_equal_operator ... FAILED
+test comparison::test_not_equals_operator ... FAILED
+test distinct::test_distinct_basic ... ok
+test distinct::test_distinct_with_order_by ... ok
+test distinct::test_distinct_with_join ... ok
+test distinct::test_distinct_with_select_star ... ok
+test distinct::test_distinct_with_where ... ok
+test distinct::test_distinct_without_id ... ok
+test delimiter::test_tab_delimiter ... ok
+test delimiter::test_colon_delimiter ... ok
+test join::test_join_order_preservation ... ok
+test group_by::test_basic_group_by ... ok
+test group_by::test_group_by_with_having ... ok
+test group_by::test_group_by_with_complex_expressions ... ok
+test comparison::test_comparison_boundary_values ... ok
+test group_by::test_group_by_with_having_avg ... ok
+test join::test_inner_join ... ok
+test join::test_inner_join_with_projection ... ok
+test limit_offset::test_limit_basic ... FAILED
+test limit_offset::test_distinct_with_limit ... ok
+test join::test_join_with_additional_filtering ... ok
+test join::test_three_table_join ... ok
+test limit_offset::test_limit_with_aggregates ... ok
+test group_by::test_group_by_with_order_by ... ok
+test limit_offset::test_limit_with_offset ... FAILED
+test join_on::test_complex_operations_with_join_on ... ok
+test limit_offset::test_limit_with_order_by ... FAILED
+test join_on::test_three_way_inner_join_on ... ok
+test limit_offset::test_offset_beyond_table_size ... ok
+test limit_offset::test_zero_limit ... ok
+test join::test_cross_join ... ok
+test order_by::test_order_by_single_column ... ok
+test order_by::test_order_by_single_column_desc ... ok
+test order_by::test_order_by_with_projection ... ok
+test join_on::test_inner_join_on_with_where ... ok
+test order_by::test_order_by_multiple_columns ... ok
+test string_functions::test_combining_string_functions_in_where ... ok
+test join_on::test_inner_join_on_basic ... ok
+test order_by::test_order_by_with_where ... ok
+test string_functions::test_lower_function_in_where ... ok
+test string_functions::test_trim_function_in_where ... ok
+test string_functions::test_replace_function_in_where ... ok
+test string_functions::test_string_functions_with_sample_data ... ok
+test string_functions::test_string_functions_with_where_clause ... ok
+test string_functions::test_upper_function_in_where ... ok
+test update::test_update_and_write ... ok
+test string_functions::test_substr_function_in_where ... ok
+test update::test_update_with_where ... ok
+test update::test_update_all_rows ... ok
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+test repl::test_repl_from_file::test_repl_from_file ... FAILED
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Blocking waiting for file lock on build directory
+    Blocking waiting for file lock on build directory
+    Blocking waiting for file lock on build directory
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running `target/debug/sqawk tests/data/sample.csv --interactive`
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running `target/debug/sqawk tests/data/sample.csv --interactive`
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running `target/debug/sqawk tests/data/sample.csv --interactive`
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.27s
+     Running `target/debug/sqawk tests/data/sample.csv --interactive`
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.27s
+     Running `target/debug/sqawk tests/data/sample.csv --interactive`
+test repl::test_repl_basic_commands ... ok
+test repl::test_repl_table_operations ... ok
+Error: SQL execution error: SQL parsing error: sql parser error: Expected an expression:, found: EOF
+Error: SQL execution error: SQL parsing error: sql parser error: Expected an SQL statement, found: id
+Error: SQL execution error: SQL parsing error: sql parser error: Expected an SQL statement, found: name
+Error: SQL execution error: SQL parsing error: sql parser error: Expected an SQL statement, found: age
+Error: SQL execution error: SQL parsing error: sql parser error: Expected an SQL statement, found: FROM
+Error: SQL execution error: SQL parsing error: sql parser error: Expected an SQL statement, found: sample
+Error: SQL execution error: SQL parsing error: sql parser error: Expected an SQL statement, found: WHERE
+Error: SQL execution error: SQL parsing error: sql parser error: Expected an SQL statement, found: age
+test repl::test_repl_multiline_statements ... ok
+test repl::test_repl_save_command ... ok
+test repl::test_repl_write_toggle ... ok
+test repl::sqlite_commands::test_repl_sqlite_commands ... ok
+
+failures:
+
+---- aggregate::test_aggregate_on_basic_table stdout ----
+
+thread 'aggregate::test_aggregate_on_basic_table' panicked at /rustc/4eb161250e340c8f48f66e2b929ef4a5bed7c181/library/core/src/ops/function.rs:250:5:
+Unexpected stdout, failed var.contains(3,30)
+├── var: Running in verbose mode
+│   Arguments: SqawkArgs { sql: ["SELECT COUNT(*) AS total_count, AVG(age) AS average_age FROM sample"], interactive: false, files: ["tests/data/sample.csv"], tabledef: [], field_separator: None, verbose: true, write: false }
+│   Loaded 1 tables
+│   Table 'sample' loaded
+│   Executing SQL: SELECT COUNT(*) AS total_count, AVG(age) AS average_age FROM sample
+│   Query returned 1 rows
+│   total_count,average_age
+│   3,34
+│   Changes not saved: use --write to save changes to files
+└── var as str: Running in verbose mode
+    Arguments: SqawkArgs { sql: ["SELECT COUNT(*) AS total_count, AVG(age) AS average_age FROM sample"], interactive: false, files: ["tests/data/sample.csv"], tabledef: [], field_separator: None, verbose: true, write: false }
+    Loaded 1 tables
+    Table 'sample' loaded
+    Executing SQL: SELECT COUNT(*) AS total_count, AVG(age) AS average_age FROM sample
+    Query returned 1 rows
+    total_count,average_age
+    3,34
+    Changes not saved: use --write to save changes to files
+
+command=`"/Users/jgarzik/repo/sqawk/target/debug/sqawk" "-s" "SELECT COUNT(*) AS total_count, AVG(age) AS average_age FROM sample" "tests/data/sample.csv" "-v"`
+code=0
+stdout=```
+Running in verbose mode
+Arguments: SqawkArgs { sql: [\"SELECT COUNT(*) AS total_count, AVG(age) AS average_age FROM sample\"], interactive: false, files: [\"tests/data/sample.csv\"], tabledef: [], field_separator: None, verbose: true, write: false }
+Loaded 1 tables
+Table \'sample\' loaded
+Executing SQL: SELECT COUNT(*) AS total_count, AVG(age) AS average_age FROM sample
+Query returned 1 rows
+total_count,average_age
+3,34
+Changes not saved: use --write to save changes to files
+```
+
+stderr="Applying aggregate functions\n"
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- basic::test_static_file_query stdout ----
+
+thread 'basic::test_static_file_query' panicked at /rustc/4eb161250e340c8f48f66e2b929ef4a5bed7c181/library/core/src/ops/function.rs:250:5:
+Unexpected stdout, failed var.contains(1,Alice,32)
+├── var: Running in verbose mode
+│   Arguments: SqawkArgs { sql: ["SELECT * FROM sample WHERE age > 25"], interactive: false, files: ["tests/data/sample.csv"], tabledef: [], field_separator: None, verbose: true, write: false }
+│   Loaded 1 tables
+│   Table 'sample' loaded
+│   Executing SQL: SELECT * FROM sample WHERE age > 25
+│   Query returned 3 rows
+│   id,name,age
+│   1,Alice,33
+│   2,Bob,34
+│   3,Charlie,35
+│   Changes not saved: use --write to save changes to files
+└── var as str: Running in verbose mode
+    Arguments: SqawkArgs { sql: ["SELECT * FROM sample WHERE age > 25"], interactive: false, files: ["tests/data/sample.csv"], tabledef: [], field_separator: None, verbose: true, write: false }
+    Loaded 1 tables
+    Table 'sample' loaded
+    Executing SQL: SELECT * FROM sample WHERE age > 25
+    Query returned 3 rows
+    id,name,age
+    1,Alice,33
+    2,Bob,34
+    3,Charlie,35
+    Changes not saved: use --write to save changes to files
+
+command=`"/Users/jgarzik/repo/sqawk/target/debug/sqawk" "-s" "SELECT * FROM sample WHERE age > 25" "-v" "tests/data/sample.csv"`
+code=0
+stdout=```
+Running in verbose mode
+Arguments: SqawkArgs { sql: [\"SELECT * FROM sample WHERE age > 25\"], interactive: false, files: [\"tests/data/sample.csv\"], tabledef: [], field_separator: None, verbose: true, write: false }
+Loaded 1 tables
+Table \'sample\' loaded
+Executing SQL: SELECT * FROM sample WHERE age > 25
+Query returned 3 rows
+id,name,age
+1,Alice,33
+2,Bob,34
+3,Charlie,35
+Changes not saved: use --write to save changes to files
+```
+
+stderr="WHERE comparison\n"
+
+
+---- comparison::test_equals_operator stdout ----
+
+thread 'comparison::test_equals_operator' panicked at /rustc/4eb161250e340c8f48f66e2b929ef4a5bed7c181/library/core/src/ops/function.rs:250:5:
+Unexpected stdout, failed var.contains(1,Alice,32)
+├── var: id,name,age
+└── var as str: id,name,age
+
+command=`"/Users/jgarzik/repo/sqawk/target/debug/sqawk" "-s" "SELECT * FROM sample WHERE age = 32" "tests/data/sample.csv"`
+code=0
+stdout="id,name,age\n"
+stderr=""
+
+
+---- comparison::test_greater_than_or_equal_operator stdout ----
+
+thread 'comparison::test_greater_than_or_equal_operator' panicked at /rustc/4eb161250e340c8f48f66e2b929ef4a5bed7c181/library/core/src/ops/function.rs:250:5:
+Unexpected stdout, failed var.contains(1,Alice,32)
+├── var: id,name,age
+│   1,Alice,33
+│   2,Bob,34
+│   3,Charlie,35
+└── var as str: id,name,age
+    1,Alice,33
+    2,Bob,34
+    3,Charlie,35
+
+command=`"/Users/jgarzik/repo/sqawk/target/debug/sqawk" "-s" "SELECT * FROM sample WHERE age >= 32" "tests/data/sample.csv"`
+code=0
+stdout=```
+id,name,age
+1,Alice,33
+2,Bob,34
+3,Charlie,35
+```
+
+stderr=""
+
+
+---- comparison::test_less_than_operator stdout ----
+
+thread 'comparison::test_less_than_operator' panicked at /rustc/4eb161250e340c8f48f66e2b929ef4a5bed7c181/library/core/src/ops/function.rs:250:5:
+Unexpected stdout, failed var.contains(2,Bob,25)
+├── var: id,name,age
+└── var as str: id,name,age
+
+command=`"/Users/jgarzik/repo/sqawk/target/debug/sqawk" "-s" "SELECT * FROM sample WHERE age < 32" "tests/data/sample.csv"`
+code=0
+stdout="id,name,age\n"
+stderr=""
+
+
+---- comparison::test_less_than_or_equal_operator stdout ----
+
+thread 'comparison::test_less_than_or_equal_operator' panicked at /rustc/4eb161250e340c8f48f66e2b929ef4a5bed7c181/library/core/src/ops/function.rs:250:5:
+Unexpected stdout, failed var.contains(1,Alice,32)
+├── var: id,name,age
+└── var as str: id,name,age
+
+command=`"/Users/jgarzik/repo/sqawk/target/debug/sqawk" "-s" "SELECT * FROM sample WHERE age <= 32" "tests/data/sample.csv"`
+code=0
+stdout="id,name,age\n"
+stderr=""
+
+
+---- comparison::test_not_equals_operator stdout ----
+
+thread 'comparison::test_not_equals_operator' panicked at /rustc/4eb161250e340c8f48f66e2b929ef4a5bed7c181/library/core/src/ops/function.rs:250:5:
+Unexpected stdout, failed var.contains(2,Bob,25)
+├── var: id,name,age
+│   1,Alice,33
+│   2,Bob,34
+│   3,Charlie,35
+└── var as str: id,name,age
+    1,Alice,33
+    2,Bob,34
+    3,Charlie,35
+
+command=`"/Users/jgarzik/repo/sqawk/target/debug/sqawk" "-s" "SELECT * FROM sample WHERE age != 32" "tests/data/sample.csv"`
+code=0
+stdout=```
+id,name,age
+1,Alice,33
+2,Bob,34
+3,Charlie,35
+```
+
+stderr=""
+
+
+---- limit_offset::test_limit_basic stdout ----
+
+thread 'limit_offset::test_limit_basic' panicked at tests/limit_offset/mod.rs:48:5:
+First row should be present
+
+---- limit_offset::test_limit_with_offset stdout ----
+
+thread 'limit_offset::test_limit_with_offset' panicked at tests/limit_offset/mod.rs:90:5:
+First row should be present
+
+---- limit_offset::test_limit_with_order_by stdout ----
+
+thread 'limit_offset::test_limit_with_order_by' panicked at tests/limit_offset/mod.rs:143:5:
+Second row (second highest age) should be present
+
+---- repl::test_repl_from_file::test_repl_from_file stdout ----
+
+thread 'repl::test_repl_from_file::test_repl_from_file' panicked at tests/repl/test_repl_from_file.rs:26:5:
+assertion failed: stdout.contains("1,Alice,32")
+
+
+failures:
+    aggregate::test_aggregate_on_basic_table
+    basic::test_static_file_query
+    comparison::test_equals_operator
+    comparison::test_greater_than_or_equal_operator
+    comparison::test_less_than_operator
+    comparison::test_less_than_or_equal_operator
+    comparison::test_not_equals_operator
+    limit_offset::test_limit_basic
+    limit_offset::test_limit_with_offset
+    limit_offset::test_limit_with_order_by
+    repl::test_repl_from_file::test_repl_from_file
+
+test result: FAILED. 75 passed; 11 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.19s
+
+error: test failed, to rerun pass `--test mod`
