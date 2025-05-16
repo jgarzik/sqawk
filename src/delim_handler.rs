@@ -59,7 +59,7 @@ impl DelimHandler {
         &self,
         file_spec: &str,
         delimiter: &str,
-        custom_columns: Option<Vec<String>>
+        custom_columns: Option<Vec<String>>,
     ) -> SqawkResult<Table> {
         // Parse file spec to get table name and file path
         let (table_name, file_path) = self.parse_file_spec(file_spec)?;
@@ -85,8 +85,8 @@ impl DelimHandler {
         let mut csv_reader = csv::ReaderBuilder::new()
             .has_headers(true)
             .delimiter(delimiter_byte)
-            .comment(Some(b'#'))  // Support for comment lines starting with #
-            .flexible(true)       // Allow for variable number of fields
+            .comment(Some(b'#')) // Support for comment lines starting with #
+            .flexible(true) // Allow for variable number of fields
             .from_reader(reader);
 
         // If custom column names are provided, use them
@@ -131,12 +131,12 @@ impl DelimHandler {
                         // Use the headers as they are
                         header_row.iter().map(|s| s.to_string()).collect::<Vec<_>>()
                     }
-                },
+                }
                 Err(_) => {
                     // If we couldn't read headers, try to determine column count from first record
                     let record_iter = csv_reader.records();
                     let first_record = record_iter.into_iter().next();
-                    
+
                     if let Some(Ok(record)) = first_record {
                         // Generate alphabetical column names (a, b, c, etc.)
                         (0..record.len())

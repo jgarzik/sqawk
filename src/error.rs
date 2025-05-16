@@ -30,7 +30,7 @@ pub enum SqawkError {
     /// Error while parsing or processing delimited file data
     #[error("File parsing error: {0}")]
     CsvError(#[from] csv::Error),
-    
+
     /// Enhanced CSV parsing error with file location information
     #[error("CSV parse error in {file} at line {line}: {error}")]
     CsvParseError {

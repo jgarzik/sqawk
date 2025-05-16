@@ -40,7 +40,7 @@ pub struct FileHandler {
 
     /// Custom field separator if specified
     field_separator: Option<String>,
-    
+
     /// Custom column names for tables
     /// Map from table name to a vector of column names
     table_column_defs: HashMap<String, Vec<String>>,
@@ -71,7 +71,7 @@ impl FileHandler {
                         .split(',')
                         .map(|s| s.trim().to_string())
                         .collect::<Vec<String>>();
-                    
+
                     if !columns.is_empty() {
                         table_column_defs.insert(table_name.to_string(), columns);
                     }
@@ -114,7 +114,9 @@ impl FileHandler {
             }
             FileFormat::Delimited => {
                 let delimiter = self.field_separator.as_deref().unwrap_or("\t");
-                let table = self.delim_handler.load_delimited(file_spec, delimiter, custom_columns)?;
+                let table =
+                    self.delim_handler
+                        .load_delimited(file_spec, delimiter, custom_columns)?;
                 self.tables.insert(table_name.clone(), table);
             }
         }

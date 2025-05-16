@@ -66,10 +66,12 @@ impl CsvHandler {
     /// * Skip malformed rows instead of failing
     /// * Log detailed error information including line numbers
     /// * Continue processing the file to extract all valid rows
-    pub fn load_csv(&self, 
-                   file_spec: &str, 
-                   custom_columns: Option<Vec<String>>,
-                   recover_errors: Option<bool>) -> SqawkResult<Table> {
+    pub fn load_csv(
+        &self,
+        file_spec: &str,
+        custom_columns: Option<Vec<String>>,
+        recover_errors: Option<bool>,
+    ) -> SqawkResult<Table> {
         // Parse file spec to get table name and file path
         let (table_name, file_path) = self.parse_file_spec(file_spec)?;
 
@@ -80,8 +82,8 @@ impl CsvHandler {
         // Create a CSV reader with enhanced options
         let mut csv_reader = csv::ReaderBuilder::new()
             .has_headers(true)
-            .comment(Some(b'#'))  // Support comment lines starting with #
-            .flexible(true)      // Allow flexible handling of different field counts
+            .comment(Some(b'#')) // Support comment lines starting with #
+            .flexible(true) // Allow flexible handling of different field counts
             .from_reader(reader);
 
         // Get headers or use custom column names if provided
@@ -105,16 +107,16 @@ impl CsvHandler {
         let should_recover = recover_errors.unwrap_or(false);
         let mut skipped_rows = 0;
         let mut row_number = 0;
-        
+
         for result in csv_reader.records() {
             row_number += 1;
-            
+
             match result {
                 Ok(record) => {
                     // Convert record to a row of values
                     let row = record.iter().map(Value::from).collect();
                     table.add_row(row)?;
-                },
+                }
                 Err(csv_err) if should_recover => {
                     // Skip this row and continue processing if recovery is enabled
                     skipped_rows += 1;
@@ -123,7 +125,7 @@ impl CsvHandler {
                         row_number + 1, // +1 for header row
                         csv_err
                     );
-                },
+                }
                 Err(csv_err) => {
                     // Provide detailed error context when failing
                     return Err(SqawkError::CsvParseError {
@@ -134,12 +136,14 @@ impl CsvHandler {
                 }
             }
         }
-        
+
         // Report the number of skipped rows if there were any and we're in recovery mode
         if should_recover && skipped_rows > 0 {
-            eprintln!("Note: Skipped {} malformed rows while loading {}", 
-                      skipped_rows, 
-                      file_path.to_string_lossy());
+            eprintln!(
+                "Note: Skipped {} malformed rows while loading {}",
+                skipped_rows,
+                file_path.to_string_lossy()
+            );
         }
 
         Ok(table)

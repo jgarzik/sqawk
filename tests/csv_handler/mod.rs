@@ -5,14 +5,16 @@ use sqawk::error::SqawkError;
 fn test_csv_with_comments() {
     // Create the CSV handler
     let csv_handler = CsvHandler::new();
-    
+
     // Load the commented CSV file
-    let table = csv_handler.load_csv("tests/data/commented.csv", None, None).unwrap();
-    
+    let table = csv_handler
+        .load_csv("tests/data/commented.csv", None, None)
+        .unwrap();
+
     // Verify the correct data was loaded (comments should be ignored)
     assert_eq!(table.rows().len(), 3);
     assert_eq!(table.name(), "commented");
-    
+
     // Check specific row data
     let rows = table.rows();
     assert_eq!(rows[0][1].to_string(), "Alice");
@@ -24,14 +26,16 @@ fn test_csv_with_comments() {
 fn test_malformed_csv_with_error_recovery() {
     // Create the CSV handler
     let csv_handler = CsvHandler::new();
-    
+
     // Try to load the malformed CSV file with error recovery enabled
-    let table = csv_handler.load_csv("tests/data/malformed.csv", None, Some(true)).unwrap();
-    
+    let table = csv_handler
+        .load_csv("tests/data/malformed.csv", None, Some(true))
+        .unwrap();
+
     // With flexible mode, all rows except the one with unclosed quote should be loaded
     // Rows with too many/few fields should be handled
     assert_eq!(table.rows().len(), 4);
-    
+
     // Check specific row data
     let rows = table.rows();
     assert_eq!(rows[0][1].to_string(), "Alice");
@@ -48,13 +52,13 @@ fn test_malformed_csv_with_error_recovery() {
 fn test_malformed_csv_without_recovery() {
     // Create the CSV handler
     let csv_handler = CsvHandler::new();
-    
+
     // Try to load the malformed CSV file without error recovery
     let result = csv_handler.load_csv("tests/data/malformed.csv", None, None);
-    
+
     // Verify that we get an error
     assert!(result.is_err());
-    
+
     // Check that the error contains file path and line information
     match result.unwrap_err() {
         SqawkError::CsvParseError { file, line, error } => {
@@ -71,23 +75,25 @@ fn test_malformed_csv_without_recovery() {
 fn test_csv_with_custom_columns() {
     // Create the CSV handler
     let csv_handler = CsvHandler::new();
-    
+
     // Define custom column names
     let custom_columns = Some(vec![
         "user_id".to_string(),
         "full_name".to_string(),
         "user_age".to_string(),
     ]);
-    
+
     // Load the commented CSV file with custom columns
-    let table = csv_handler.load_csv("tests/data/commented.csv", custom_columns, None).unwrap();
-    
+    let table = csv_handler
+        .load_csv("tests/data/commented.csv", custom_columns, None)
+        .unwrap();
+
     // Verify the column names were properly set
     let columns = table.columns();
     assert_eq!(columns[0], "user_id");
     assert_eq!(columns[1], "full_name");
     assert_eq!(columns[2], "user_age");
-    
+
     // Verify the data was loaded correctly
     assert_eq!(table.rows().len(), 3);
 }

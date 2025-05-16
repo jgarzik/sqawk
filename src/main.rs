@@ -76,7 +76,11 @@ fn main() -> Result<()> {
     // Table definitions allow specifying custom column names for files without headers
     let mut file_handler = FileHandler::new(
         args.field_separator.clone(),
-        if args.tabledef.is_empty() { None } else { Some(args.tabledef.clone()) }
+        if args.tabledef.is_empty() {
+            None
+        } else {
+            Some(args.tabledef.clone())
+        },
     );
 
     // Step 2b: Load all specified files into in-memory tables
