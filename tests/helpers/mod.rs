@@ -156,7 +156,7 @@ pub fn create_temp_dir() -> Result<TempDir, Box<dyn std::error::Error>> {
 /// This uses a template identical to the static sample.csv test file
 pub fn prepare_test_file(dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let file_path = dir.join("people.csv");
-    let content = "id,name,age\n1,Alice,30\n2,Bob,25\n3,Charlie,35\n";
+    let content = "id,name,age\n1,Alice,32\n2,Bob,25\n3,Charlie,35\n";
     fs::write(&file_path, content)?;
     Ok(file_path)
 }
@@ -166,7 +166,7 @@ pub fn prepare_test_file(dir: &Path) -> Result<PathBuf, Box<dyn std::error::Erro
 #[allow(dead_code)]
 pub fn prepare_test_file_with_category(dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let file_path = dir.join("people.csv");
-    let content = "id,name,age,category_id\n1,Alice,30,1\n2,Bob,25,2\n3,Charlie,35,1\n";
+    let content = "id,name,age,category_id\n1,Alice,32,1\n2,Bob,25,2\n3,Charlie,35,1\n";
     fs::write(&file_path, content)?;
     Ok(file_path)
 }

@@ -18,7 +18,7 @@ fn test_basic_select() -> Result<(), Box<dyn std::error::Error>> {
         sql: "SELECT * FROM people".to_string(),
         expected_stdout: vec![
             "id,name,age".to_string(),
-            "1,Alice,30".to_string(),
+            "1,Alice,32".to_string(),
             "2,Bob,25".to_string(),
             "3,Charlie,35".to_string(),
         ],
@@ -31,7 +31,7 @@ fn test_basic_select() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_filtered_select() -> Result<(), Box<dyn std::error::Error>> {
     let test_case = SqawkTestCase {
-        sql: "SELECT name FROM people WHERE age = 30".to_string(),
+        sql: "SELECT name FROM people WHERE age = 32".to_string(),
         expected_stdout: vec!["name".to_string(), "Alice".to_string()],
         verbose: true,
         ..Default::default()
@@ -48,7 +48,7 @@ fn test_insert() -> Result<(), Box<dyn std::error::Error>> {
         args: vec!["-s".to_string(), "SELECT * FROM people".to_string()],
         expected_stdout: vec![
             "id,name,age".to_string(),
-            "1,Alice,30".to_string(),
+            "1,Alice,32".to_string(),
             "2,Bob,25".to_string(),
             "3,Charlie,35".to_string(),
             "4,Dave,40".to_string(),

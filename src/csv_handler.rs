@@ -83,7 +83,8 @@ impl CsvHandler {
         let mut csv_reader = csv::ReaderBuilder::new()
             .has_headers(true)
             .comment(Some(b'#')) // Support comment lines starting with #
-            .flexible(true) // Allow flexible handling of different field counts
+            // Enable flexible mode only if error recovery is requested
+            .flexible(true) // Always use flexible mode to allow for skipping errors
             .from_reader(reader);
 
         // Get headers or use custom column names if provided
@@ -113,9 +114,42 @@ impl CsvHandler {
 
             match result {
                 Ok(record) => {
-                    // Convert record to a row of values
-                    let row = record.iter().map(Value::from).collect();
-                    table.add_row(row)?;
+                    if should_recover && record.len() != table.column_count() {
+                        // In recovery mode, handle rows with different column counts
+                        let mut row = Vec::new();
+                        
+                        // For each column in our table
+                        for i in 0..table.column_count() {
+                            if i < record.len() {
+                                // Use the value if it exists
+                                row.push(Value::from(record.get(i).unwrap_or(&"")));
+                            } else {
+                                // Pad with null values if we need more
+                                row.push(Value::Null);
+                            }
+                        }
+                        
+                        // Now we have a properly sized row, add it without validation
+                        table.add_row_recovery(row)?;
+                    } else {
+                        // Normal path - convert record to a row of values and validate
+                        let row = record.iter().map(Value::from).collect();
+                        // This call can fail if the columns don't match and we're not in recovery mode
+                        if let Err(e) = table.add_row(row) {
+                            if should_recover {
+                                // If we're in recovery mode, log and continue
+                                skipped_rows += 1;
+                                eprintln!(
+                                    "Warning: Skipping row at line {} with inconsistent field count: {}",
+                                    row_number + 1, // +1 for header row
+                                    e
+                                );
+                            } else {
+                                // If we're not in recovery mode, propagate the error
+                                return Err(e);
+                            }
+                        }
+                    }
                 }
                 Err(csv_err) if should_recover => {
                     // Skip this row and continue processing if recovery is enabled

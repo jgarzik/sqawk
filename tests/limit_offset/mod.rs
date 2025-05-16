@@ -45,7 +45,7 @@ fn test_limit_basic() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check that the output contains the expected data
     assert!(stdout.contains("id,name,age"), "Header should be present");
-    assert!(stdout.contains("1,Alice,30"), "First row should be present");
+    assert!(stdout.contains("1,Alice,32"), "First row should be present");
     assert!(stdout.contains("2,Bob,25"), "Second row should be present");
 
     // Make sure limited rows are not present

@@ -27,13 +27,13 @@ fn test_equals_operator() -> Result<(), Box<dyn std::error::Error>> {
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
-        .arg("SELECT * FROM sample WHERE age = 30")
+        .arg("SELECT * FROM sample WHERE age = 32")
         .arg(file_path);
 
     cmd.assert()
         .success()
         .stdout(predicates::str::contains("id,name,age"))
-        .stdout(predicates::str::contains("1,Alice,30"));
+        .stdout(predicates::str::contains("1,Alice,32"));
 
     Ok(())
 }
@@ -45,7 +45,7 @@ fn test_not_equals_operator() -> Result<(), Box<dyn std::error::Error>> {
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
-        .arg("SELECT * FROM sample WHERE age != 30")
+        .arg("SELECT * FROM sample WHERE age != 32")
         .arg(file_path);
 
     cmd.assert()
@@ -53,7 +53,7 @@ fn test_not_equals_operator() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicates::str::contains("id,name,age"))
         .stdout(predicates::str::contains("2,Bob,25"))
         .stdout(predicates::str::contains("3,Charlie,35"))
-        .stdout(predicates::str::contains("1,Alice,30").not());
+        .stdout(predicates::str::contains("1,Alice,32").not());
 
     Ok(())
 }
@@ -65,14 +65,14 @@ fn test_greater_than_operator() -> Result<(), Box<dyn std::error::Error>> {
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
-        .arg("SELECT * FROM sample WHERE age > 30")
+        .arg("SELECT * FROM sample WHERE age > 32")
         .arg(file_path);
 
     cmd.assert()
         .success()
         .stdout(predicates::str::contains("id,name,age"))
         .stdout(predicates::str::contains("3,Charlie,35"))
-        .stdout(predicates::str::contains("1,Alice,30").not())
+        .stdout(predicates::str::contains("1,Alice,32").not())
         .stdout(predicates::str::contains("2,Bob,25").not());
 
     Ok(())
@@ -85,14 +85,14 @@ fn test_less_than_operator() -> Result<(), Box<dyn std::error::Error>> {
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
-        .arg("SELECT * FROM sample WHERE age < 30")
+        .arg("SELECT * FROM sample WHERE age < 32")
         .arg(file_path);
 
     cmd.assert()
         .success()
         .stdout(predicates::str::contains("id,name,age"))
         .stdout(predicates::str::contains("2,Bob,25"))
-        .stdout(predicates::str::contains("1,Alice,30").not())
+        .stdout(predicates::str::contains("1,Alice,32").not())
         .stdout(predicates::str::contains("3,Charlie,35").not());
 
     Ok(())
@@ -105,13 +105,13 @@ fn test_greater_than_or_equal_operator() -> Result<(), Box<dyn std::error::Error
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
-        .arg("SELECT * FROM sample WHERE age >= 30")
+        .arg("SELECT * FROM sample WHERE age >= 32")
         .arg(file_path);
 
     cmd.assert()
         .success()
         .stdout(predicates::str::contains("id,name,age"))
-        .stdout(predicates::str::contains("1,Alice,30"))
+        .stdout(predicates::str::contains("1,Alice,32"))
         .stdout(predicates::str::contains("3,Charlie,35"))
         .stdout(predicates::str::contains("2,Bob,25").not());
 
@@ -125,13 +125,13 @@ fn test_less_than_or_equal_operator() -> Result<(), Box<dyn std::error::Error>> 
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
-        .arg("SELECT * FROM sample WHERE age <= 30")
+        .arg("SELECT * FROM sample WHERE age <= 32")
         .arg(file_path);
 
     cmd.assert()
         .success()
         .stdout(predicates::str::contains("id,name,age"))
-        .stdout(predicates::str::contains("1,Alice,30"))
+        .stdout(predicates::str::contains("1,Alice,32"))
         .stdout(predicates::str::contains("2,Bob,25"))
         .stdout(predicates::str::contains("3,Charlie,35").not());
 

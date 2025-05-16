@@ -18,7 +18,7 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use sqlparser::ast::{
-    Assignment, Expr, Join as SqlJoin, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr,
+    Assignment, Expr, Join as SqlJoin, JoinConstraint, JoinOperator, Query, Select, SelectItem, SetExpr,
     Statement, TableFactor, TableWithJoins, Value as SqlValue,
 };
 use sqlparser::dialect::GenericDialect;
@@ -138,133 +138,131 @@ impl SqlExecutor {
                 // Check if the query contains any aggregate functions
                 let has_aggregates = self.contains_aggregate_functions(&select.projection);
 
-                // Determine which columns to include in the result (for projection)
+                // Process based on whether we have aggregates or not
                 if has_aggregates {
                     if self.verbose {
                         eprintln!("Applying aggregate functions");
                     }
-
-                    // IMPORTANT: First filter rows if WHERE clause is present
-                    // We must apply the WHERE clause before aggregation to ensure all columns
-                    // needed for filtering are available during the WHERE evaluation
-                    let filtered_table = if let Some(where_clause) = &select.selection {
-                        if self.verbose {
-                            eprintln!("WHERE comparison");
-                        }
-                        self.apply_where_clause(source_table, where_clause)?
-                    } else {
-                        // If no WHERE clause, just use the source table as is
-                        source_table
-                    };
-
-                    let result_table = if !select.group_by.is_empty() {
-                        if self.verbose {
-                            eprintln!("Applying GROUP BY");
-                        }
-                        // Apply aggregation functions with grouping
-                        SqlExecutor::apply_grouped_aggregate_functions(
-                            &select.projection,
-                            &filtered_table,
-                            &select.group_by,
-                        )?
-                    } else {
-                        // Apply aggregation functions without grouping (to the whole table)
-                        self.apply_aggregate_functions(&select.projection, &filtered_table)?
-                    };
-
-                    // Apply HAVING if present (only after GROUP BY)
-                    let result_after_having = if let Some(having_expr) = &select.having {
-                        if self.verbose {
-                            eprintln!("Applying HAVING");
-                        }
-                        self.apply_having_clause(result_table, having_expr)?
-                    } else {
-                        result_table
-                    };
-
-                    // Apply DISTINCT if present
-                    let mut final_result_table = result_after_having;
-                    if select.distinct.is_some() {
-                        if self.verbose {
-                            eprintln!("Applying DISTINCT");
-                        }
-                        final_result_table = final_result_table.distinct()?;
-                    }
-
-                    // Apply ORDER BY if present
-                    if !query.order_by.is_empty() {
-                        if self.verbose {
-                            eprintln!("Applying ORDER BY");
-                        }
-                        final_result_table =
-                            self.apply_order_by(final_result_table, &query.order_by)?;
-                    }
-
-                    // Apply LIMIT and OFFSET if present
-                    if query.limit.is_some() || query.offset.is_some() {
-                        if self.verbose {
-                            eprintln!("Applying LIMIT/OFFSET");
-                        }
-                        final_result_table = self.apply_limit_offset(final_result_table, &query)?;
-                    }
-
-                    Ok(Some(final_result_table))
+                    self.execute_aggregate_query(source_table, select, &query)
                 } else {
-                    // For non-aggregate queries, use the normal column resolution and projection
-                    let column_specs =
-                        self.resolve_select_items(&select.projection, &source_table)?;
-
-                    // IMPORTANT: First filter rows if WHERE clause is present
-                    // We must apply the WHERE clause before projection to ensure all columns
-                    // needed for filtering are available during the WHERE evaluation
-                    let filtered_table = if let Some(where_clause) = &select.selection {
-                        if self.verbose {
-                            eprintln!("WHERE comparison");
-                        }
-                        self.apply_where_clause(source_table, where_clause)?
-                    } else {
-                        // If no WHERE clause, just use the source table as is
-                        source_table
-                    };
-
-                    // Then apply projection to get only the requested columns with aliases
-                    // This happens AFTER filtering to ensure WHERE clauses can access all columns
-                    let mut result_table = filtered_table.project_with_aliases(&column_specs)?;
-
-                    // Apply DISTINCT if present
-                    if select.distinct.is_some() {
-                        if self.verbose {
-                            eprintln!("Applying DISTINCT");
-                        }
-                        result_table = result_table.distinct()?;
-                    }
-
-                    // Apply ORDER BY if present
-                    // This needs to happen after projection because we need to sort
-                    // using the column indices in the result table, not the source table
-                    // In sqlparser 0.36, order_by is Vec<OrderByExpr> not Option<Vec<OrderByExpr>>
-                    if !query.order_by.is_empty() {
-                        if self.verbose {
-                            eprintln!("Applying ORDER BY");
-                        }
-                        result_table = self.apply_order_by(result_table, &query.order_by)?;
-                    }
-
-                    // Apply LIMIT and OFFSET if present
-                    if query.limit.is_some() || query.offset.is_some() {
-                        if self.verbose {
-                            eprintln!("Applying LIMIT/OFFSET");
-                        }
-                        result_table = self.apply_limit_offset(result_table, &query)?;
-                    }
-
-                    Ok(Some(result_table))
+                    self.execute_simple_query(source_table, select, &query)
                 }
             }
             _ => Err(SqawkError::UnsupportedSqlFeature(
                 "Only simple SELECT statements are supported".to_string(),
             )),
         }
+    }
+    
+    /// Executes a query that contains aggregate functions
+    fn execute_aggregate_query(
+        &self,
+        source_table: Table,
+        select: &Select,
+        query: &Query,
+    ) -> SqawkResult<Option<Table>> {
+        // Apply WHERE clause before aggregation
+        let filtered_table = self.apply_where_clause_if_present(source_table, &select.selection)?;
+
+        // Apply GROUP BY if present, otherwise apply simple aggregation
+        let result_table = if !select.group_by.is_empty() {
+            if self.verbose {
+                eprintln!("Applying GROUP BY");
+            }
+            SqlExecutor::apply_grouped_aggregate_functions(
+                &select.projection,
+                &filtered_table,
+                &select.group_by,
+            )?
+        } else {
+            self.apply_aggregate_functions(&select.projection, &filtered_table)?
+        };
+
+        // Apply HAVING if present (only after GROUP BY)
+        let result_after_having = if let Some(having_expr) = &select.having {
+            if self.verbose {
+                eprintln!("Applying HAVING");
+            }
+            self.apply_having_clause(result_table, having_expr)?
+        } else {
+            result_table
+        };
+
+        // Apply post-processing steps (DISTINCT, ORDER BY, LIMIT, OFFSET)
+        let final_result = self.apply_post_processing_steps(result_after_having, select, query)?;
+        Ok(Some(final_result))
+    }
+
+    /// Executes a simple query without aggregate functions
+    fn execute_simple_query(
+        &self,
+        source_table: Table,
+        select: &Select,
+        query: &Query,
+    ) -> SqawkResult<Option<Table>> {
+        // For non-aggregate queries, use the normal column resolution
+        let column_specs = self.resolve_select_items(&select.projection, &source_table)?;
+
+        // Apply WHERE clause before projection
+        let filtered_table = self.apply_where_clause_if_present(source_table, &select.selection)?;
+
+        // Apply projection to get only the requested columns with aliases
+        let result_table = filtered_table.project_with_aliases(&column_specs)?;
+        
+        // Apply post-processing steps (DISTINCT, ORDER BY, LIMIT, OFFSET)
+        let final_result = self.apply_post_processing_steps(result_table, select, query)?;
+        Ok(Some(final_result))
+    }
+    
+    /// Helper function to apply WHERE clause if present
+    fn apply_where_clause_if_present(
+        &self, 
+        table: Table, 
+        selection: &Option<Expr>
+    ) -> SqawkResult<Table> {
+        if let Some(where_clause) = selection {
+            if self.verbose {
+                eprintln!("WHERE comparison");
+            }
+            self.apply_where_clause(table, where_clause)
+        } else {
+            // If no WHERE clause, just use the table as is
+            Ok(table)
+        }
+    }
+    
+    /// Applies post-processing steps to a query result: DISTINCT, ORDER BY, LIMIT/OFFSET
+    fn apply_post_processing_steps(
+        &self,
+        mut table: Table,
+        select: &Select,
+        query: &Query,
+    ) -> SqawkResult<Table> {
+        // Apply DISTINCT if present
+        if select.distinct.is_some() {
+            if self.verbose {
+                eprintln!("Applying DISTINCT");
+            }
+            table = table.distinct()?;
+        }
+
+        // Apply ORDER BY if present
+        if !query.order_by.is_empty() {
+            if self.verbose {
+                eprintln!("Applying ORDER BY");
+            }
+            table = self.apply_order_by(table, &query.order_by)?;
+        }
+
+        // Apply LIMIT and OFFSET if present
+        if query.limit.is_some() || query.offset.is_some() {
+            if self.verbose {
+                eprintln!("Applying LIMIT/OFFSET");
+            }
+            table = self.apply_limit_offset(table, query)?;
+        }
+        
+        Ok(table)
     }
 
     /// Apply LIMIT and OFFSET clauses to a table
@@ -1037,40 +1035,12 @@ impl SqlExecutor {
                 Ok(val != Value::Null)
             }
             // Support for Function expressions (needed for HAVING clause with aggregate functions)
-            Expr::Function(func) => {
-                // Get the function name to check if it's an aggregate function
-                let func_name = func
-                    .name
-                    .0
-                    .first()
-                    .map(|i| i.value.clone())
-                    .unwrap_or_default();
-
-                // For functions in HAVING clauses, we need to handle aggregate functions specially
-                if AggregateFunction::from_name(&func_name).is_some() {
-                    // Get the function result as a Value by looking at the current row
-                    let val = self.evaluate_expr_with_row(expr, row, table)?;
-
-                    // For a numeric condition (common in HAVING), check if value is > 0
-                    match val {
-                        Value::Integer(i) => Ok(i > 0),
-                        Value::Float(f) => Ok(f > 0.0),
-                        Value::Boolean(b) => Ok(b),
-                        Value::String(s) => Ok(!s.is_empty()),
-                        Value::Null => Ok(false),
-                    }
-                } else {
-                    // For non-aggregate functions, evaluate normally
-                    let val = self.evaluate_expr_with_row(expr, row, table)?;
-
-                    match val {
-                        Value::Integer(i) => Ok(i > 0),
-                        Value::Float(f) => Ok(f > 0.0),
-                        Value::Boolean(b) => Ok(b),
-                        Value::String(s) => Ok(!s.is_empty()),
-                        Value::Null => Ok(false),
-                    }
-                }
+            Expr::Function(_func) => {
+                // Evaluate the function to get its result
+                let val = self.evaluate_expr_with_row(expr, row, table)?;
+                
+                // Determine boolean result from the value
+                self.value_to_boolean(&val)
             }
             // Add more expression types as needed
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -1096,6 +1066,31 @@ impl SqlExecutor {
     /// * `Ok(true)` if both conditions evaluate to true
     /// * `Ok(false)` if either condition evaluates to false
     /// * `Err` if there's an error evaluating either condition
+    
+    /// Convert a Value to a boolean result, following SQL-like conversion rules
+    ///
+    /// This helper method centralizes the logic for converting different value types to boolean results:
+    /// - Integers: true if > 0
+    /// - Floats: true if > 0.0
+    /// - Booleans: as-is
+    /// - Strings: true if non-empty
+    /// - Null: always false
+    ///
+    /// # Arguments
+    /// * `val` - The value to convert to a boolean
+    ///
+    /// # Returns
+    /// * `Ok(bool)` - The converted boolean value
+    fn value_to_boolean(&self, val: &Value) -> SqawkResult<bool> {
+        match val {
+            Value::Integer(i) => Ok(*i > 0),
+            Value::Float(f) => Ok(*f > 0.0),
+            Value::Boolean(b) => Ok(*b),
+            Value::String(s) => Ok(!s.is_empty()),
+            Value::Null => Ok(false),
+        }
+    }
+    
     fn evaluate_logical_and(
         &self,
         left: &Expr,

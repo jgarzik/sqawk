@@ -1,9 +1,8 @@
-# This is a CSV file with comments
+# This is a header comment
 id,name,age
-# This is a comment about Alice
+# Comment for Alice
 1,Alice,30
-# This is a comment about Bob
+# Comment for Bob
 2,Bob,25
-# This is a comment about Charlie
+# Comment for Charlie
 3,Charlie,35
-# End of file comment

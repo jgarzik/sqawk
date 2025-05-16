@@ -335,6 +335,24 @@ impl Table {
         self.modified = true;
         Ok(())
     }
+    
+    /// Add a row without validation for recovery mode
+    ///
+    /// This method is used internally by the CSV handler in recovery mode
+    /// to add rows that may have had their structure altered to fix issues,
+    /// such as padding missing fields or truncating extra fields.
+    ///
+    /// # Arguments
+    /// * `row` - Vector of values to add as a new row
+    ///
+    /// # Returns
+    /// * `Ok(())` always succeeds
+    pub fn add_row_recovery(&mut self, row: Row) -> SqawkResult<()> {
+        // No validation, assumes the row has been fixed already
+        self.rows.push(row);
+        self.modified = true;
+        Ok(())
+    }
 
     /// Get the source file path
     ///
