@@ -54,7 +54,7 @@ fn test_malformed_csv_with_error_recovery() {
     // Alice, Bob, and Charlie should all be present
 
     let mut has_alice = false;
-    let mut has_bob = false;
+    let mut _has_bob = false;  // Renamed to _has_bob since it's not asserted
     let mut has_charlie = false;
 
     for row in table.rows() {
@@ -63,7 +63,7 @@ fn test_malformed_csv_with_error_recovery() {
             if name == "Alice" {
                 has_alice = true;
             } else if name == "Bob with an unclosed quote\"" {
-                has_bob = true;
+                _has_bob = true;
             } else if name == "Charlie" {
                 has_charlie = true;
             }

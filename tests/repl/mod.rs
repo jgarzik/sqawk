@@ -3,6 +3,10 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
+// Include the sqlite_commands tests
+mod sqlite_commands;
+mod test_repl_from_file;
+
 #[test]
 fn test_repl_basic_commands() {
     // Create test commands for REPL

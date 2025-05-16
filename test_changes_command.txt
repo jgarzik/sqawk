@@ -1,0 +1,7 @@
+.changes on
+INSERT INTO sample VALUES (4, 'David', 40);
+UPDATE sample SET age = 33 WHERE name = 'Alice';
+DELETE FROM sample WHERE name = 'Bob';
+.changes off
+INSERT INTO sample VALUES (5, 'Eve', 28);
+.exit

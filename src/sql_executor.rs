@@ -40,6 +40,9 @@ pub struct SqlExecutor {
 
     /// Verbose mode flag
     verbose: bool,
+    
+    /// Number of affected rows from the last statement
+    affected_row_count: usize,
 }
 
 impl SqlExecutor {
@@ -49,7 +52,13 @@ impl SqlExecutor {
             file_handler,
             modified_tables: HashSet::new(),
             verbose,
+            affected_row_count: 0,
         }
+    }
+    
+    /// Get the number of rows affected by the last executed statement
+    pub fn get_affected_row_count(&self) -> SqawkResult<usize> {
+        Ok(self.affected_row_count)
     }
 
     /// Execute an SQL statement
@@ -85,7 +94,25 @@ impl SqlExecutor {
                 source,
                 ..
             } => {
+                // For INSERT, we count affected rows as the number of rows inserted
+                // Currently we only support VALUES, so that's the number of value lists
+                match &*source {
+                    Query { body, .. } => {
+                        if let SetExpr::Values(values) = &**body {
+                            // Count the number of rows that will be inserted
+                            self.affected_row_count = values.rows.len();
+                        } else {
+                            // If not using VALUES, we'll set affected rows later
+                            self.affected_row_count = 0;
+                        }
+                    }
+                }
+                
                 self.execute_insert(table_name, columns, source)?;
+                
+                if self.verbose {
+                    eprintln!("Inserted {} rows", self.affected_row_count);
+                }
                 Ok(None)
             }
             Statement::Update {
@@ -95,6 +122,9 @@ impl SqlExecutor {
                 ..
             } => {
                 let updated_count = self.execute_update(table, assignments, selection)?;
+                // Store the affected row count for .changes command
+                self.affected_row_count = updated_count;
+                
                 if self.verbose {
                     eprintln!("Updated {} rows", updated_count);
                 }
@@ -110,6 +140,9 @@ impl SqlExecutor {
                 }
                 let table_with_joins = &from[0];
                 let deleted_count = self.execute_delete(table_with_joins, selection)?;
+                // Store the affected row count for .changes command
+                self.affected_row_count = deleted_count;
+                
                 if self.verbose {
                     eprintln!("Deleted {} rows", deleted_count);
                 }

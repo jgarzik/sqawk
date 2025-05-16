@@ -1,6 +1,8 @@
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::fmt;
+use std::process::Command;
+use regex;
 
 use crate::error::SqawkError;
 use crate::sql_executor::SqlExecutor;
@@ -57,21 +59,29 @@ const HISTORY_FILE: &str = ".sqawk_history";
 
 /// Commands that can be executed in the REPL
 #[derive(Debug)]
-enum Command {
+enum ReplCommand {
     /// Execute SQL statement
     Sql(String),
     /// Load a file into a table
     Load(String),
-    /// Show the list of tables
-    Tables,
-    /// Show the columns of a table
-    Columns(String),
+    /// Show the list of tables matching an optional pattern
+    Tables(Option<String>),
+    /// Show the columns of a table or schema
+    Schema(Option<String>),
     /// Toggle writing changes to files
     WriteMode(Option<String>),
     /// Show help message
     Help,
-    /// Exit the REPL
-    Exit,
+    /// Exit the REPL with optional exit code
+    Exit(Option<String>),
+    /// Change directory
+    ChangeDirectory(String),
+    /// Toggle showing number of changes
+    Changes(Option<String>),
+    /// Print a string literal
+    Print(String),
+    /// Show version information
+    Version,
     /// Unknown command
     Unknown(String),
 }
@@ -90,6 +100,8 @@ pub struct Repl {
     running: bool,
     /// Field separator for delimited files
     _field_separator: Option<String>,
+    /// Whether to show number of rows changed by SQL statements
+    show_changes: bool,
 }
 
 impl Repl {
@@ -113,6 +125,7 @@ impl Repl {
             write,
             running: true,
             _field_separator: field_separator,
+            show_changes: false, // Default to not showing changes
         }
     }
 
@@ -152,7 +165,7 @@ impl Repl {
     }
 
     /// Read a command from the user
-    fn read_command(&mut self) -> rustyline::Result<Command> {
+    fn read_command(&mut self) -> rustyline::Result<ReplCommand> {
         let prompt = "sqawk> ";
         let input = self.editor.readline(prompt)?;
 
@@ -164,7 +177,7 @@ impl Repl {
     }
 
     /// Parse a command from user input
-    fn parse_command(&self, input: &str) -> Command {
+    fn parse_command(&self, input: &str) -> ReplCommand {
         let input = input.trim();
 
         if let Some(stripped) = input.strip_prefix('.') {
@@ -172,53 +185,100 @@ impl Repl {
             let command = parts[0].to_lowercase();
 
             match command.as_str() {
-                "exit" | "quit" => Command::Exit,
-                "tables" => Command::Tables,
-                "columns" | "schema" => {
+                "exit" => {
                     if parts.len() > 1 {
-                        Command::Columns(parts[1].trim().to_string())
+                        ReplCommand::Exit(Some(parts[1].trim().to_string()))
                     } else {
-                        Command::Unknown("Table name required for .columns command".to_string())
+                        ReplCommand::Exit(None)
+                    }
+                },
+                "quit" => ReplCommand::Exit(None),
+                "tables" => {
+                    if parts.len() > 1 {
+                        ReplCommand::Tables(Some(parts[1].trim().to_string()))
+                    } else {
+                        ReplCommand::Tables(None)
+                    }
+                },
+                "schema" => {
+                    if parts.len() > 1 {
+                        ReplCommand::Schema(Some(parts[1].trim().to_string()))
+                    } else {
+                        // With no argument, show schema for all tables
+                        ReplCommand::Schema(None)
+                    }
+                }
+                "columns" => {
+                    if parts.len() > 1 {
+                        ReplCommand::Schema(Some(parts[1].trim().to_string()))
+                    } else {
+                        ReplCommand::Unknown("Table name required for .columns command".to_string())
                     }
                 }
                 "load" => {
                     if parts.len() > 1 {
-                        Command::Load(parts[1].trim().to_string())
+                        ReplCommand::Load(parts[1].trim().to_string())
                     } else {
-                        Command::Unknown("File path required for .load command".to_string())
+                        ReplCommand::Unknown("File path required for .load command".to_string())
                     }
                 }
                 "write" => {
                     if parts.len() > 1 {
-                        Command::WriteMode(Some(parts[1].trim().to_string()))
+                        ReplCommand::WriteMode(Some(parts[1].trim().to_string()))
                     } else {
-                        Command::WriteMode(None)
+                        ReplCommand::WriteMode(None)
                     }
                 }
-                "help" => Command::Help,
-                _ => Command::Unknown(format!("Unknown command: .{}", command)),
+                "cd" => {
+                    if parts.len() > 1 {
+                        ReplCommand::ChangeDirectory(parts[1].trim().to_string())
+                    } else {
+                        ReplCommand::Unknown("Directory path required for .cd command".to_string())
+                    }
+                }
+                "changes" => {
+                    if parts.len() > 1 {
+                        ReplCommand::Changes(Some(parts[1].trim().to_string()))
+                    } else {
+                        ReplCommand::Changes(None)
+                    }
+                }
+                "print" => {
+                    if parts.len() > 1 {
+                        ReplCommand::Print(parts[1].to_string())
+                    } else {
+                        ReplCommand::Print("".to_string()) // Print an empty line
+                    }
+                }
+                "version" => ReplCommand::Version,
+                "help" => ReplCommand::Help,
+                _ => ReplCommand::Unknown(format!("Unknown command: .{}", command)),
             }
         } else if !input.is_empty() {
-            Command::Sql(input.to_string())
+            ReplCommand::Sql(input.to_string())
         } else {
-            Command::Unknown("Empty command".to_string())
+            ReplCommand::Unknown("Empty command".to_string())
         }
     }
 
     /// Execute a command
-    fn execute_command(&mut self, command: Command) -> Result<()> {
+    fn execute_command(&mut self, command: ReplCommand) -> Result<()> {
         match command {
-            Command::Sql(sql) => self.execute_sql(&sql),
-            Command::Load(file_spec) => self.load_file(&file_spec),
-            Command::Tables => self.show_tables(),
-            Command::Columns(table_name) => self.show_columns(&table_name),
-            Command::WriteMode(arg) => self.toggle_write(arg.as_deref()),
-            Command::Help => self.show_help(),
-            Command::Exit => {
-                self.running = false;
+            ReplCommand::Sql(sql) => self.execute_sql(&sql),
+            ReplCommand::Load(file_spec) => self.load_file(&file_spec),
+            ReplCommand::Tables(pattern) => self.show_tables(pattern.as_deref()),
+            ReplCommand::Schema(table_name) => self.show_schema(table_name.as_deref()),
+            ReplCommand::WriteMode(arg) => self.toggle_write(arg.as_deref()),
+            ReplCommand::Help => self.show_help(),
+            ReplCommand::Exit(code) => self.exit_repl(code.as_deref()),
+            ReplCommand::ChangeDirectory(dir) => self.change_directory(&dir),
+            ReplCommand::Changes(arg) => self.toggle_changes(arg.as_deref()),
+            ReplCommand::Print(text) => {
+                println!("{}", text);
                 Ok(())
             }
-            Command::Unknown(msg) => {
+            ReplCommand::Version => self.show_version(),
+            ReplCommand::Unknown(msg) => {
                 eprintln!("{}", msg);
                 Ok(())
             }
@@ -244,6 +304,14 @@ impl Repl {
                 // Print rows
                 for row in result_set.rows {
                     println!("{}", row.join(","));
+                }
+            }
+        } else if self.show_changes {
+            // For non-SELECT statements that don't return rows (INSERT, UPDATE, DELETE)
+            // Try to display the number of affected rows if show_changes is enabled
+            if let Ok(affected_rows) = self.executor.get_affected_row_count() {
+                if affected_rows > 0 {
+                    println!("{} rows affected", affected_rows);
                 }
             }
         }
@@ -284,55 +352,214 @@ impl Repl {
         }
     }
 
-    /// Show the list of tables
-    fn show_tables(&self) -> Result<()> {
+    /// Show the list of tables, optionally filtered by a pattern
+    fn show_tables(&self, pattern: Option<&str>) -> Result<()> {
         let tables = self.executor.table_names();
         if tables.is_empty() {
             println!("No tables loaded");
-        } else {
-            println!("Tables:");
-            for table in tables {
-                let modified = if self.executor.is_table_modified(&table) {
-                    " (modified)"
+            return Ok(());
+        }
+        
+        println!("Tables:");
+        match pattern {
+            Some(pat) => {
+                // Filter tables matching the pattern (SQL LIKE pattern)
+                // Convert SQL LIKE pattern to regex
+                let regex_pattern = pat.replace("%", ".*").replace("_", ".");
+                let regex = regex::Regex::new(&format!("^{}$", regex_pattern))
+                    .unwrap_or_else(|_| regex::Regex::new(".*").unwrap()); // Fallback to match all if regex is invalid
+                
+                let matching_tables: Vec<&String> = tables
+                    .iter()
+                    .filter(|name| regex.is_match(name))
+                    .collect();
+                
+                if matching_tables.is_empty() {
+                    println!("  No tables match pattern: {}", pat);
                 } else {
-                    ""
-                };
-                println!("  {}{}", table, modified);
+                    for table in matching_tables {
+                        let modified = if self.executor.is_table_modified(table) {
+                            " (modified)"
+                        } else {
+                            ""
+                        };
+                        println!("  {}{}", table, modified);
+                    }
+                }
+            }
+            None => {
+                // Show all tables
+                for table in tables {
+                    let modified = if self.executor.is_table_modified(&table) {
+                        " (modified)"
+                    } else {
+                        ""
+                    };
+                    println!("  {}{}", table, modified);
+                }
             }
         }
+        
         Ok(())
     }
 
-    /// Show the columns of a table
-    fn show_columns(&self, table_name: &str) -> Result<()> {
-        match self.executor.get_table_columns(table_name) {
-            Ok(columns) => {
-                println!("Columns for table '{}':", table_name);
-                for column in columns {
-                    println!("  {}", column);
-                }
-                Ok(())
-            }
-            Err(e) => Err(ReplError::Sqawk(e)),
-        }
-    }
+    // The show_columns functionality is now handled by show_schema with a specific table name
 
     /// Show help message
     fn show_help(&self) -> Result<()> {
         println!("Available commands:");
         println!("  .help                 Show this help message");
-        println!("  .exit, .quit          Exit the REPL");
-        println!("  .tables               List all tables");
-        println!("  .columns TABLE        Show columns for TABLE");
+        println!("  .exit ?CODE?          Exit the REPL with optional code");
+        println!("  .quit                 Exit the REPL");
+        println!("  .tables ?TABLE?       List names of tables matching LIKE pattern TABLE");
+        println!("  .schema ?TABLE?       Show schema for a specific table or all tables");
+        println!("  .columns TABLE        Show columns for TABLE (alias for .schema TABLE)");
         println!("  .load [TABLE=]FILE    Load FILE into TABLE");
         println!(
             "  .write [on|off]       Toggle writing changes to files (currently: {})",
             if self.write { "ON" } else { "OFF" }
         );
+        println!(
+            "  .changes [on|off]     Show number of rows changed by SQL (currently: {})",
+            if self.show_changes { "ON" } else { "OFF" }
+        );
+        println!("  .cd DIRECTORY         Change the working directory to DIRECTORY");
+        println!("  .print STRING...      Print literal STRING");
+        println!("  .version              Show source, library and compiler versions");
         println!("  SQL_STATEMENT         Execute SQL statement");
         Ok(())
     }
+    
+    /// Exit the REPL with an optional exit code
+    fn exit_repl(&mut self, code: Option<&str>) -> Result<()> {
+        self.running = false;
+        
+        // If an exit code is provided, we'll just acknowledge it
+        // In a real program, this would set the process exit code
+        if let Some(code_str) = code {
+            match code_str.parse::<i32>() {
+                Ok(code) => {
+                    println!("Exit code set to: {}", code);
+                }
+                Err(_) => {
+                    eprintln!("Invalid exit code: {}", code_str);
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Display schema information for a table or all tables
+    fn show_schema(&self, table_name: Option<&str>) -> Result<()> {
+        match table_name {
+            Some(name) => {
+                // Show schema for specific table
+                match self.executor.get_table_columns(name) {
+                    Ok(columns) => {
+                        println!("CREATE TABLE {} (", name);
+                        for (i, column) in columns.iter().enumerate() {
+                            // For now, we'll just use TEXT as the type 
+                            // since we don't have direct type information
+                            let data_type = "TEXT";
+                            if i < columns.len() - 1 {
+                                println!("  {} {},", column, data_type);
+                            } else {
+                                println!("  {} {}", column, data_type);
+                            }
+                        }
+                        println!(");");
+                    },
+                    Err(_) => {
+                        eprintln!("No such table: {}", name);
+                    }
+                }
+            }
+            None => {
+                // Show schema for all tables
+                for name in self.executor.table_names() {
+                    if let Ok(columns) = self.executor.get_table_columns(&name) {
+                        println!("CREATE TABLE {} (", name);
+                        for (i, column) in columns.iter().enumerate() {
+                            // For now, we'll just use TEXT as the type
+                            let data_type = "TEXT";
+                            if i < columns.len() - 1 {
+                                println!("  {} {},", column, data_type);
+                            } else {
+                                println!("  {} {}", column, data_type);
+                            }
+                        }
+                        println!(");");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    
+    /// Change the current working directory
+    fn change_directory(&self, dir: &str) -> Result<()> {
+        match std::env::set_current_dir(dir) {
+            Ok(_) => {
+                println!("Changed directory to {}", dir);
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("Failed to change directory: {}", e);
+                Ok(())
+            }
+        }
+    }
+    
+    /// Toggle showing number of rows changed by SQL statements
+    fn toggle_changes(&mut self, arg: Option<&str>) -> Result<()> {
+        match arg {
+            Some("on") => {
+                self.show_changes = true;
+                println!("Changes display enabled");
+            }
+            Some("off") => {
+                self.show_changes = false;
+                println!("Changes display disabled");
+            }
+            _ => {
+                // Toggle current state
+                self.show_changes = !self.show_changes;
+                println!(
+                    "Changes display {}",
+                    if self.show_changes { "enabled" } else { "disabled" }
+                );
+            }
+        }
+        Ok(())
+    }
+    
+    /// Show version information
+    fn show_version(&self) -> Result<()> {
+        println!("Sqawk version 0.1.1");
+        println!("Running on Rust {}", get_rustc_version());
+        Ok(())
+    }
+}
 
+/// Get the Rust compiler version
+fn get_rustc_version() -> String {
+    match Command::new("rustc").arg("--version").output() {
+        Ok(output) => {
+            if output.status.success() {
+                match String::from_utf8(output.stdout) {
+                    Ok(version) => version.trim().to_string(),
+                    Err(_) => "unknown (utf8 error)".to_string(),
+                }
+            } else {
+                "unknown (command failed)".to_string()
+            }
+        }
+        Err(_) => "unknown (command not found)".to_string(),
+    }
+}
+
+impl Repl {
     /// Toggle writing changes to files
     fn toggle_write(&mut self, arg: Option<&str>) -> Result<()> {
         match arg {

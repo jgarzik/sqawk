@@ -24,3 +24,6 @@ mod string_functions; // Tests for string functions (UPPER, LOWER, TRIM, SUBSTR,
 
 // Support modules
 mod helpers; // Test helpers and utilities
+
+// Common test utilities
+pub mod common;

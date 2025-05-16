@@ -1,0 +1,4 @@
+.changes on
+INSERT INTO sample VALUES (4, 'David', 40);
+UPDATE sample SET age = 33 WHERE name = 'Alice';
+.exit 42
