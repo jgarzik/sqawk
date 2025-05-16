@@ -71,9 +71,13 @@ fn main() -> Result<()> {
         println!("Arguments: {args:?}");
     }
 
-    // Step 2a: Initialize the file handler with optional custom field separator
+    // Step 2a: Initialize the file handler with optional custom field separator and table definitions
     // The field separator determines how input files are parsed (comma, tab, etc.)
-    let mut file_handler = FileHandler::new(args.field_separator.clone());
+    // Table definitions allow specifying custom column names for files without headers
+    let mut file_handler = FileHandler::new(
+        args.field_separator.clone(),
+        if args.tabledef.is_empty() { None } else { Some(args.tabledef.clone()) }
+    );
 
     // Step 2b: Load all specified files into in-memory tables
     // Each file can specify its table name with table_name=file_path syntax

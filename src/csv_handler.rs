@@ -49,11 +49,12 @@ impl CsvHandler {
     /// # Arguments
     /// * `file_spec` - File specification in the format `[table_name=]file_path.csv`
     ///   If table_name is not specified, the file name without extension is used.
+    /// * `custom_columns` - Optional custom column names to use instead of detected/generated ones
     ///
     /// # Returns
     /// * `Ok(Table)` - The successfully loaded table
     /// * `Err` if there was an error parsing the file spec, opening the file, or parsing the CSV data
-    pub fn load_csv(&self, file_spec: &str) -> SqawkResult<Table> {
+    pub fn load_csv(&self, file_spec: &str, custom_columns: Option<Vec<String>>) -> SqawkResult<Table> {
         // Parse file spec to get table name and file path
         let (table_name, file_path) = self.parse_file_spec(file_spec)?;
 
@@ -66,13 +67,19 @@ impl CsvHandler {
             .has_headers(true)
             .from_reader(reader);
 
-        // Get headers
-        let headers = csv_reader
-            .headers()
-            .map_err(SqawkError::CsvError)?
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        // Get headers or use custom column names if provided
+        let headers = if let Some(columns) = custom_columns {
+            // Use the provided custom column names
+            columns
+        } else {
+            // Use column names from the CSV header row
+            csv_reader
+                .headers()
+                .map_err(SqawkError::CsvError)?
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        };
 
         // Create a new table
         let mut table = Table::new(&table_name, headers, Some(file_path.clone()));

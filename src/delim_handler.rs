@@ -50,11 +50,17 @@ impl DelimHandler {
     /// # Arguments
     /// * `file_spec` - File specification in the format `[table_name=]file_path`
     /// * `delimiter` - Delimiter character to use for parsing
+    /// * `custom_columns` - Optional custom column names to use instead of detected/generated ones
     ///
     /// # Returns
     /// * `Ok(Table)` - The successfully loaded table
     /// * `Err` if there was an error parsing the file spec, opening the file, or parsing the file data
-    pub fn load_delimited(&self, file_spec: &str, delimiter: &str) -> SqawkResult<Table> {
+    pub fn load_delimited(
+        &self,
+        file_spec: &str,
+        delimiter: &str,
+        custom_columns: Option<Vec<String>>
+    ) -> SqawkResult<Table> {
         // Parse file spec to get table name and file path
         let (table_name, file_path) = self.parse_file_spec(file_spec)?;
 
@@ -83,69 +89,76 @@ impl DelimHandler {
             .flexible(true)       // Allow for variable number of fields
             .from_reader(reader);
 
-        // Get headers or generate generic ones if needed
-        let headers = match csv_reader.headers().map_err(SqawkError::CsvError) {
-            Ok(header_row) => {
-                // Check if the first row looks like data rather than headers
-                // This helps with system files like /etc/passwd that don't have headers
-                let is_likely_data = header_row.iter().any(|field| {
-                    // Common indicators that a field is data, not a header
-                    field.starts_with('/') || // Path
-                    field == "*" ||           // Password placeholder
-                    field == "root" ||        // Common username
-                    field == "nobody" ||      // Common username
-                    field.parse::<i32>().is_ok() // Numeric ID
-                });
+        // If custom column names are provided, use them
+        // Otherwise detect/generate headers based on file content
+        let headers = if let Some(columns) = custom_columns {
+            // Use the provided custom column names
+            columns
+        } else {
+            // No custom column names, generate or detect from file
+            match csv_reader.headers().map_err(SqawkError::CsvError) {
+                Ok(header_row) => {
+                    // Check if the first row looks like data rather than headers
+                    // This helps with system files like /etc/passwd that don't have headers
+                    let is_likely_data = header_row.iter().any(|field| {
+                        // Common indicators that a field is data, not a header
+                        field.starts_with('/') || // Path
+                        field == "*" ||           // Password placeholder
+                        field == "root" ||        // Common username
+                        field == "nobody" ||      // Common username
+                        field.parse::<i32>().is_ok() // Numeric ID
+                    });
 
-                if is_likely_data {
-                    // Generate alphabetical column names (a, b, c, etc.)
-                    (0..header_row.len())
-                        .map(|i| {
-                            // Convert number to alphabetical column name (a, b, ..., z, aa, ab, ...)
-                            let mut name = String::new();
-                            let mut n = i;
-                            loop {
-                                name.insert(0, (b'a' + (n % 26) as u8) as char);
-                                n /= 26;
-                                if n == 0 {
-                                    break;
+                    if is_likely_data {
+                        // Generate alphabetical column names (a, b, c, etc.)
+                        (0..header_row.len())
+                            .map(|i| {
+                                // Convert number to alphabetical column name (a, b, ..., z, aa, ab, ...)
+                                let mut name = String::new();
+                                let mut n = i;
+                                loop {
+                                    name.insert(0, (b'a' + (n % 26) as u8) as char);
+                                    n /= 26;
+                                    if n == 0 {
+                                        break;
+                                    }
+                                    n -= 1; // Adjust for the shift from 0-based to 1-based
                                 }
-                                n -= 1; // Adjust for the shift from 0-based to 1-based
-                            }
-                            name
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    // Use the headers as they are
-                    header_row.iter().map(|s| s.to_string()).collect::<Vec<_>>()
-                }
-            },
-            Err(_) => {
-                // If we couldn't read headers, try to determine column count from first record
-                let record_iter = csv_reader.records();
-                let first_record = record_iter.into_iter().next();
-                
-                if let Some(Ok(record)) = first_record {
-                    // Generate alphabetical column names (a, b, c, etc.)
-                    (0..record.len())
-                        .map(|i| {
-                            // Convert number to alphabetical column name (a, b, ..., z, aa, ab, ...)
-                            let mut name = String::new();
-                            let mut n = i;
-                            loop {
-                                name.insert(0, (b'a' + (n % 26) as u8) as char);
-                                n /= 26;
-                                if n == 0 {
-                                    break;
+                                name
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        // Use the headers as they are
+                        header_row.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+                    }
+                },
+                Err(_) => {
+                    // If we couldn't read headers, try to determine column count from first record
+                    let record_iter = csv_reader.records();
+                    let first_record = record_iter.into_iter().next();
+                    
+                    if let Some(Ok(record)) = first_record {
+                        // Generate alphabetical column names (a, b, c, etc.)
+                        (0..record.len())
+                            .map(|i| {
+                                // Convert number to alphabetical column name (a, b, ..., z, aa, ab, ...)
+                                let mut name = String::new();
+                                let mut n = i;
+                                loop {
+                                    name.insert(0, (b'a' + (n % 26) as u8) as char);
+                                    n /= 26;
+                                    if n == 0 {
+                                        break;
+                                    }
+                                    n -= 1; // Adjust for the shift from 0-based to 1-based
                                 }
-                                n -= 1; // Adjust for the shift from 0-based to 1-based
-                            }
-                            name
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    // Fallback to a minimal set if we can't determine field count
-                    vec!["a".to_string()]
+                                name
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        // Fallback to a minimal set if we can't determine field count
+                        vec!["a".to_string()]
+                    }
                 }
             }
         };

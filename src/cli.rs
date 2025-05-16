@@ -61,6 +61,18 @@ pub struct SqawkArgs {
     )]
     pub files: Vec<String>,
 
+    /// Define column names for tables - format: table_name:col1,col2,col3,...
+    ///
+    /// For files without header rows (like system files), this option allows
+    /// specifying explicit column names to use instead of the default a,b,c,... naming.
+    /// Multiple table definitions can be provided for different tables.
+    /// Example: --tabledef=passwd:username,password,uid,gid,gecos,home,shell
+    #[clap(
+        long,
+        help = "Define column names for tables as table_name:col1,col2,col3,..."
+    )]
+    pub tabledef: Vec<String>,
+
     /// Specify field separator character
     ///
     /// Similar to awk's -F option, this sets the field separator for all input files.

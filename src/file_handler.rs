@@ -40,22 +40,44 @@ pub struct FileHandler {
 
     /// Custom field separator if specified
     field_separator: Option<String>,
+    
+    /// Custom column names for tables
+    /// Map from table name to a vector of column names
+    table_column_defs: HashMap<String, Vec<String>>,
 }
 
 impl FileHandler {
-    /// Create a new FileHandler with specified field separator
+    /// Create a new FileHandler with specified field separator and column definitions
     ///
     /// # Arguments
     /// * `field_separator` - Optional field separator character/string
+    /// * `tabledef` - Optional vector of table column definitions in format "table_name:col1,col2,..."
     ///
     /// # Returns
     /// A new FileHandler instance ready to load and manage tables
-    pub fn new(field_separator: Option<String>) -> Self {
+    pub fn new(field_separator: Option<String>, tabledef: Option<Vec<String>>) -> Self {
         let default_format = if field_separator.is_some() {
             FileFormat::Delimited
         } else {
             FileFormat::Csv
         };
+
+        // Process any table column definitions
+        let mut table_column_defs = HashMap::new();
+        if let Some(defs) = tabledef {
+            for def in defs {
+                if let Some((table_name, columns_str)) = def.split_once(':') {
+                    let columns = columns_str
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .collect::<Vec<String>>();
+                    
+                    if !columns.is_empty() {
+                        table_column_defs.insert(table_name.to_string(), columns);
+                    }
+                }
+            }
+        }
 
         FileHandler {
             tables: HashMap::new(),
@@ -63,6 +85,7 @@ impl FileHandler {
             delim_handler: DelimHandler::new(field_separator.clone()),
             _default_format: default_format,
             field_separator,
+            table_column_defs,
         }
     }
 
@@ -81,14 +104,17 @@ impl FileHandler {
         // Determine the file format based on extension
         let format = self.detect_format(&file_path);
 
+        // Check if custom column names are defined for this table
+        let custom_columns = self.table_column_defs.get(&table_name).cloned();
+
         match format {
             FileFormat::Csv => {
-                let table = self.csv_handler.load_csv(file_spec)?;
+                let table = self.csv_handler.load_csv(file_spec, custom_columns)?;
                 self.tables.insert(table_name.clone(), table);
             }
             FileFormat::Delimited => {
                 let delimiter = self.field_separator.as_deref().unwrap_or("\t");
-                let table = self.delim_handler.load_delimited(file_spec, delimiter)?;
+                let table = self.delim_handler.load_delimited(file_spec, delimiter, custom_columns)?;
                 self.tables.insert(table_name.clone(), table);
             }
         }
