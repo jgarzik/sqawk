@@ -2562,12 +2562,99 @@ impl SqlExecutor {
     /// # Returns
     /// * `Ok(())` if all modified tables were saved successfully
     /// * `Err` if any error occurs during saving
-    pub fn save_modified_tables(&self) -> Result<()> {
+    pub fn save_modified_tables(&self) -> Result<usize> {
+        let mut count = 0;
         for table_name in &self.modified_tables {
             // Use the file handler to write the table back to its source file
             self.file_handler.save_table(table_name)?;
+            count += 1;
         }
 
-        Ok(())
+        Ok(count)
     }
+    
+    /// Check if a specific table has been modified
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table to check
+    ///
+    /// # Returns
+    /// * `bool` - True if the table has been modified
+    pub fn is_table_modified(&self, table_name: &str) -> bool {
+        self.modified_tables.contains(table_name)
+    }
+    
+    /// Get a list of all available table names
+    ///
+    /// # Returns
+    /// * `Vec<String>` - List of table names
+    pub fn table_names(&self) -> Vec<String> {
+        self.file_handler.table_names()
+    }
+    
+    /// Get column names for a specific table
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table
+    ///
+    /// # Returns
+    /// * `SqawkResult<Vec<String>>` - List of column names
+    pub fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<String>> {
+        self.file_handler.get_table_columns(table_name)
+    }
+    
+    /// Save a specific table back to its original file
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table to save
+    ///
+    /// # Returns
+    /// * `Result<()>` - Result indicating success or failure
+    pub fn save_table(&self, table_name: &str) -> Result<()> {
+        Ok(self.file_handler.save_table(table_name)?)
+    }
+    
+    /// Check if any tables have been modified
+    ///
+    /// # Returns
+    /// * `bool` - True if any tables have been modified
+    pub fn has_modified_tables(&self) -> bool {
+        !self.modified_tables.is_empty()
+    }
+    
+    /// Load a file as a table
+    /// 
+    /// # Arguments
+    /// * `file_spec` - File specification in format [table_name=]file_path
+    ///
+    /// # Returns
+    /// * `SqawkResult<Option<(String, String)>>` - Tuple of (table_name, file_path) if successful
+    pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<Option<(String, String)>> {
+        self.file_handler.load_file(file_spec)
+    }
+    
+    /// Execute SQL statement and return a ResultSet for REPL mode
+    ///
+    /// # Arguments
+    /// * `sql` - SQL statement to execute
+    ///
+    /// # Returns
+    /// * `Result<Option<ResultSet>>` - Optional ResultSet containing query results
+    pub fn execute_sql(&mut self, sql: &str) -> Result<Option<ResultSet>> {
+        let result = self.execute(sql)?;
+        
+        Ok(result.map(|table| ResultSet {
+            columns: table.columns().to_vec(),
+            rows: table.rows_as_strings(),
+        }))
+    }
+}
+
+/// Result set structure for REPL output
+#[derive(Debug)]
+pub struct ResultSet {
+    /// Column names
+    pub columns: Vec<String>,
+    /// Rows as strings
+    pub rows: Vec<Vec<String>>,
 }

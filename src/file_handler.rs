@@ -66,21 +66,17 @@ impl FileHandler {
         }
     }
 
-    /// Load a file into an in-memory table
-    ///
-    /// This method determines the file format based on extension or explicit format argument
-    /// and delegates to the appropriate handler.
-    ///
+    /// Load a file into an in-memory table with explicit return of table name and path
+    /// 
     /// # Arguments
-    /// * `file_spec` - File specification in the format `[table_name=]file_path`
-    /// * `format` - Optional format override
+    /// * `file_spec` - File specification in format [table_name=]file_path
     ///
     /// # Returns
-    /// * `Ok(())` if the file was successfully loaded
-    /// * `Err` if there was an error parsing the file spec, opening the file, or parsing the file data
-    pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<()> {
+    /// * `SqawkResult<Option<(String, String)>>` - Tuple of (table_name, file_path) if successful
+    pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<Option<(String, String)>> {
         // Parse file spec to get table name and file path
         let (table_name, file_path) = self.parse_file_spec(file_spec)?;
+        let file_path_str = file_path.to_string_lossy().to_string();
 
         // Determine the file format based on extension
         let format = self.detect_format(&file_path);
@@ -88,16 +84,16 @@ impl FileHandler {
         match format {
             FileFormat::Csv => {
                 let table = self.csv_handler.load_csv(file_spec)?;
-                self.tables.insert(table_name, table);
+                self.tables.insert(table_name.clone(), table);
             }
             FileFormat::Delimited => {
                 let delimiter = self.field_separator.as_deref().unwrap_or("\t");
                 let table = self.delim_handler.load_delimited(file_spec, delimiter)?;
-                self.tables.insert(table_name, table);
+                self.tables.insert(table_name.clone(), table);
             }
         }
 
-        Ok(())
+        Ok(Some((table_name, file_path_str)))
     }
 
     /// Save a table back to its source file
@@ -161,6 +157,20 @@ impl FileHandler {
     /// Get the number of tables in the collection
     pub fn table_count(&self) -> usize {
         self.tables.len()
+    }
+    
+    /// Get column names for a specific table
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table
+    ///
+    /// # Returns
+    /// * `SqawkResult<Vec<String>>` - List of column names or error if table not found
+    pub fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<String>> {
+        match self.tables.get(table_name) {
+            Some(table) => Ok(table.columns().to_vec()),
+            None => Err(SqawkError::TableNotFound(table_name.to_string())),
+        }
     }
 
     /// Parse a file specification into table name and file path

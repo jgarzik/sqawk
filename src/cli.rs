@@ -33,8 +33,16 @@ pub struct SqawkArgs {
     /// Multiple SQL statements can be provided and they will be executed in sequence.
     /// Each statement operates on the state resulting from the previous statement.
     /// Example: -s "SELECT * FROM data" -s "DELETE FROM data WHERE id = 1"
-    #[clap(short, long, required = true, help = "SQL statement to execute")]
+    #[clap(short, long, required_unless_present = "interactive", help = "SQL statement to execute")]
     pub sql: Vec<String>,
+    
+    /// Start in interactive mode (REPL)
+    ///
+    /// When enabled, launches an interactive shell for entering SQL commands.
+    /// This mode allows exploration of data with immediate feedback.
+    /// Type .help in the interactive shell to see available commands.
+    #[clap(short, long, help = "Start in interactive mode")]
+    pub interactive: bool,
 
     /// Input files to process - format: [table_name=]file_path
     ///

@@ -472,6 +472,20 @@ impl Table {
         Ok(())
     }
 
+    /// Convert all rows to string representation
+    ///
+    /// This method converts all table rows to a vector of string vectors,
+    /// useful for displaying in the REPL interface.
+    ///
+    /// # Returns
+    /// * Vec<Vec<String>> - All rows converted to strings
+    pub fn rows_as_strings(&self) -> Vec<Vec<String>> {
+        self.rows
+            .iter()
+            .map(|row| row.iter().map(|value| value.to_string()).collect())
+            .collect()
+    }
+
     /// Create a new table with only specified columns
     ///
     /// Projects the table to include only the columns specified by their indices.

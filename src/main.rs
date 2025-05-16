@@ -32,6 +32,7 @@ mod csv_handler;
 mod delim_handler;
 mod error;
 mod file_handler;
+mod repl;
 mod sql_executor;
 mod string_functions;
 mod table;
@@ -39,6 +40,7 @@ mod table;
 use anyhow::{Context, Result};
 // Not explicitly importing SqawkArgs as it's not directly used
 use file_handler::FileHandler;
+use repl::Repl;
 use sql_executor::SqlExecutor;
 
 /// Main entry point for the sqawk utility
@@ -90,9 +92,16 @@ fn main() -> Result<()> {
         }
     }
 
-    // Step 3: Create SQL executor and process all SQL statements sequentially
+    // Step 3: Create SQL executor
     // The executor maintains state across statements, allowing multi-statement operations
     let mut sql_executor = SqlExecutor::new_with_verbose(file_handler, args.verbose);
+
+    // Check if interactive mode is requested
+    if args.interactive {
+        // Start REPL (Read-Eval-Print Loop) for interactive SQL entry
+        let mut repl = Repl::new(sql_executor, args.verbose, args.write, args.field_separator);
+        return repl.run().context("Failed to run interactive mode");
+    }
 
     // Process each SQL statement in the order specified on the command line
     // This allows operations like: UPDATE -> DELETE -> SELECT to see the effects
