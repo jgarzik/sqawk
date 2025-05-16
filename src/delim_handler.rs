@@ -83,15 +83,74 @@ impl DelimHandler {
             .flexible(true)       // Allow for variable number of fields
             .from_reader(reader);
 
-        // Get headers
-        let headers = csv_reader
-            .headers()
-            .map_err(SqawkError::CsvError)?
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        // Get headers or generate generic ones if needed
+        let headers = match csv_reader.headers().map_err(SqawkError::CsvError) {
+            Ok(header_row) => {
+                // Check if the first row looks like data rather than headers
+                // This helps with system files like /etc/passwd that don't have headers
+                let is_likely_data = header_row.iter().any(|field| {
+                    // Common indicators that a field is data, not a header
+                    field.starts_with('/') || // Path
+                    field == "*" ||           // Password placeholder
+                    field == "root" ||        // Common username
+                    field == "nobody" ||      // Common username
+                    field.parse::<i32>().is_ok() // Numeric ID
+                });
 
-        // Create a new table
+                if is_likely_data {
+                    // Generate alphabetical column names (a, b, c, etc.)
+                    (0..header_row.len())
+                        .map(|i| {
+                            // Convert number to alphabetical column name (a, b, ..., z, aa, ab, ...)
+                            let mut name = String::new();
+                            let mut n = i;
+                            loop {
+                                name.insert(0, (b'a' + (n % 26) as u8) as char);
+                                n /= 26;
+                                if n == 0 {
+                                    break;
+                                }
+                                n -= 1; // Adjust for the shift from 0-based to 1-based
+                            }
+                            name
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    // Use the headers as they are
+                    header_row.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+                }
+            },
+            Err(_) => {
+                // If we couldn't read headers, try to determine column count from first record
+                let record_iter = csv_reader.records();
+                let first_record = record_iter.into_iter().next();
+                
+                if let Some(Ok(record)) = first_record {
+                    // Generate alphabetical column names (a, b, c, etc.)
+                    (0..record.len())
+                        .map(|i| {
+                            // Convert number to alphabetical column name (a, b, ..., z, aa, ab, ...)
+                            let mut name = String::new();
+                            let mut n = i;
+                            loop {
+                                name.insert(0, (b'a' + (n % 26) as u8) as char);
+                                n /= 26;
+                                if n == 0 {
+                                    break;
+                                }
+                                n -= 1; // Adjust for the shift from 0-based to 1-based
+                            }
+                            name
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    // Fallback to a minimal set if we can't determine field count
+                    vec!["a".to_string()]
+                }
+            }
+        };
+
+        // Create a new table with the determined headers
         let mut table = Table::new(&table_name, headers, Some(file_path.clone()));
 
         // Read rows
