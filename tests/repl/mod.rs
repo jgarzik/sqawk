@@ -156,18 +156,32 @@ fn test_repl_multiline_statements() {
 }
 
 #[test]
-fn test_repl_save_command() {
+fn test_repl_save_command() -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::io::Write;
+    use tempfile::tempdir;
+    
+    // Create a temporary directory
+    let temp_dir = tempdir()?;
+    let temp_file_path = temp_dir.path().join("sample.csv");
+    
+    // Copy sample.csv to the temporary file
+    let original_content = fs::read_to_string("tests/data/sample.csv")?;
+    let mut temp_file = fs::File::create(&temp_file_path)?;
+    temp_file.write_all(original_content.as_bytes())?;
+    drop(temp_file); // Close the file
+
     // Commands to test the .save command
     let test_commands = 
         "UPDATE sample SET age = 33 WHERE id = 1;\n.save\nUPDATE sample SET age = 34 WHERE id = 2;\n.save sample\n.exit\n";
 
-    // Start the sqawk process with sample data loaded
+    // Start the sqawk process with the temporary file
     let mut process = Command::new("cargo")
         .args(&[
             "run",
             "--bin",
             "sqawk",
-            "tests/data/sample.csv",
+            temp_file_path.to_str().unwrap(),
             "--interactive",
         ])
         .stdin(Stdio::piped())
@@ -190,4 +204,13 @@ fn test_repl_save_command() {
     // Wait for process to complete
     let status = process.wait().expect("Failed to wait for sqawk process");
     assert!(status.success(), "Process did not exit successfully");
+    
+    // Verify the temporary file was modified
+    let modified_content = fs::read_to_string(&temp_file_path)?;
+    assert!(modified_content.contains("2,Bob,34"), "File was not modified as expected");
+    
+    // The temporary directory and its contents will be automatically deleted
+    // when it goes out of scope at the end of this function
+    
+    Ok(())
 }
