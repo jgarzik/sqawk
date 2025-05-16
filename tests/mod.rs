@@ -19,6 +19,7 @@ mod delimiter; // Tests for delimiter options (-F flag)
 mod group_by; // Tests for GROUP BY functionality
 mod join_on; // Tests for JOIN ON syntax (as opposed to WHERE for joins)
 mod limit_offset; // Tests for LIMIT and OFFSET clauses
+mod repl; // Tests for interactive REPL functionality with pre-generated input
 mod string_functions; // Tests for string functions (UPPER, LOWER, TRIM, SUBSTR, REPLACE)
 
 // Support modules
