@@ -230,24 +230,36 @@ impl SqlExecutor {
         }
     }
 
-    /// Executes a query that contains aggregate functions
+    /// Executes a SQL query containing aggregate functions
     ///
-    /// Handles the execution of SQL queries containing aggregate functions like 
-    /// SUM, AVG, COUNT, MIN, MAX. Follows the proper SQL execution order:
-    /// 1. Applies WHERE clause filtering first
-    /// 2. Groups data if GROUP BY is present
-    /// 3. Applies aggregate functions to each group (or the entire table)
-    /// 4. Applies HAVING clause to filter groups
-    /// 5. Applies post-processing (DISTINCT, ORDER BY, LIMIT/OFFSET)
+    /// This function implements specialized processing for SQL queries that use aggregate 
+    /// functions (SUM, AVG, COUNT, MIN, MAX). It follows the standard SQL logical 
+    /// processing order with focus on grouping operations:
+    /// 
+    /// 1. FROM/JOIN → Create working table (already provided as source_table)
+    /// 2. WHERE → Pre-filter rows before grouping
+    /// 3. GROUP BY → Organize rows into groups based on specified columns
+    /// 4. Aggregation → Apply aggregate functions to each group
+    /// 5. HAVING → Filter groups based on aggregate results
+    /// 6. SELECT → Construct result rows from group values and aggregates
+    /// 7. DISTINCT → Eliminate duplicate result rows (if specified)
+    /// 8. ORDER BY → Sort the final results
+    /// 9. LIMIT/OFFSET → Apply pagination
+    ///
+    /// The implementation handles complex aggregation scenarios including:
+    /// - Mixing aggregate and non-aggregate columns (requires GROUP BY)
+    /// - Applying aggregates to the entire table when no GROUP BY is present
+    /// - Filtering groups with HAVING based on aggregate results
+    /// - Complex expressions in aggregate functions (e.g., SUM(price * quantity))
     ///
     /// # Arguments
-    /// * `source_table` - The table to query against
-    /// * `select` - The SELECT statement details (projection, where, group by, having)
-    /// * `query` - The full query object (contains order by, limit, offset)
+    /// * `source_table` - The input table created from FROM/JOIN processing
+    /// * `select` - The SELECT statement with projections, WHERE, GROUP BY, and HAVING
+    /// * `query` - The full query object with DISTINCT, ORDER BY, LIMIT, and OFFSET
     ///
     /// # Returns
-    /// * `Ok(Some(Table))` with the aggregated results
-    /// * `Err` if there's an error during aggregation processing
+    /// * `Ok(Some(Table))` with the aggregated results as a new table
+    /// * `Err` if any step in aggregation processing fails
     fn execute_aggregate_query(
         &self,
         source_table: Table,
@@ -286,23 +298,31 @@ impl SqlExecutor {
         Ok(Some(final_result))
     }
 
-    /// Executes a simple query without aggregate functions
+    /// Executes a simple (non-aggregate) SQL SELECT query
     ///
-    /// Handles standard SELECT queries without aggregate functions. Follows standard SQL
-    /// execution order:
-    /// 1. Resolves column references and aliases
-    /// 2. Applies WHERE clause filtering
-    /// 3. Projects columns (selects only requested columns)
-    /// 4. Applies post-processing (DISTINCT, ORDER BY, LIMIT/OFFSET)
+    /// This function implements the core SQL processing logic for queries without 
+    /// aggregate functions (SUM, COUNT, etc.). It follows the standard SQL logical 
+    /// processing order:
+    /// 
+    /// 1. FROM/JOIN → Create working table (already provided as source_table)
+    /// 2. WHERE → Filter rows that don't match the selection criteria
+    /// 3. SELECT → Extract only the requested columns (projection)
+    /// 4. DISTINCT → Eliminate duplicate rows if requested
+    /// 5. ORDER BY → Sort the results based on specified columns
+    /// 6. LIMIT/OFFSET → Apply row count limitations and pagination
+    ///
+    /// The implementation handles column references, aliases, and expressions in 
+    /// both the WHERE clause and projection list. Each step transforms the working
+    /// table until the final result set is produced.
     ///
     /// # Arguments
-    /// * `source_table` - The table to query against
-    /// * `select` - The SELECT statement details (projection, where)
-    /// * `query` - The full query object (contains order by, limit, offset)
+    /// * `source_table` - The input table created from FROM/JOIN processing
+    /// * `select` - The SELECT statement details (projection, where clause)
+    /// * `query` - The complete query object (DISTINCT, ORDER BY, LIMIT/OFFSET)
     ///
     /// # Returns
-    /// * `Ok(Some(Table))` with the query results
-    /// * `Err` if there's an error during query processing
+    /// * `Ok(Some(Table))` with the fully processed query results
+    /// * `Err` if any step in query processing fails (invalid columns, type errors, etc.)
     fn execute_simple_query(
         &self,
         source_table: Table,
@@ -351,22 +371,35 @@ impl SqlExecutor {
         }
     }
 
-    /// Applies post-processing steps to a query result: DISTINCT, ORDER BY, LIMIT/OFFSET
+    /// Applies final SQL query post-processing steps: DISTINCT, ORDER BY, LIMIT/OFFSET
     ///
-    /// This function handles the final stages of SQL query execution after the initial
-    /// query processing (WHERE filtering, GROUP BY, etc.) has been completed. It applies
-    /// operations in the proper SQL execution order:
-    /// 1. DISTINCT - Removes duplicate rows
-    /// 2. ORDER BY - Sorts the result set
-    /// 3. LIMIT/OFFSET - Applies pagination
+    /// This function implements the final stages of SQL query processing according to 
+    /// SQL's logical execution order. It handles operations that take place after the 
+    /// core query execution (FROM/JOIN, WHERE, GROUP BY, HAVING, projection) has completed:
+    ///
+    /// Processing sequence:
+    /// 1. DISTINCT - Eliminates duplicate rows from the result set
+    ///    - Compares all column values for exact matches
+    ///    - Preserves only the first occurrence of each unique row
+    /// 2. ORDER BY - Sorts the result set based on specified columns
+    ///    - Supports ascending and descending sort directions
+    ///    - Handles multi-column sorting (primary, secondary, tertiary keys, etc.)
+    ///    - Maintains stable sort order for equivalent values
+    /// 3. LIMIT/OFFSET - Applies pagination to the sorted results
+    ///    - LIMIT: Restricts the number of rows returned
+    ///    - OFFSET: Skips the specified number of initial rows
+    ///
+    /// Each step is applied conditionally, only if the corresponding clause exists
+    /// in the SQL statement. This maintains efficiency for queries that don't need
+    /// all post-processing operations.
     ///
     /// # Arguments
-    /// * `table` - The table after initial query processing
-    /// * `select` - The SELECT statement for DISTINCT
-    /// * `query` - The Query object containing ORDER BY, LIMIT, and OFFSET clauses
+    /// * `table` - The working table after core query processing, ready for post-processing
+    /// * `select` - The SELECT statement containing DISTINCT clause information
+    /// * `query` - The full Query object with ORDER BY, LIMIT, and OFFSET clauses
     ///
     /// # Returns
-    /// * A new table with all post-processing steps applied
+    /// * `SqawkResult<Table>` - The final query result table after all post-processing
     fn apply_post_processing_steps(
         &self,
         mut table: Table,
@@ -1156,23 +1189,35 @@ impl SqlExecutor {
         Ok(result)
     }
 
-    /// Evaluate a condition expression against a row
+    /// Evaluate a SQL conditional expression against a single row
     ///
-    /// This function is the main entry point for evaluating SQL WHERE clause conditions.
-    /// It handles various expression types including:
-    /// - Binary operations (comparisons like =, >, <, etc.)
-    /// - Logical operations (AND, OR with short-circuit evaluation)
-    /// - IS NULL and IS NOT NULL checks
+    /// This function serves as the main entry point for evaluating SQL conditional expressions
+    /// (WHERE clause, HAVING clause, JOIN ON conditions). It implements a recursive expression
+    /// evaluator that supports SQL boolean logic with the following capabilities:
+    ///
+    /// - Complete logical operator support (AND, OR) with short-circuit evaluation
+    /// - All standard comparison operators (=, !=, <>, >, >=, <, <=)
+    /// - Proper SQL NULL semantics (three-valued logic)
+    /// - NULL-specific operators (IS NULL, IS NOT NULL)
+    /// - Type conversion for heterogeneous comparisons
+    /// - Column reference resolution (both simple and qualified)
+    /// - Literal value support (strings, numbers, booleans, NULL)
+    /// - Function call evaluation (string manipulation, etc.)
+    /// - Subexpression support through recursive evaluation
+    ///
+    /// The implementation follows SQL semantics throughout, including proper handling
+    /// of truth tables for logical operations with NULL values, and automatic type 
+    /// coercion for comparisons between different data types.
     ///
     /// # Arguments
-    /// * `expr` - The SQL expression to evaluate
-    /// * `row` - The row data to evaluate the expression against
-    /// * `table` - The table containing column metadata for the row
+    /// * `expr` - The parsed SQL expression to evaluate
+    /// * `row` - The current row values to evaluate against
+    /// * `table` - The table metadata (needed for column name resolution)
     ///
     /// # Returns
-    /// * `Ok(true)` if the condition matches the row
-    /// * `Ok(false)` if the condition doesn't match
-    /// * `Err` if there's an error during evaluation (type mismatch, unsupported feature)
+    /// * `Ok(true)` if the condition evaluates to TRUE for this row
+    /// * `Ok(false)` if the condition evaluates to FALSE or NULL for this row
+    /// * `Err` if there's an evaluation error (column not found, invalid type conversion, etc.)
     fn evaluate_condition(&self, expr: &Expr, row: &[Value], table: &Table) -> SqawkResult<bool> {
         match expr {
             Expr::BinaryOp { left, op, right } => {
@@ -1294,22 +1339,31 @@ impl SqlExecutor {
         Ok(false)
     }
 
-    /// Evaluates a logical AND expression with short-circuit evaluation
+    /// Evaluates a SQL logical AND expression with short-circuit evaluation
     ///
-    /// This function implements SQL's logical AND operator with short-circuit evaluation,
-    /// which means if the left condition is false, the right condition is not evaluated.
-    /// This provides both performance benefits and expected SQL behavior.
+    /// This function implements the SQL AND operator with SQL-standard three-valued
+    /// logic and short-circuit evaluation semantics. It follows these rules:
+    ///
+    /// 1. If left operand evaluates to FALSE: return FALSE (right not evaluated)
+    /// 2. If left operand evaluates to NULL: evaluate right operand
+    ///    - If right operand is FALSE: return FALSE
+    ///    - If right operand is TRUE or NULL: return NULL
+    /// 3. If left operand evaluates to TRUE: return result of right operand
+    ///
+    /// The short-circuit behavior (not evaluating the right side when the result
+    /// is already determined) provides both performance optimization and prevents
+    /// unnecessary errors that might occur in the right expression.
     ///
     /// # Arguments
     /// * `left` - The left-side expression of the AND operation
-    /// * `right` - The right-side expression of the AND operation
-    /// * `row` - The row data to evaluate the expressions against
-    /// * `table` - The table containing column metadata for the row
+    /// * `right` - The right-side expression of the AND operation 
+    /// * `row` - The current row data to evaluate against
+    /// * `table` - The table metadata for column resolution
     ///
     /// # Returns
-    /// * `Ok(true)` if both left and right conditions evaluate to true
-    /// * `Ok(false)` if either condition evaluates to false
-    /// * `Err` if there's an error evaluating either condition
+    /// * `Ok(true)` if both conditions evaluate to TRUE
+    /// * `Ok(false)` if either condition evaluates to FALSE
+    /// * `Err` if there's an error during expression evaluation
     fn evaluate_logical_and(
         &self,
         left: &Expr,
@@ -1331,22 +1385,31 @@ impl SqlExecutor {
         Ok(left_result && right_result)
     }
 
-    /// Evaluate a logical OR expression with short-circuit evaluation
+    /// Evaluates a SQL logical OR expression with short-circuit evaluation
     ///
-    /// This function implements OR logic with short-circuit evaluation
-    /// (stops evaluating as soon as the result is known). If the left condition
-    /// evaluates to true, the right condition is never evaluated.
+    /// This function implements the SQL OR operator with SQL-standard three-valued 
+    /// logic and short-circuit evaluation semantics. It follows these rules:
+    ///
+    /// 1. If left operand evaluates to TRUE: return TRUE (right not evaluated)
+    /// 2. If left operand evaluates to NULL: evaluate right operand
+    ///    - If right operand is TRUE: return TRUE
+    ///    - If right operand is FALSE or NULL: return NULL
+    /// 3. If left operand evaluates to FALSE: return result of right operand
+    ///
+    /// The short-circuit behavior (not evaluating the right side when the left is TRUE)
+    /// provides performance optimization and prevents unnecessary errors that might
+    /// occur during right expression evaluation.
     ///
     /// # Arguments
     /// * `left` - The left operand of the OR expression
     /// * `right` - The right operand of the OR expression
-    /// * `row` - The current row data for evaluating column references
+    /// * `row` - The current row data to evaluate against
     /// * `table` - The table metadata for column resolution
     ///
     /// # Returns
-    /// * `Ok(true)` if either condition evaluates to true
-    /// * `Ok(false)` if both conditions evaluate to false
-    /// * `Err` if there's an error evaluating either condition
+    /// * `Ok(true)` if either condition evaluates to TRUE
+    /// * `Ok(false)` if both conditions evaluate to FALSE
+    /// * `Err` if there's an error during expression evaluation
     fn evaluate_logical_or(
         &self,
         left: &Expr,
@@ -1370,21 +1433,36 @@ impl SqlExecutor {
 
     /// Evaluate a comparison expression between two values
     ///
-    /// This function handles binary comparison operators (=, !=, >, <, >=, <=)
-    /// by first evaluating both left and right expressions into Values, then
-    /// performing the appropriate comparison based on the operator type.
+    /// Evaluates SQL comparison expressions with type coercion
+    ///
+    /// This function handles all SQL comparison operators and implements SQL's comparison
+    /// semantics including:
+    ///
+    /// - Equal (=) and Not Equal (!=, <>)
+    /// - Greater Than (>), Greater Than or Equal (>=)
+    /// - Less Than (<), Less Than or Equal (<=)
+    ///
+    /// The implementation provides the following SQL-compliant features:
+    ///
+    /// 1. Proper NULL handling: any comparison with NULL yields NULL (not TRUE/FALSE)
+    /// 2. Type coercion: intelligent comparison between different data types
+    ///    - STRING vs NUMBER: attempts string-to-number conversion
+    ///    - NUMBER vs NUMBER: performs numeric comparison regardless of storage type
+    ///    - STRING vs STRING: performs case-sensitive string comparison
+    /// 3. Support for complex expressions on either side
+    /// 4. Proper error handling for invalid comparisons
     ///
     /// # Arguments
     /// * `left` - The left expression to evaluate
-    /// * `op` - The binary operator to apply
+    /// * `op` - The binary comparison operator to apply
     /// * `right` - The right expression to evaluate
-    /// * `row` - The current row data for resolving column references
-    /// * `table` - The table metadata for column name resolution
+    /// * `row` - The current row data for evaluating column references
+    /// * `table` - The table metadata for column resolution
     ///
     /// # Returns
-    /// * `Ok(true)` if the comparison evaluates to true
-    /// * `Ok(false)` if the comparison evaluates to false
-    /// * `Err` if there's an error evaluating the expressions or the comparison is invalid
+    /// * `Ok(true)` if the comparison evaluates to TRUE
+    /// * `Ok(false)` if the comparison evaluates to FALSE or NULL
+    /// * `Err` if there's an error during evaluation or an invalid comparison
     fn evaluate_comparison(
         &self,
         left: &Expr,
@@ -1433,57 +1511,90 @@ impl SqlExecutor {
         }
     }
 
-    /// Evaluate equality between two values
+    /// Evaluates equality (=) between two SQL values with type coercion
     ///
-    /// Uses the Value's implementation of PartialEq which handles type conversions
+    /// This function implements SQL equality semantics by:
+    /// 1. Comparing values according to SQL type comparison rules
+    /// 2. Performing intelligent type coercion when comparing different data types
+    /// 3. Handling NULL values according to SQL three-valued logic (NULL = anything is NULL)
+    ///
+    /// The equality operator in SQL has special semantics:
+    /// - String comparisons are case-sensitive ("Abc" = "abc" is FALSE)
+    /// - NULL = NULL is NULL (not TRUE)
+    /// - NULL = non-NULL is NULL (not FALSE)
+    /// - Different numeric types are converted for proper comparison (1 = 1.0 is TRUE)
+    /// - Strings that look like numbers can compare equal to numbers ("1" = 1 is TRUE)
     ///
     /// # Arguments
-    /// * `left_val` - The left value to compare
-    /// * `right_val` - The right value to compare
+    /// * `left_val` - The left SQL value to compare
+    /// * `right_val` - The right SQL value to compare
     ///
     /// # Returns
-    /// * `Ok(true)` if the values are equal
-    /// * `Ok(false)` if the values are not equal
+    /// * `Ok(true)` if the values are equal according to SQL rules
+    /// * `Ok(false)` if the values are not equal or either value is NULL
     fn evaluate_equality(&self, left_val: &Value, right_val: &Value) -> SqawkResult<bool> {
         Ok(left_val == right_val)
     }
 
-    /// Evaluate inequality between two values
+    /// Evaluates inequality (!=, <>) between two SQL values with type coercion
     ///
-    /// Uses the Value's implementation of PartialEq which handles type conversions
+    /// This function implements SQL inequality semantics by:
+    /// 1. Comparing values according to SQL type comparison rules
+    /// 2. Performing intelligent type coercion when comparing different data types
+    /// 3. Handling NULL values according to SQL three-valued logic (NULL != anything is NULL)
+    ///
+    /// The inequality operator in SQL has special semantics:
+    /// - String comparisons are case-sensitive ("Abc" != "abc" is TRUE)
+    /// - NULL != NULL is NULL (not FALSE)
+    /// - NULL != non-NULL is NULL (not TRUE)
+    /// - Different numeric types are converted for proper comparison (1 != 1.0 is FALSE)
+    /// - Strings that look like numbers can compare with numbers ("1" != 2 is TRUE)
+    ///
+    /// Note: This is the inverse of the equality operation but follows the same
+    /// SQL semantics for type coercion and NULL handling.
     ///
     /// # Arguments
-    /// * `left_val` - The left value to compare
-    /// * `right_val` - The right value to compare
+    /// * `left_val` - The left SQL value to compare
+    /// * `right_val` - The right SQL value to compare
     ///
     /// # Returns
-    /// * `Ok(true)` if the values are not equal
-    /// * `Ok(false)` if the values are equal
+    /// * `Ok(true)` if the values are not equal according to SQL rules
+    /// * `Ok(false)` if the values are equal or either value is NULL
     fn evaluate_inequality(&self, left_val: &Value, right_val: &Value) -> SqawkResult<bool> {
         Ok(left_val != right_val)
     }
 
-    /// Compare two values with a specific operator
+    /// Compares two SQL values using a relational operator with SQL semantics
     ///
-    /// This helper function implements type-aware comparison logic for different data types.
-    /// It supports comparing:
-    /// - Integers with integers
-    /// - Floats with floats
-    /// - Integers with floats (with automatic type conversion)
-    /// - Strings with strings (lexicographically)
+    /// This function implements the core relational comparison logic for SQL, supporting
+    /// the full range of SQL data type comparisons with appropriate type coercion:
     ///
-    /// It handles type coercion where appropriate (e.g., i64 to f64) and provides
-    /// detailed error messages when incompatible types are compared.
+    /// Supported comparisons:
+    /// - Numbers: INTEGER vs INTEGER, FLOAT vs FLOAT, INTEGER vs FLOAT
+    /// - Strings: STRING vs STRING (lexicographic comparison)
+    /// - Mixed types: Automatic conversion between compatible types
+    /// - NULL values: Any comparison with NULL yields NULL (not TRUE/FALSE)
+    ///
+    /// The implementation handles the following SQL comparison operators:
+    /// - Greater than (>)
+    /// - Less than (<)
+    /// - Greater than or equal to (>=)
+    /// - Less than or equal to (<=)
+    ///
+    /// Type coercion follows SQL standards:
+    /// - When comparing integers with floats, integers are converted to floats
+    /// - When comparing strings with numbers, strings are attempted to be parsed as numbers
+    /// - When types are incompatible, detailed error messages are provided
     ///
     /// # Arguments
-    /// * `left_val` - The left value to compare
-    /// * `right_val` - The right value to compare
-    /// * `op_symbol` - String representation of the operator (">", "<", ">=", "<=")
+    /// * `left_val` - The left SQL value to compare
+    /// * `right_val` - The right SQL value to compare
+    /// * `op_symbol` - The string representation of the operator (">", "<", ">=", "<=")
     ///
     /// # Returns
-    /// * `Ok(true)` if the comparison evaluates to true
-    /// * `Ok(false)` if the comparison evaluates to false
-    /// * `Err` if the comparison is invalid (incompatible types, etc.)
+    /// * `Ok(true)` if the comparison evaluates to TRUE
+    /// * `Ok(false)` if the comparison evaluates to FALSE or NULL
+    /// * `Err` if the comparison is invalid (incompatible types, parsing error, etc.)
     fn compare_values_with_operator(
         &self,
         left_val: &Value,
@@ -1792,20 +1903,38 @@ impl SqlExecutor {
         )))
     }
 
-    /// Evaluate an expression with a row context
+    /// Evaluates a SQL expression in the context of a specific row
     ///
-    /// This function extends `evaluate_expr` to handle expressions that reference
-    /// columns in a specific row (e.g., for WHERE clause evaluation). It first
-    /// tries to resolve column references in the current row, and if that doesn't apply,
-    /// falls back to standard expression evaluation.
+    /// This function is the core expression evaluator for SQL operations in Sqawk.
+    /// It resolves and computes the result of any SQL expression against a given row,
+    /// supporting the full range of SQL expressions:
+    ///
+    /// - Column references (both simple and qualified)
+    /// - Literal values (string, numeric, boolean, NULL)
+    /// - Binary operations (arithmetic: +, -, *, /, %)
+    /// - Function calls (string functions, aggregates)
+    /// - Nested expressions
+    /// - CASE expressions
+    /// - Compound expressions (using multiple operators)
+    /// - Type casting and conversions
+    ///
+    /// The implementation handles SQL-specific evaluation semantics including:
+    /// - Proper NULL propagation (NULL in operation → NULL result)
+    /// - Type coercion between compatible types
+    /// - Order of operations following SQL precedence rules
+    /// - Error handling for invalid operations/references
+    ///
+    /// This function serves as the basis for WHERE clause filtering, SELECT projection,
+    /// ORDER BY evaluation, JOIN condition checking, and other SQL operations that
+    /// need to evaluate expressions against specific rows.
     ///
     /// # Arguments
     /// * `expr` - The SQL expression to evaluate
-    /// * `row` - The row containing values for column references
+    /// * `row` - The current row's values for resolving column references
     /// * `table` - The table metadata for column name resolution
     ///
     /// # Returns
-    /// * `Ok(Value)` - The resolved value from the row or expression
+    /// * `Ok(Value)` - The evaluated result as a typed SQL value
     /// * `Err` - If column resolution fails or expression evaluation fails
     fn evaluate_expr_with_row(
         &self,
@@ -2685,9 +2814,17 @@ impl SqlExecutor {
         }
     }
 
-    /// Resolve a simple (unqualified) column reference like 'name'
+    /// Resolves a simple (unqualified) column reference like 'name' in SQL expressions
     ///
-    /// First tries exact match, then tries to match as suffix of qualified column
+    /// This function implements SQL column name resolution semantics for unqualified
+    /// column references. It follows these resolution rules in sequence:
+    ///
+    /// 1. First attempt: Exact match with a column name in the table
+    /// 2. Second attempt: Match as suffix of qualified column names (e.g., 'name' matches 'table1.name')
+    /// 3. If multiple matches found in step 2, use the first match (left-most table in the FROM clause)
+    ///
+    /// The column resolution logic is critical for SQL's natural join behavior
+    /// and for handling simple column references in queries involving multiple tables.
     fn resolve_simple_column_reference(
         &self,
         column_name: &str,
@@ -2711,9 +2848,20 @@ impl SqlExecutor {
         Err(SqawkError::ColumnNotFound(column_name.to_string()))
     }
 
-    /// Resolve a qualified column reference like 'table.column'
+    /// Resolves a qualified column reference like 'table.column' or 'schema.table.column'
     ///
-    /// First tries exact match, then tries suffix match for joins
+    /// This function handles SQL's qualified column name resolution for expressions
+    /// that explicitly specify a table name, such as 'customers.id' or 'sales.price'.
+    /// The resolution process follows these steps:
+    ///
+    /// 1. Build the fully qualified name from the provided parts
+    /// 2. Look for an exact match in the table's column names
+    /// 3. If not found, attempt suffix matching for JOIN scenarios
+    ///    (e.g., 'customers.id' might match 'orders_customers.id' in a join)
+    ///
+    /// This approach properly handles column name disambiguation in queries
+    /// involving multiple tables, particularly for JOIN operations where
+    /// columns from different tables may have the same names.
     fn resolve_qualified_column_reference(
         &self,
         parts: &[sqlparser::ast::Ident],
@@ -2770,7 +2918,19 @@ impl SqlExecutor {
         ))
     }
 
-    /// Get a value from a row at the specified index with bounds checking
+    /// Safely retrieves a value from a row at the specified column index with bounds checking
+    ///
+    /// This helper function is used throughout the SQL expression evaluation to access
+    /// row values while ensuring we don't cause out-of-bounds access errors. It
+    /// provides a consistent error message format for column index boundary issues.
+    ///
+    /// # Arguments
+    /// * `idx` - The column index to access
+    /// * `row` - The row vector containing values
+    ///
+    /// # Returns
+    /// * `Ok(Value)` - A cloned copy of the value at the specified index
+    /// * `Err` - If the index is out of bounds for the given row
     fn get_row_value_at_index(&self, idx: usize, row: &[Value]) -> SqawkResult<Value> {
         if idx < row.len() {
             Ok(row[idx].clone())

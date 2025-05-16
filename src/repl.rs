@@ -405,24 +405,24 @@ impl Repl {
     /// Show help message
     fn show_help(&self) -> Result<()> {
         println!("Available commands:");
-        println!("  .help                 Show this help message");
-        println!("  .exit ?CODE?          Exit the REPL with optional code");
-        println!("  .quit                 Exit the REPL");
-        println!("  .tables ?TABLE?       List names of tables matching LIKE pattern TABLE");
-        println!("  .schema ?TABLE?       Show schema for a specific table or all tables");
-        println!("  .columns TABLE        Show columns for TABLE (alias for .schema TABLE)");
-        println!("  .load [TABLE=]FILE    Load FILE into TABLE");
-        println!(
-            "  .write [on|off]       Toggle writing changes to files (currently: {})",
-            if self.write { "ON" } else { "OFF" }
-        );
+        println!("  .cd DIRECTORY         Change the working directory to DIRECTORY");
         println!(
             "  .changes [on|off]     Show number of rows changed by SQL (currently: {})",
             if self.show_changes { "ON" } else { "OFF" }
         );
-        println!("  .cd DIRECTORY         Change the working directory to DIRECTORY");
+        println!("  .columns TABLE        Show columns for TABLE (alias for .schema TABLE)");
+        println!("  .exit ?CODE?          Exit the REPL with optional code");
+        println!("  .help                 Show this help message");
+        println!("  .load [TABLE=]FILE    Load FILE into TABLE");
         println!("  .print STRING...      Print literal STRING");
+        println!("  .quit                 Exit the REPL");
+        println!("  .schema ?TABLE?       Show schema for a specific table or all tables");
+        println!("  .tables ?TABLE?       List names of tables matching LIKE pattern TABLE");
         println!("  .version              Show source, library and compiler versions");
+        println!(
+            "  .write [on|off]       Toggle writing changes to files (currently: {})",
+            if self.write { "ON" } else { "OFF" }
+        );
         println!("  SQL_STATEMENT         Execute SQL statement");
         Ok(())
     }
