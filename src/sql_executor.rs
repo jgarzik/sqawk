@@ -28,7 +28,7 @@ use sqlparser::parser::Parser;
 use crate::aggregate::AggregateFunction;
 use crate::error::{SqawkError, SqawkResult};
 use crate::database::Database;
-use crate::file_handler_new::FileHandler;
+use crate::file_manager::FileHandler;
 use crate::string_functions::StringFunction;
 use crate::table::{ColumnDefinition, DataType, SortDirection, Table, Value};
 
@@ -3302,9 +3302,35 @@ impl SqlExecutor {
     pub fn save_modified_tables(&self) -> Result<usize> {
         let mut count = 0;
         for table_name in &self.modified_tables {
-            // Use the file handler to write the table back to its source file
-            self.file_handler.save_table(table_name)?;
-            count += 1;
+            // Get the table from the database
+            let table = self.database.get_table(table_name)?;
+            
+            // Check if the table has a file path
+            if let Some(file_path) = table.file_path() {
+                // Use the appropriate handler based on the file extension
+                if let Some(extension) = file_path.extension().and_then(|ext| ext.to_str()) {
+                    let is_csv = extension.eq_ignore_ascii_case("csv");
+                    
+                    if is_csv {
+                        // Use CSV handler
+                        self.file_handler.csv_handler.save_table(table_name, table)?;
+                    } else {
+                        // Use delimiter handler with the table's delimiter
+                        let delimiter = &table.delimiter;
+                        self.file_handler.delim_handler.save_table(table_name, table, delimiter)?;
+                    }
+                    count += 1;
+                } else {
+                    // No extension, default to CSV
+                    self.file_handler.csv_handler.save_table(table_name, table)?;
+                    count += 1;
+                }
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Table '{}' doesn't have a file path. Use CREATE TABLE with LOCATION to specify a file path.",
+                    table_name
+                ));
+            }
         }
 
         Ok(count)
