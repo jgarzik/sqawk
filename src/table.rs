@@ -240,7 +240,7 @@ pub struct Table {
     schema: Option<Vec<ColumnDefinition>>,
     
     /// Custom delimiter for this table's file (default is comma)
-    pub delimiter: String,
+    delimiter: String,
 
     /// The file format for this table (currently only TEXTFILE is supported)
     file_format: String,
@@ -460,17 +460,6 @@ impl Table {
     /// * `None` if the table has no associated file
     pub fn file_path(&self) -> Option<&PathBuf> {
         self.file_path.as_ref()
-    }
-    
-    /// Set the file path for this table
-    ///
-    /// This allows updating the file path after the table is created.
-    /// Used for normalizing paths in CREATE TABLE statements.
-    ///
-    /// # Arguments
-    /// * `path` - The new file path for the table
-    pub fn set_file_path(&mut self, path: Option<PathBuf>) {
-        self.file_path = path;
     }
     
     /// Get the delimiter for this table

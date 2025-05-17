@@ -29,11 +29,9 @@
 mod aggregate;
 mod cli;
 mod csv_handler;
-mod database;
 mod delim_handler;
 mod error;
 mod file_handler;
-mod file_manager;
 mod repl;
 mod sql_executor;
 mod string_functions;
@@ -41,8 +39,7 @@ mod table;
 
 use anyhow::{Context, Result};
 // Not explicitly importing SqawkArgs as it's not directly used
-use database::Database;
-use file_manager::FileHandler;
+use file_handler::FileHandler;
 use repl::Repl;
 use sql_executor::SqlExecutor;
 
@@ -74,13 +71,10 @@ fn main() -> Result<()> {
         println!("Arguments: {args:?}");
     }
 
-    // Step 2a: Create a new database to hold all tables
-    let mut database = Database::new();
-
-    // Step 2b: Initialize the file handler with optional custom field separator and table definitions
+    // Step 2a: Initialize the file handler with optional custom field separator and table definitions
     // The field separator determines how input files are parsed (comma, tab, etc.)
     // Table definitions allow specifying custom column names for files without headers
-    let file_handler = FileHandler::new(
+    let mut file_handler = FileHandler::new(
         args.field_separator.clone(),
         if args.tabledef.is_empty() {
             None
@@ -89,26 +83,26 @@ fn main() -> Result<()> {
         },
     );
 
-    // Step 2c: Load all specified files into in-memory tables in the database
+    // Step 2b: Load all specified files into in-memory tables
     // Each file can specify its table name with table_name=file_path syntax
     for file_spec in &args.files {
         file_handler
-            .load_file(file_spec, &mut database)
+            .load_file(file_spec)
             .with_context(|| format!("Failed to load file: {file_spec}"))?;
     }
 
     // Log table loading results in verbose mode
     if args.verbose {
-        let table_count = database.table_count();
+        let table_count = file_handler.table_count();
         println!("Loaded {table_count} tables");
-        for table_name in database.table_names() {
+        for table_name in file_handler.table_names() {
             println!("Table '{table_name}' loaded");
         }
     }
 
     // Step 3: Create SQL executor
     // The executor maintains state across statements, allowing multi-statement operations
-    let mut sql_executor = SqlExecutor::new_with_verbose(file_handler, database, args.verbose);
+    let mut sql_executor = SqlExecutor::new_with_verbose(file_handler, args.verbose);
 
     // Check if interactive mode is requested
     if args.interactive {

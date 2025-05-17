@@ -692,15 +692,18 @@ impl Repl {
     fn save_tables(&mut self, table_name: Option<&str>) -> Result<()> {
         match table_name {
             Some(name) => {
-                // Save a specific table if it exists
+                // Save a specific table if it exists and is modified
                 if !self.executor.table_exists(name) {
                     return Err(ReplError::Sqawk(crate::error::SqawkError::TableNotFound(
                         name.to_string(),
                     )));
                 }
                 
-                // Try to save the table directly without checking if it's modified
-                // This allows saving tables created with CREATE TABLE
+                if !self.executor.table_is_modified(name) {
+                    println!("Table '{}' has no changes to save", name);
+                    return Ok(());
+                }
+                
                 match self.executor.save_table(name) {
                     Ok(_) => {
                         println!("Changes saved to table '{}'", name);
@@ -710,47 +713,19 @@ impl Repl {
                 }
             }
             None => {
-                // For saving all tables, we'll try to save any table that's been modified
-                // or created with CREATE TABLE + LOCATION
-                
-                // First get all table names
-                let table_names = self.executor.table_names();
-                
-                // Track count of saved tables
-                let mut saved_count = 0;
-                let mut errors = Vec::new();
-                
-                // Try saving each table
-                for name in table_names {
-                    // Only try saving if the table is modified or if it was created with CREATE TABLE
-                    if self.executor.table_is_modified(&name) {
-                        match self.executor.save_table(&name) {
-                            Ok(_) => {
-                                saved_count += 1;
-                            }
-                            Err(err) => {
-                                // Only collect errors that aren't "no source file"
-                                if !err.to_string().contains("doesn't have a source file") {
-                                    errors.push((name.clone(), err));
-                                }
-                            }
-                        }
-                    }
+                // Save all modified tables
+                if !self.executor.has_modified_tables() {
+                    println!("No modified tables to save");
+                    return Ok(());
                 }
                 
-                // If no tables were saved, report
-                if saved_count == 0 && errors.is_empty() {
-                    println!("No tables saved");
-                } else {
-                    println!("Changes saved to {} tables", saved_count);
-                    
-                    // Report any errors
-                    for (table, err) in errors {
-                        eprintln!("Error saving table '{}': {}", table, err);
+                match self.executor.save_modified_tables() {
+                    Ok(count) => {
+                        println!("Changes saved to {} tables", count);
+                        Ok(())
                     }
+                    Err(err) => Err(ReplError::SqlExecutor(err)),
                 }
-                
-                Ok(())
             }
         }
     }

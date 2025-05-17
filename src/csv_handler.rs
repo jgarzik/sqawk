@@ -204,9 +204,6 @@ impl CsvHandler {
                 table.name()
             ))
         })?;
-        
-        // Debug print the file path to help diagnose issues
-        println!("Saving table '{}' to file: {:?}", table.name(), file_path);
 
         // Open the CSV file for writing
         let file = File::create(file_path)?;

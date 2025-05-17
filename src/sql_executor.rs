@@ -27,18 +27,14 @@ use sqlparser::parser::Parser;
 
 use crate::aggregate::AggregateFunction;
 use crate::error::{SqawkError, SqawkResult};
-use crate::database::Database;
 use crate::file_handler::FileHandler;
 use crate::string_functions::StringFunction;
 use crate::table::{ColumnDefinition, DataType, SortDirection, Table, Value};
 
 /// SQL statement executor
 pub struct SqlExecutor {
-    /// File handler for managing file operations
+    /// File handler for managing tables
     file_handler: FileHandler,
-    
-    /// Database for managing tables
-    database: Database,
 
     /// Names of tables that have been modified
     modified_tables: HashSet<String>,
@@ -51,11 +47,10 @@ pub struct SqlExecutor {
 }
 
 impl SqlExecutor {
-    /// Create a new SQL executor with the given file handler, database, and verbose flag
-    pub fn new_with_verbose(file_handler: FileHandler, database: Database, verbose: bool) -> Self {
+    /// Create a new SQL executor with the given file handler and verbose flag
+    pub fn new_with_verbose(file_handler: FileHandler, verbose: bool) -> Self {
         SqlExecutor {
             file_handler,
-            database,
             modified_tables: HashSet::new(),
             verbose,
             affected_row_count: 0,
@@ -65,75 +60,6 @@ impl SqlExecutor {
     /// Get the number of rows affected by the last executed statement
     pub fn get_affected_row_count(&self) -> SqawkResult<usize> {
         Ok(self.affected_row_count)
-    }
-    
-    /// Save a specific table to its source file
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table to save
-    ///
-    /// # Returns
-    /// * `Ok(())` if the table was successfully saved
-    /// * `Err` if the table does not exist or cannot be saved
-    pub fn save_table(&self, table_name: &str) -> SqawkResult<()> {
-        self.file_handler.save_table(table_name, &self.database)
-    }
-    
-    /// Check if a table exists
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table to check
-    ///
-    /// # Returns
-    /// * `true` if the table exists, `false` otherwise
-    pub fn table_exists(&self, table_name: &str) -> bool {
-        self.database.has_table(table_name)
-    }
-    
-    /// Check if a table has been modified
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table to check
-    ///
-    /// # Returns
-    /// * `true` if the table has been modified, `false` otherwise
-    pub fn is_table_modified(&self, table_name: &str) -> bool {
-        self.modified_tables.contains(table_name)
-    }
-    
-    /// Get the names of all tables
-    ///
-    /// # Returns
-    /// * Vector of table names
-    pub fn table_names(&self) -> Vec<String> {
-        self.database.table_names()
-    }
-    
-    /// Get the column definitions for a table
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table
-    ///
-    /// # Returns
-    /// * `Ok(Vec<ColumnDefinition>)` containing the table's columns
-    /// * `Err` if the table does not exist
-    pub fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<ColumnDefinition>> {
-        let table = self.database.get_table(table_name)?;
-        
-        // If the table has a schema, use it
-        if let Some(schema) = table.schema() {
-            return Ok(schema.clone());
-        }
-        
-        // Otherwise create a basic schema with all columns as TEXT type
-        let schema: Vec<ColumnDefinition> = table.columns().iter()
-            .map(|col_name| ColumnDefinition {
-                name: col_name.clone(),
-                data_type: DataType::Text, // Default to TEXT for columns without type information
-            })
-            .collect();
-            
-        Ok(schema)
     }
 
     /// Execute an SQL statement
@@ -697,7 +623,7 @@ impl SqlExecutor {
         // Start with the first table in the FROM clause
         let first_table_with_joins = &from[0];
         let first_table_name = self.get_table_name(first_table_with_joins)?;
-        let mut result_table = self.database.get_table(&first_table_name)?.clone();
+        let mut result_table = self.file_handler.get_table(&first_table_name)?.clone();
 
         // Handle any joins in the first TableWithJoins
         if !first_table_with_joins.joins.is_empty() {
@@ -713,7 +639,7 @@ impl SqlExecutor {
             }
             for table_with_joins in &from[1..] {
                 let right_table_name = self.get_table_name(table_with_joins)?;
-                let right_table = self.database.get_table(&right_table_name)?;
+                let right_table = self.file_handler.get_table(&right_table_name)?;
 
                 // Cross join with the current result table
                 result_table = result_table.cross_join(right_table)?;
@@ -793,8 +719,8 @@ impl SqlExecutor {
                 }
             };
 
-            // Fetch the right table from the database
-            let right_table = self.database.get_table(&right_table_name)?;
+            // Fetch the right table from the loaded tables collection
+            let right_table = self.file_handler.get_table(&right_table_name)?;
 
             // Apply different join algorithms based on join type and constraints
             match &join.join_operator {
@@ -885,13 +811,13 @@ impl SqlExecutor {
 
         // Check if the table exists
         let column_count = {
-            let table = self.database.get_table(&table_name)?;
+            let table = self.file_handler.get_table(&table_name)?;
             table.column_count()
         };
 
         // Extract column indices if specified
         let column_indices = if !columns.is_empty() {
-            let table = self.database.get_table(&table_name)?;
+            let table = self.file_handler.get_table(&table_name)?;
             columns
                 .iter()
                 .map(|ident| {
@@ -927,7 +853,7 @@ impl SqlExecutor {
                     }
 
                     // Add the row to the table
-                    let table = self.database.get_table_mut(&table_name)?;
+                    let table = self.file_handler.get_table_mut(&table_name)?;
                     table.add_row(row)?;
                 }
 
@@ -972,7 +898,7 @@ impl SqlExecutor {
         // If there's a WHERE clause, we need to precompute which rows match before modifying the table
         if let Some(ref where_expr) = selection {
             // Create a list of row indices to delete
-            let table_ref = self.database.get_table(&table_name)?;
+            let table_ref = self.file_handler.get_table(&table_name)?;
 
             // Evaluate WHERE condition for each row before modifying the table
             // to avoid borrow checker issues
@@ -988,7 +914,7 @@ impl SqlExecutor {
             }
 
             // Now get mutable reference and delete the rows
-            let table = self.database.get_table_mut(&table_name)?;
+            let table = self.file_handler.get_table_mut(&table_name)?;
 
             // If we have rows to delete, create a new set of rows excluding the ones to delete
             if !rows_to_delete.is_empty() {
@@ -1017,7 +943,7 @@ impl SqlExecutor {
         } else {
             // No WHERE clause means delete all rows
 
-            let table = self.database.get_table_mut(&table_name)?;
+            let table = self.file_handler.get_table_mut(&table_name)?;
             let deleted_count = table.row_count();
 
             // Replace with empty row set
@@ -3097,7 +3023,7 @@ impl SqlExecutor {
             .join(".");
         
         // Check if table already exists
-        if self.database.has_table(&table_name) {
+        if self.file_handler.table_exists(&table_name) {
             return Err(SqawkError::TableAlreadyExists(table_name));
         }
         
@@ -3137,19 +3063,7 @@ impl SqlExecutor {
             });
             
         // Convert location to PathBuf if specified
-        // Make sure to resolve relative paths to absolute to match how files are loaded
-        let file_path = location.map(|path_str| {
-            let path = std::path::PathBuf::from(&path_str);
-            // Only convert to absolute if it's a relative path
-            if path.is_relative() {
-                match std::env::current_dir() {
-                    Ok(current_dir) => current_dir.join(path),
-                    Err(_) => path, // Fallback to the relative path if we can't get current dir
-                }
-            } else {
-                path
-            }
-        });
+        let file_path = location.map(std::path::PathBuf::from);
         
         // Create file format string (only TEXTFILE supported for now)
         let file_format_str = file_format.map(|_| "TEXTFILE".to_string());
@@ -3163,8 +3077,8 @@ impl SqlExecutor {
             file_format_str,
         );
         
-        // Add the table to the database
-        self.database.add_table(table_name.clone(), table)?;
+        // Add the table to the file handler
+        self.file_handler.add_table(table_name.clone(), table)?;
         
         // Mark the table as modified (for potential saving)
         self.modified_tables.insert(table_name);
@@ -3182,7 +3096,7 @@ impl SqlExecutor {
         let table_name = self.get_table_name(&table)?;
 
         // Verify the table exists and get necessary info
-        let table_ref = self.database.get_table(&table_name)?;
+        let table_ref = self.file_handler.get_table(&table_name)?;
 
         // Process assignments to get column indices and their new values
         let column_assignments = self.process_update_assignments(&assignments, table_ref)?;
@@ -3289,7 +3203,7 @@ impl SqlExecutor {
         let row_count = row_indices.len();
 
         if row_count > 0 {
-            let table = self.database.get_table_mut(table_name)?;
+            let table = self.file_handler.get_table_mut(table_name)?;
 
             // Apply all the pre-computed updates
             for (row_idx, col_idx, value) in updates {
@@ -3316,15 +3230,43 @@ impl SqlExecutor {
     pub fn save_modified_tables(&self) -> Result<usize> {
         let mut count = 0;
         for table_name in &self.modified_tables {
-            // Use FileHandler to save the table
-            self.file_handler.save_table(table_name, &self.database)?;
+            // Use the file handler to write the table back to its source file
+            self.file_handler.save_table(table_name)?;
             count += 1;
         }
 
         Ok(count)
     }
 
-    // Duplicate methods removed during Database architecture transition
+    /// Check if a specific table has been modified
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table to check
+    ///
+    /// # Returns
+    /// * `bool` - True if the table has been modified
+    pub fn is_table_modified(&self, table_name: &str) -> bool {
+        self.modified_tables.contains(table_name)
+    }
+
+    /// Get a list of all available table names
+    ///
+    /// # Returns
+    /// * `Vec<String>` - List of table names
+    pub fn table_names(&self) -> Vec<String> {
+        self.file_handler.table_names()
+    }
+
+    /// Get column names for a specific table
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table
+    ///
+    /// # Returns
+    /// * `SqawkResult<Vec<String>>` - List of column names
+    pub fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<String>> {
+        self.file_handler.get_table_columns(table_name)
+    }
 
     /// Check if any tables have been modified
     ///
@@ -3342,7 +3284,7 @@ impl SqlExecutor {
     /// # Returns
     /// * `SqawkResult<Option<(String, String)>>` - Tuple of (table_name, file_path) if successful
     pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<Option<(String, String)>> {
-        self.file_handler.load_file(file_spec, &mut self.database)
+        self.file_handler.load_file(file_spec)
     }
 
     /// Execute SQL statement and return a ResultSet for REPL mode
@@ -3361,6 +3303,17 @@ impl SqlExecutor {
         }))
     }
 
+    /// Check if a table exists
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table to check
+    ///
+    /// # Returns
+    /// * `bool` - True if the table exists
+    pub fn table_exists(&self, table_name: &str) -> bool {
+        self.file_handler.table_exists(table_name)
+    }
+
     /// Check if a table is modified
     ///
     /// # Arguments
@@ -3370,6 +3323,26 @@ impl SqlExecutor {
     /// * `bool` - True if the table has been modified
     pub fn table_is_modified(&self, table_name: &str) -> bool {
         self.modified_tables.contains(table_name)
+    }
+
+    /// Save a specific table
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table to save
+    ///
+    /// # Returns
+    /// * `SqawkResult<()>` - Success or error
+    pub fn save_table(&self, table_name: &str) -> SqawkResult<()> {
+        if !self.file_handler.table_exists(table_name) {
+            return Err(SqawkError::TableNotFound(table_name.to_string()));
+        }
+        
+        if !self.modified_tables.contains(table_name) {
+            // Table exists but isn't modified, just return success
+            return Ok(());
+        }
+        
+        self.file_handler.save_table(table_name)
     }
 }
 

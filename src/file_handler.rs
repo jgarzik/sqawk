@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::csv_handler::CsvHandler;
-use crate::database::Database;
 use crate::delim_handler::DelimHandler;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
@@ -27,11 +26,14 @@ pub enum FileFormat {
 
 /// Unified file handler that delegates to specific format handlers
 pub struct FileHandler {
+    /// In-memory tables indexed by their names
+    tables: HashMap<String, Table>,
+
     /// Handler for CSV files
-    pub csv_handler: CsvHandler,
+    csv_handler: CsvHandler,
 
     /// Handler for delimiter-separated files
-    pub delim_handler: DelimHandler,
+    delim_handler: DelimHandler,
 
     /// Default format to use if not specified (underscore prefix indicates it's intentionally unused for now)
     _default_format: FileFormat,
@@ -42,9 +44,6 @@ pub struct FileHandler {
     /// Custom column names for tables
     /// Map from table name to a vector of column names
     table_column_defs: HashMap<String, Vec<String>>,
-    
-    /// Database instance for table storage
-    pub database: Database,
 }
 
 impl FileHandler {
@@ -81,12 +80,12 @@ impl FileHandler {
         }
 
         FileHandler {
+            tables: HashMap::new(),
             csv_handler: CsvHandler::new(),
             delim_handler: DelimHandler::new(field_separator.clone()),
             _default_format: default_format,
             field_separator,
             table_column_defs,
-            database: Database::new(),
         }
     }
 
@@ -97,7 +96,7 @@ impl FileHandler {
     ///
     /// # Returns
     /// * `SqawkResult<Option<(String, String)>>` - Tuple of (table_name, file_path) if successful
-    pub fn load_file(&mut self, file_spec: &str, database: &mut Database) -> SqawkResult<Option<(String, String)>> {
+    pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<Option<(String, String)>> {
         // Parse file spec to get table name and file path
         let (table_name, file_path) = self.parse_file_spec(file_spec)?;
         let file_path_str = file_path.to_string_lossy().to_string();
@@ -111,14 +110,14 @@ impl FileHandler {
         match format {
             FileFormat::Csv => {
                 let table = self.csv_handler.load_csv(file_spec, custom_columns, None)?;
-                self.database.add_table(table_name.clone(), table)?;
+                self.tables.insert(table_name.clone(), table);
             }
             FileFormat::Delimited => {
                 let delimiter = self.field_separator.as_deref().unwrap_or("\t");
                 let table =
                     self.delim_handler
                         .load_delimited(file_spec, delimiter, custom_columns)?;
-                self.database.add_table(table_name.clone(), table)?;
+                self.tables.insert(table_name.clone(), table);
             }
         }
 
@@ -136,8 +135,8 @@ impl FileHandler {
     /// # Returns
     /// * `Ok(())` if the table was successfully written
     /// * `Err` if the table doesn't exist, lacks a source file, or if there was an error writing the file
-    pub fn save_table(&self, table_name: &str, database: &Database) -> SqawkResult<()> {
-        let table = database.get_table(table_name)?;
+    pub fn save_table(&self, table_name: &str) -> SqawkResult<()> {
+        let table = self.get_table(table_name)?;
 
         // Check if the table has a source file
         let file_path = table.file_path().ok_or_else(|| {
@@ -166,12 +165,16 @@ impl FileHandler {
 
     /// Get a reference to a table by name
     pub fn get_table(&self, name: &str) -> SqawkResult<&Table> {
-        self.database.get_table(name)
+        self.tables
+            .get(name)
+            .ok_or_else(|| SqawkError::TableNotFound(name.to_string()))
     }
 
     /// Get a mutable reference to a table by name
     pub fn get_table_mut(&mut self, name: &str) -> SqawkResult<&mut Table> {
-        self.database.get_table_mut(name)
+        self.tables
+            .get_mut(name)
+            .ok_or_else(|| SqawkError::TableNotFound(name.to_string()))
     }
     
     /// Add a new table to the file handler
@@ -186,40 +189,23 @@ impl FileHandler {
     /// # Returns
     /// * `Ok(())` if the table was added successfully
     /// * `Err` if a table with that name already exists
-    pub fn add_table(&mut self, name: String, mut table: Table) -> SqawkResult<()> {
-        if self.database.has_table(&name) {
+    pub fn add_table(&mut self, name: String, table: Table) -> SqawkResult<()> {
+        if self.tables.contains_key(&name) {
             return Err(SqawkError::TableAlreadyExists(name));
         }
         
-        // For tables with a file path (like those created with CREATE TABLE + LOCATION),
-        // make sure the file path is in a normalized form
-        if let Some(file_path) = table.file_path() {
-            // Create a normalized path that always uses system paths correctly
-            let normalized_path = if file_path.is_relative() {
-                match std::env::current_dir() {
-                    Ok(current_dir) => current_dir.join(file_path),
-                    Err(_) => file_path.to_path_buf(),
-                }
-            } else {
-                file_path.to_path_buf()
-            };
-            
-            // Set the normalized path back on the table
-            table.set_file_path(Some(normalized_path));
-        }
-        
-        // Use the Database to store the table
-        self.database.add_table(name, table)
+        self.tables.insert(name, table);
+        Ok(())
     }
 
     /// Get the names of all tables in the collection
     pub fn table_names(&self) -> Vec<String> {
-        self.database.table_names()
+        self.tables.keys().cloned().collect()
     }
 
     /// Get the number of tables in the collection
     pub fn table_count(&self) -> usize {
-        self.database.table_count()
+        self.tables.len()
     }
 
     /// Get column names for a specific table
@@ -230,9 +216,10 @@ impl FileHandler {
     /// # Returns
     /// * `SqawkResult<Vec<String>>` - List of column names or error if table not found
     pub fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<String>> {
-        // Get the table from the database
-        let table = self.database.get_table(table_name)?;
-        Ok(table.columns().to_vec())
+        match self.tables.get(table_name) {
+            Some(table) => Ok(table.columns().to_vec()),
+            None => Err(SqawkError::TableNotFound(table_name.to_string())),
+        }
     }
     
     /// Check if a table exists
@@ -243,7 +230,7 @@ impl FileHandler {
     /// # Returns
     /// * `bool` - True if the table exists
     pub fn table_exists(&self, table_name: &str) -> bool {
-        self.database.has_table(table_name)
+        self.tables.contains_key(table_name)
     }
 
     /// Parse a file specification into table name and file path
