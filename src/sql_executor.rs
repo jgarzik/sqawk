@@ -3067,40 +3067,73 @@ impl<'a> SqlExecutor<'a> {
                 }
             });
             
-        // Convert location to PathBuf if specified
+        // Get the delimiter from options or default to comma
+        let delimiter_str = delimiter.unwrap_or_else(|| {
+            // Default to comma as separator if not specified
+            ",".to_string()
+        });
+        
+        // Process location to ensure we have a valid file path
+        if location.is_none() {
+            return Err(SqawkError::InvalidSqlQuery(
+                "CREATE TABLE statement requires a LOCATION clause to specify the output file path.".to_string()
+            ));
+        }
+        
+        // Convert location to PathBuf
         let file_path = location.map(|loc| {
-            eprintln!("DEBUG: Setting file_path to '{}'", loc);
-            std::path::PathBuf::from(loc)
+            let path = std::path::PathBuf::from(loc);
+            
+            // Verify the path is valid
+            if path.to_string_lossy().is_empty() {
+                eprintln!("Warning: Empty location path specified in CREATE TABLE");
+            }
+            
+            path
         });
         
         // Create file format string (only TEXTFILE supported for now)
-        let file_format_str = file_format.map(|_| "TEXTFILE".to_string());
+        let file_format_str = Some("TEXTFILE".to_string());
         
         // Create the table with schema and file information
-        let table = Table::new_with_schema(
+        let mut table = Table::new_with_schema(
             &table_name,
             schema,
-            file_path,
-            delimiter,
+            file_path.clone(),
+            Some(delimiter_str),
             file_format_str,
         );
         
-        // Verify table has path after creation
-        if let Some(path) = table.file_path() {
-            eprintln!("DEBUG: Table '{}' has file_path '{:?}' after creation", table_name, path);
+        // Double-check file path is set and display it for debug purposes
+        if let Some(path) = file_path {
+            if let Some(table_path) = table.file_path() {
+                println!("Table '{}' created with file path: {:?}", table_name, table_path);
+            } else {
+                // If the file path isn't set, explicitly set it now
+                // First verify we can access the set_file_path method
+                if self.verbose {
+                    eprintln!("Setting file path explicitly to: {:?}", path);
+                }
+                
+                // Set the file path
+                table.set_file_path(path.clone());
+                println!("Table '{}' created with file path: {:?}", table_name, path);
+            }
         } else {
-            eprintln!("DEBUG: Table '{}' has NO file_path after creation!", table_name);
+            return Err(SqawkError::InvalidSqlQuery(
+                "Failed to set file path for table created with CREATE TABLE".to_string()
+            ));
         }
         
         // Add the table to the file handler
         self.file_handler.add_table(table_name.clone(), table)?;
         
-        // Check if table has path after adding to file handler
-        if let Ok(table) = self.file_handler.get_table(&table_name) {
-            if let Some(path) = table.file_path() {
-                eprintln!("DEBUG: Table '{}' has file_path '{:?}' after adding to file handler", table_name, path);
-            } else {
-                eprintln!("DEBUG: Table '{}' has NO file_path after adding to file handler!", table_name);
+        // Verify path after adding to database
+        if let Ok(added_table) = self.file_handler.get_table(&table_name) {
+            if added_table.file_path().is_none() {
+                return Err(SqawkError::InvalidSqlQuery(
+                    "File path was lost when adding table to database. This is likely a bug.".to_string()
+                ));
             }
         }
         
