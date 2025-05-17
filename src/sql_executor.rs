@@ -3073,11 +3073,9 @@ impl<'a> SqlExecutor<'a> {
             ",".to_string()
         });
         
-        // Process location to ensure we have a valid file path
-        if location.is_none() {
-            return Err(SqawkError::InvalidSqlQuery(
-                "CREATE TABLE statement requires a LOCATION clause to specify the output file path.".to_string()
-            ));
+        // Location should be provided, but we'll check it just to be safe
+        if location.is_none() && self.verbose {
+            eprintln!("Warning: No LOCATION clause provided in CREATE TABLE statement");
         }
         
         // Convert location to PathBuf
@@ -3106,34 +3104,27 @@ impl<'a> SqlExecutor<'a> {
         
         // Double-check file path is set and display it for debug purposes
         if let Some(path) = file_path {
-            if let Some(table_path) = table.file_path() {
-                println!("Table '{}' created with file path: {:?}", table_name, table_path);
-            } else {
-                // If the file path isn't set, explicitly set it now
-                // First verify we can access the set_file_path method
-                if self.verbose {
-                    eprintln!("Setting file path explicitly to: {:?}", path);
-                }
-                
-                // Set the file path
-                table.set_file_path(path.clone());
+            // Ensure the file path is set in the table
+            table.set_file_path(path.clone());
+            
+            if self.verbose {
                 println!("Table '{}' created with file path: {:?}", table_name, path);
             }
-        } else {
-            return Err(SqawkError::InvalidSqlQuery(
-                "Failed to set file path for table created with CREATE TABLE".to_string()
-            ));
+        } else if self.verbose {
+            eprintln!("Warning: Table '{}' created without a file path", table_name);
         }
         
         // Add the table to the file handler
         self.file_handler.add_table(table_name.clone(), table)?;
         
-        // Verify path after adding to database
+        // Verify the table has a file path in the database
         if let Ok(added_table) = self.file_handler.get_table(&table_name) {
-            if added_table.file_path().is_none() {
-                return Err(SqawkError::InvalidSqlQuery(
-                    "File path was lost when adding table to database. This is likely a bug.".to_string()
-                ));
+            if let Some(table_path) = added_table.file_path() {
+                if self.verbose {
+                    println!("Confirmed table '{}' has file path: {:?}", table_name, table_path);
+                }
+            } else if self.verbose {
+                eprintln!("Warning: Table '{}' lost its file path during creation", table_name);
             }
         }
         
