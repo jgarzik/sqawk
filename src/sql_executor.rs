@@ -3337,11 +3337,8 @@ impl SqlExecutor {
             return Err(SqawkError::TableNotFound(table_name.to_string()));
         }
         
-        if !self.modified_tables.contains(table_name) {
-            // Table exists but isn't modified, just return success
-            return Ok(());
-        }
-        
+        // Always try to save the table, whether it's been modified or not
+        // This is important for tables created with CREATE TABLE and LOCATION
         self.file_handler.save_table(table_name)
     }
 }
