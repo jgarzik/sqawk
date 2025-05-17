@@ -29,6 +29,7 @@
 mod aggregate;
 mod cli;
 mod csv_handler;
+mod database;
 mod delim_handler;
 mod error;
 mod file_handler;
@@ -39,6 +40,7 @@ mod table;
 
 use anyhow::{Context, Result};
 // Not explicitly importing SqawkArgs as it's not directly used
+use database::Database;
 use file_handler::FileHandler;
 use repl::Repl;
 use sql_executor::SqlExecutor;
@@ -71,16 +73,20 @@ fn main() -> Result<()> {
         println!("Arguments: {args:?}");
     }
 
-    // Step 2a: Initialize the file handler with optional custom field separator and table definitions
+    // Step 2a: Create a new Database instance to serve as the central store for tables
+    let mut database = Database::new();
+    
+    // Step 2b: Initialize the file handler with optional custom field separator and table definitions
     // The field separator determines how input files are parsed (comma, tab, etc.)
     // Table definitions allow specifying custom column names for files without headers
-    let mut file_handler = FileHandler::new(
+    let mut file_handler = FileHandler::new_with_database(
         args.field_separator.clone(),
         if args.tabledef.is_empty() {
             None
         } else {
             Some(args.tabledef.clone())
         },
+        &mut database,
     );
 
     // Step 2b: Load all specified files into in-memory tables

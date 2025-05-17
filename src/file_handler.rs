@@ -26,10 +26,7 @@ pub enum FileFormat {
 }
 
 /// Unified file handler that delegates to specific format handlers
-pub struct FileHandler<'a> {
-    /// Reference to the database that holds tables
-    database: &'a mut Database,
-
+pub struct FileHandler {
     /// Handler for CSV files
     csv_handler: CsvHandler,
 
@@ -45,19 +42,31 @@ pub struct FileHandler<'a> {
     /// Custom column names for tables
     /// Map from table name to a vector of column names
     table_column_defs: HashMap<String, Vec<String>>,
+    
+    /// Optional reference to a database object
+    /// When present, this database will be used as the source of truth
+    /// During the transition, this will be None, and FileHandler will use its own tables
+    database: Option<*mut Database>,
+    
+    /// Local tables storage for backward compatibility
+    /// This will be deprecated once the transition to Database is complete
+    tables: HashMap<String, Table>,
 }
 
-impl<'a> FileHandler<'a> {
+// Add safety implementation for the raw pointer to Database
+unsafe impl Send for FileHandler {}
+unsafe impl Sync for FileHandler {}
+
+impl FileHandler {
     /// Create a new FileHandler with specified field separator and column definitions
     ///
     /// # Arguments
     /// * `field_separator` - Optional field separator character/string
     /// * `tabledef` - Optional vector of table column definitions in format "table_name:col1,col2,..."
-    /// * `database` - Mutable reference to the database that will store all tables
     ///
     /// # Returns
     /// A new FileHandler instance ready to load and manage tables
-    pub fn new(field_separator: Option<String>, tabledef: Option<Vec<String>>, database: &'a mut Database) -> Self {
+    pub fn new(field_separator: Option<String>, tabledef: Option<Vec<String>>) -> Self {
         let default_format = if field_separator.is_some() {
             FileFormat::Delimited
         } else {
@@ -82,12 +91,50 @@ impl<'a> FileHandler<'a> {
         }
 
         FileHandler {
-            database,
+            tables: HashMap::new(),
             csv_handler: CsvHandler::new(),
             delim_handler: DelimHandler::new(field_separator.clone()),
             _default_format: default_format,
             field_separator,
             table_column_defs,
+            database: None,
+        }
+    }
+    
+    /// Create a new FileHandler that uses the provided Database as the source of truth
+    ///
+    /// # Arguments
+    /// * `field_separator` - Optional field separator character/string
+    /// * `tabledef` - Optional vector of table column definitions in format "table_name:col1,col2,..."
+    /// * `database` - Mutable reference to the database to use
+    ///
+    /// # Returns
+    /// A new FileHandler instance that delegates table operations to the database
+    pub fn new_with_database(
+        field_separator: Option<String>, 
+        tabledef: Option<Vec<String>>,
+        database: &mut Database
+    ) -> Self {
+        let mut handler = Self::new(field_separator, tabledef);
+        
+        // Store a raw pointer to the database
+        // SAFETY: The caller must ensure that the database outlives this FileHandler
+        handler.database = Some(database as *mut Database);
+        
+        handler
+    }
+    
+    /// Get a reference to the database if available
+    ///
+    /// # Returns
+    /// * `Some(&mut Database)` if a database was provided
+    /// * `None` if no database was provided
+    fn database_mut(&mut self) -> Option<&mut Database> {
+        if let Some(db_ptr) = self.database {
+            // SAFETY: The caller of `new_with_database` ensures the database outlives this FileHandler
+            unsafe { Some(&mut *db_ptr) }
+        } else {
+            None
         }
     }
 
@@ -112,118 +159,177 @@ impl<'a> FileHandler<'a> {
         match format {
             FileFormat::Csv => {
                 let table = self.csv_handler.load_csv(file_spec, custom_columns, None)?;
-                self.tables.insert(table_name.clone(), table);
+                
+                // If we have a database, add the table to it
+                if let Some(db) = self.database_mut() {
+                    db.add_table(table_name.clone(), table)?;
+                } else {
+                    // Otherwise, store it locally (backward compatibility)
+                    self.tables.insert(table_name.clone(), table);
+                }
             }
             FileFormat::Delimited => {
                 let delimiter = self.field_separator.as_deref().unwrap_or("\t");
                 let table =
-                    self.delim_handler
-                        .load_delimited(file_spec, delimiter, custom_columns)?;
-                self.tables.insert(table_name.clone(), table);
+                    self.delim_handler.load_delimited(file_spec, delimiter, custom_columns)?;
+                
+                // If we have a database, add the table to it
+                if let Some(db) = self.database_mut() {
+                    db.add_table(table_name.clone(), table)?;
+                } else {
+                    // Otherwise, store it locally (backward compatibility)
+                    self.tables.insert(table_name.clone(), table);
+                }
             }
         }
 
         Ok(Some((table_name, file_path_str)))
     }
 
-    /// Save a table back to its source file
-    ///
-    /// Writes the current state of a table back to its source file,
-    /// preserving column order and formatting values appropriately.
+    /// Parse a file specification into a table name and path
     ///
     /// # Arguments
-    /// * `table_name` - Name of the table to write to its source file
+    /// * `file_spec` - File specification in format [table_name=]file_path
     ///
     /// # Returns
-    /// * `Ok(())` if the table was successfully written
-    /// * `Err` if the table doesn't exist, lacks a source file, or if there was an error writing the file
-    pub fn save_table(&self, table_name: &str) -> SqawkResult<()> {
-        let table = self.get_table(table_name)?;
-
-        // Check if the table has a source file
-        let file_path = table.file_path().ok_or_else(|| {
-            SqawkError::InvalidSqlQuery(format!(
-                "Table '{}' doesn't have a source file",
-                table_name
-            ))
-        })?;
-
-        // Determine the file format based on extension
-        let format = self.detect_format(file_path);
-
-        match format {
-            FileFormat::Csv => {
-                self.csv_handler.save_table(table_name, table)?;
+    /// * `SqawkResult<(String, PathBuf)>` - Tuple of (table_name, file_path)
+    pub fn parse_file_spec(&self, file_spec: &str) -> SqawkResult<(String, PathBuf)> {
+        // Check for explicit table name in format "table_name=file_path"
+        if let Some(pos) = file_spec.find('=') {
+            let (table_name, file_path) = file_spec.split_at(pos);
+            
+            // Strip the '=' from the file path
+            let file_path = &file_path[1..];
+            
+            // Validate that the file exists
+            let path = PathBuf::from(file_path);
+            if !path.exists() {
+                return Err(SqawkError::FileNotFound(file_path.to_string()));
             }
-            FileFormat::Delimited => {
-                let delimiter = self.field_separator.as_deref().unwrap_or("\t");
-                self.delim_handler
-                    .save_table(table_name, table, delimiter)?;
+            
+            Ok((table_name.to_string(), path))
+        } else {
+            // No explicit table name, use the file name without extension
+            let path = PathBuf::from(file_spec);
+            
+            // Validate that the file exists
+            if !path.exists() {
+                return Err(SqawkError::FileNotFound(file_spec.to_string()));
             }
+            
+            // Get file name without extension as table name
+            let file_name = path.file_name()
+                .ok_or_else(|| SqawkError::InvalidFileSpec(file_spec.to_string()))?
+                .to_string_lossy();
+            
+            // Extract name without extension
+            let table_name = if let Some(pos) = file_name.rfind('.') {
+                file_name[..pos].to_string()
+            } else {
+                file_name.to_string()
+            };
+            
+            Ok((table_name, path))
         }
-
-        Ok(())
     }
 
     /// Get a reference to a table by name
-    pub fn get_table(&self, name: &str) -> SqawkResult<&Table> {
-        self.tables
-            .get(name)
-            .ok_or_else(|| SqawkError::TableNotFound(name.to_string()))
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table to retrieve
+    ///
+    /// # Returns
+    /// * `SqawkResult<&Table>` - Reference to the requested table
+    pub fn get_table(&self, table_name: &str) -> SqawkResult<&Table> {
+        // If we have a database, try to get the table from it
+        if let Some(db_ptr) = self.database {
+            // SAFETY: The caller of `new_with_database` ensures the database outlives this FileHandler
+            let db = unsafe { &*db_ptr };
+            db.get_table(table_name)
+        } else {
+            // Otherwise, use local tables (backward compatibility)
+            match self.tables.get(table_name) {
+                Some(table) => Ok(table),
+                None => Err(SqawkError::TableNotFound(table_name.to_string())),
+            }
+        }
     }
 
     /// Get a mutable reference to a table by name
-    pub fn get_table_mut(&mut self, name: &str) -> SqawkResult<&mut Table> {
-        self.tables
-            .get_mut(name)
-            .ok_or_else(|| SqawkError::TableNotFound(name.to_string()))
-    }
-    
-    /// Add a new table to the file handler
-    ///
-    /// This method is used to add a table that's created via CREATE TABLE
-    /// or other programmatic means, rather than being loaded from a file.
     ///
     /// # Arguments
-    /// * `name` - Name of the new table
-    /// * `table` - The table to add
+    /// * `table_name` - Name of the table to retrieve
     ///
     /// # Returns
-    /// * `Ok(())` if the table was added successfully
-    /// * `Err` if a table with that name already exists
+    /// * `SqawkResult<&mut Table>` - Mutable reference to the requested table
+    pub fn get_table_mut(&mut self, table_name: &str) -> SqawkResult<&mut Table> {
+        // If we have a database, try to get the table from it
+        if let Some(db) = self.database_mut() {
+            db.get_table_mut(table_name)
+        } else {
+            // Otherwise, use local tables (backward compatibility)
+            match self.tables.get_mut(table_name) {
+                Some(table) => Ok(table),
+                None => Err(SqawkError::TableNotFound(table_name.to_string())),
+            }
+        }
+    }
+
+    /// Add a table to the collection
+    ///
+    /// # Arguments
+    /// * `name` - Name of the table
+    /// * `table` - Table to add
+    ///
+    /// # Returns
+    /// * `SqawkResult<()>` - Result of the operation
     pub fn add_table(&mut self, name: String, table: Table) -> SqawkResult<()> {
-        if self.tables.contains_key(&name) {
-            return Err(SqawkError::TableAlreadyExists(name));
+        // If we have a database, add the table to it
+        if let Some(db) = self.database_mut() {
+            db.add_table(name, table)
+        } else {
+            // Otherwise, store it locally (backward compatibility)
+            if self.tables.contains_key(&name) {
+                return Err(SqawkError::TableAlreadyExists(name));
+            }
+            
+            self.tables.insert(name, table);
+            Ok(())
         }
-        
-        self.tables.insert(name, table);
-        Ok(())
     }
 
-    /// Get the names of all tables in the collection
-    pub fn table_names(&self) -> Vec<String> {
-        self.tables.keys().cloned().collect()
-    }
-
-    /// Get the number of tables in the collection
-    pub fn table_count(&self) -> usize {
-        self.tables.len()
-    }
-
-    /// Get column names for a specific table
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table
+    /// Get all table names
     ///
     /// # Returns
-    /// * `SqawkResult<Vec<String>>` - List of column names or error if table not found
-    pub fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<String>> {
-        match self.tables.get(table_name) {
-            Some(table) => Ok(table.columns().to_vec()),
-            None => Err(SqawkError::TableNotFound(table_name.to_string())),
+    /// * `Vec<String>` - Vector of table names
+    pub fn table_names(&self) -> Vec<String> {
+        // If we have a database, get table names from it
+        if let Some(db_ptr) = self.database {
+            // SAFETY: The caller of `new_with_database` ensures the database outlives this FileHandler
+            let db = unsafe { &*db_ptr };
+            db.table_names()
+        } else {
+            // Otherwise, use local tables (backward compatibility)
+            self.tables.keys().cloned().collect()
         }
     }
-    
+
+    /// Get the number of tables
+    ///
+    /// # Returns
+    /// * `usize` - Number of tables
+    pub fn table_count(&self) -> usize {
+        // If we have a database, get table count from it
+        if let Some(db_ptr) = self.database {
+            // SAFETY: The caller of `new_with_database` ensures the database outlives this FileHandler
+            let db = unsafe { &*db_ptr };
+            db.table_count()
+        } else {
+            // Otherwise, use local tables (backward compatibility)
+            self.tables.len()
+        }
+    }
+
     /// Check if a table exists
     ///
     /// # Arguments
@@ -231,59 +337,77 @@ impl<'a> FileHandler<'a> {
     ///
     /// # Returns
     /// * `bool` - True if the table exists
-    pub fn table_exists(&self, table_name: &str) -> bool {
-        self.tables.contains_key(table_name)
-    }
-
-    /// Parse a file specification into table name and file path
-    ///
-    /// Handles two formats:
-    /// 1. `table_name=file_path` - Explicit table name and file path
-    /// 2. `file_path` - Table name derived from file name
-    ///
-    /// # Arguments
-    /// * `file_spec` - File specification in one of the supported formats
-    ///
-    /// # Returns
-    /// * `Ok((String, PathBuf))` - Tuple of (table_name, file_path)
-    /// * `Err` - If the file specification is invalid
-    fn parse_file_spec(&self, file_spec: &str) -> SqawkResult<(String, PathBuf)> {
-        if let Some((table_name, file_path)) = file_spec.split_once('=') {
-            // Table name specified explicitly
-            Ok((table_name.to_string(), PathBuf::from(file_path)))
+    pub fn has_table(&self, table_name: &str) -> bool {
+        // If we have a database, check if the table exists in it
+        if let Some(db_ptr) = self.database {
+            // SAFETY: The caller of `new_with_database` ensures the database outlives this FileHandler
+            let db = unsafe { &*db_ptr };
+            db.has_table(table_name)
         } else {
-            // Table name derived from file name
-            let path = PathBuf::from(file_spec);
-            // Check that path has a filename
-            path.file_name().ok_or_else(|| {
-                SqawkError::InvalidFileSpec(format!("Invalid file specification: {}", file_spec))
-            })?;
-
-            let stem = path.file_stem().ok_or_else(|| {
-                SqawkError::InvalidFileSpec(format!("Invalid file specification: {}", file_spec))
-            })?;
-
-            Ok((stem.to_string_lossy().to_string(), path))
+            // Otherwise, check local tables (backward compatibility)
+            self.tables.contains_key(table_name)
         }
     }
 
-    /// Detect file format based on extension and default settings
+    /// Save a modified table back to its original file
     ///
     /// # Arguments
-    /// * `path` - File path to inspect
+    /// * `table_name` - Name of the table to save
     ///
     /// # Returns
-    /// The detected file format
-    fn detect_format(&self, path: &Path) -> FileFormat {
-        // If a field separator was explicitly provided, use delimited format
-        if self.field_separator.is_some() {
-            return FileFormat::Delimited;
+    /// * `SqawkResult<()>` - Result of the operation
+    pub fn save_table(&self, table_name: &str) -> SqawkResult<()> {
+        // Get a reference to the table
+        let table = self.get_table(table_name)?;
+
+        // Check if the table has an associated file path
+        let file_path = match table.file_path() {
+            Some(path) => path,
+            None => return Err(SqawkError::NoFilePath(table_name.to_string())),
+        };
+
+        // Determine the format based on the file extension
+        let format = self.detect_format(file_path);
+
+        // Get the delimiter from the table
+        let delimiter = table.delimiter();
+
+        // Save the table based on the format
+        match format {
+            FileFormat::Csv => {
+                // Delegation to CSV handler (comma is the standard CSV delimiter)
+                if delimiter == "," {
+                    self.csv_handler.save_csv(table, file_path)?;
+                } else {
+                    // If delimiter is not a comma, use the delimited handler
+                    self.delim_handler.save_delimited(table, file_path, delimiter)?;
+                }
+            }
+            FileFormat::Delimited => {
+                // Delegation to delimited handler
+                self.delim_handler.save_delimited(table, file_path, delimiter)?;
+            }
         }
 
-        // Otherwise determine by extension
-        match path.extension().and_then(|ext| ext.to_str()) {
-            Some("csv") => FileFormat::Csv,
-            _ => FileFormat::Delimited, // Default to delimited for non-csv files
+        Ok(())
+    }
+
+    /// Detect file format based on extension
+    ///
+    /// # Arguments
+    /// * `path` - File path
+    ///
+    /// # Returns
+    /// * `FileFormat` - Detected format based on file extension
+    fn detect_format(&self, path: &Path) -> FileFormat {
+        if let Some(ext) = path.extension() {
+            match ext.to_string_lossy().to_lowercase().as_str() {
+                "csv" => FileFormat::Csv,
+                _ => FileFormat::Delimited,
+            }
+        } else {
+            // Default to CSV if no extension
+            FileFormat::Csv
         }
     }
 }
