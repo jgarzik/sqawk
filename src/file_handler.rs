@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::csv_handler::CsvHandler;
+use crate::database::Database;
 use crate::delim_handler::DelimHandler;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
@@ -25,9 +26,9 @@ pub enum FileFormat {
 }
 
 /// Unified file handler that delegates to specific format handlers
-pub struct FileHandler {
-    /// In-memory tables indexed by their names
-    tables: HashMap<String, Table>,
+pub struct FileHandler<'a> {
+    /// Reference to the database that holds tables
+    database: &'a mut Database,
 
     /// Handler for CSV files
     csv_handler: CsvHandler,
@@ -46,16 +47,17 @@ pub struct FileHandler {
     table_column_defs: HashMap<String, Vec<String>>,
 }
 
-impl FileHandler {
+impl<'a> FileHandler<'a> {
     /// Create a new FileHandler with specified field separator and column definitions
     ///
     /// # Arguments
     /// * `field_separator` - Optional field separator character/string
     /// * `tabledef` - Optional vector of table column definitions in format "table_name:col1,col2,..."
+    /// * `database` - Mutable reference to the database that will store all tables
     ///
     /// # Returns
     /// A new FileHandler instance ready to load and manage tables
-    pub fn new(field_separator: Option<String>, tabledef: Option<Vec<String>>) -> Self {
+    pub fn new(field_separator: Option<String>, tabledef: Option<Vec<String>>, database: &'a mut Database) -> Self {
         let default_format = if field_separator.is_some() {
             FileFormat::Delimited
         } else {
@@ -80,7 +82,7 @@ impl FileHandler {
         }
 
         FileHandler {
-            tables: HashMap::new(),
+            database,
             csv_handler: CsvHandler::new(),
             delim_handler: DelimHandler::new(field_separator.clone()),
             _default_format: default_format,

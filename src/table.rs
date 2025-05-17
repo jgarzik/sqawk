@@ -496,6 +496,26 @@ impl Table {
     pub fn schema(&self) -> Option<&Vec<ColumnDefinition>> {
         self.schema.as_ref()
     }
+    
+    /// Check if this table has been modified
+    ///
+    /// # Returns
+    /// * `true` if the table has been modified
+    /// * `false` if the table has not been modified
+    pub fn is_modified(&self) -> bool {
+        self.modified
+    }
+    
+    /// Set the modified flag for this table
+    ///
+    /// This method allows explicitly setting the modified state of a table.
+    /// It's primarily used by the Database when managing tables.
+    ///
+    /// # Arguments
+    /// * `modified` - The new modified state
+    pub fn set_modified(&mut self, modified: bool) {
+        self.modified = modified;
+    }
 
     /// Get the index of a column by name
     ///
