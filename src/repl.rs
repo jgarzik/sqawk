@@ -74,7 +74,7 @@ impl CommandCompleter {
     /// Create a new command completer with the list of available commands
     fn new() -> Self {
         let commands = vec![
-            ".cd", ".changes", ".columns", ".exit", ".help", ".load",
+            ".cd", ".changes", ".exit", ".help", ".load",
             ".print", ".quit", ".save", ".schema", ".show", ".stats", 
             ".tables", ".version", ".write",
         ]
@@ -314,13 +314,6 @@ impl Repl {
                         ReplCommand::Schema(None)
                     }
                 }
-                "columns" => {
-                    if parts.len() > 1 {
-                        ReplCommand::Schema(Some(parts[1].trim().to_string()))
-                    } else {
-                        ReplCommand::Unknown("Table name required for .columns command".to_string())
-                    }
-                }
                 "load" => {
                     if parts.len() > 1 {
                         ReplCommand::Load(parts[1].trim().to_string())
@@ -554,7 +547,6 @@ impl Repl {
             "  .changes [on|off]     Show number of rows changed by SQL (currently: {})",
             if self.show_changes { "ON" } else { "OFF" }
         );
-        println!("  .columns TABLE        Show columns for TABLE (alias for .schema TABLE)");
         println!("  .exit ?CODE?          Exit the REPL with optional code");
         println!("  .help                 Show this help message");
         println!("  .load [TABLE=]FILE    Load FILE into TABLE");
