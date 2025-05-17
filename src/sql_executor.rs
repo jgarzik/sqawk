@@ -22,7 +22,7 @@ use sqlparser::ast::{
     Join as SqlJoin, JoinConstraint, JoinOperator, ObjectName, Query, Select, SelectItem,
     SetExpr, SqlOption, Statement, TableFactor, TableWithJoins, Value as SqlValue,
 };
-use sqlparser::dialect::{GenericDialect, HiveDialect};
+use sqlparser::dialect::{GenericDialect, HiveDialect, SnowflakeDialect};
 use sqlparser::parser::Parser;
 
 use crate::aggregate::AggregateFunction;
@@ -71,8 +71,9 @@ impl<'a> SqlExecutor<'a> {
     ///
     /// Returns Some(Table) for SELECT queries, None for other statements.
     pub fn execute(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
-        // Use the GenericDialect which supports most SQL features
-        let dialect = GenericDialect {};
+        // For CREATE TABLE statements with LOCATION, we need to use a dialect that
+        // properly supports the LOCATION clause - HiveDialect is made for this
+        let dialect = HiveDialect {}; // Hive dialect is specifically designed for LOCATION clauses
         
         if self.verbose {
             println!("Executing SQL: {}", sql);
