@@ -28,10 +28,10 @@ pub enum FileFormat {
 /// Unified file handler that delegates to specific format handlers
 pub struct FileHandler {
     /// Handler for CSV files
-    csv_handler: CsvHandler,
+    pub csv_handler: CsvHandler,
 
     /// Handler for delimiter-separated files
-    delim_handler: DelimHandler,
+    pub delim_handler: DelimHandler,
 
     /// Default format to use if not specified (underscore prefix indicates it's intentionally unused for now)
     _default_format: FileFormat,
@@ -42,6 +42,9 @@ pub struct FileHandler {
     /// Custom column names for tables
     /// Map from table name to a vector of column names
     table_column_defs: HashMap<String, Vec<String>>,
+    
+    /// Database instance for table storage
+    pub database: Database,
 }
 
 impl FileHandler {
@@ -83,6 +86,7 @@ impl FileHandler {
             _default_format: default_format,
             field_separator,
             table_column_defs,
+            database: Database::new(),
         }
     }
 
@@ -162,16 +166,12 @@ impl FileHandler {
 
     /// Get a reference to a table by name
     pub fn get_table(&self, name: &str) -> SqawkResult<&Table> {
-        self.tables
-            .get(name)
-            .ok_or_else(|| SqawkError::TableNotFound(name.to_string()))
+        self.database.get_table(name)
     }
 
     /// Get a mutable reference to a table by name
     pub fn get_table_mut(&mut self, name: &str) -> SqawkResult<&mut Table> {
-        self.tables
-            .get_mut(name)
-            .ok_or_else(|| SqawkError::TableNotFound(name.to_string()))
+        self.database.get_table_mut(name)
     }
     
     /// Add a new table to the file handler
