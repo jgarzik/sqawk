@@ -29,6 +29,7 @@
 mod aggregate;
 mod cli;
 mod csv_handler;
+mod database;
 mod delim_handler;
 mod error;
 mod file_handler;
