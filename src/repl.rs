@@ -1,7 +1,12 @@
 use rustyline::completion::{Completer, Pair};
 use rustyline::config::CompletionType;
 use rustyline::error::ReadlineError;
-use rustyline::{Config, Editor};
+use rustyline::highlight::{Highlighter, CmdKind};
+use rustyline::hint::Hinter;
+use rustyline::validate::{self, Validator};
+use rustyline::{Config, Context, Editor, Helper};
+use rustyline::history::DefaultHistory;
+use std::borrow::Cow;
 use std::fmt;
 use std::process::Command;
 
@@ -81,10 +86,11 @@ impl CommandCompleter {
     }
 }
 
+// Implement the required traits for Helper
 impl Completer for CommandCompleter {
     type Candidate = Pair;
 
-    fn complete(&self, line: &str, pos: usize) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
+    fn complete(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
         // Only provide completion for dot commands
         if line.starts_with('.') {
             // Split the input into command and argument parts
@@ -110,6 +116,33 @@ impl Completer for CommandCompleter {
         }
     }
 }
+
+// Implement minimal no-op versions of the other traits required by Helper
+impl Hinter for CommandCompleter {
+    type Hint = String;
+
+    fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<Self::Hint> {
+        None
+    }
+}
+
+impl Highlighter for CommandCompleter {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
+        Cow::Borrowed(line)
+    }
+
+    fn highlight_char(&self, _line: &str, _pos: usize, _kind: CmdKind) -> bool {
+        false
+    }
+}
+
+impl Validator for CommandCompleter {
+    fn validate(&self, _ctx: &mut validate::ValidationContext) -> rustyline::Result<validate::ValidationResult> {
+        Ok(validate::ValidationResult::Valid(None))
+    }
+}
+
+impl Helper for CommandCompleter {}
 
 /// Commands that can be executed in the REPL
 #[derive(Debug)]
@@ -151,7 +184,7 @@ pub struct Repl {
     /// SQL executor for running queries
     executor: SqlExecutor,
     /// Rustyline editor for command line editing
-    editor: Editor<CommandCompleter>,
+    editor: Editor<CommandCompleter, DefaultHistory>,
     /// Whether to print verbose output
     _verbose: bool,
     /// Whether to write changes to files
@@ -180,14 +213,14 @@ impl Repl {
             .build();
 
         // Create editor with our custom command completer
-        let completer = CommandCompleter::new();
-        let mut editor = Editor::with_config(config).unwrap_or_else(|err| {
-            eprintln!("Warning: Failed to initialize editor: {}", err);
-            Editor::with_config(config).expect("Critical error initializing editor")
-        });
+        let helper = CommandCompleter::new();
+        let mut editor = Editor::with_config(config)
+            .expect("Failed to create editor");
         
-        // Set the completer and load history
-        editor.set_completer(Some(completer));
+        // Set the helper manually
+        editor.set_helper(Some(helper));
+        
+        // Load history if available
         let _ = editor.load_history(HISTORY_FILE);
 
         Self {
