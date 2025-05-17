@@ -36,15 +36,15 @@ pub struct FileHandler {
     /// Default format to use if not specified (underscore prefix indicates it's intentionally unused for now)
     _default_format: FileFormat,
 
-    /// Custom field separator if specified
-    field_separator: Option<String>,
-
     /// Custom column names for tables
     /// Map from table name to a vector of column names
     table_column_defs: HashMap<String, Vec<String>>,
     
     /// Reference to a database object which is the source of truth for tables
     database: *mut Database,
+    
+    /// Default field separator for tables if not explicitly specified
+    default_field_separator: Option<String>,
 }
 
 // Add safety implementation for the raw pointer to Database
@@ -91,12 +91,12 @@ impl FileHandler {
 
         FileHandler {
             csv_handler: CsvHandler::new(),
-            delim_handler: DelimHandler::new(field_separator.clone()),
+            delim_handler: DelimHandler::new(),
             _default_format: default_format,
-            field_separator,
             table_column_defs,
             // SAFETY: The caller must ensure that the database outlives this FileHandler
             database: database as *mut Database,
+            default_field_separator: field_separator,
         }
     }
     
@@ -107,6 +107,17 @@ impl FileHandler {
     fn database_mut(&mut self) -> &mut Database {
         // SAFETY: The caller of `new` ensures the database outlives this FileHandler
         unsafe { &mut *self.database }
+    }
+    
+    /// Get the default field separator
+    ///
+    /// # Returns
+    /// * `&str` - The default field separator or "\t" for tab-delimited files and "," for CSV
+    pub fn get_default_delimiter(&self, format: FileFormat) -> &str {
+        match format {
+            FileFormat::Csv => ",",
+            FileFormat::Delimited => self.default_field_separator.as_deref().unwrap_or("\t"),
+        }
     }
 
     /// Load a file into an in-memory table with explicit return of table name and path
@@ -134,7 +145,7 @@ impl FileHandler {
                 self.database_mut().add_table(table_name.clone(), table)?;
             }
             FileFormat::Delimited => {
-                let delimiter = self.field_separator.as_deref().unwrap_or("\t");
+                let delimiter = self.default_field_separator.as_deref().unwrap_or("\t");
                 let table =
                     self.delim_handler.load_delimited(file_spec, delimiter, custom_columns)?;
                 
