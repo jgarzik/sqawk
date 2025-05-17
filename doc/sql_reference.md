@@ -12,7 +12,12 @@ Sqawk provides a powerful SQL-like query language for processing delimiter-separ
 4. [Chaining SQL Statements](#chaining-sql-statements)
 5. [Data Types](#data-types)
 6. [SQL Statement Types](#sql-statement-types)
-7. [SELECT Statement](#select-statement)
+7. [CREATE TABLE Statement](#create-table-statement)
+   - [Basic Syntax](#create-table-basic-syntax)
+   - [Data Types](#create-table-data-types)
+   - [Table Location and Format](#table-location-and-format)
+   - [Custom Delimiters](#custom-delimiters)
+8. [SELECT Statement](#select-statement)
    - [Basic Syntax](#basic-syntax)
    - [Column Selection](#column-selection)
    - [Column Aliases](#column-aliases)
@@ -23,12 +28,12 @@ Sqawk provides a powerful SQL-like query language for processing delimiter-separ
    - [Aggregate Functions](#aggregate-functions)
    - [GROUP BY Clause](#group-by-clause)
    - [HAVING Clause](#having-clause)
-7. [Multi-Table Operations (Joins)](#multi-table-operations-joins)
-8. [INSERT Statement](#insert-statement)
-9. [UPDATE Statement](#update-statement)
-10. [DELETE Statement](#delete-statement)
-11. [Limitations](#limitations)
-12. [Writeback Behavior](#writeback-behavior)
+9. [Multi-Table Operations (Joins)](#multi-table-operations-joins)
+10. [INSERT Statement](#insert-statement)
+11. [UPDATE Statement](#update-statement)
+12. [DELETE Statement](#delete-statement)
+13. [Limitations](#limitations)
+14. [Writeback Behavior](#writeback-behavior)
 
 ## Table Names and File Specification
 
@@ -184,9 +189,121 @@ Sqawk currently supports the following SQL statement types:
 | Statement | Description | Example |
 |-----------|-------------|---------|
 | `SELECT` | Query data from tables | `SELECT * FROM users WHERE age > 30` |
+| `CREATE TABLE` | Create a new table with a defined schema | `CREATE TABLE users (id INT, name TEXT, age INT)` |
 | `INSERT` | Add new rows to tables | `INSERT INTO users VALUES (4, 'Dave', 28)` |
 | `UPDATE` | Modify existing rows in tables | `UPDATE users SET age = 29 WHERE name = 'Dave'` |
 | `DELETE` | Remove rows from tables | `DELETE FROM users WHERE age < 18` |
+
+## CREATE TABLE Statement
+
+### Create Table Basic Syntax
+
+```sql
+CREATE TABLE table_name (
+    column1 data_type,
+    column2 data_type,
+    ...
+) [LOCATION 'file_path'] 
+  [STORED AS file_format]
+  [WITH (option_name='option_value', ...)]
+```
+
+The CREATE TABLE statement allows you to define a new table with a specified schema. The statement requires:
+
+- A table name
+- One or more column definitions with their data types
+- Optional LOCATION clause to specify where the table should be stored
+- Optional STORED AS clause to specify the file format
+- Optional WITH clause to specify additional table properties
+
+Example of a basic CREATE TABLE statement:
+
+```sql
+CREATE TABLE users (
+    id INT,
+    name TEXT,
+    email TEXT,
+    age INT,
+    salary FLOAT
+)
+```
+
+### Create Table Data Types
+
+Sqawk supports the following data types in CREATE TABLE statements:
+
+| Data Type | Description | Example |
+|-----------|-------------|---------|
+| `INT` or `INTEGER` | 64-bit signed integer | `id INT` |
+| `FLOAT` or `REAL` | 64-bit floating point | `salary FLOAT` |
+| `TEXT` or `STRING` | UTF-8 text | `name TEXT` |
+| `BOOLEAN` | True/false value | `active BOOLEAN` |
+
+When defining columns, you must specify a data type for each column. This type information is used when inserting data into the table and for data validation.
+
+```sql
+CREATE TABLE products (
+    product_id INT,
+    name TEXT,
+    description TEXT,
+    price FLOAT,
+    in_stock BOOLEAN
+)
+```
+
+### Table Location and Format
+
+You can specify a location for the table's data file using the LOCATION keyword, followed by a path string:
+
+```sql
+CREATE TABLE sales (
+    id INT,
+    date TEXT,
+    amount FLOAT
+) LOCATION './data/sales.csv'
+```
+
+Currently, Sqawk only supports the TEXTFILE format via the STORED AS clause:
+
+```sql
+CREATE TABLE events (
+    event_id INT,
+    timestamp TEXT,
+    type TEXT
+) LOCATION './data/events.csv' STORED AS TEXTFILE
+```
+
+### Custom Delimiters
+
+You can specify a custom delimiter for the table using the WITH clause:
+
+```sql
+CREATE TABLE logs (
+    log_id INT,
+    timestamp TEXT,
+    level TEXT,
+    message TEXT
+) LOCATION './data/logs.tsv'
+  STORED AS TEXTFILE
+  WITH (DELIMITER='\t')
+```
+
+This is particularly useful when working with tab-delimited files, semicolon-delimited files, or other custom formats.
+
+Complete example with all options:
+
+```sql
+CREATE TABLE financial_data (
+    account_id INT,
+    transaction_date TEXT,
+    amount FLOAT,
+    category TEXT
+) LOCATION './data/financial.csv'
+  STORED AS TEXTFILE
+  WITH (DELIMITER=',')
+```
+
+The CREATE TABLE statement only defines the table's structure - it doesn't load or modify any data. After creating a table, you can insert data into it using the INSERT statement.
 
 ## SELECT Statement
 

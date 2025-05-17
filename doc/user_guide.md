@@ -23,6 +23,7 @@
    - [Table Naming](#table-naming)
    - [Handling Multiple Files](#handling-multiple-files)
    - [File Writeback Behavior](#file-writeback-behavior)
+   - [Defining Schemas with CREATE TABLE](#defining-schemas-with-create-table)
 6. [Common Usage Patterns](#common-usage-patterns)
    - [Data Exploration](#data-exploration)
    - [Data Cleanup](#data-cleanup)
