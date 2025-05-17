@@ -329,6 +329,109 @@ When processing CSV or other delimiter-separated files, Sqawk provides options f
 
 This error recovery capability is essential when working with imperfect data sources where strict format conformance isn't guaranteed.
 
+### Defining Schemas with CREATE TABLE
+
+While Sqawk automatically infers types from input files, you can explicitly define table schemas using the CREATE TABLE statement. This is useful for:
+
+- Creating empty tables without loading from a file
+- Ensuring specific column types for data validation
+- Defining output file formats for new tables
+
+#### Basic CREATE TABLE Syntax
+
+```sql
+CREATE TABLE table_name (
+    column1 data_type,
+    column2 data_type,
+    ...
+) [LOCATION 'file_path'] 
+  [STORED AS file_format]
+  [WITH (option_name='option_value', ...)]
+```
+
+Example:
+
+```sql
+-- Create a new employee table with specific column types
+CREATE TABLE employees (
+    id INT,
+    name TEXT,
+    department TEXT,
+    salary FLOAT
+) LOCATION './data/employees.csv'
+  STORED AS TEXTFILE
+  WITH (DELIMITER=',');
+```
+
+#### Supported Data Types
+
+Sqawk supports these data types in CREATE TABLE statements:
+
+- `INT` or `INTEGER`: For whole numbers
+- `FLOAT` or `REAL`: For decimal numbers
+- `TEXT` or `STRING`: For text values
+- `BOOLEAN`: For true/false values
+
+#### Setting File Location and Format
+
+Use the LOCATION clause to specify where the table data should be stored:
+
+```sql
+CREATE TABLE logs (
+    timestamp TEXT,
+    level TEXT,
+    message TEXT
+) LOCATION './logs/app.log'
+```
+
+Currently, only TEXTFILE format is supported:
+
+```sql
+CREATE TABLE users (
+    id INT,
+    name TEXT,
+    email TEXT
+) LOCATION './users.csv' STORED AS TEXTFILE
+```
+
+#### Specifying Custom Delimiters
+
+For non-CSV formats, specify the delimiter with the WITH clause:
+
+```sql
+CREATE TABLE server_logs (
+    timestamp TEXT,
+    server_id TEXT,
+    status INT,
+    response_time FLOAT
+) LOCATION './logs/server.log'
+  STORED AS TEXTFILE
+  WITH (DELIMITER='\t')
+```
+
+#### Working with Created Tables
+
+After creating a table, you can insert data and query it:
+
+```sql
+-- Create table
+CREATE TABLE products (id INT, name TEXT, price FLOAT);
+
+-- Insert data
+INSERT INTO products VALUES (1, 'Keyboard', 49.99), (2, 'Mouse', 29.99);
+
+-- Query data
+SELECT * FROM products WHERE price < 40;
+```
+
+Use the `--write` flag to save changes to the specified location:
+
+```sh
+sqawk -s "CREATE TABLE data (id INT, value FLOAT) LOCATION './output.csv';
+          INSERT INTO data VALUES (1, 10.5), (2, 20.7);
+          SELECT * FROM data;" --write
+```
+
 ### Table Naming
 
 By default, the table name is derived from the filename (without extension):
