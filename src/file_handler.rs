@@ -43,14 +43,8 @@ pub struct FileHandler {
     /// Map from table name to a vector of column names
     table_column_defs: HashMap<String, Vec<String>>,
     
-    /// Optional reference to a database object
-    /// When present, this database will be used as the source of truth
-    /// During the transition, this will be None, and FileHandler will use its own tables
-    database: Option<*mut Database>,
-    
-    /// Local tables storage for backward compatibility
-    /// This will be deprecated once the transition to Database is complete
-    tables: HashMap<String, Table>,
+    /// Reference to a database object which is the source of truth for tables
+    database: *mut Database,
 }
 
 // Add safety implementation for the raw pointer to Database
