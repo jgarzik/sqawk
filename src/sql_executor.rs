@@ -683,7 +683,7 @@ impl SqlExecutor {
         // Start with the first table in the FROM clause
         let first_table_with_joins = &from[0];
         let first_table_name = self.get_table_name(first_table_with_joins)?;
-        let mut result_table = self.file_handler.get_table(&first_table_name)?.clone();
+        let mut result_table = self.database.get_table(&first_table_name)?.clone();
 
         // Handle any joins in the first TableWithJoins
         if !first_table_with_joins.joins.is_empty() {
@@ -699,7 +699,7 @@ impl SqlExecutor {
             }
             for table_with_joins in &from[1..] {
                 let right_table_name = self.get_table_name(table_with_joins)?;
-                let right_table = self.file_handler.get_table(&right_table_name)?;
+                let right_table = self.database.get_table(&right_table_name)?;
 
                 // Cross join with the current result table
                 result_table = result_table.cross_join(right_table)?;
@@ -779,8 +779,8 @@ impl SqlExecutor {
                 }
             };
 
-            // Fetch the right table from the loaded tables collection
-            let right_table = self.file_handler.get_table(&right_table_name)?;
+            // Fetch the right table from the database
+            let right_table = self.database.get_table(&right_table_name)?;
 
             // Apply different join algorithms based on join type and constraints
             match &join.join_operator {
@@ -913,7 +913,7 @@ impl SqlExecutor {
                     }
 
                     // Add the row to the table
-                    let table = self.file_handler.get_table_mut(&table_name)?;
+                    let table = self.database.get_table_mut(&table_name)?;
                     table.add_row(row)?;
                 }
 
