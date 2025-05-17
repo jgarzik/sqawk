@@ -22,23 +22,15 @@ use crate::error::{SqawkError, SqawkResult};
 use crate::table::{Table, Value};
 
 /// Handles loading and saving delimiter-separated value files
-pub struct DelimHandler {
-    /// Default field separator to use if none is specified
-    _field_separator: Option<String>, // Underscore prefix indicates that it's intentionally unused
-}
+pub struct DelimHandler {}
 
 impl DelimHandler {
-    /// Create a new DelimHandler with an optional default field separator
-    ///
-    /// # Arguments
-    /// * `field_separator` - Optional default field separator
+    /// Create a new DelimHandler
     ///
     /// # Returns
     /// A new DelimHandler instance ready to load and manage delimiter-separated files
-    pub fn new(field_separator: Option<String>) -> Self {
-        DelimHandler {
-            _field_separator: field_separator,
-        }
+    pub fn new() -> Self {
+        DelimHandler {}
     }
     
     /// Save a table to a delimiter-separated file
