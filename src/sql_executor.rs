@@ -22,7 +22,7 @@ use sqlparser::ast::{
     Join as SqlJoin, JoinConstraint, JoinOperator, ObjectName, Query, Select, SelectItem,
     SetExpr, SqlOption, Statement, TableFactor, TableWithJoins, Value as SqlValue,
 };
-use sqlparser::dialect::{GenericDialect, HiveDialect, SnowflakeDialect};
+use sqlparser::dialect::HiveDialect;
 use sqlparser::parser::Parser;
 
 use crate::aggregate::AggregateFunction;
@@ -194,7 +194,8 @@ impl<'a> SqlExecutor<'a> {
                 name, 
                 columns, 
                 file_format, 
-                location, 
+                location,
+                hive_formats,
                 with_options, 
                 .. 
             } => {
@@ -202,14 +203,21 @@ impl<'a> SqlExecutor<'a> {
                 if self.verbose {
                     println!("Parsed CREATE TABLE statement:");
                     println!("  Table name: {:?}", name);
-                    println!("  LOCATION clause: {:?}", location);
+                    println!("  LOCATION clause (direct): {:?}", location);
+                    println!("  LOCATION in hive_formats: {:?}", hive_formats.as_ref().and_then(|hf| hf.location.as_ref()));
                     println!("  File format: {:?}", file_format);
                     println!("  WITH options: {:?}", with_options);
                     println!("  Columns: {:?}", columns.len());
                 }
                 
-                // Just use the location directly from the statement
-                let actual_location = location.clone();
+                // In sqlparser, the LOCATION clause is stored in the hive_formats field
+                // even when using non-Hive dialects like GenericDialect
+                let actual_location = if let Some(hf) = hive_formats.as_ref() {
+                    hf.location.clone()
+                } else {
+                    // Fallback to direct location field (unlikely to be used)
+                    location.clone()
+                };
                 
                 self.execute_create_table(name, columns, file_format, actual_location, with_options)?;
                 if self.verbose {
