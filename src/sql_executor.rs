@@ -66,6 +66,61 @@ impl SqlExecutor {
     pub fn get_affected_row_count(&self) -> SqawkResult<usize> {
         Ok(self.affected_row_count)
     }
+    
+    /// Save a specific table to its source file
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table to save
+    ///
+    /// # Returns
+    /// * `Ok(())` if the table was successfully saved
+    /// * `Err` if the table does not exist or cannot be saved
+    pub fn save_table(&self, table_name: &str) -> SqawkResult<()> {
+        self.file_handler.save_table(table_name, &self.database)
+    }
+    
+    /// Check if a table exists
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table to check
+    ///
+    /// # Returns
+    /// * `true` if the table exists, `false` otherwise
+    pub fn table_exists(&self, table_name: &str) -> bool {
+        self.database.has_table(table_name)
+    }
+    
+    /// Check if a table has been modified
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table to check
+    ///
+    /// # Returns
+    /// * `true` if the table has been modified, `false` otherwise
+    pub fn is_table_modified(&self, table_name: &str) -> bool {
+        self.modified_tables.contains(table_name)
+    }
+    
+    /// Get the names of all tables
+    ///
+    /// # Returns
+    /// * Vector of table names
+    pub fn table_names(&self) -> Vec<String> {
+        self.database.table_names()
+    }
+    
+    /// Get the column definitions for a table
+    ///
+    /// # Arguments
+    /// * `table_name` - Name of the table
+    ///
+    /// # Returns
+    /// * `Ok(Vec<ColumnDefinition>)` containing the table's columns
+    /// * `Err` if the table does not exist
+    pub fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<ColumnDefinition>> {
+        let table = self.database.get_table(table_name)?;
+        Ok(table.columns().to_vec())
+    }
 
     /// Execute an SQL statement
     ///
@@ -816,13 +871,13 @@ impl SqlExecutor {
 
         // Check if the table exists
         let column_count = {
-            let table = self.file_handler.get_table(&table_name)?;
+            let table = self.database.get_table(&table_name)?;
             table.column_count()
         };
 
         // Extract column indices if specified
         let column_indices = if !columns.is_empty() {
-            let table = self.file_handler.get_table(&table_name)?;
+            let table = self.database.get_table(&table_name)?;
             columns
                 .iter()
                 .map(|ident| {
