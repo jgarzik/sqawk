@@ -139,7 +139,7 @@ impl FileHandler {
         let table = self.get_table(table_name)?;
 
         // Check if the table has a source file
-        let file_path = table.source_file().ok_or_else(|| {
+        let file_path = table.file_path().ok_or_else(|| {
             SqawkError::InvalidSqlQuery(format!(
                 "Table '{}' doesn't have a source file",
                 table_name

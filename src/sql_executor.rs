@@ -2977,6 +2977,115 @@ impl SqlExecutor {
     ///
     /// # Returns
     /// * The number of rows that were updated
+    /// Execute a CREATE TABLE statement
+    ///
+    /// Creates a new table with the specified schema. If a LOCATION is specified,
+    /// the table will be associated with that file for future saving. Supports
+    /// specifying a custom delimiter and file format through WITH options.
+    ///
+    /// # Arguments
+    /// * `name` - The name of the table to create
+    /// * `columns` - Column definitions with names and data types
+    /// * `file_format` - Optional file format specification
+    /// * `location` - Optional file path for the table
+    /// * `with_options` - Additional options like delimiter
+    ///
+    /// # Returns
+    /// * `Ok(())` if the table was created successfully
+    /// * `Err` if there was an error creating the table
+    fn execute_create_table(
+        &mut self,
+        name: ObjectName,
+        columns: Vec<SqlColumnDef>,
+        file_format: Option<SqlFileFormat>,
+        location: Option<String>,
+        with_options: Vec<SqlOption>,
+    ) -> SqawkResult<()> {
+        // Validate file format (must be TEXTFILE if specified)
+        if let Some(format) = &file_format {
+            match format {
+                SqlFileFormat::TEXTFILE => {
+                    // This is the only supported format for now
+                },
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(format!(
+                        "Unsupported file format: {:?}. Only TEXTFILE is supported.",
+                        format
+                    )));
+                }
+            }
+        }
+        
+        // Extract table name
+        let table_name = name.0.iter()
+            .map(|i| i.value.clone())
+            .collect::<Vec<_>>()
+            .join(".");
+        
+        // Check if table already exists
+        if self.file_handler.table_exists(&table_name) {
+            return Err(SqawkError::TableAlreadyExists(table_name));
+        }
+        
+        // Convert SQL column definitions to our internal ColumnDefinition type
+        let schema: Vec<ColumnDefinition> = columns
+            .into_iter()
+            .map(|col| {
+                let name = col.name.value;
+                
+                // Convert SQL data type to our internal DataType
+                let data_type = match col.data_type.to_string().to_uppercase().as_str() {
+                    "INTEGER" | "INT" => DataType::Integer,
+                    "REAL" | "FLOAT" | "DOUBLE" => DataType::Float,
+                    "TEXT" | "VARCHAR" | "CHAR" | "STRING" => DataType::Text,
+                    "BOOLEAN" | "BOOL" => DataType::Boolean,
+                    other => {
+                        // Default to TEXT for unsupported types
+                        eprintln!("Warning: Unsupported data type '{}', using TEXT instead", other);
+                        DataType::Text
+                    }
+                };
+                
+                ColumnDefinition { name, data_type }
+            })
+            .collect();
+            
+        // Extract custom delimiter from WITH options if specified
+        let delimiter = with_options.iter()
+            .find(|opt| opt.name.value.to_lowercase() == "delimiter")
+            .and_then(|opt| {
+                if let SqlValue::SingleQuotedString(s) = &opt.value {
+                    Some(s.clone())
+                } else {
+                    // Only string literals are supported for delimiter
+                    None
+                }
+            });
+            
+        // Convert location to PathBuf if specified
+        let file_path = location.map(std::path::PathBuf::from);
+        
+        // Create file format string (only TEXTFILE supported for now)
+        let file_format_str = file_format.map(|_| "TEXTFILE".to_string());
+        
+        // Create the table with schema and file information
+        let table = Table::new_with_schema(
+            &table_name,
+            schema,
+            file_path,
+            delimiter,
+            file_format_str,
+        );
+        
+        // Add the table to the file handler
+        self.file_handler.add_table(table_name.clone(), table)?;
+        
+        // Mark the table as modified (for potential saving)
+        self.modified_tables.insert(table_name);
+        
+        Ok(())
+    }
+    
     fn execute_update(
         &mut self,
         table: TableWithJoins,

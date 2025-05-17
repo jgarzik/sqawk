@@ -198,7 +198,7 @@ impl CsvHandler {
     /// * `Err` if the table lacks a source file, or if there was an error writing the file
     pub fn save_table(&self, _table_name: &str, table: &Table) -> SqawkResult<()> {
         // Check if the table has a source file
-        let file_path = table.source_file().ok_or_else(|| {
+        let file_path = table.file_path().ok_or_else(|| {
             SqawkError::InvalidSqlQuery(format!(
                 "Table '{}' doesn't have a source file",
                 table.name()
