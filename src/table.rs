@@ -560,7 +560,7 @@ impl Table {
     where
         F: Fn(&Row) -> bool,
     {
-        let mut result = Table::new(&self.name, self.columns.clone(), None, Some(self.delimiter.clone()));
+        let mut result = Table::new_with_delimiter(&self.name, self.columns.clone(), None, self.delimiter.clone());
 
         for row in &self.rows {
             if predicate(row) {
@@ -683,7 +683,8 @@ impl Table {
             })
             .collect();
 
-        let mut result = Table::new(&self.name, columns, self.file_path.clone(), Some(self.delimiter.clone()));
+        let mut result = Table::new(&self.name, columns, self.file_path.clone());
+        result.delimiter = self.delimiter.clone();
 
         // Project rows
         for row in &self.rows {
@@ -723,7 +724,8 @@ impl Table {
         let columns = self.create_joined_columns(right);
 
         // Create a new table to hold the join result
-        let mut result = Table::new("join_result", columns, None, Some(self.delimiter.clone()));
+        let mut result = Table::new("join_result", columns, None);
+        result.delimiter = self.delimiter.clone();
 
         // Fill with cross-joined rows
         self.fill_cross_joined_rows(right, &mut result)?;
@@ -771,7 +773,8 @@ impl Table {
 
         // Step 2: Create a new table to hold the join result
         let name = format!("{}_inner_join", self.name());
-        let mut result = Table::new(&name, columns, None, Some(self.delimiter.clone()));
+        let mut result = Table::new(&name, columns, None);
+        result.delimiter = self.delimiter.clone();
 
         // Step 3: First create the cross join (Cartesian product) to evaluate conditions against
         // This creates every possible combination of rows from both tables
