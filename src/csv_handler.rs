@@ -50,12 +50,13 @@ impl CsvHandler {
     /// # Returns
     /// * `SqawkResult<()>` - Result of the operation
     pub fn save_csv(&self, table: &Table, file_path: &Path) -> SqawkResult<()> {
-        let mut writer = csv::Writer::from_path(file_path)
-            .map_err(|e| SqawkError::IoError(e))?;
+        // Create a CSV writer
+        let file = File::create(file_path).map_err(SqawkError::IoError)?;
+        let mut writer = csv::Writer::from_writer(file);
             
         // Write header row
         writer.write_record(table.columns())
-            .map_err(|e| SqawkError::CsvError(e))?;
+            .map_err(SqawkError::CsvError)?;
             
         // Write data rows
         for row in table.rows() {
@@ -64,10 +65,10 @@ impl CsvHandler {
                 .collect();
                 
             writer.write_record(&string_values)
-                .map_err(|e| SqawkError::CsvError(e))?;
+                .map_err(SqawkError::CsvError)?;
         }
         
-        writer.flush().map_err(|e| SqawkError::IoError(e))?;
+        writer.flush().map_err(SqawkError::CsvError)?;
         
         Ok(())
     }

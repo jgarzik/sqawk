@@ -3320,7 +3320,7 @@ impl<'a> SqlExecutor<'a> {
     /// # Returns
     /// * `bool` - True if the table exists
     pub fn table_exists(&self, table_name: &str) -> bool {
-        self.file_handler.table_exists(table_name)
+        self.file_handler.has_table(table_name)
     }
 
     /// Check if a table is modified
@@ -3342,7 +3342,7 @@ impl<'a> SqlExecutor<'a> {
     /// # Returns
     /// * `SqawkResult<()>` - Success or error
     pub fn save_table(&self, table_name: &str) -> SqawkResult<()> {
-        if !self.file_handler.table_exists(table_name) {
+        if !self.file_handler.has_table(table_name) {
             return Err(SqawkError::TableNotFound(table_name.to_string()));
         }
         

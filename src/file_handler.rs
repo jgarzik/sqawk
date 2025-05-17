@@ -263,8 +263,11 @@ impl FileHandler {
     /// # Returns
     /// * `SqawkResult<&mut Table>` - Mutable reference to the requested table
     pub fn get_table_mut(&mut self, table_name: &str) -> SqawkResult<&mut Table> {
-        // If we have a database, try to get the table from it
-        if let Some(db) = self.database_mut() {
+        // Check if we have a database reference
+        if self.database.is_some() {
+            // SAFETY: We've already checked that database is Some, and we know
+            // the database reference outlives this FileHandler
+            let db = unsafe { &mut *(self.database.unwrap()) };
             db.get_table_mut(table_name)
         } else {
             // Otherwise, use local tables (backward compatibility)

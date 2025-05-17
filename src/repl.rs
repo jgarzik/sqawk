@@ -180,9 +180,9 @@ enum ReplCommand {
 }
 
 /// REPL interface for interactive SQL entry
-pub struct Repl {
+pub struct Repl<'a> {
     /// SQL executor for running queries
-    executor: SqlExecutor,
+    executor: SqlExecutor<'a>,
     /// Rustyline editor for command line editing
     editor: Editor<CommandCompleter, DefaultHistory>,
     /// Whether to print verbose output
