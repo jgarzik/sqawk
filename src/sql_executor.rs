@@ -3104,17 +3104,29 @@ impl<'a> SqlExecutor<'a> {
             }
         }
         
-        // Convert location to PathBuf if provided
+        // Process location to ensure we have a valid file path
+        // We need an absolute path to ensure consistency
         let file_path = location.map(|loc| {
+            // Print info about the location being processed
             if self.verbose {
                 println!("Setting file path for table '{}' to: {}", table_name, loc);
             }
             
-            let path = std::path::PathBuf::from(loc);
+            // Fix relative paths to be relative to current directory
+            let path = if loc.starts_with('/') {
+                // Already absolute path
+                std::path::PathBuf::from(loc)
+            } else {
+                // Get current directory and append the relative path
+                let mut cur_dir = std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                cur_dir.push(loc);
+                cur_dir
+            };
             
-            // Verify the path is valid and warn if not
-            if path.to_string_lossy().is_empty() {
-                eprintln!("Warning: Empty location path specified in CREATE TABLE");
+            // Print the full resolved path for debugging
+            if self.verbose {
+                println!("Absolute path for table '{}': {:?}", table_name, path);
             }
             
             path
