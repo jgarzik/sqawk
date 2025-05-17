@@ -3337,9 +3337,6 @@ impl SqlExecutor {
     }
 
     // Duplicate methods removed during Database architecture transition
-    pub fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<String>> {
-        self.file_handler.get_table_columns(table_name)
-    }
 
     /// Check if any tables have been modified
     ///

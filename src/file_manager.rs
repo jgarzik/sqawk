@@ -28,10 +28,10 @@ pub enum FileFormat {
 /// Unified file handler that delegates to specific format handlers
 pub struct FileHandler {
     /// Handler for CSV files
-    csv_handler: CsvHandler,
+    pub csv_handler: CsvHandler,
 
     /// Handler for delimiter-separated files
-    delim_handler: DelimHandler,
+    pub delim_handler: DelimHandler,
 
     /// Default format to use if not specified
     _default_format: FileFormat,
