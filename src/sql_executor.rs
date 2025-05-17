@@ -28,7 +28,7 @@ use sqlparser::parser::Parser;
 use crate::aggregate::AggregateFunction;
 use crate::error::{SqawkError, SqawkResult};
 use crate::database::Database;
-use crate::file_manager::FileHandler;
+use crate::file_handler::FileHandler;
 use crate::string_functions::StringFunction;
 use crate::table::{ColumnDefinition, DataType, SortDirection, Table, Value};
 
@@ -3168,7 +3168,7 @@ impl SqlExecutor {
         let table_name = self.get_table_name(&table)?;
 
         // Verify the table exists and get necessary info
-        let table_ref = self.file_handler.get_table(&table_name)?;
+        let table_ref = self.database.get_table(&table_name)?;
 
         // Process assignments to get column indices and their new values
         let column_assignments = self.process_update_assignments(&assignments, table_ref)?;
@@ -3275,7 +3275,7 @@ impl SqlExecutor {
         let row_count = row_indices.len();
 
         if row_count > 0 {
-            let table = self.file_handler.get_table_mut(table_name)?;
+            let table = self.database.get_table_mut(table_name)?;
 
             // Apply all the pre-computed updates
             for (row_idx, col_idx, value) in updates {
@@ -3302,35 +3302,9 @@ impl SqlExecutor {
     pub fn save_modified_tables(&self) -> Result<usize> {
         let mut count = 0;
         for table_name in &self.modified_tables {
-            // Get the table from the database
-            let table = self.database.get_table(table_name)?;
-            
-            // Check if the table has a file path
-            if let Some(file_path) = table.file_path() {
-                // Use the appropriate handler based on the file extension
-                if let Some(extension) = file_path.extension().and_then(|ext| ext.to_str()) {
-                    let is_csv = extension.eq_ignore_ascii_case("csv");
-                    
-                    if is_csv {
-                        // Use CSV handler
-                        self.file_handler.csv_handler.save_table(table_name, table)?;
-                    } else {
-                        // Use delimiter handler with the table's delimiter
-                        let delimiter = &table.delimiter;
-                        self.file_handler.delim_handler.save_table(table_name, table, delimiter)?;
-                    }
-                    count += 1;
-                } else {
-                    // No extension, default to CSV
-                    self.file_handler.csv_handler.save_table(table_name, table)?;
-                    count += 1;
-                }
-            } else {
-                return Err(anyhow::anyhow!(
-                    "Table '{}' doesn't have a file path. Use CREATE TABLE with LOCATION to specify a file path.",
-                    table_name
-                ));
-            }
+            // Use FileHandler to save the table
+            self.file_handler.save_table(table_name, &self.database)?;
+            count += 1;
         }
 
         Ok(count)
@@ -3354,7 +3328,7 @@ impl SqlExecutor {
     /// # Returns
     /// * `SqawkResult<Option<(String, String)>>` - Tuple of (table_name, file_path) if successful
     pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<Option<(String, String)>> {
-        self.file_handler.load_file(file_spec)
+        self.file_handler.load_file(file_spec, &mut self.database)
     }
 
     /// Execute SQL statement and return a ResultSet for REPL mode

@@ -240,7 +240,7 @@ pub struct Table {
     schema: Option<Vec<ColumnDefinition>>,
     
     /// Custom delimiter for this table's file (default is comma)
-    delimiter: String,
+    pub delimiter: String,
 
     /// The file format for this table (currently only TEXTFILE is supported)
     file_format: String,

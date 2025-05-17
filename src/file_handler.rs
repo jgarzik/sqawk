@@ -97,7 +97,7 @@ impl FileHandler {
     ///
     /// # Returns
     /// * `SqawkResult<Option<(String, String)>>` - Tuple of (table_name, file_path) if successful
-    pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<Option<(String, String)>> {
+    pub fn load_file(&mut self, file_spec: &str, database: &mut Database) -> SqawkResult<Option<(String, String)>> {
         // Parse file spec to get table name and file path
         let (table_name, file_path) = self.parse_file_spec(file_spec)?;
         let file_path_str = file_path.to_string_lossy().to_string();
@@ -136,7 +136,7 @@ impl FileHandler {
     /// # Returns
     /// * `Ok(())` if the table was successfully written
     /// * `Err` if the table doesn't exist, lacks a source file, or if there was an error writing the file
-    pub fn save_table(&self, table_name: &str) -> SqawkResult<()> {
+    pub fn save_table(&self, table_name: &str, database: &Database) -> SqawkResult<()> {
         let table = self.get_table(table_name)?;
 
         // Check if the table has a source file
