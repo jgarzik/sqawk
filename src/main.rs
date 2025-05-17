@@ -108,7 +108,7 @@ fn main() -> Result<()> {
 
     // Step 3: Create SQL executor
     // The executor maintains state across statements, allowing multi-statement operations
-    let mut sql_executor = SqlExecutor::new_with_verbose(file_handler, args.verbose);
+    let mut sql_executor = SqlExecutor::new_with_verbose(&mut database, &mut file_handler, args.verbose);
 
     // Check if interactive mode is requested
     if args.interactive {

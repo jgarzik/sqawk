@@ -40,6 +40,43 @@ impl DelimHandler {
             _field_separator: field_separator,
         }
     }
+    
+    /// Save a table to a delimiter-separated file
+    ///
+    /// # Arguments
+    /// * `table` - The table to save
+    /// * `file_path` - The path to the file
+    /// * `delimiter` - The delimiter to use (e.g., ",", "\t")
+    ///
+    /// # Returns
+    /// * `SqawkResult<()>` - Result of the operation
+    pub fn save_delimited(&self, table: &Table, file_path: &Path, delimiter: &str) -> SqawkResult<()> {
+        use std::fs::File;
+        use std::io::{BufWriter, Write};
+        
+        // Open the file for writing
+        let file = File::create(file_path).map_err(SqawkError::IoError)?;
+        let mut writer = BufWriter::new(file);
+        
+        // Write the header row
+        let header = table.columns().join(delimiter);
+        writeln!(writer, "{}", header).map_err(SqawkError::IoError)?;
+        
+        // Write data rows
+        for row in table.rows() {
+            let row_values: Vec<String> = row.iter()
+                .map(|value| value.to_string())
+                .collect();
+            
+            let row_str = row_values.join(delimiter);
+            writeln!(writer, "{}", row_str).map_err(SqawkError::IoError)?;
+        }
+        
+        // Flush and close the writer
+        writer.flush().map_err(SqawkError::IoError)?;
+        
+        Ok(())
+    }
 
     /// Load a delimiter-separated file into an in-memory table
     ///

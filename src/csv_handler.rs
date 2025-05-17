@@ -40,6 +40,37 @@ impl CsvHandler {
     pub fn new() -> Self {
         CsvHandler {}
     }
+    
+    /// Save a table to a CSV file
+    ///
+    /// # Arguments
+    /// * `table` - The table to save
+    /// * `file_path` - The path to the file
+    ///
+    /// # Returns
+    /// * `SqawkResult<()>` - Result of the operation
+    pub fn save_csv(&self, table: &Table, file_path: &Path) -> SqawkResult<()> {
+        let mut writer = csv::Writer::from_path(file_path)
+            .map_err(SqawkError::IoError)?;
+            
+        // Write header row
+        writer.write_record(table.columns())
+            .map_err(SqawkError::CsvError)?;
+            
+        // Write data rows
+        for row in table.rows() {
+            let string_values: Vec<String> = row.iter()
+                .map(|value| value.to_string())
+                .collect();
+                
+            writer.write_record(&string_values)
+                .map_err(SqawkError::CsvError)?;
+        }
+        
+        writer.flush().map_err(SqawkError::IoError)?;
+        
+        Ok(())
+    }
 
     /// Load a CSV file into an in-memory table
     ///

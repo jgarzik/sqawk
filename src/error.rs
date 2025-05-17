@@ -50,6 +50,14 @@ pub enum SqawkError {
     /// Error when trying to create a table that already exists
     #[error("Table '{0}' already exists")]
     TableAlreadyExists(String),
+    
+    /// Error when a file doesn't exist
+    #[error("File not found: {0}")]
+    FileNotFound(String),
+    
+    /// Error when a table doesn't have an associated file path
+    #[error("Table '{0}' has no associated file path")]
+    NoFilePath(String),
 
     /// Error when a referenced column doesn't exist in a table
     #[error("Column '{0}' not found")]
@@ -94,6 +102,8 @@ impl PartialEq for SqawkError {
             (SqawkError::SqlParseError(_), SqawkError::SqlParseError(_)) => true,
             (SqawkError::TableNotFound(_), SqawkError::TableNotFound(_)) => true,
             (SqawkError::TableAlreadyExists(_), SqawkError::TableAlreadyExists(_)) => true,
+            (SqawkError::FileNotFound(_), SqawkError::FileNotFound(_)) => true,
+            (SqawkError::NoFilePath(_), SqawkError::NoFilePath(_)) => true,
             (SqawkError::ColumnNotFound(_), SqawkError::ColumnNotFound(_)) => true,
             (SqawkError::InvalidFileSpec(_), SqawkError::InvalidFileSpec(_)) => true,
             (SqawkError::UnsupportedSqlFeature(_), SqawkError::UnsupportedSqlFeature(_)) => true,
