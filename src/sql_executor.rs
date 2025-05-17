@@ -2335,7 +2335,7 @@ impl SqlExecutor {
         }
 
         // Create a new table with a single row containing the aggregate results
-        let mut result_table = Table::new("aggregate_result", result_columns, None, None);
+        let mut result_table = Table::new("aggregate_result", result_columns, None);
         result_table.add_row(result_values)?;
         Ok(result_table)
     }
@@ -2569,7 +2569,7 @@ impl SqlExecutor {
         }
 
         // Create the result table
-        let mut result_table = Table::new("grouped_result", result_columns, None, None);
+        let mut result_table = Table::new("grouped_result", result_columns, None);
 
         // Generate a row for each group
         for (group_key, row_indices) in groups {

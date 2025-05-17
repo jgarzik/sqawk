@@ -242,7 +242,7 @@ pub struct Table {
     /// Custom delimiter for this table's file (default is comma)
     delimiter: String,
 
-    /// The file format for this table (currently only TEXT is supported)
+    /// The file format for this table (currently only TEXTFILE is supported)
     file_format: String,
 }
 
@@ -291,11 +291,6 @@ pub enum SortDirection {
 impl Table {
     /// Create a new table with the given name and columns
     pub fn new(name: &str, columns: Vec<String>, file_path: Option<PathBuf>) -> Self {
-        Self::new_with_delimiter(name, columns, file_path, ",".to_string())
-    }
-    
-    /// Create a new table with the given name, columns, and delimiter
-    pub fn new_with_delimiter(name: &str, columns: Vec<String>, file_path: Option<PathBuf>, delimiter: String) -> Self {
         let column_map = columns
             .iter()
             .enumerate()
@@ -310,9 +305,16 @@ impl Table {
             file_path,
             modified: false,
             schema: None,
-            delimiter,
+            delimiter: ",".to_string(),  // Default to comma delimiter
             file_format: "TEXTFILE".to_string(),
         }
+    }
+    
+    /// Create a new table with the given name, columns, and a specific delimiter
+    pub fn new_with_delimiter(name: &str, columns: Vec<String>, file_path: Option<PathBuf>, delimiter: String) -> Self {
+        let mut table = Self::new(name, columns, file_path);
+        table.delimiter = delimiter;
+        table
     }
     
     /// Create a new table with a schema
@@ -354,7 +356,6 @@ impl Table {
         file_path: Option<PathBuf>
     ) -> Self {
         Self::new_with_schema(name, schema, file_path, None, None)
-    }
     }
 
     /// Get the columns of the table
