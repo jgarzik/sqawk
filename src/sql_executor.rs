@@ -1003,7 +1003,7 @@ impl SqlExecutor {
         } else {
             // No WHERE clause means delete all rows
 
-            let table = self.file_handler.get_table_mut(&table_name)?;
+            let table = self.database.get_table_mut(&table_name)?;
             let deleted_count = table.row_count();
 
             // Replace with empty row set

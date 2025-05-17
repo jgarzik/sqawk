@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::csv_handler::CsvHandler;
-use crate::database::Database;
+//use crate::database::Database;
 use crate::delim_handler::DelimHandler;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;

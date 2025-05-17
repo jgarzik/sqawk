@@ -33,6 +33,7 @@ mod database;
 mod delim_handler;
 mod error;
 mod file_handler;
+mod file_handler_new;
 mod repl;
 mod sql_executor;
 mod string_functions;
