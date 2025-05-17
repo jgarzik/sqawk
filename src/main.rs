@@ -93,7 +93,7 @@ fn main() -> Result<()> {
     // Each file can specify its table name with table_name=file_path syntax
     for file_spec in &args.files {
         file_handler
-            .load_file(file_spec)
+            .load_file(file_spec, &args.field_separator)
             .with_context(|| format!("Failed to load file: {file_spec}"))?;
     }
 

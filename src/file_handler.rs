@@ -42,9 +42,6 @@ pub struct FileHandler {
     
     /// Reference to a database object which is the source of truth for tables
     database: *mut Database,
-    
-    /// Default field separator for tables if not explicitly specified
-    default_field_separator: Option<String>,
 }
 
 // Add safety implementation for the raw pointer to Database
@@ -55,7 +52,7 @@ impl FileHandler {
     /// Create a new FileHandler with a database, field separator, and column definitions
     ///
     /// # Arguments
-    /// * `field_separator` - Optional field separator character/string
+    /// * `field_separator` - Optional field separator character/string from command line
     /// * `tabledef` - Optional vector of table column definitions in format "table_name:col1,col2,..."
     /// * `database` - Mutable reference to the database to use as source of truth
     ///
@@ -96,7 +93,6 @@ impl FileHandler {
             table_column_defs,
             // SAFETY: The caller must ensure that the database outlives this FileHandler
             database: database as *mut Database,
-            default_field_separator: field_separator,
         }
     }
     
@@ -109,14 +105,18 @@ impl FileHandler {
         unsafe { &mut *self.database }
     }
     
-    /// Get the default field separator
+    /// Get the default delimiter based on format
+    ///
+    /// # Arguments
+    /// * `format` - The file format
+    /// * `field_separator` - Optional custom field separator from command line
     ///
     /// # Returns
-    /// * `&str` - The default field separator or "\t" for tab-delimited files and "," for CSV
-    pub fn get_default_delimiter(&self, format: FileFormat) -> &str {
+    /// * `String` - The appropriate delimiter for the format
+    pub fn get_delimiter_for_format(format: FileFormat, field_separator: &Option<String>) -> String {
         match format {
-            FileFormat::Csv => ",",
-            FileFormat::Delimited => self.default_field_separator.as_deref().unwrap_or("\t"),
+            FileFormat::Csv => ",".to_string(),
+            FileFormat::Delimited => field_separator.clone().unwrap_or_else(|| "\t".to_string()),
         }
     }
 
@@ -124,10 +124,11 @@ impl FileHandler {
     ///
     /// # Arguments
     /// * `file_spec` - File specification in format [table_name=]file_path
+    /// * `field_separator` - Optional field separator from command line
     ///
     /// # Returns
     /// * `SqawkResult<Option<(String, String)>>` - Tuple of (table_name, file_path) if successful
-    pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<Option<(String, String)>> {
+    pub fn load_file(&mut self, file_spec: &str, field_separator: &Option<String>) -> SqawkResult<Option<(String, String)>> {
         // Parse file spec to get table name and file path
         let (table_name, file_path) = self.parse_file_spec(file_spec)?;
         let file_path_str = file_path.to_string_lossy().to_string();
@@ -145,9 +146,9 @@ impl FileHandler {
                 self.database_mut().add_table(table_name.clone(), table)?;
             }
             FileFormat::Delimited => {
-                let delimiter = self.default_field_separator.as_deref().unwrap_or("\t");
+                let delimiter = field_separator.clone().unwrap_or_else(|| "\t".to_string());
                 let table =
-                    self.delim_handler.load_delimited(file_spec, delimiter, custom_columns)?;
+                    self.delim_handler.load_delimited(file_spec, &delimiter, custom_columns)?;
                 
                 // Add the table to the database
                 self.database_mut().add_table(table_name.clone(), table)?;
