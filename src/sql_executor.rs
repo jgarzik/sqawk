@@ -27,14 +27,18 @@ use sqlparser::parser::Parser;
 
 use crate::aggregate::AggregateFunction;
 use crate::error::{SqawkError, SqawkResult};
-use crate::file_handler::FileHandler;
+use crate::database::Database;
+use crate::file_handler_new::FileHandler;
 use crate::string_functions::StringFunction;
 use crate::table::{ColumnDefinition, DataType, SortDirection, Table, Value};
 
 /// SQL statement executor
 pub struct SqlExecutor {
-    /// File handler for managing tables
+    /// File handler for managing file operations
     file_handler: FileHandler,
+    
+    /// Database for managing tables
+    database: Database,
 
     /// Names of tables that have been modified
     modified_tables: HashSet<String>,
@@ -47,10 +51,11 @@ pub struct SqlExecutor {
 }
 
 impl SqlExecutor {
-    /// Create a new SQL executor with the given file handler and verbose flag
-    pub fn new_with_verbose(file_handler: FileHandler, verbose: bool) -> Self {
+    /// Create a new SQL executor with the given file handler, database, and verbose flag
+    pub fn new_with_verbose(file_handler: FileHandler, database: Database, verbose: bool) -> Self {
         SqlExecutor {
             file_handler,
+            database,
             modified_tables: HashSet::new(),
             verbose,
             affected_row_count: 0,
