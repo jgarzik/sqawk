@@ -56,7 +56,7 @@ pub struct SqawkArgs {
     /// is used as the table name in SQL queries.
     /// Example: users=data/people.csv or just data/products.csv
     #[clap(
-        required = true,
+        required_unless_present = "interactive",
         help = "Input files to process as [table_name=]file_path"
     )]
     pub files: Vec<String>,
