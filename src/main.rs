@@ -33,7 +33,7 @@ mod database;
 mod delim_handler;
 mod error;
 mod file_handler;
-mod file_handler_new;
+mod file_manager;
 mod repl;
 mod sql_executor;
 mod string_functions;
@@ -42,7 +42,7 @@ mod table;
 use anyhow::{Context, Result};
 // Not explicitly importing SqawkArgs as it's not directly used
 use database::Database;
-use file_handler_new::FileHandler;
+use file_manager::FileHandler;
 use repl::Repl;
 use sql_executor::SqlExecutor;
 
