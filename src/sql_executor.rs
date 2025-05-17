@@ -90,15 +90,7 @@ impl<'a> SqlExecutor<'a> {
         // Execute each statement
         let mut result = None;
         for statement in statements {
-            // Debug logging for CREATE TABLE with LOCATION
-            if let Statement::CreateTable { ref location, .. } = statement {
-                if self.verbose {
-                    match location {
-                        Some(loc) => println!("CREATE TABLE with LOCATION: {}", loc),
-                        None => println!("CREATE TABLE without LOCATION clause")
-                    }
-                }
-            }
+            // We've handled CREATE TABLE with LOCATION properly now, no need for extra debug logging here
             
             result = self.execute_statement(statement)?;
         }
@@ -203,8 +195,7 @@ impl<'a> SqlExecutor<'a> {
                 if self.verbose {
                     println!("Parsed CREATE TABLE statement:");
                     println!("  Table name: {:?}", name);
-                    println!("  LOCATION clause (direct): {:?}", location);
-                    println!("  LOCATION in hive_formats: {:?}", hive_formats.as_ref().and_then(|hf| hf.location.as_ref()));
+                    println!("  LOCATION clause: {:?}", hive_formats.as_ref().and_then(|hf| hf.location.as_ref()));
                     println!("  File format: {:?}", file_format);
                     println!("  WITH options: {:?}", with_options);
                     println!("  Columns: {:?}", columns.len());
