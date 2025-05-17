@@ -33,7 +33,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd $(pwd) && RUST_TEST_THREADS=1 cargo test"
+args = "cd $(pwd) && cargo test"
 
 [deployment]
 run = ["sh", "-c", "cargo build && echo \"Testing Sqawk with sample data:\" && cargo run -- -s \"SELECT * FROM sample\" tests/data/sample.csv -v"]
