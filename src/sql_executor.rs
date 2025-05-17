@@ -958,7 +958,7 @@ impl SqlExecutor {
         // If there's a WHERE clause, we need to precompute which rows match before modifying the table
         if let Some(ref where_expr) = selection {
             // Create a list of row indices to delete
-            let table_ref = self.file_handler.get_table(&table_name)?;
+            let table_ref = self.database.get_table(&table_name)?;
 
             // Evaluate WHERE condition for each row before modifying the table
             // to avoid borrow checker issues
@@ -974,7 +974,7 @@ impl SqlExecutor {
             }
 
             // Now get mutable reference and delete the rows
-            let table = self.file_handler.get_table_mut(&table_name)?;
+            let table = self.database.get_table_mut(&table_name)?;
 
             // If we have rows to delete, create a new set of rows excluding the ones to delete
             if !rows_to_delete.is_empty() {
