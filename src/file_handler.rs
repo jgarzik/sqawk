@@ -111,14 +111,14 @@ impl FileHandler {
         match format {
             FileFormat::Csv => {
                 let table = self.csv_handler.load_csv(file_spec, custom_columns, None)?;
-                self.tables.insert(table_name.clone(), table);
+                self.database.add_table(table_name.clone(), table)?;
             }
             FileFormat::Delimited => {
                 let delimiter = self.field_separator.as_deref().unwrap_or("\t");
                 let table =
                     self.delim_handler
                         .load_delimited(file_spec, delimiter, custom_columns)?;
-                self.tables.insert(table_name.clone(), table);
+                self.database.add_table(table_name.clone(), table)?;
             }
         }
 
@@ -243,7 +243,7 @@ impl FileHandler {
     /// # Returns
     /// * `bool` - True if the table exists
     pub fn table_exists(&self, table_name: &str) -> bool {
-        self.tables.contains_key(table_name)
+        self.database.has_table(table_name)
     }
 
     /// Parse a file specification into table name and file path

@@ -3336,32 +3336,7 @@ impl SqlExecutor {
         Ok(count)
     }
 
-    /// Check if a specific table has been modified
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table to check
-    ///
-    /// # Returns
-    /// * `bool` - True if the table has been modified
-    pub fn is_table_modified(&self, table_name: &str) -> bool {
-        self.modified_tables.contains(table_name)
-    }
-
-    /// Get a list of all available table names
-    ///
-    /// # Returns
-    /// * `Vec<String>` - List of table names
-    pub fn table_names(&self) -> Vec<String> {
-        self.file_handler.table_names()
-    }
-
-    /// Get column names for a specific table
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table
-    ///
-    /// # Returns
-    /// * `SqawkResult<Vec<String>>` - List of column names
+    // Duplicate methods removed during Database architecture transition
     pub fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<String>> {
         self.file_handler.get_table_columns(table_name)
     }
