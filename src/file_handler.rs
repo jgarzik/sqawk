@@ -187,7 +187,7 @@ impl FileHandler {
     /// * `Ok(())` if the table was added successfully
     /// * `Err` if a table with that name already exists
     pub fn add_table(&mut self, name: String, mut table: Table) -> SqawkResult<()> {
-        if self.tables.contains_key(&name) {
+        if self.database.has_table(&name) {
             return Err(SqawkError::TableAlreadyExists(name));
         }
         
@@ -208,18 +208,18 @@ impl FileHandler {
             table.set_file_path(Some(normalized_path));
         }
         
-        self.tables.insert(name, table);
-        Ok(())
+        // Use the Database to store the table
+        self.database.add_table(name, table)
     }
 
     /// Get the names of all tables in the collection
     pub fn table_names(&self) -> Vec<String> {
-        self.tables.keys().cloned().collect()
+        self.database.table_names()
     }
 
     /// Get the number of tables in the collection
     pub fn table_count(&self) -> usize {
-        self.tables.len()
+        self.database.table_count()
     }
 
     /// Get column names for a specific table
@@ -230,10 +230,9 @@ impl FileHandler {
     /// # Returns
     /// * `SqawkResult<Vec<String>>` - List of column names or error if table not found
     pub fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<String>> {
-        match self.tables.get(table_name) {
-            Some(table) => Ok(table.columns().to_vec()),
-            None => Err(SqawkError::TableNotFound(table_name.to_string())),
-        }
+        // Get the table from the database
+        let table = self.database.get_table(table_name)?;
+        Ok(table.columns().to_vec())
     }
     
     /// Check if a table exists
