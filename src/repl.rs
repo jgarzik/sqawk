@@ -1,5 +1,7 @@
+use rustyline::completion::{Completer, Pair};
+use rustyline::config::CompletionType;
 use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
+use rustyline::{Config, Editor};
 use std::fmt;
 use std::process::Command;
 
@@ -56,6 +58,59 @@ pub type Result<T> = std::result::Result<T, ReplError>;
 
 const HISTORY_FILE: &str = ".sqawk_history";
 
+/// Command completer for REPL commands
+#[derive(Default)]
+struct CommandCompleter {
+    /// List of available dot commands for auto-completion
+    commands: Vec<String>,
+}
+
+impl CommandCompleter {
+    /// Create a new command completer with the list of available commands
+    fn new() -> Self {
+        let commands = vec![
+            ".cd", ".changes", ".columns", ".exit", ".help", ".load",
+            ".print", ".quit", ".save", ".schema", ".show", ".stats", 
+            ".tables", ".version", ".write",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        Self { commands }
+    }
+}
+
+impl Completer for CommandCompleter {
+    type Candidate = Pair;
+
+    fn complete(&self, line: &str, pos: usize) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
+        // Only provide completion for dot commands
+        if line.starts_with('.') {
+            // Split the input into command and argument parts
+            let parts: Vec<&str> = line.splitn(2, ' ').collect();
+            let partial_cmd = parts[0];
+            
+            // We're completing a command (not an argument)
+            let start_pos = 0; // Start of the command
+            let candidates: Vec<Pair> = self
+                .commands
+                .iter()
+                .filter(|cmd| cmd.starts_with(partial_cmd))
+                .map(|cmd| Pair {
+                    display: cmd.clone(),
+                    replacement: cmd.clone(),
+                })
+                .collect();
+
+            Ok((start_pos, candidates))
+        } else {
+            // No completion for SQL statements for now
+            Ok((pos, vec![]))
+        }
+    }
+}
+
 /// Commands that can be executed in the REPL
 #[derive(Debug)]
 enum ReplCommand {
@@ -96,7 +151,7 @@ pub struct Repl {
     /// SQL executor for running queries
     executor: SqlExecutor,
     /// Rustyline editor for command line editing
-    editor: DefaultEditor,
+    editor: Editor<CommandCompleter>,
     /// Whether to print verbose output
     _verbose: bool,
     /// Whether to write changes to files
@@ -119,10 +174,20 @@ impl Repl {
         write: bool,
         field_separator: Option<String>,
     ) -> Self {
-        let mut editor = DefaultEditor::new().unwrap_or_else(|err| {
+        // Create rustyline configuration with list-style completion
+        let config = Config::builder()
+            .completion_type(CompletionType::List)
+            .build();
+
+        // Create editor with our custom command completer
+        let completer = CommandCompleter::new();
+        let mut editor = Editor::with_config(config).unwrap_or_else(|err| {
             eprintln!("Warning: Failed to initialize editor: {}", err);
-            DefaultEditor::new().expect("Critical error initializing editor")
+            Editor::with_config(config).expect("Critical error initializing editor")
         });
+        
+        // Set the completer and load history
+        editor.set_completer(Some(completer));
         let _ = editor.load_history(HISTORY_FILE);
 
         Self {
