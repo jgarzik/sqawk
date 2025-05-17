@@ -293,6 +293,9 @@ impl FileHandler {
             Some(path) => path,
             None => return Err(SqawkError::NoFilePath(table_name.to_string())),
         };
+        
+        // For tables created with CREATE TABLE, the file may not exist yet
+        // The parent directories might need to be created
 
         // Determine the format based on the file extension
         let format = self.detect_format(file_path);
