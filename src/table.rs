@@ -544,7 +544,7 @@ impl Table {
     where
         F: Fn(&Row) -> bool,
     {
-        let mut result = Table::new(&self.name, self.columns.clone(), None);
+        let mut result = Table::new(&self.name, self.columns.clone(), None, Some(self.delimiter.clone()));
 
         for row in &self.rows {
             if predicate(row) {
@@ -667,7 +667,7 @@ impl Table {
             })
             .collect();
 
-        let mut result = Table::new(&self.name, columns, self.file_path.clone());
+        let mut result = Table::new(&self.name, columns, self.file_path.clone(), Some(self.delimiter.clone()));
 
         // Project rows
         for row in &self.rows {
