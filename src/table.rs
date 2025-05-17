@@ -432,16 +432,55 @@ impl Table {
         Ok(())
     }
 
-    /// Get the source file path
+    /// Get the file path associated with this table
     ///
-    /// Returns the path to the original file from which this table was loaded,
-    /// if applicable. This is used when writing changes back to disk.
+    /// Returns the path to the file associated with this table,
+    /// either as the source file it was loaded from or the destination
+    /// file specified in CREATE TABLE. This is used when writing 
+    /// changes back to disk.
     ///
     /// # Returns
-    /// * `Some(PathBuf)` containing the source file path
-    /// * `None` if the table wasn't loaded from a file
-    pub fn source_file(&self) -> Option<&PathBuf> {
-        self.source_file.as_ref()
+    /// * `Some(PathBuf)` containing the file path
+    /// * `None` if the table has no associated file
+    pub fn file_path(&self) -> Option<&PathBuf> {
+        self.file_path.as_ref()
+    }
+    
+    /// Get the delimiter for this table
+    ///
+    /// Returns the custom delimiter specified for this table, if any.
+    /// This is used when writing the table to a file.
+    ///
+    /// # Returns
+    /// * `Some(String)` containing the delimiter
+    /// * `None` if no custom delimiter is specified
+    pub fn delimiter(&self) -> Option<&String> {
+        self.delimiter.as_ref()
+    }
+    
+    /// Get the file format for this table
+    ///
+    /// Returns the file format specified for this table, if any.
+    /// Currently only TEXTFILE is supported.
+    ///
+    /// # Returns
+    /// * `Some(String)` containing the file format
+    /// * `None` if no file format is specified
+    pub fn file_format(&self) -> Option<&String> {
+        self.file_format.as_ref()
+    }
+    
+    /// Get the schema for this table
+    ///
+    /// Returns the schema definitions for this table if it was created
+    /// with a schema, or None if it was loaded from a file without 
+    /// schema information.
+    ///
+    /// # Returns
+    /// * `Some(Vec<ColumnDefinition>)` containing the schema
+    /// * `None` if the table has no schema information
+    pub fn schema(&self) -> Option<&Vec<ColumnDefinition>> {
+        self.schema.as_ref()
     }
 
     /// Get the index of a column by name
@@ -630,7 +669,7 @@ impl Table {
             })
             .collect();
 
-        let mut result = Table::new(&self.name, columns, self.source_file.clone());
+        let mut result = Table::new(&self.name, columns, self.file_path.clone());
 
         // Project rows
         for row in &self.rows {
@@ -849,7 +888,7 @@ impl Table {
     /// * A new table with duplicate rows removed
     pub fn distinct(&self) -> SqawkResult<Self> {
         // Create a new table with the same structure
-        let mut result = Table::new(&self.name, self.columns.clone(), self.source_file.clone());
+        let mut result = Table::new(&self.name, self.columns.clone(), self.file_path.clone());
 
         // Use a vector to track rows we've already seen
         // We can't use a HashSet directly because Row is Vec<Value> which may not implement Hash
@@ -898,7 +937,7 @@ impl Table {
         }
 
         // Create a new table with the same structure
-        let mut result = Table::new(&self.name, self.columns.clone(), self.source_file.clone());
+        let mut result = Table::new(&self.name, self.columns.clone(), self.file_path.clone());
 
         // Clone the rows for sorting
         let mut sorted_rows = self.rows.clone();
@@ -950,7 +989,7 @@ impl Table {
     /// * A new table with the specified limit and offset applied
     pub fn limit(&self, limit: usize, offset: usize) -> SqawkResult<Self> {
         // Create a new table with the same structure
-        let mut result = Table::new(&self.name, self.columns.clone(), self.source_file.clone());
+        let mut result = Table::new(&self.name, self.columns.clone(), self.file_path.clone());
 
         // If offset is greater than or equal to the number of rows, return an empty table
         if offset >= self.rows.len() {

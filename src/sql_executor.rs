@@ -168,6 +168,20 @@ impl SqlExecutor {
                 }
                 Ok(None)
             }
+            Statement::CreateTable { 
+                name, 
+                columns, 
+                file_format, 
+                location, 
+                with_options, 
+                .. 
+            } => {
+                self.execute_create_table(name, columns, file_format, location, with_options)?;
+                if self.verbose {
+                    eprintln!("Table created successfully");
+                }
+                Ok(None)
+            },
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
                 "Unsupported SQL statement: {:?}",
                 statement
