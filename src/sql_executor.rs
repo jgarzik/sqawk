@@ -22,7 +22,7 @@ use sqlparser::ast::{
     Join as SqlJoin, JoinConstraint, JoinOperator, ObjectName, Query, Select, SelectItem,
     SetExpr, SqlOption, Statement, TableFactor, TableWithJoins, Value as SqlValue,
 };
-use sqlparser::dialect::GenericDialect;
+use sqlparser::dialect::{GenericDialect, HiveDialect};
 use sqlparser::parser::Parser;
 
 use crate::aggregate::AggregateFunction;
@@ -194,15 +194,20 @@ impl<'a> SqlExecutor<'a> {
                 with_options, 
                 .. 
             } => {
-                // Debug output for location clause to help understand what's happening
+                // Print complete debug information about the parsed CREATE TABLE statement
                 if self.verbose {
-                    match &location {
-                        Some(loc) => println!("CREATE TABLE with LOCATION: {}", loc),
-                        None => println!("CREATE TABLE without LOCATION clause")
-                    }
+                    println!("Parsed CREATE TABLE statement:");
+                    println!("  Table name: {:?}", name);
+                    println!("  LOCATION clause: {:?}", location);
+                    println!("  File format: {:?}", file_format);
+                    println!("  WITH options: {:?}", with_options);
+                    println!("  Columns: {:?}", columns.len());
                 }
                 
-                self.execute_create_table(name, columns, file_format, location, with_options)?;
+                // Just use the location directly from the statement
+                let actual_location = location.clone();
+                
+                self.execute_create_table(name, columns, file_format, actual_location, with_options)?;
                 if self.verbose {
                     eprintln!("Table created successfully");
                 }
@@ -3108,37 +3113,50 @@ impl<'a> SqlExecutor<'a> {
             ",".to_string()
         });
         
-        // For CREATE TABLE, we strongly recommend a LOCATION clause, otherwise
-        // the table can't be saved later - print a warning if missing
-        if location.is_none() {
-            if self.verbose {
+        // Check if the LOCATION clause was provided
+        if self.verbose {
+            if let Some(loc) = &location {
+                println!("LOCATION clause found: '{}'", loc);
+            } else {
                 eprintln!("Warning: CREATE TABLE without LOCATION clause - table cannot be saved to disk");
             }
         }
         
-        // Process location to ensure we have a valid file path
-        // We need an absolute path to ensure consistency
+        // Process the file path from the LOCATION clause
         let file_path = location.map(|loc| {
-            // Print info about the location being processed
+            // Remove any quotes that might be in the location string
+            let loc = loc.trim_matches('\'').trim_matches('"');
+            
             if self.verbose {
                 println!("Setting file path for table '{}' to: {}", table_name, loc);
             }
             
-            // Fix relative paths to be relative to current directory
+            // Convert to absolute path if needed
             let path = if loc.starts_with('/') {
-                // Already absolute path
+                // Already absolute
                 std::path::PathBuf::from(loc)
             } else {
-                // Get current directory and append the relative path
-                let mut cur_dir = std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                cur_dir.push(loc);
-                cur_dir
+                // Convert relative path to absolute
+                match std::env::current_dir() {
+                    Ok(mut cur_dir) => {
+                        cur_dir.push(loc);
+                        if self.verbose {
+                            println!("Resolved relative path to absolute: {:?}", cur_dir);
+                        }
+                        cur_dir
+                    },
+                    Err(_) => {
+                        // Fall back to relative path if current dir can't be determined
+                        if self.verbose {
+                            println!("Warning: Could not resolve absolute path, using relative");
+                        }
+                        std::path::PathBuf::from(loc)
+                    }
+                }
             };
             
-            // Print the full resolved path for debugging
             if self.verbose {
-                println!("Absolute path for table '{}': {:?}", table_name, path);
+                println!("Final file path for table '{}': {:?}", table_name, path);
             }
             
             path
