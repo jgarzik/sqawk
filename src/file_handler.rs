@@ -176,6 +176,27 @@ impl FileHandler {
             .get_mut(name)
             .ok_or_else(|| SqawkError::TableNotFound(name.to_string()))
     }
+    
+    /// Add a new table to the file handler
+    ///
+    /// This method is used to add a table that's created via CREATE TABLE
+    /// or other programmatic means, rather than being loaded from a file.
+    ///
+    /// # Arguments
+    /// * `name` - Name of the new table
+    /// * `table` - The table to add
+    ///
+    /// # Returns
+    /// * `Ok(())` if the table was added successfully
+    /// * `Err` if a table with that name already exists
+    pub fn add_table(&mut self, name: String, table: Table) -> SqawkResult<()> {
+        if self.tables.contains_key(&name) {
+            return Err(SqawkError::TableAlreadyExists(name));
+        }
+        
+        self.tables.insert(name, table);
+        Ok(())
+    }
 
     /// Get the names of all tables in the collection
     pub fn table_names(&self) -> Vec<String> {
