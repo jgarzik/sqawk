@@ -18,8 +18,9 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use sqlparser::ast::{
-    Assignment, Expr, Join as SqlJoin, JoinConstraint, JoinOperator, Query, Select, SelectItem,
-    SetExpr, Statement, TableFactor, TableWithJoins, Value as SqlValue,
+    Assignment, ColumnDef as SqlColumnDef, Expr, FileFormat as SqlFileFormat, 
+    Join as SqlJoin, JoinConstraint, JoinOperator, ObjectName, Query, Select, SelectItem,
+    SetExpr, SqlOption, Statement, TableFactor, TableWithJoins, Value as SqlValue,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -28,7 +29,7 @@ use crate::aggregate::AggregateFunction;
 use crate::error::{SqawkError, SqawkResult};
 use crate::file_handler::FileHandler;
 use crate::string_functions::StringFunction;
-use crate::table::{SortDirection, Table, Value};
+use crate::table::{ColumnDefinition, DataType, SortDirection, Table, Value};
 
 /// SQL statement executor
 pub struct SqlExecutor {
