@@ -239,8 +239,15 @@ impl FileHandler {
     ///
     /// # Returns
     /// * `SqawkResult<()>` - Result of the operation
-    pub fn add_table(&mut self, name: String, table: Table) -> SqawkResult<()> {
-        // Add the table to the database
+    pub fn add_table(&mut self, name: String, mut table: Table) -> SqawkResult<()> {
+        // Debug: Check if the table has a file path before adding
+        if let Some(path) = table.file_path() {
+            println!("Adding table '{}' with file path: {:?}", name, path);
+        } else {
+            println!("Adding table '{}' with NO file path", name);
+        }
+        
+        // Add the table to the database, ensuring file path information is preserved
         self.database_mut().add_table(name, table)
     }
 

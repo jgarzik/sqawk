@@ -711,7 +711,17 @@ impl<'a> Repl<'a> {
                         println!("Changes saved to table '{}'", name);
                         Ok(())
                     }
-                    Err(err) => Err(ReplError::Sqawk(err)),
+                    Err(err) => {
+                        // Print specific guidance for NoFilePath errors related to CREATE TABLE usage
+                        if let crate::error::SqawkError::NoFilePath(table) = &err {
+                            eprintln!("Error: Table '{}' has no associated file path", table);
+                            eprintln!("Hint: When creating tables with CREATE TABLE, use the LOCATION clause");
+                            eprintln!("Example: CREATE TABLE {} (...) LOCATION './file.csv';", table);
+                        } else {
+                            eprintln!("Error saving table '{}': {}", name, err);
+                        }
+                        Err(ReplError::Sqawk(err))
+                    }
                 }
             }
             None => {
@@ -726,7 +736,10 @@ impl<'a> Repl<'a> {
                         println!("Changes saved to {} tables", count);
                         Ok(())
                     }
-                    Err(err) => Err(ReplError::SqlExecutor(err)),
+                    Err(err) => {
+                        eprintln!("Error saving modified tables: {}", err);
+                        Err(ReplError::SqlExecutor(err))
+                    }
                 }
             }
         }
