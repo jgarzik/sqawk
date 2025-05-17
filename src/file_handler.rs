@@ -295,7 +295,13 @@ impl FileHandler {
         };
         
         // For tables created with CREATE TABLE, the file may not exist yet
-        // The parent directories might need to be created
+        // Make sure parent directories exist
+        if let Some(parent) = file_path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| SqawkError::IoError(e))?;
+            }
+        }
 
         // Determine the format based on the file extension
         let format = self.detect_format(file_path);

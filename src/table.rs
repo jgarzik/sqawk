@@ -462,6 +462,17 @@ impl Table {
         self.file_path.as_ref()
     }
     
+    /// Set file path for this table
+    ///
+    /// Sets the path to the file associated with this table.
+    /// This is useful for tables created with CREATE TABLE.
+    ///
+    /// # Arguments
+    /// * `path` - The new file path
+    pub fn set_file_path(&mut self, path: PathBuf) {
+        self.file_path = Some(path);
+    }
+    
     /// Get the delimiter for this table
     ///
     /// Returns the delimiter used for this table.
