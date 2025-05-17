@@ -52,15 +52,20 @@ unsafe impl Send for FileHandler {}
 unsafe impl Sync for FileHandler {}
 
 impl FileHandler {
-    /// Create a new FileHandler with specified field separator and column definitions
+    /// Create a new FileHandler with a database, field separator, and column definitions
     ///
     /// # Arguments
     /// * `field_separator` - Optional field separator character/string
     /// * `tabledef` - Optional vector of table column definitions in format "table_name:col1,col2,..."
+    /// * `database` - Mutable reference to the database to use as source of truth
     ///
     /// # Returns
     /// A new FileHandler instance ready to load and manage tables
-    pub fn new(field_separator: Option<String>, tabledef: Option<Vec<String>>) -> Self {
+    pub fn new(
+        field_separator: Option<String>, 
+        tabledef: Option<Vec<String>>,
+        database: &mut Database
+    ) -> Self {
         let default_format = if field_separator.is_some() {
             FileFormat::Delimited
         } else {
@@ -85,51 +90,23 @@ impl FileHandler {
         }
 
         FileHandler {
-            tables: HashMap::new(),
             csv_handler: CsvHandler::new(),
             delim_handler: DelimHandler::new(field_separator.clone()),
             _default_format: default_format,
             field_separator,
             table_column_defs,
-            database: None,
+            // SAFETY: The caller must ensure that the database outlives this FileHandler
+            database: database as *mut Database,
         }
     }
     
-    /// Create a new FileHandler that uses the provided Database as the source of truth
-    ///
-    /// # Arguments
-    /// * `field_separator` - Optional field separator character/string
-    /// * `tabledef` - Optional vector of table column definitions in format "table_name:col1,col2,..."
-    /// * `database` - Mutable reference to the database to use
+    /// Get a mutable reference to the database
     ///
     /// # Returns
-    /// A new FileHandler instance that delegates table operations to the database
-    pub fn new_with_database(
-        field_separator: Option<String>, 
-        tabledef: Option<Vec<String>>,
-        database: &mut Database
-    ) -> Self {
-        let mut handler = Self::new(field_separator, tabledef);
-        
-        // Store a raw pointer to the database
-        // SAFETY: The caller must ensure that the database outlives this FileHandler
-        handler.database = Some(database as *mut Database);
-        
-        handler
-    }
-    
-    /// Get a reference to the database if available
-    ///
-    /// # Returns
-    /// * `Some(&mut Database)` if a database was provided
-    /// * `None` if no database was provided
-    fn database_mut(&mut self) -> Option<&mut Database> {
-        if let Some(db_ptr) = self.database {
-            // SAFETY: The caller of `new_with_database` ensures the database outlives this FileHandler
-            unsafe { Some(&mut *db_ptr) }
-        } else {
-            None
-        }
+    /// * `&mut Database` - Mutable reference to the database
+    fn database_mut(&mut self) -> &mut Database {
+        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
+        unsafe { &mut *self.database }
     }
 
     /// Load a file into an in-memory table with explicit return of table name and path
@@ -153,27 +130,16 @@ impl FileHandler {
         match format {
             FileFormat::Csv => {
                 let table = self.csv_handler.load_csv(file_spec, custom_columns, None)?;
-                
-                // If we have a database, add the table to it
-                if let Some(db) = self.database_mut() {
-                    db.add_table(table_name.clone(), table)?;
-                } else {
-                    // Otherwise, store it locally (backward compatibility)
-                    self.tables.insert(table_name.clone(), table);
-                }
+                // Add the table to the database
+                self.database_mut().add_table(table_name.clone(), table)?;
             }
             FileFormat::Delimited => {
                 let delimiter = self.field_separator.as_deref().unwrap_or("\t");
                 let table =
                     self.delim_handler.load_delimited(file_spec, delimiter, custom_columns)?;
                 
-                // If we have a database, add the table to it
-                if let Some(db) = self.database_mut() {
-                    db.add_table(table_name.clone(), table)?;
-                } else {
-                    // Otherwise, store it locally (backward compatibility)
-                    self.tables.insert(table_name.clone(), table);
-                }
+                // Add the table to the database
+                self.database_mut().add_table(table_name.clone(), table)?;
             }
         }
 
@@ -235,18 +201,9 @@ impl FileHandler {
     /// # Returns
     /// * `SqawkResult<&Table>` - Reference to the requested table
     pub fn get_table(&self, table_name: &str) -> SqawkResult<&Table> {
-        // If we have a database, try to get the table from it
-        if let Some(db_ptr) = self.database {
-            // SAFETY: The caller of `new_with_database` ensures the database outlives this FileHandler
-            let db = unsafe { &*db_ptr };
-            db.get_table(table_name)
-        } else {
-            // Otherwise, use local tables (backward compatibility)
-            match self.tables.get(table_name) {
-                Some(table) => Ok(table),
-                None => Err(SqawkError::TableNotFound(table_name.to_string())),
-            }
-        }
+        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
+        let db = unsafe { &*self.database };
+        db.get_table(table_name)
     }
 
     /// Get a mutable reference to a table by name
@@ -257,19 +214,9 @@ impl FileHandler {
     /// # Returns
     /// * `SqawkResult<&mut Table>` - Mutable reference to the requested table
     pub fn get_table_mut(&mut self, table_name: &str) -> SqawkResult<&mut Table> {
-        // Check if we have a database reference
-        if self.database.is_some() {
-            // SAFETY: We've already checked that database is Some, and we know
-            // the database reference outlives this FileHandler
-            let db = unsafe { &mut *(self.database.unwrap()) };
-            db.get_table_mut(table_name)
-        } else {
-            // Otherwise, use local tables (backward compatibility)
-            match self.tables.get_mut(table_name) {
-                Some(table) => Ok(table),
-                None => Err(SqawkError::TableNotFound(table_name.to_string())),
-            }
-        }
+        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
+        let db = unsafe { &mut *self.database };
+        db.get_table_mut(table_name)
     }
 
     /// Add a table to the collection
@@ -281,18 +228,8 @@ impl FileHandler {
     /// # Returns
     /// * `SqawkResult<()>` - Result of the operation
     pub fn add_table(&mut self, name: String, table: Table) -> SqawkResult<()> {
-        // If we have a database, add the table to it
-        if let Some(db) = self.database_mut() {
-            db.add_table(name, table)
-        } else {
-            // Otherwise, store it locally (backward compatibility)
-            if self.tables.contains_key(&name) {
-                return Err(SqawkError::TableAlreadyExists(name));
-            }
-            
-            self.tables.insert(name, table);
-            Ok(())
-        }
+        // Add the table to the database
+        self.database_mut().add_table(name, table)
     }
 
     /// Get all table names
@@ -300,15 +237,9 @@ impl FileHandler {
     /// # Returns
     /// * `Vec<String>` - Vector of table names
     pub fn table_names(&self) -> Vec<String> {
-        // If we have a database, get table names from it
-        if let Some(db_ptr) = self.database {
-            // SAFETY: The caller of `new_with_database` ensures the database outlives this FileHandler
-            let db = unsafe { &*db_ptr };
-            db.table_names()
-        } else {
-            // Otherwise, use local tables (backward compatibility)
-            self.tables.keys().cloned().collect()
-        }
+        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
+        let db = unsafe { &*self.database };
+        db.table_names()
     }
 
     /// Get the number of tables
@@ -316,15 +247,9 @@ impl FileHandler {
     /// # Returns
     /// * `usize` - Number of tables
     pub fn table_count(&self) -> usize {
-        // If we have a database, get table count from it
-        if let Some(db_ptr) = self.database {
-            // SAFETY: The caller of `new_with_database` ensures the database outlives this FileHandler
-            let db = unsafe { &*db_ptr };
-            db.table_count()
-        } else {
-            // Otherwise, use local tables (backward compatibility)
-            self.tables.len()
-        }
+        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
+        let db = unsafe { &*self.database };
+        db.table_count()
     }
 
     /// Check if a table exists
@@ -335,15 +260,9 @@ impl FileHandler {
     /// # Returns
     /// * `bool` - True if the table exists
     pub fn has_table(&self, table_name: &str) -> bool {
-        // If we have a database, check if the table exists in it
-        if let Some(db_ptr) = self.database {
-            // SAFETY: The caller of `new_with_database` ensures the database outlives this FileHandler
-            let db = unsafe { &*db_ptr };
-            db.has_table(table_name)
-        } else {
-            // Otherwise, check local tables (backward compatibility)
-            self.tables.contains_key(table_name)
-        }
+        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
+        let db = unsafe { &*self.database };
+        db.has_table(table_name)
     }
 
     /// Save a modified table back to its original file

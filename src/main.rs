@@ -79,7 +79,7 @@ fn main() -> Result<()> {
     // Step 2b: Initialize the file handler with optional custom field separator and table definitions
     // The field separator determines how input files are parsed (comma, tab, etc.)
     // Table definitions allow specifying custom column names for files without headers
-    let mut file_handler = FileHandler::new_with_database(
+    let mut file_handler = FileHandler::new(
         args.field_separator.clone(),
         if args.tabledef.is_empty() {
             None
