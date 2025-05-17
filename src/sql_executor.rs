@@ -70,15 +70,53 @@ impl<'a> SqlExecutor<'a> {
     /// Execute an SQL statement
     ///
     /// Returns Some(Table) for SELECT queries, None for other statements.
-    pub fn execute(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
-        // Parse the SQL statement using the Snowflake dialect, which properly supports LOCATION clauses
-        // Import the dialect specifically to make it clear what we're using
-        use sqlparser::dialect::SnowflakeDialect;
+    /// Extract location from a CREATE TABLE statement
+    /// 
+    /// This function directly extracts the LOCATION clause from a SQL string
+    /// since the SQL parser doesn't consistently recognize it with all dialects
+    fn extract_location_from_sql(&self, sql: &str) -> Option<String> {
+        // Only process if it contains CREATE TABLE and LOCATION
+        if !sql.to_uppercase().contains("CREATE TABLE") || !sql.to_uppercase().contains("LOCATION") {
+            return None;
+        }
         
-        let dialect = SnowflakeDialect {};
+        // Find the LOCATION keyword
+        if let Some(loc_start) = sql.to_uppercase().find("LOCATION") {
+            // Extract the path after LOCATION
+            let after_location = &sql[loc_start + 8..]; // 8 = "LOCATION".len()
+            
+            // Determine the quote character used
+            let quote_char = if after_location.trim().starts_with('\'') { '\'' } 
+                           else if after_location.trim().starts_with('"') { '"' } 
+                           else { return None }; // No quoted path found
+            
+            // Find the quoted string
+            if let Some(start_idx) = after_location.find(quote_char) {
+                if let Some(end_idx) = after_location[start_idx + 1..].find(quote_char) {
+                    // Extract the path between quotes
+                    let path = &after_location[start_idx + 1..start_idx + 1 + end_idx];
+                    
+                    if self.verbose {
+                        println!("Manually extracted LOCATION path: {}", path);
+                    }
+                    
+                    return Some(path.to_string());
+                }
+            }
+        }
+        
+        None
+    }
+    
+    pub fn execute(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
+        // Check if this might be a CREATE TABLE with LOCATION before parsing
+        let location_path = self.extract_location_from_sql(sql);
+        
+        // Use Hive dialect which has the best support for CREATE TABLE features
+        let dialect = HiveDialect {};
         
         if self.verbose {
-            println!("Executing SQL using Snowflake dialect: {}", sql);
+            println!("Executing SQL: {}", sql);
         }
         
         let statements = Parser::parse_sql(&dialect, sql).map_err(SqawkError::SqlParseError)?;
@@ -89,11 +127,26 @@ impl<'a> SqlExecutor<'a> {
             ));
         }
 
-        // Execute each statement
+        // Execute each statement, injecting location if needed
         let mut result = None;
-        for statement in statements {
-            if self.verbose && matches!(statement, Statement::CreateTable {..}) {
-                println!("Executing CREATE TABLE statement with proper dialect support");
+        for mut statement in statements {
+            // Special handling for CREATE TABLE statements
+            if let Statement::CreateTable { ref mut location, .. } = statement {
+                // If SQL parser didn't recognize the LOCATION clause but we found one
+                if location.is_none() && location_path.is_some() {
+                    if self.verbose {
+                        println!("Injecting LOCATION clause: {}", location_path.as_ref().unwrap());
+                    }
+                    // Use our manually extracted location
+                    *location = location_path.clone();
+                }
+                
+                if self.verbose {
+                    match location {
+                        Some(loc) => println!("CREATE TABLE with LOCATION: {}", loc),
+                        None => println!("CREATE TABLE without LOCATION clause")
+                    }
+                }
             }
             
             result = self.execute_statement(statement)?;
