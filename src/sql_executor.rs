@@ -3259,7 +3259,8 @@ impl<'a> SqlExecutor<'a> {
     /// # Returns
     /// * `Vec<String>` - List of table names
     pub fn table_names(&self) -> Vec<String> {
-        self.file_handler.table_names()
+        // Get the table names from the database
+        self.database.table_names()
     }
 
     /// Get column names for a specific table
@@ -3270,7 +3271,10 @@ impl<'a> SqlExecutor<'a> {
     /// # Returns
     /// * `SqawkResult<Vec<String>>` - List of column names
     pub fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<String>> {
-        self.file_handler.get_table_columns(table_name)
+        // Get the table from the database
+        let table = self.database.get_table(table_name)?;
+        // Return the column names
+        Ok(table.columns().to_vec())
     }
 
     /// Check if any tables have been modified
