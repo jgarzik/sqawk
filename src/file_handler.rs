@@ -288,12 +288,30 @@ impl FileHandler {
         // Get a reference to the table
         let table = self.get_table(table_name)?;
 
+        eprintln!("DEBUG: In FileHandler::save_table for table '{}'", table_name);
+        
+        // Access database directly to check if the table exists there
+        let db = unsafe { &*self.database };
+        if let Ok(db_table) = db.get_table(table_name) {
+            if let Some(path) = db_table.file_path() {
+                eprintln!("DEBUG: Database has table '{}' with file_path '{:?}'", table_name, path);
+            } else {
+                eprintln!("DEBUG: Database has table '{}' but NO file_path", table_name);
+            }
+        } else {
+            eprintln!("DEBUG: Table '{}' not found in database", table_name);
+        }
+
         // Check if the table has an associated file path
         let file_path = match table.file_path() {
-            Some(path) => path,
+            Some(path) => {
+                eprintln!("DEBUG: Table '{}' has file_path '{:?}' in FileHandler", table_name, path);
+                path
+            },
             None => {
                 // Log debugging information
-                eprintln!("Table debug - Name: {}, Columns: {}, Delimiter: {}", 
+                eprintln!("DEBUG: Table '{}' has NO file_path in FileHandler", table_name);
+                eprintln!("  Table details - Name: {}, Columns: {}, Delimiter: '{}'", 
                           table.name(), 
                           table.columns().join(","), 
                           table.delimiter());

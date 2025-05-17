@@ -3068,7 +3068,10 @@ impl<'a> SqlExecutor<'a> {
             });
             
         // Convert location to PathBuf if specified
-        let file_path = location.map(std::path::PathBuf::from);
+        let file_path = location.map(|loc| {
+            eprintln!("DEBUG: Setting file_path to '{}'", loc);
+            std::path::PathBuf::from(loc)
+        });
         
         // Create file format string (only TEXTFILE supported for now)
         let file_format_str = file_format.map(|_| "TEXTFILE".to_string());
@@ -3082,8 +3085,24 @@ impl<'a> SqlExecutor<'a> {
             file_format_str,
         );
         
+        // Verify table has path after creation
+        if let Some(path) = table.file_path() {
+            eprintln!("DEBUG: Table '{}' has file_path '{:?}' after creation", table_name, path);
+        } else {
+            eprintln!("DEBUG: Table '{}' has NO file_path after creation!", table_name);
+        }
+        
         // Add the table to the file handler
         self.file_handler.add_table(table_name.clone(), table)?;
+        
+        // Check if table has path after adding to file handler
+        if let Ok(table) = self.file_handler.get_table(&table_name) {
+            if let Some(path) = table.file_path() {
+                eprintln!("DEBUG: Table '{}' has file_path '{:?}' after adding to file handler", table_name, path);
+            } else {
+                eprintln!("DEBUG: Table '{}' has NO file_path after adding to file handler!", table_name);
+            }
+        }
         
         // Mark the table as modified (for potential saving)
         self.modified_tables.insert(table_name);
