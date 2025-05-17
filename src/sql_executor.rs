@@ -3028,7 +3028,7 @@ impl<'a> SqlExecutor<'a> {
             .join(".");
         
         // Check if table already exists
-        if self.file_handler.table_exists(&table_name) {
+        if self.file_handler.has_table(&table_name) {
             return Err(SqawkError::TableAlreadyExists(table_name));
         }
         

@@ -16,7 +16,7 @@
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{Table, Value};

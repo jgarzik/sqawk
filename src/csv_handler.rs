@@ -14,7 +14,7 @@
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{Table, Value};
@@ -51,11 +51,11 @@ impl CsvHandler {
     /// * `SqawkResult<()>` - Result of the operation
     pub fn save_csv(&self, table: &Table, file_path: &Path) -> SqawkResult<()> {
         let mut writer = csv::Writer::from_path(file_path)
-            .map_err(SqawkError::IoError)?;
+            .map_err(|e| SqawkError::IoError(e))?;
             
         // Write header row
         writer.write_record(table.columns())
-            .map_err(SqawkError::CsvError)?;
+            .map_err(|e| SqawkError::CsvError(e))?;
             
         // Write data rows
         for row in table.rows() {
@@ -64,10 +64,10 @@ impl CsvHandler {
                 .collect();
                 
             writer.write_record(&string_values)
-                .map_err(SqawkError::CsvError)?;
+                .map_err(|e| SqawkError::CsvError(e))?;
         }
         
-        writer.flush().map_err(SqawkError::IoError)?;
+        writer.flush().map_err(|e| SqawkError::IoError(e))?;
         
         Ok(())
     }
