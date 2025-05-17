@@ -32,3 +32,7 @@ tempfile = "3.8"
 [[bin]]
 name = "sqawk"
 path = "src/main.rs"
+
+[[bin]]
+name = "debug_create_table"
+path = "debug_create_table.rs"
