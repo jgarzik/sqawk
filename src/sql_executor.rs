@@ -3063,7 +3063,19 @@ impl SqlExecutor {
             });
             
         // Convert location to PathBuf if specified
-        let file_path = location.map(std::path::PathBuf::from);
+        // Make sure to resolve relative paths to absolute to match how files are loaded
+        let file_path = location.map(|path_str| {
+            let path = std::path::PathBuf::from(&path_str);
+            // Only convert to absolute if it's a relative path
+            if path.is_relative() {
+                match std::env::current_dir() {
+                    Ok(current_dir) => current_dir.join(path),
+                    Err(_) => path, // Fallback to the relative path if we can't get current dir
+                }
+            } else {
+                path
+            }
+        });
         
         // Create file format string (only TEXTFILE supported for now)
         let file_format_str = file_format.map(|_| "TEXTFILE".to_string());

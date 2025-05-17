@@ -189,9 +189,26 @@ impl FileHandler {
     /// # Returns
     /// * `Ok(())` if the table was added successfully
     /// * `Err` if a table with that name already exists
-    pub fn add_table(&mut self, name: String, table: Table) -> SqawkResult<()> {
+    pub fn add_table(&mut self, name: String, mut table: Table) -> SqawkResult<()> {
         if self.tables.contains_key(&name) {
             return Err(SqawkError::TableAlreadyExists(name));
+        }
+        
+        // For tables with a file path (like those created with CREATE TABLE + LOCATION),
+        // make sure the file path is in a normalized form
+        if let Some(file_path) = table.file_path() {
+            // Create a normalized path that always uses system paths correctly
+            let normalized_path = if file_path.is_relative() {
+                match std::env::current_dir() {
+                    Ok(current_dir) => current_dir.join(file_path),
+                    Err(_) => file_path.to_path_buf(),
+                }
+            } else {
+                file_path.to_path_buf()
+            };
+            
+            // Set the normalized path back on the table
+            table.set_file_path(Some(normalized_path));
         }
         
         self.tables.insert(name, table);
