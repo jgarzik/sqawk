@@ -199,10 +199,10 @@ pub struct Repl<'a> {
     show_stats: bool,
 }
 
-impl Repl {
+impl<'a> Repl<'a> {
     /// Create a new REPL
     pub fn new(
-        executor: SqlExecutor,
+        executor: SqlExecutor<'a>,
         verbose: bool,
         write: bool,
         field_separator: Option<String>,
@@ -748,7 +748,7 @@ fn get_rustc_version() -> String {
     }
 }
 
-impl Repl {
+impl<'a> Repl<'a> {
     /// Toggle writing changes to files
     fn toggle_write(&mut self, arg: Option<&str>) -> Result<()> {
         match arg {

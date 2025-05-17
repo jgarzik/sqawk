@@ -68,7 +68,7 @@ impl CsvHandler {
                 .map_err(SqawkError::CsvError)?;
         }
         
-        writer.flush().map_err(SqawkError::CsvError)?;
+        writer.flush().map_err(|err| SqawkError::IoError(err))?;
         
         Ok(())
     }
