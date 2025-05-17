@@ -182,6 +182,14 @@ impl<'a> SqlExecutor<'a> {
                 with_options, 
                 .. 
             } => {
+                // Debug output for location clause to help understand what's happening
+                if self.verbose {
+                    match &location {
+                        Some(loc) => println!("CREATE TABLE with LOCATION: {}", loc),
+                        None => println!("CREATE TABLE without LOCATION clause")
+                    }
+                }
+                
                 self.execute_create_table(name, columns, file_format, location, with_options)?;
                 if self.verbose {
                     eprintln!("Table created successfully");
@@ -2998,6 +3006,21 @@ impl<'a> SqlExecutor<'a> {
     /// # Returns
     /// * `Ok(())` if the table was created successfully
     /// * `Err` if there was an error creating the table
+    /// Execute a CREATE TABLE statement
+    ///
+    /// This function handles the creation of tables from SQL CREATE TABLE statements.
+    /// It parses the schema, location, file format, and options to create a new table.
+    /// The location is crucial for being able to save the table later.
+    ///
+    /// # Arguments
+    /// * `name` - Table name from SQL
+    /// * `columns` - Column definitions from SQL
+    /// * `file_format` - File format (TEXTFILE, etc.) from SQL
+    /// * `location` - File path location from SQL LOCATION clause
+    /// * `with_options` - Additional options from SQL WITH clause
+    ///
+    /// # Returns
+    /// * `SqawkResult<()>` - Success or error
     fn execute_create_table(
         &mut self,
         name: ObjectName,
@@ -3073,16 +3096,23 @@ impl<'a> SqlExecutor<'a> {
             ",".to_string()
         });
         
-        // Location should be provided, but we'll check it just to be safe
-        if location.is_none() && self.verbose {
-            eprintln!("Warning: No LOCATION clause provided in CREATE TABLE statement");
+        // For CREATE TABLE, we strongly recommend a LOCATION clause, otherwise
+        // the table can't be saved later - print a warning if missing
+        if location.is_none() {
+            if self.verbose {
+                eprintln!("Warning: CREATE TABLE without LOCATION clause - table cannot be saved to disk");
+            }
         }
         
-        // Convert location to PathBuf
+        // Convert location to PathBuf if provided
         let file_path = location.map(|loc| {
+            if self.verbose {
+                println!("Setting file path for table '{}' to: {}", table_name, loc);
+            }
+            
             let path = std::path::PathBuf::from(loc);
             
-            // Verify the path is valid
+            // Verify the path is valid and warn if not
             if path.to_string_lossy().is_empty() {
                 eprintln!("Warning: Empty location path specified in CREATE TABLE");
             }
