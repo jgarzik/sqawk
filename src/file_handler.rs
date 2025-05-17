@@ -137,7 +137,7 @@ impl FileHandler {
     /// * `Ok(())` if the table was successfully written
     /// * `Err` if the table doesn't exist, lacks a source file, or if there was an error writing the file
     pub fn save_table(&self, table_name: &str, database: &Database) -> SqawkResult<()> {
-        let table = self.get_table(table_name)?;
+        let table = database.get_table(table_name)?;
 
         // Check if the table has a source file
         let file_path = table.file_path().ok_or_else(|| {

@@ -119,7 +119,21 @@ impl SqlExecutor {
     /// * `Err` if the table does not exist
     pub fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<ColumnDefinition>> {
         let table = self.database.get_table(table_name)?;
-        Ok(table.columns().to_vec())
+        
+        // If the table has a schema, use it
+        if let Some(schema) = table.schema() {
+            return Ok(schema.clone());
+        }
+        
+        // Otherwise create a basic schema with all columns as TEXT type
+        let schema: Vec<ColumnDefinition> = table.columns().iter()
+            .map(|col_name| ColumnDefinition {
+                name: col_name.clone(),
+                data_type: DataType::Text, // Default to TEXT for columns without type information
+            })
+            .collect();
+            
+        Ok(schema)
     }
 
     /// Execute an SQL statement
