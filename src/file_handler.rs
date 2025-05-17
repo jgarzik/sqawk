@@ -240,14 +240,26 @@ impl FileHandler {
     /// # Returns
     /// * `SqawkResult<()>` - Result of the operation
     pub fn add_table(&mut self, name: String, mut table: Table) -> SqawkResult<()> {
-        // Debug: Check if the table has a file path before adding
+        // Check if the table has a file path before adding and log information
         if let Some(path) = table.file_path() {
             println!("Adding table '{}' with file path: {:?}", name, path);
+            
+            // Make absolute path if necessary (needed for CREATE TABLE with relative paths)
+            if !path.is_absolute() {
+                // Get current directory
+                if let Ok(mut cur_dir) = std::env::current_dir() {
+                    // Join with the relative path 
+                    cur_dir.push(path.clone());
+                    println!("Converting to absolute path: {:?}", cur_dir);
+                    // Update the file path in the table
+                    table.set_file_path(cur_dir);
+                }
+            }
         } else {
             println!("Adding table '{}' with NO file path", name);
         }
         
-        // Add the table to the database, ensuring file path information is preserved
+        // Add the table to the database
         self.database_mut().add_table(name, table)
     }
 
