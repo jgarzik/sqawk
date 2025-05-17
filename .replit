@@ -19,6 +19,10 @@ args = "Sqawk Build and Run"
 task = "workflow.run"
 args = "Run All Tests"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Test REPL without files"
+
 [[workflows.workflow]]
 name = "Sqawk Build and Run"
 author = "agent"
@@ -34,6 +38,14 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "cd $(pwd) && cargo test"
+
+[[workflows.workflow]]
+name = "Test REPL without files"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd $(pwd) && cargo run --bin sqawk -- -i"
 
 [deployment]
 run = ["sh", "-c", "cargo build && echo \"Testing Sqawk with sample data:\" && cargo run -- -s \"SELECT * FROM sample\" tests/data/sample.csv -v"]
