@@ -337,8 +337,8 @@ impl Table {
             file_path,
             modified: true, // Tables created with schema are considered modified
             schema: Some(schema),
-            delimiter,
-            file_format,
+            delimiter: delimiter.unwrap_or_else(|| ",".to_string()),
+            file_format: file_format.unwrap_or_else(|| "TEXTFILE".to_string()),
         }
     }
 
@@ -448,26 +448,24 @@ impl Table {
     
     /// Get the delimiter for this table
     ///
-    /// Returns the custom delimiter specified for this table, if any.
+    /// Returns the delimiter used for this table.
     /// This is used when writing the table to a file.
     ///
     /// # Returns
-    /// * `Some(String)` containing the delimiter
-    /// * `None` if no custom delimiter is specified
-    pub fn delimiter(&self) -> Option<&String> {
-        self.delimiter.as_ref()
+    /// * A string reference to the delimiter (always defined, defaults to comma)
+    pub fn delimiter(&self) -> &String {
+        &self.delimiter
     }
     
     /// Get the file format for this table
     ///
-    /// Returns the file format specified for this table, if any.
+    /// Returns the file format for this table.
     /// Currently only TEXTFILE is supported.
     ///
     /// # Returns
-    /// * `Some(String)` containing the file format
-    /// * `None` if no file format is specified
-    pub fn file_format(&self) -> Option<&String> {
-        self.file_format.as_ref()
+    /// * A string reference to the file format (always defined, defaults to TEXTFILE)
+    pub fn file_format(&self) -> &String {
+        &self.file_format
     }
     
     /// Get the schema for this table

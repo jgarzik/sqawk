@@ -101,8 +101,8 @@ impl CsvHandler {
                 .collect::<Vec<_>>()
         };
 
-        // Create a new table
-        let mut table = Table::new(&table_name, headers, Some(file_path.clone()));
+        // Create a new table with comma delimiter (since this is the CSV handler)
+        let mut table = Table::new(&table_name, headers, Some(file_path.clone()), Some(",".to_string()));
 
         // Read rows with enhanced error handling
         let should_recover = recover_errors.unwrap_or(false);

@@ -163,8 +163,8 @@ impl DelimHandler {
             }
         };
 
-        // Create a new table with the determined headers
-        let mut table = Table::new(&table_name, headers, Some(file_path.clone()));
+        // Create a new table with the determined headers and custom delimiter
+        let mut table = Table::new(&table_name, headers, Some(file_path.clone()), Some(delimiter.to_string()));
 
         // Read rows
         for result in csv_reader.records() {
