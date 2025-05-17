@@ -471,6 +471,8 @@ impl<'a> Repl<'a> {
 
     /// Load a file into a table
     fn load_file(&mut self, file_spec: &str) -> Result<()> {
+        // The file load now needs to pass the field separator
+        // Since our SqlExecutor's load_file method has been updated to handle it
         let result = match self.executor.load_file(file_spec) {
             Ok(result) => result,
             Err(err) => return Err(ReplError::Sqawk(err)),
