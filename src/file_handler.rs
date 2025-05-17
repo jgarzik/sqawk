@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::csv_handler::CsvHandler;
+use crate::database::Database;
 use crate::delim_handler::DelimHandler;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
@@ -77,7 +78,6 @@ impl FileHandler {
         }
 
         FileHandler {
-            tables: HashMap::new(),
             csv_handler: CsvHandler::new(),
             delim_handler: DelimHandler::new(field_separator.clone()),
             _default_format: default_format,
