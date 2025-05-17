@@ -41,10 +41,6 @@ pub struct FileHandler {
     /// Custom column names for tables
     /// Map from table name to a vector of column names
     table_column_defs: HashMap<String, Vec<String>>,
-    
-    /// Registry of table names (used only for finding tables, not for storing them)
-    /// This maps table names to their indexes in the tables vector maintained by the SqlExecutor
-    table_registry: HashMap<String, usize>,
 }
 
 impl FileHandler {
