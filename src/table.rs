@@ -239,11 +239,11 @@ pub struct Table {
     /// This will be None for tables loaded without schema information
     schema: Option<Vec<ColumnDefinition>>,
     
-    /// Custom delimiter for this table's file
-    delimiter: Option<String>,
+    /// Custom delimiter for this table's file (default is comma)
+    delimiter: String,
 
     /// The file format for this table (currently only TEXT is supported)
-    file_format: Option<String>,
+    file_format: String,
 }
 
 /// Data type for a column in a table schema
@@ -290,7 +290,7 @@ pub enum SortDirection {
 
 impl Table {
     /// Create a new table with the given name and columns
-    pub fn new(name: &str, columns: Vec<String>, file_path: Option<PathBuf>) -> Self {
+    pub fn new(name: &str, columns: Vec<String>, file_path: Option<PathBuf>, delimiter: Option<String>) -> Self {
         let column_map = columns
             .iter()
             .enumerate()
@@ -305,8 +305,8 @@ impl Table {
             file_path,
             modified: false,
             schema: None,
-            delimiter: None,
-            file_format: None,
+            delimiter: delimiter.unwrap_or_else(|| ",".to_string()),
+            file_format: "TEXTFILE".to_string(),
         }
     }
     
