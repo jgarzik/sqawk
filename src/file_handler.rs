@@ -291,7 +291,16 @@ impl FileHandler {
         // Check if the table has an associated file path
         let file_path = match table.file_path() {
             Some(path) => path,
-            None => return Err(SqawkError::NoFilePath(table_name.to_string())),
+            None => {
+                // Log debugging information
+                eprintln!("Table debug - Name: {}, Columns: {}, Delimiter: {}", 
+                          table.name(), 
+                          table.columns().join(","), 
+                          table.delimiter());
+                
+                // For tables created with CREATE TABLE, the file path should be set
+                return Err(SqawkError::NoFilePath(table_name.to_string()));
+            },
         };
         
         // For tables created with CREATE TABLE, the file may not exist yet

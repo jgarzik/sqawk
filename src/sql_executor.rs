@@ -3353,6 +3353,8 @@ impl<'a> SqlExecutor<'a> {
             return Ok(());
         }
         
+        // Use our enhanced file_handler.save_table method which ensures parent directories exist
+        // This ensures consistency between command-line loaded tables and CREATE TABLE tables
         self.file_handler.save_table(table_name)
     }
 }
