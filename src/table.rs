@@ -462,6 +462,17 @@ impl Table {
         self.file_path.as_ref()
     }
     
+    /// Set the file path for this table
+    ///
+    /// This allows updating the file path after the table is created.
+    /// Used for normalizing paths in CREATE TABLE statements.
+    ///
+    /// # Arguments
+    /// * `path` - The new file path for the table
+    pub fn set_file_path(&mut self, path: Option<PathBuf>) {
+        self.file_path = path;
+    }
+    
     /// Get the delimiter for this table
     ///
     /// Returns the delimiter used for this table.
