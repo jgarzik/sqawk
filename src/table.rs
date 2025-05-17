@@ -229,11 +229,54 @@ pub struct Table {
     /// Rows of data
     rows: Vec<Row>,
 
-    /// Source file path, if loaded from a file
-    source_file: Option<PathBuf>,
+    /// File path associated with this table (for loading or saving)
+    file_path: Option<PathBuf>,
 
     /// Whether the table was modified since loading
     modified: bool,
+
+    /// Schema information with column definitions (types)
+    /// This will be None for tables loaded without schema information
+    schema: Option<Vec<ColumnDefinition>>,
+    
+    /// Custom delimiter for this table's file
+    delimiter: Option<String>,
+
+    /// The file format for this table (currently only TEXT is supported)
+    file_format: Option<String>,
+}
+
+/// Data type for a column in a table schema
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataType {
+    /// Integer (i64)
+    Integer,
+    /// Floating point (f64)
+    Float,
+    /// Text/String
+    Text,
+    /// Boolean
+    Boolean,
+}
+
+impl fmt::Display for DataType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DataType::Integer => write!(f, "INTEGER"),
+            DataType::Float => write!(f, "REAL"),
+            DataType::Text => write!(f, "TEXT"),
+            DataType::Boolean => write!(f, "BOOLEAN"),
+        }
+    }
+}
+
+/// Column definition for a table schema
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnDefinition {
+    /// Name of the column
+    pub name: String,
+    /// Data type of the column
+    pub data_type: DataType,
 }
 
 /// Sort direction for a column in ORDER BY clause
@@ -247,7 +290,7 @@ pub enum SortDirection {
 
 impl Table {
     /// Create a new table with the given name and columns
-    pub fn new(name: &str, columns: Vec<String>, source_file: Option<PathBuf>) -> Self {
+    pub fn new(name: &str, columns: Vec<String>, file_path: Option<PathBuf>) -> Self {
         let column_map = columns
             .iter()
             .enumerate()
@@ -259,8 +302,43 @@ impl Table {
             columns,
             column_map,
             rows: Vec::new(),
-            source_file,
+            file_path,
             modified: false,
+            schema: None,
+            delimiter: None,
+            file_format: None,
+        }
+    }
+    
+    /// Create a new table with a schema
+    pub fn new_with_schema(
+        name: &str, 
+        schema: Vec<ColumnDefinition>, 
+        file_path: Option<PathBuf>,
+        delimiter: Option<String>,
+        file_format: Option<String>,
+    ) -> Self {
+        // Extract column names from the schema
+        let columns: Vec<String> = schema.iter()
+            .map(|col_def| col_def.name.clone())
+            .collect();
+            
+        let column_map = columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+
+        Table {
+            name: name.to_string(),
+            columns,
+            column_map,
+            rows: Vec::new(),
+            file_path,
+            modified: true, // Tables created with schema are considered modified
+            schema: Some(schema),
+            delimiter,
+            file_format,
         }
     }
 
