@@ -3293,7 +3293,9 @@ impl<'a> SqlExecutor<'a> {
     /// # Returns
     /// * `SqawkResult<Option<(String, String)>>` - Tuple of (table_name, file_path) if successful
     pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<Option<(String, String)>> {
-        self.file_handler.load_file(file_spec)
+        // Use None for field_separator, as Tables already have their delimiter
+        // This method is typically used for tables created via CREATE TABLE
+        self.file_handler.load_file(file_spec, &None)
     }
 
     /// Execute SQL statement and return a ResultSet for REPL mode
