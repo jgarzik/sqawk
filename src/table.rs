@@ -470,6 +470,7 @@ impl Table {
     /// # Arguments
     /// * `path` - The new file path
     pub fn set_file_path(&mut self, path: PathBuf) {
+        println!("DEBUG: Setting file_path for table to: {:?}", path);
         self.file_path = Some(path);
     }
     
