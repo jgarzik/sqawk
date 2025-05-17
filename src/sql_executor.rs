@@ -3028,7 +3028,7 @@ impl SqlExecutor {
             .join(".");
         
         // Check if table already exists
-        if self.file_handler.table_exists(&table_name) {
+        if self.database.has_table(&table_name) {
             return Err(SqawkError::TableAlreadyExists(table_name));
         }
         
@@ -3094,8 +3094,8 @@ impl SqlExecutor {
             file_format_str,
         );
         
-        // Add the table to the file handler
-        self.file_handler.add_table(table_name.clone(), table)?;
+        // Add the table to the database
+        self.database.add_table(table_name.clone(), table)?;
         
         // Mark the table as modified (for potential saving)
         self.modified_tables.insert(table_name);
