@@ -290,7 +290,12 @@ pub enum SortDirection {
 
 impl Table {
     /// Create a new table with the given name and columns
-    pub fn new(name: &str, columns: Vec<String>, file_path: Option<PathBuf>, delimiter: Option<String>) -> Self {
+    pub fn new(name: &str, columns: Vec<String>, file_path: Option<PathBuf>) -> Self {
+        Self::new_with_delimiter(name, columns, file_path, ",".to_string())
+    }
+    
+    /// Create a new table with the given name, columns, and delimiter
+    pub fn new_with_delimiter(name: &str, columns: Vec<String>, file_path: Option<PathBuf>, delimiter: String) -> Self {
         let column_map = columns
             .iter()
             .enumerate()
@@ -305,7 +310,7 @@ impl Table {
             file_path,
             modified: false,
             schema: None,
-            delimiter: delimiter.unwrap_or_else(|| ",".to_string()),
+            delimiter,
             file_format: "TEXTFILE".to_string(),
         }
     }
@@ -340,6 +345,16 @@ impl Table {
             delimiter: delimiter.unwrap_or_else(|| ",".to_string()),
             file_format: file_format.unwrap_or_else(|| "TEXTFILE".to_string()),
         }
+    }
+    
+    /// Create a new table with a schema and default values
+    pub fn new_with_schema_defaults(
+        name: &str, 
+        schema: Vec<ColumnDefinition>, 
+        file_path: Option<PathBuf>
+    ) -> Self {
+        Self::new_with_schema(name, schema, file_path, None, None)
+    }
     }
 
     /// Get the columns of the table
@@ -707,7 +722,7 @@ impl Table {
         let columns = self.create_joined_columns(right);
 
         // Create a new table to hold the join result
-        let mut result = Table::new("join_result", columns, None);
+        let mut result = Table::new("join_result", columns, None, Some(self.delimiter.clone()));
 
         // Fill with cross-joined rows
         self.fill_cross_joined_rows(right, &mut result)?;
@@ -755,7 +770,7 @@ impl Table {
 
         // Step 2: Create a new table to hold the join result
         let name = format!("{}_inner_join", self.name());
-        let mut result = Table::new(&name, columns, None);
+        let mut result = Table::new(&name, columns, None, Some(self.delimiter.clone()));
 
         // Step 3: First create the cross join (Cartesian product) to evaluate conditions against
         // This creates every possible combination of rows from both tables
