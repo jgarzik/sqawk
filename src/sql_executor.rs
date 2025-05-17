@@ -71,31 +71,16 @@ impl<'a> SqlExecutor<'a> {
     ///
     /// Returns Some(Table) for SELECT queries, None for other statements.
     pub fn execute(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
-        // Check for LOCATION clause in CREATE TABLE statements
-        // This is a workaround for an issue with the SQL parser dialect
-        let contains_location = sql.to_uppercase().contains("LOCATION");
-        let location_path = if contains_location {
-            // Very basic extraction of the LOCATION path
-            if let Some(loc_start) = sql.to_uppercase().find("LOCATION") {
-                let after_location = &sql[loc_start + 8..]; // 8 = "LOCATION".len()
-                let quote_char = if after_location.trim().starts_with('\'') { '\'' } 
-                               else if after_location.trim().starts_with('"') { '"' } 
-                               else { '\'' };
-                
-                if let Some(start_idx) = after_location.find(quote_char) {
-                    if let Some(end_idx) = after_location[start_idx + 1..].find(quote_char) {
-                        let path = &after_location[start_idx + 1..start_idx + 1 + end_idx];
-                        if self.verbose {
-                            println!("Manually extracted LOCATION path: {}", path);
-                        }
-                        Some(path.to_string())
-                    } else { None }
-                } else { None }
-            } else { None }
-        } else { None };
+        // Parse the SQL statement using the Snowflake dialect, which properly supports LOCATION clauses
+        // Import the dialect specifically to make it clear what we're using
+        use sqlparser::dialect::SnowflakeDialect;
         
-        // Parse the SQL statement
-        let dialect = GenericDialect {};
+        let dialect = SnowflakeDialect {};
+        
+        if self.verbose {
+            println!("Executing SQL using Snowflake dialect: {}", sql);
+        }
+        
         let statements = Parser::parse_sql(&dialect, sql).map_err(SqawkError::SqlParseError)?;
 
         if statements.is_empty() {
@@ -104,18 +89,11 @@ impl<'a> SqlExecutor<'a> {
             ));
         }
 
-        // Execute each statement, modifying CREATE TABLE statements if needed
+        // Execute each statement
         let mut result = None;
-        for mut statement in statements {
-            // Fix CREATE TABLE statements with LOCATION clause if needed
-            if let Statement::CreateTable { ref mut location, .. } = statement {
-                if location.is_none() && contains_location && location_path.is_some() {
-                    // Override the parsed location with our manually extracted one
-                    *location = location_path.clone();
-                    if self.verbose {
-                        println!("Fixed missing LOCATION in CREATE TABLE: {}", location_path.as_ref().unwrap());
-                    }
-                }
+        for statement in statements {
+            if self.verbose && matches!(statement, Statement::CreateTable {..}) {
+                println!("Executing CREATE TABLE statement with proper dialect support");
             }
             
             result = self.execute_statement(statement)?;
