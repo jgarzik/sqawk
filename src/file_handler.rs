@@ -26,17 +26,28 @@ pub enum FileFormat {
 }
 
 /// Unified file handler that delegates to specific format handlers
+///
+/// This struct provides a consistent interface for working with different file formats
+/// by delegating to specialized handlers (CSV or delimiter-separated). It acts as a facade
+/// that simplifies file operations for the rest of the application.
+///
+/// Key responsibilities:
+/// - Determining the appropriate handler based on file format
+/// - Managing the relationship between tables and their source files
+/// - Providing access to the database for table operations
+/// - Handling table loading and saving with proper format detection
 pub struct FileHandler {
-    /// Handler for CSV files
+    /// Handler for CSV files (comma-separated values)
     csv_handler: CsvHandler,
 
-    /// Handler for delimiter-separated files
+    /// Handler for delimiter-separated files (tab, pipe, etc.)
     delim_handler: DelimHandler,
 
     /// Reference to a database object which is the source of truth for tables
+    /// Stored as a raw pointer to avoid borrowing limitations
     database: *mut Database,
 
-    /// Application configuration for global settings
+    /// Application configuration for global settings like verbosity and field separators
     config: AppConfig,
 }
 
@@ -65,10 +76,21 @@ impl FileHandler {
 
     /// Get a mutable reference to the database
     ///
+    /// Provides safe access to the database reference stored as a raw pointer.
+    /// This design allows the FileHandler to maintain a reference to the Database
+    /// while avoiding Rust's borrowing conflicts in complex operations.
+    ///
+    /// # Safety
+    /// Safety is guaranteed because:
+    /// - The database pointer is initialized in the constructor and never changes
+    /// - The FileHandler's lifetime is tied to the Database through the constructor's contract
+    /// - All access to the database happens through this controlled interface
+    ///
     /// # Returns
     /// * `&mut Database` - Mutable reference to the database
     fn database_mut(&mut self) -> &mut Database {
-        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
+        // SAFETY: The caller of `new` ensures the database outlives this FileHandler,
+        // and we have exclusive access through `&mut self`
         unsafe { &mut *self.database }
     }
 
