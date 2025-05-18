@@ -73,7 +73,7 @@ impl<'a> SqlCompiler<'a> {
         }
     }
     
-    /// Compile an SQL statement into bytecode
+    /// Compile an SQL string into bytecode
     pub fn compile(&mut self, sql: &str) -> SqawkResult<Program> {
         // Reset state for new compilation
         self.program = Program::new();
@@ -125,6 +125,27 @@ impl<'a> SqlCompiler<'a> {
         }
         
         Ok(self.program.clone())
+    }
+    
+    /// Compile a parsed SQL statement directly into the provided program
+    pub fn compile_statement_into_program(&mut self, stmt: &Statement, program: &mut Program) -> SqawkResult<()> {
+        // Save the existing program
+        self.program = program.clone();
+        
+        // Reset other compilation state
+        self.reset_registers();
+        self.table_map.clear();
+        
+        // Compile the statement
+        self.compile_statement(stmt)?;
+        
+        // Add a halt instruction
+        self.add_halt();
+        
+        // Update the provided program with our compiled result
+        *program = self.program.clone();
+        
+        Ok(())
     }
     
     /// Compile a single SQL statement
