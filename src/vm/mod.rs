@@ -27,6 +27,10 @@ pub fn execute_vm(
     database: &Database,
     verbose: bool
 ) -> SqawkResult<Option<Table>> {
+    if verbose {
+        println!("VM Engine: Executing SQL via bytecode: {}", sql);
+    }
+
     // Phase 1: Compile SQL to bytecode
     let mut compiler = compiler::SqlCompiler::new(database, verbose);
     let program = compiler.compile(sql)?;

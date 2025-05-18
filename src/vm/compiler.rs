@@ -59,6 +59,17 @@ impl<'a> SqlCompiler<'a> {
         self.register_counter = 0;
     }
     
+    /// Add a halt instruction to the program
+    fn add_halt(&mut self) {
+        self.program.add_instruction(Instruction::new(
+            OpCode::Halt,
+            0, 0, 0,
+            None,
+            0,
+            Some("End execution".to_string())
+        ));
+    }
+    
     /// Add a comment to the program if verbose mode is enabled
     fn add_comment(&mut self, comment: &str) {
         if self.verbose {
