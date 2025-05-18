@@ -384,11 +384,13 @@ impl Table {
 
     /// Get the columns of the table
     ///
-    /// Returns a slice containing all column names in the table.
+    /// Returns a vector containing all column names in the table.
     /// The column names maintain their original order as specified when
     /// the table was created or loaded from a file.
-    pub fn columns(&self) -> &[String] {
-        &self.columns
+    pub fn columns(&self) -> Vec<String> {
+        // Get column names from Column objects
+        // This prepares for future removal of the columns field
+        self.cols.iter().map(|col| col.name.clone()).collect()
     }
 
     /// Get a column's type by index
@@ -418,7 +420,7 @@ impl Table {
     /// validation when adding rows or performing operations that need to
     /// check column bounds.
     pub fn column_count(&self) -> usize {
-        self.columns.len()
+        self.columns().len()
     }
 
     /// Get the rows of the table
