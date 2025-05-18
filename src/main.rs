@@ -116,7 +116,46 @@ fn main() -> Result<()> {
         }
     }
 
-    // Step 3: Create SQL executor
+    // Step 3: Create SQL executor based on VM flag
+    if args.vm {
+        if config.verbose() {
+            println!("Using VM-based SQL execution engine");
+        }
+        
+        // Create the VM-based executor
+        let vm_executor = vm::executor::SqlVmExecutor::new(config.verbose());
+        
+        // Process each SQL statement
+        for sql in &args.sql {
+            // Log the SQL being executed in verbose mode
+            if config.verbose() {
+                println!("Executing SQL with VM: {sql}");
+            }
+            
+            // Execute the SQL statement with the VM executor
+            match vm_executor.execute_sql(sql) {
+                Ok(Some(table)) => {
+                    // Output the results to stdout
+                    for row in table.rows() {
+                        println!("{}", row.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
+                    }
+                },
+                Ok(None) => {
+                    if config.verbose() {
+                        println!("Query executed successfully (no results to display)");
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                }
+            }
+        }
+        
+        // Early return when using VM executor
+        return Ok(());
+    }
+    
+    // Use the default SQL executor for non-VM mode
     // The executor maintains state across statements, allowing multi-statement operations
     let mut sql_executor = SqlExecutor::new(&mut database, &mut file_handler, &config);
 
