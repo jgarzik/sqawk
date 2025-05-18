@@ -65,15 +65,19 @@ impl Cursor {
 }
 
 /// Transaction state for the VM engine
+///
+/// This enum tracks the current state of a transaction during VM execution.
+/// It enables proper validation of transaction operations (e.g., preventing
+/// nested transactions or commits without an active transaction).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum TransactionState {
-    /// No active transaction
+    /// No active transaction - the default state when no transaction has been started
     None,
-    /// Transaction in progress
+    /// Transaction in progress - changes are being tracked but not yet permanent
     Active,
-    /// Transaction has been committed
+    /// Transaction has been committed - changes have been permanently applied
     Committed,
-    /// Transaction has been rolled back
+    /// Transaction has been rolled back - changes have been discarded
     RolledBack,
 }
 
@@ -97,10 +101,16 @@ pub struct VmEngine<'a> {
     /// Result rows from SELECT statements
     results: Vec<Vec<Value>>,
 
-    /// Current transaction state
+    /// Current transaction state (None, Active, Committed, or RolledBack)
+    /// Tracks the lifecycle of a transaction and enforces proper operation sequencing
     transaction_state: TransactionState,
 
-    /// Modified rows in the current transaction, to support rollback
+    /// Transaction log tracking changes made during an active transaction
+    /// 
+    /// This stores the modified data to enable rollback operations:
+    /// - First element (usize): Cursor ID that made the modification
+    /// - Second element (Table): Original state of the table before modification
+    /// - Third element (Vec<(usize, Value)>): List of (column_index, new_value) pairs representing changes
     transaction_log: Vec<(usize, Table, Vec<(usize, Value)>)>,
 
     // Removed unused fields for column_names, modified_tables, and affected_rows

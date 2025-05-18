@@ -35,11 +35,11 @@ pub enum OpCode {
     ResultRow, // Return result row to client
 
     // Transaction operations
-    Begin,     // Begin a transaction
-    Commit,    // Commit a transaction
-    Rollback,  // Rollback a transaction
-    SavePoint, // Create a savepoint in the transaction
-    Release,   // Release a savepoint
+    Begin,     // Begin a transaction - marks the start of a set of changes that can be committed or rolled back
+    Commit,    // Commit a transaction - permanently applies all changes made since the Begin operation
+    Rollback,  // Rollback a transaction - discards all changes made since the Begin operation
+    SavePoint, // Create a savepoint in the transaction - establishes a point to which a transaction can be partially rolled back
+    Release,   // Release a savepoint - confirms changes up to the specified savepoint
 
     // Utility opcodes
     Noop, // No operation
