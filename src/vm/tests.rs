@@ -5,8 +5,49 @@
 //! 2. Execution of bytecode by the VM engine
 
 use crate::database::Database;
-use crate::table::{Table, Value};
+use crate::table::{Column, DataType, Table, Value};
 use crate::vm;
+
+/// Helper function to create a test database with sample person data
+fn create_test_persons_database() -> Database {
+    let mut database = Database::new();
+    
+    // Create a "persons" table with name and age columns
+    let mut persons_table = Table::new(
+        "persons", 
+        vec![
+            Column::new("name".to_string(), DataType::String),
+            Column::new("age".to_string(), DataType::Integer)
+        ],
+        None
+    );
+    
+    // Add sample data rows
+    persons_table.add_row(vec![
+        Value::String("alice".to_string()), 
+        Value::Integer(18)
+    ]).unwrap();
+    
+    persons_table.add_row(vec![
+        Value::String("bob".to_string()), 
+        Value::Integer(19)
+    ]).unwrap();
+    
+    persons_table.add_row(vec![
+        Value::String("jane".to_string()), 
+        Value::Integer(25)
+    ]).unwrap();
+    
+    persons_table.add_row(vec![
+        Value::String("john".to_string()), 
+        Value::Integer(35)
+    ]).unwrap();
+    
+    // Add the table to the database
+    database.add_table(persons_table);
+    
+    database
+}
 
 #[test]
 fn test_select_literal() {
@@ -160,4 +201,63 @@ fn test_select_star_from_table() {
     // Verify second row
     assert_eq!(rows[1][0], Value::Integer(2));
     assert_eq!(rows[1][1], Value::String("Bob".to_string()));
+}
+
+#[test]
+fn test_select_with_where_comparison() {
+    // Create a test database with sample person data
+    let database = create_test_persons_database();
+    
+    // Execute "SELECT name, age FROM persons WHERE age > 20" with the VM
+    let result = vm::execute_vm(
+        "SELECT name, age FROM persons WHERE age > 20", 
+        &database, 
+        false
+    );
+    
+    // Verify the query executed successfully
+    assert!(result.is_ok(), "VM execution failed: {:?}", result.err());
+    
+    // Verify we have a result table
+    let table_opt = result.unwrap();
+    assert!(table_opt.is_some(), "Expected a result table, got None");
+    
+    let table = table_opt.unwrap();
+    
+    // Verify the table structure
+    assert_eq!(table.column_count(), 2, "Expected 2 columns, got {}", table.column_count());
+    assert_eq!(table.row_count(), 2, "Expected 2 rows, got {}", table.row_count());
+    
+    // Verify the table content - should contain only jane and john who are older than 20
+    let rows = table.rows();
+    assert_eq!(rows.len(), 2, "Expected 2 rows, got {}", rows.len());
+    
+    // Verify the row content
+    // First row - jane
+    let first_row = &rows[0];
+    assert_eq!(first_row.len(), 2, "Expected 2 columns in row, got {}", first_row.len());
+    
+    match &first_row[0] {
+        Value::String(name) => assert_eq!(name, "jane", "Expected name 'jane', got '{}'", name),
+        other => panic!("Expected String type for name, got {:?}", other),
+    }
+    
+    match &first_row[1] {
+        Value::Integer(age) => assert_eq!(*age, 25, "Expected age 25, got {}", age),
+        other => panic!("Expected Integer type for age, got {:?}", other),
+    }
+    
+    // Second row - john
+    let second_row = &rows[1];
+    assert_eq!(second_row.len(), 2, "Expected 2 columns in row, got {}", second_row.len());
+    
+    match &second_row[0] {
+        Value::String(name) => assert_eq!(name, "john", "Expected name 'john', got '{}'", name),
+        other => panic!("Expected String type for name, got {:?}", other),
+    }
+    
+    match &second_row[1] {
+        Value::Integer(age) => assert_eq!(*age, 35, "Expected age 35, got {}", age),
+        other => panic!("Expected Integer type for age, got {:?}", other),
+    }
 }
