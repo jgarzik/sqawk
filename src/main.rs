@@ -116,46 +116,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // Step 3: Create SQL executor based on VM flag
-    if args.vm {
-        if config.verbose() {
-            println!("Using VM-based SQL execution engine");
-        }
-        
-        // Create the VM-based executor
-        let vm_executor = vm::executor::SqlVmExecutor::new(config.verbose());
-        
-        // Process each SQL statement
-        for sql in &args.sql {
-            // Log the SQL being executed in verbose mode
-            if config.verbose() {
-                println!("Executing SQL with VM: {sql}");
-            }
-            
-            // Execute the SQL statement with the VM executor
-            match vm_executor.execute_sql(sql) {
-                Ok(Some(table)) => {
-                    // Output the results to stdout
-                    for row in table.rows() {
-                        println!("{}", row.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
-                    }
-                },
-                Ok(None) => {
-                    if config.verbose() {
-                        println!("Query executed successfully (no results to display)");
-                    }
-                },
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                }
-            }
-        }
-        
-        // Early return when using VM executor
-        return Ok(());
-    }
-    
-    // Use the default SQL executor for non-VM mode
+    // Step 3: Create SQL executor
     // The executor maintains state across statements, allowing multi-statement operations
     let mut sql_executor = SqlExecutor::new(&mut database, &mut file_handler, &config);
 
@@ -174,14 +135,24 @@ fn main() -> Result<()> {
     for sql in &args.sql {
         // Log the SQL being executed in verbose mode
         if config.verbose() {
-            println!("Executing SQL: {sql}");
+            if args.vm {
+                println!("Executing SQL with VM: {sql}");
+            } else {
+                println!("Executing SQL: {sql}");
+            }
         }
 
         // Execute the SQL statement against the in-memory tables
         // The result may be a table (for SELECT) or None (for UPDATE, DELETE, INSERT)
-        let result = sql_executor
-            .execute(sql)
-            .with_context(|| format!("Failed to execute SQL: {sql}"))?;
+        let result = if args.vm {
+            sql_executor
+                .execute_vm(sql)
+                .with_context(|| format!("Failed to execute SQL with VM: {sql}"))?
+        } else {
+            sql_executor
+                .execute(sql)
+                .with_context(|| format!("Failed to execute SQL: {sql}"))?
+        };
 
         // Step 4: Output results to stdout (for SELECT queries)
         match result {
