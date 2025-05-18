@@ -33,17 +33,20 @@ impl AppConfig {
     /// * `field_separator` - Optional field separator character/string from command line
     /// * `table_definitions` - Optional vector of table column definitions
     /// * `write_changes` - Whether to write changes back to files
+    /// * `use_vm` - Whether to use the VM-based execution engine
     pub fn new(
         verbose: bool,
         field_separator: Option<String>,
         table_definitions: Vec<String>,
         write_changes: bool,
+        use_vm: bool,
     ) -> Self {
         Self {
             verbose,
             field_separator,
             table_definitions,
             write_changes,
+            use_vm,
         }
     }
 
