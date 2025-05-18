@@ -237,9 +237,6 @@ pub struct Table {
 
     /// Custom delimiter for this table's file (default is comma)
     delimiter: String,
-
-    /// Flag indicating whether to show verbose output
-    verbose: bool,
 }
 
 /// Data type for a column in a table schema
@@ -323,7 +320,6 @@ impl Table {
         schema: Vec<ColumnDefinition>,
         file_path: Option<PathBuf>,
         delimiter: Option<String>,
-        verbose: bool,
     ) -> Self {
         // Extract column names from the schema
         let columns: Vec<String> = schema.iter().map(|col_def| col_def.name.clone()).collect();
