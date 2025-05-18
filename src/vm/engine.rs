@@ -54,8 +54,10 @@ impl Cursor {
             return None;
         }
         
-        if let Some(row) = self.table.get_row(self.position) {
-            row.get(idx).cloned()
+        // Access rows from the table using the rows() method
+        let rows = self.table.rows();
+        if self.position < rows.len() {
+            rows[self.position].get(idx).cloned()
         } else {
             None
         }
@@ -134,17 +136,18 @@ impl<'a> VmEngine<'a> {
         // Main execution loop
         loop {
             // Get current instruction
-            let inst = self.program.get(self.pc)
+            let inst_clone = self.program.get(self.pc)
                 .ok_or_else(|| SqawkError::VmError(
                     format!("Invalid program counter: {}", self.pc)
-                ))?;
+                ))?
+                .clone(); // Clone the instruction to avoid borrowing issues
             
             if self.verbose {
-                println!("Executing [{}]: {}", self.pc, inst);
+                println!("Executing [{}]: {}", self.pc, inst_clone);
             }
             
             // Execute the instruction
-            match self.execute_instruction(inst)? {
+            match self.execute_instruction(&inst_clone)? {
                 ExecuteResult::Continue => {
                     // Move to next instruction
                     self.pc += 1;
@@ -187,14 +190,15 @@ impl<'a> VmEngine<'a> {
                 let table_name = inst.p4.clone().unwrap_or_default();
                 
                 // Get the table from the database
-                if let Some(table) = self.database.get_table(&table_name) {
-                    // Create a cursor for the table
-                    let cursor = Cursor::new(table.clone());
-                    self.cursors.insert(cursor_idx, cursor);
-                    
-                    Ok(ExecuteResult::Continue)
-                } else {
-                    Err(SqawkError::TableNotFound(table_name))
+                match self.database.get_table(&table_name) {
+                    Some(table) => {
+                        // Create a cursor for the table
+                        let cursor = Cursor::new(table.clone());
+                        self.cursors.insert(cursor_idx, cursor);
+                        
+                        Ok(ExecuteResult::Continue)
+                    },
+                    None => Err(SqawkError::TableNotFound(table_name))
                 }
             },
             

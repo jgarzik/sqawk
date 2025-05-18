@@ -173,10 +173,12 @@ impl<'a> SqlCompiler<'a> {
         };
         
         // Check if the table exists by trying to get it
-        let table = match self.database.get_table(&table_name) {
-            Some(table) => table,
-            None => return Err(SqawkError::TableNotFound(table_name)),
-        };
+        if !self.database.has_table(&table_name) {
+            return Err(SqawkError::TableNotFound(table_name));
+        }
+        
+        // We know the table exists, so unwrap is safe
+        let table = self.database.get_table(&table_name).unwrap();
         
         // Get column indices for result row based on projection
         let columns = self.resolve_projection(projection, &table)?;
