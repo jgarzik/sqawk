@@ -111,10 +111,16 @@ impl FileHandler {
 
         // First, check if the table already exists in the database
         // This could happen if it was defined through CLI table definitions
-        let db = self.database_mut();
-        let existing_schema = db.has_table(&table_name);
+        let existing_schema;
+        {
+            // Create a temporary scope for the database borrow
+            let db = self.database_mut();
+            existing_schema = db.has_table(&table_name);
+        }
         
-        if existing_schema && self.config.verbose() {
+        // Show verbose output if needed
+        let verbose = self.config.verbose();
+        if existing_schema && verbose {
             println!("Table '{}' already exists in database, loading data into existing schema", table_name);
         }
         
@@ -131,43 +137,35 @@ impl FileHandler {
             None
         };
 
-        match format {
+        // Create the table based on the format
+        let table = match format {
             FileFormat::Csv => {
                 // Load the table from the CSV file
-                let table = self.csv_handler.load_csv(file_spec, custom_columns, None)?;
-                
-                // If the table already exists in the database, we need to handle this
-                // differently - either merge, replace, or error
-                if existing_schema {
-                    // For now, we'll replace it - in the future we might want to handle this
-                    // more gracefully with schema validation and merging
-                    if self.config.verbose() {
-                        println!("Replacing existing table '{}' with loaded data", table_name);
-                    }
-                    db.tables.remove(&table_name);
-                }
-                
-                // Add the table to the database
-                db.add_table(table_name.clone(), table)?;
+                self.csv_handler.load_csv(file_spec, custom_columns, None)?
             }
             FileFormat::Delimited => {
                 let delimiter = self.config.field_separator().unwrap_or_else(|| "\t".to_string());
-                let table = self.delim_handler.load_delimited(file_spec, &delimiter, custom_columns)?;
-                
-                // If the table already exists in the database, we need to handle this
-                // differently - either merge, replace, or error
-                if existing_schema {
-                    // For now, we'll replace it - in the future we might want to handle this
-                    // more gracefully with schema validation and merging
-                    if self.config.verbose() {
-                        println!("Replacing existing table '{}' with loaded data", table_name);
-                    }
-                    db.tables.remove(&table_name);
-                }
-                
-                // Add the table to the database
-                db.add_table(table_name.clone(), table)?;
+                self.delim_handler.load_delimited(file_spec, &delimiter, custom_columns)?
             }
+        };
+        
+        // Now that we have the table, we can update the database without borrowing conflicts
+        {
+            // Create a new scope for database operations
+            let db = self.database_mut();
+            
+            // Handle existing schema if needed
+            if existing_schema {
+                // For now, we'll replace it - in the future we might want to handle this
+                // more gracefully with schema validation and merging
+                if verbose {
+                    println!("Replacing existing table '{}' with loaded data", table_name);
+                }
+                db.remove_table(&table_name);
+            }
+            
+            // Add the table to the database
+            db.add_table(table_name.clone(), table)?;
         }
 
         Ok(Some((table_name, file_path_str)))
