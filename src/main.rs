@@ -28,6 +28,7 @@
 
 mod aggregate;
 mod cli;
+mod config;
 mod csv_handler;
 mod database;
 mod delim_handler;
@@ -40,6 +41,7 @@ mod table;
 
 use anyhow::{Context, Result};
 // Not explicitly importing SqawkArgs as it's not directly used
+use config::AppConfig;
 use database::Database;
 use file_handler::FileHandler;
 use repl::Repl;
