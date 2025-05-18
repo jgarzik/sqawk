@@ -165,7 +165,7 @@ impl<'a> SqlExecutor<'a> {
     /// * `Err` if the statement cannot be executed or contains unsupported features
     fn execute_statement(&mut self, statement: Statement) -> SqawkResult<Option<Table>> {
         // If VM mode is enabled, route all statements through the VM engine
-        if self.config.use_vm {
+        if self.config.use_vm() {
             // Use our VM implementation instead of the regular SQL executor
             return self.execute_vm_stmt(&statement);
         }
@@ -309,7 +309,7 @@ impl<'a> SqlExecutor<'a> {
             SetExpr::Select(ref select) => {
                 // Handle special case of SELECT without FROM (e.g., SELECT 1)
                 if select.from.is_empty() {
-                    if self.config.use_vm {
+                    if self.config.use_vm() {
                         // If using VM mode, let the VM handle literal SELECTs
                         // The VM will execute this correctly
                         return self.execute_vm_stmt(&Statement::Query(Box::new(query.clone())));
