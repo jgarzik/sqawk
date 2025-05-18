@@ -71,64 +71,12 @@ impl Database {
         self.tables.get_mut(name).ok_or_else(|| SqawkError::TableNotFound(name.to_string()))
     }
     
-    /// Mark a table as modified
-    ///
-    /// # Arguments
-    /// * `name` - The name of the table that was modified
-    ///
-    /// # Returns
-    /// * `Ok(())` if the table was successfully marked as modified
-    /// * `Err` if the table doesn't exist
-    pub fn mark_table_modified(&mut self, name: &str) -> SqawkResult<()> {
-        if !self.tables.contains_key(name) {
-            return Err(SqawkError::TableNotFound(name.to_string()));
-        }
-        
-        // Add to modified set and also update the table's internal modified flag
-        self.modified_tables.insert(name.to_string());
-        
-        // Update the table's internal modified flag
-        let table = self.tables.get_mut(name).unwrap(); // Safe due to check above
-        table.set_modified(true);
-        
-        Ok(())
-    }
-    
-    /// Check if a table has been modified
-    ///
-    /// # Arguments
-    /// * `name` - The name of the table to check
-    ///
-    /// # Returns
-    /// * `true` if the table has been modified
-    /// * `false` if the table hasn't been modified or doesn't exist
-    pub fn is_table_modified(&self, name: &str) -> bool {
-        self.modified_tables.contains(name)
-    }
-    
     /// Get the names of all tables in the database
     ///
     /// # Returns
     /// * Vector of table names
     pub fn table_names(&self) -> Vec<String> {
         self.tables.keys().cloned().collect()
-    }
-    
-    /// Get the names of all modified tables
-    ///
-    /// # Returns
-    /// * Vector of modified table names
-    pub fn modified_table_names(&self) -> Vec<String> {
-        self.modified_tables.iter().cloned().collect()
-    }
-    
-    /// Check if the database has any modified tables
-    ///
-    /// # Returns
-    /// * `true` if any tables have been modified
-    /// * `false` if no tables have been modified
-    pub fn has_modified_tables(&self) -> bool {
-        !self.modified_tables.is_empty()
     }
     
     /// Get the number of tables in the database
