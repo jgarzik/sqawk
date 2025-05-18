@@ -876,3 +876,318 @@ mod bytecode_tests {
 
 // The compiler tests and other VM tests have been removed to simplify
 // our implementation and focus on the transaction tests.
+
+/// Test comparison opcodes and conditional jumps
+mod comparison_tests {
+    use super::*;
+    use crate::vm::tests::bytecode_tests::{create_instruction, execute_bytecode_program};
+    
+    /// Test the Lt (Less Than) comparison opcode
+    #[test]
+    fn test_lt_opcode() {
+        let database = Database::new();
+        
+        // Test cases: [(first_value, second_value, expected_result)]
+        let test_cases = vec![
+            (10, 20, 1),   // 10 < 20 = true (1)
+            (20, 10, 0),   // 20 < 10 = false (0)
+            (10, 10, 0),   // 10 < 10 = false (0)
+        ];
+        
+        for (val1, val2, expected) in test_cases {
+            let instructions = vec![
+                // Initialize VM
+                create_instruction(
+                    OpCode::Init,
+                    0,
+                    1,
+                    0,
+                    None,
+                    Some("Initialize VM".to_string()),
+                ),
+                // Load first value into register 1
+                create_instruction(
+                    OpCode::Integer,
+                    val1,
+                    1,
+                    0,
+                    None,
+                    Some(format!("Load first value: {}", val1)),
+                ),
+                // Load second value into register 2
+                create_instruction(
+                    OpCode::Integer,
+                    val2,
+                    2,
+                    0,
+                    None,
+                    Some(format!("Load second value: {}", val2)),
+                ),
+                // Compare r1 < r2, result in r3
+                create_instruction(
+                    OpCode::Lt,
+                    1,
+                    2,
+                    3,
+                    None,
+                    Some(format!("Compare {} < {}", val1, val2)),
+                ),
+                // Return the comparison result
+                create_instruction(
+                    OpCode::ResultRow,
+                    3,
+                    1,
+                    0,
+                    None,
+                    Some("Return result".to_string()),
+                ),
+                // Halt VM
+                create_instruction(
+                    OpCode::Halt,
+                    0,
+                    0,
+                    0,
+                    None,
+                    Some("Stop execution".to_string()),
+                ),
+            ];
+            
+            // Execute the program
+            let result = execute_bytecode_program(instructions, &database)
+                .expect("Failed to execute program with Lt opcode");
+                
+            // Verify the result
+            assert!(result.is_some(), "Expected a result table");
+            let table = result.unwrap();
+            assert_eq!(table.row_count(), 1, "Expected 1 row");
+            
+            // Check the result value
+            match &table.rows()[0][0] {
+                Value::Integer(val) => assert_eq!(
+                    val, expected, 
+                    "Expected {} < {} to be {}, got {}", 
+                    val1, val2, expected, val
+                ),
+                other => panic!("Expected Integer type, got {:?}", other),
+            }
+        }
+    }
+    
+    /// Test the Le (Less Than or Equal) comparison opcode
+    #[test]
+    fn test_le_opcode() {
+        let database = Database::new();
+        
+        // Test cases: [(first_value, second_value, expected_result)]
+        let test_cases = vec![
+            (10, 20, 1),   // 10 <= 20 = true (1)
+            (20, 10, 0),   // 20 <= 10 = false (0)
+            (10, 10, 1),   // 10 <= 10 = true (1)
+        ];
+        
+        for (val1, val2, expected) in test_cases {
+            let instructions = vec![
+                // Initialize VM
+                create_instruction(
+                    OpCode::Init,
+                    0,
+                    1,
+                    0,
+                    None,
+                    Some("Initialize VM".to_string()),
+                ),
+                // Load first value into register 1
+                create_instruction(
+                    OpCode::Integer,
+                    val1,
+                    1,
+                    0,
+                    None,
+                    Some(format!("Load first value: {}", val1)),
+                ),
+                // Load second value into register 2
+                create_instruction(
+                    OpCode::Integer,
+                    val2,
+                    2,
+                    0,
+                    None,
+                    Some(format!("Load second value: {}", val2)),
+                ),
+                // Compare r1 <= r2, result in r3
+                create_instruction(
+                    OpCode::Le,
+                    1,
+                    2,
+                    3,
+                    None,
+                    Some(format!("Compare {} <= {}", val1, val2)),
+                ),
+                // Return the comparison result
+                create_instruction(
+                    OpCode::ResultRow,
+                    3,
+                    1,
+                    0,
+                    None,
+                    Some("Return result".to_string()),
+                ),
+                // Halt VM
+                create_instruction(
+                    OpCode::Halt,
+                    0,
+                    0,
+                    0,
+                    None,
+                    Some("Stop execution".to_string()),
+                ),
+            ];
+            
+            // Execute the program
+            let result = execute_bytecode_program(instructions, &database)
+                .expect("Failed to execute program with Le opcode");
+                
+            // Verify the result
+            assert!(result.is_some(), "Expected a result table");
+            let table = result.unwrap();
+            assert_eq!(table.row_count(), 1, "Expected 1 row");
+            
+            // Check the result value
+            match &table.rows()[0][0] {
+                Value::Integer(val) => assert_eq!(
+                    val, expected, 
+                    "Expected {} <= {} to be {}, got {}", 
+                    val1, val2, expected, val
+                ),
+                other => panic!("Expected Integer type, got {:?}", other),
+            }
+        }
+    }
+    
+    /// Test conditional jump using SQLite-style jump mechanism
+    #[test]
+    fn test_conditional_jump() {
+        let database = Database::new();
+        
+        // Test cases for conditional jumps
+        // (first_value, second_value, expected_result_after_jump)
+        let test_cases = vec![
+            (10, 20, 555),  // 10 < 20 = true, result = 1, so NOT Jump (555)
+            (20, 10, 999),  // 20 < 10 = false, result = 0, so Jump (999)
+        ];
+        
+        for (val1, val2, expected) in test_cases {
+            let instructions = vec![
+                // Initialize VM
+                create_instruction(
+                    OpCode::Init,
+                    0,
+                    1,
+                    0,
+                    None,
+                    Some("Initialize VM".to_string()),
+                ),
+                // Load first value into register 1
+                create_instruction(
+                    OpCode::Integer,
+                    val1,
+                    1,
+                    0,
+                    None,
+                    Some(format!("Load value {}", val1)),
+                ),
+                // Load second value into register 2
+                create_instruction(
+                    OpCode::Integer,
+                    val2,
+                    2,
+                    0,
+                    None,
+                    Some(format!("Load value {}", val2)),
+                ),
+                // Compare register 1 < register 2, result in register 3
+                create_instruction(
+                    OpCode::Lt,
+                    1,
+                    2,
+                    3,
+                    None,
+                    Some(format!("Compare {} < {}", val1, val2)),
+                ),
+                // Jump to instruction 7 if reg3 contains 0 (SQLite-style jump if zero)
+                create_instruction(
+                    OpCode::IfZ,
+                    3,
+                    7,
+                    0,
+                    None,
+                    Some("Jump to instruction 7 if result is 0 (false)".to_string()),
+                ),
+                // True path (Not jumped) - load 555 into register 4
+                create_instruction(
+                    OpCode::Integer,
+                    555,
+                    4,
+                    0,
+                    None,
+                    Some("Load true path value (555)".to_string()),
+                ),
+                // Jump to instruction 8 (end)
+                create_instruction(
+                    OpCode::Goto,
+                    0,
+                    8,
+                    0,
+                    None,
+                    Some("Jump to end".to_string()),
+                ),
+                // False path (Jumped) - load 999 into register 4
+                create_instruction(
+                    OpCode::Integer,
+                    999,
+                    4,
+                    0,
+                    None,
+                    Some("Load false path value (999)".to_string()),
+                ),
+                // Return result from register 4
+                create_instruction(
+                    OpCode::ResultRow,
+                    4,
+                    1,
+                    0,
+                    None,
+                    Some("Return result".to_string()),
+                ),
+                // Halt execution
+                create_instruction(
+                    OpCode::Halt,
+                    0,
+                    0,
+                    0,
+                    None,
+                    Some("Stop execution".to_string()),
+                ),
+            ];
+            
+            // Execute the program
+            let result = execute_bytecode_program(instructions, &database)
+                .expect("Failed to execute program with conditional jump");
+            
+            // Verify the result
+            assert!(result.is_some(), "Expected a result table");
+            let table = result.unwrap();
+            assert_eq!(table.row_count(), 1, "Expected 1 row");
+            
+            // Check the conditional jump outcome
+            match &table.rows()[0][0] {
+                Value::Integer(val) => assert_eq!(
+                    val, expected,
+                    "Expected {} for comparison {} < {}, got {}",
+                    expected, val1, val2, val
+                ),
+                other => panic!("Expected Integer type, got {:?}", other),
+            }
+        }
+    }
+}
