@@ -117,20 +117,19 @@ impl FileHandler {
         // Determine the file format based on extension
         let format = self.detect_format(&file_path);
 
-        // We're getting schema information from the Database now
-        // For tables without an existing schema that need custom columns,
-        // they should be defined via CLI table_definitions and compiled into Database
-        let custom_columns = None;
+        // Column definitions now come exclusively from Database
+        // No need for custom columns logic here anymore
 
         // Create the table based on the format
         let table = match format {
             FileFormat::Csv => {
-                // Load the table from the CSV file
-                self.csv_handler.load_csv(file_spec, custom_columns, None)?
+                // Load the table from the CSV file, no custom columns since we use Database schemas
+                self.csv_handler.load_csv(file_spec, None, None)?
             }
             FileFormat::Delimited => {
                 let delimiter = self.config.field_separator().unwrap_or_else(|| "\t".to_string());
-                self.delim_handler.load_delimited(file_spec, &delimiter, custom_columns)?
+                // No custom columns since we use Database schemas
+                self.delim_handler.load_delimited(file_spec, &delimiter, None)?
             }
         };
         
