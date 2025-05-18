@@ -115,6 +115,12 @@ pub struct Program {
     pub instructions: Vec<Instruction>,
 }
 
+impl Default for Program {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Program {
     /// Create a new empty program
     pub fn new() -> Self {
