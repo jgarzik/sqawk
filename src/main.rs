@@ -87,8 +87,14 @@ fn main() -> Result<()> {
     // Step 2a: Create a new Database instance to serve as the central store for tables
     let mut database = Database::new();
     
-    // Step 2b: Initialize the file handler with the application configuration
-    // The file handler uses config for field separator, table defs, and verbosity
+    // Step 2b: Compile table definitions from the CLI arguments
+    // This makes Database the source of truth for table schemas defined via CLI
+    database.compile_table_definitions(&config)
+        .context("Failed to compile table definitions")?;
+    
+    // Step 2c: Initialize the file handler with the application configuration
+    // The file handler uses config for field separator and verbosity
+    // Note: table definitions are now handled by Database directly
     let mut file_handler = FileHandler::new(
         &config,
         &mut database,

@@ -9,6 +9,8 @@
 //! - Providing a unified interface for table operations
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use crate::config::AppConfig;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
 
@@ -94,6 +96,56 @@ impl Database {
     /// * `false` if the table doesn't exist
     pub fn has_table(&self, name: &str) -> bool {
         self.tables.contains_key(name)
+    }
+    
+    /// Compile table definitions from the application configuration
+    ///
+    /// This method processes the table definitions provided through command-line
+    /// arguments and creates corresponding table schemas in the database.
+    /// It serves as the central mechanism for converting raw tabledef strings
+    /// into properly structured table objects.
+    ///
+    /// # Arguments
+    /// * `config` - The application configuration containing table definitions
+    ///
+    /// # Returns
+    /// * `Ok(())` if all table definitions were compiled successfully
+    /// * `Err` if there was an issue with any table definition
+    pub fn compile_table_definitions(&mut self, config: &AppConfig) -> SqawkResult<()> {
+        // Process each table definition string (format: "table_name:col1,col2,...")
+        for tabledef in config.table_definitions() {
+            if let Some((table_name, columns_str)) = tabledef.split_once(':') {
+                let columns = columns_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect::<Vec<String>>();
+
+                if !columns.is_empty() {
+                    // Create a new table with the specified columns
+                    // Note: No file_path is assigned here as this is a table definition only
+                    let table = Table::new(table_name, columns, None);
+                    
+                    // Add the table to the database, overwriting any existing definition with the same name
+                    // This ensures CLI definitions take precedence
+                    if self.has_table(table_name) {
+                        // Remove the existing table first to avoid conflict errors
+                        self.tables.remove(table_name);
+                    }
+                    
+                    self.add_table(table_name.to_string(), table)?;
+                    
+                    if config.verbose() {
+                        println!("Compiled table definition for '{}' with {} columns",
+                            table_name, columns.len());
+                    }
+                }
+            } else if config.verbose() {
+                eprintln!("Invalid table definition format: {}", tabledef);
+                eprintln!("Expected format: table_name:col1,col2,...");
+            }
+        }
+        
+        Ok(())
     }
 }
 
