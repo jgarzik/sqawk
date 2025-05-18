@@ -346,12 +346,13 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Continue)
             },
             
-            // Note: All opcodes are handled above, so this is unreachable
-            // But the compiler doesn't know that, so we keep this for safety.
-            // We could add an `#[allow(unreachable_patterns)]` here instead.
-            OpCode::Noop => {
-                // We already handled Noop above, this is just to silence the warning
-                Ok(ExecuteResult::Continue)
+            #[allow(unreachable_patterns)]
+            _ => {
+                // This code is unreachable since all opcodes are handled above,
+                // but we keep it for future-proofing and to silence compiler warnings
+                Err(SqawkError::UnsupportedSqlFeature(
+                    format!("Unsupported VM opcode: {:?}", inst.opcode)
+                ))
             }
         }
     }

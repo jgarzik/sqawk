@@ -15,12 +15,14 @@ use crate::table::Value;
 pub enum OpCode {
     // Program flow control
     Init,           // Initialize VM
-    Goto,           // Jump to address
+    #[allow(dead_code)]
+    Goto,           // Jump to address (reserved for future use)
     Halt,           // Stop execution
     
     // Table operations
     OpenRead,       // Open a table for reading
-    OpenWrite,      // Open a table for writing
+    #[allow(dead_code)]
+    OpenWrite,      // Open a table for writing (reserved for future use)
     Close,          // Close a cursor
     
     // Cursor operations
