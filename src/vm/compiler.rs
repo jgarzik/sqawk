@@ -139,7 +139,7 @@ impl<'a> SqlCompiler<'a> {
     
     /// Compile a SQL query
     fn compile_query(&mut self, query: &Query) -> SqawkResult<()> {
-        match &query.body {
+        match &*query.body {
             SetExpr::Select(select) => self.compile_select(select),
             _ => Err(SqawkError::UnsupportedSqlFeature(
                 "Only simple SELECT statements are supported".to_string()
@@ -172,13 +172,11 @@ impl<'a> SqlCompiler<'a> {
             )),
         };
         
-        // Check if the table exists
-        if !self.database.table_exists(&table_name) {
-            return Err(SqawkError::TableNotFound(table_name));
-        }
-        
-        let table = self.database.get_table(&table_name)
-            .ok_or_else(|| SqawkError::TableNotFound(table_name.clone()))?;
+        // Check if the table exists by trying to get it
+        let table = match self.database.get_table(&table_name) {
+            Some(table) => table,
+            None => return Err(SqawkError::TableNotFound(table_name)),
+        };
         
         // Get column indices for result row based on projection
         let columns = self.resolve_projection(projection, &table)?;
@@ -187,7 +185,8 @@ impl<'a> SqlCompiler<'a> {
         
         // Open the table for reading (cursor 0)
         let cursor_idx = 0;
-        let table_id = self.database.get_table_id(&table_name).unwrap_or(0) as i64;
+        // Use a simple counter for now, since we don't have get_table_id
+        let table_id = 1i64; // Just assign a default ID
         
         self.program.add_instruction(Instruction::new(
             OpCode::OpenRead,
@@ -207,7 +206,7 @@ impl<'a> SqlCompiler<'a> {
             0,
             None,
             0,
-            Some("Position cursor at first row"),
+            Some("Position cursor at first row".to_string()),
         ));
         
         // Loop body start address
@@ -238,7 +237,7 @@ impl<'a> SqlCompiler<'a> {
             0,
             None,
             0,
-            Some("Output result row"),
+            Some("Output result row".to_string()),
         ));
         
         // Move to next row and continue loop

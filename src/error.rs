@@ -117,7 +117,7 @@ impl PartialEq for SqawkError {
             (SqawkError::InvalidFunctionArguments(_), SqawkError::InvalidFunctionArguments(_)) => {
                 true
             },
-            (SqawkError::VmError(_), SqawkError::VmError(_)) => true
+            (SqawkError::VmError(_), SqawkError::VmError(_)) => true,
             // If variants are different, they are not equal
             _ => false,
         }
