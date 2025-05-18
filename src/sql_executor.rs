@@ -17,7 +17,6 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
-use crate::error::SqawkResult;
 use sqlparser::ast::{
     Assignment, ColumnDef as SqlColumnDef, Expr, FileFormat as SqlFileFormat, Join as SqlJoin,
     JoinConstraint, JoinOperator, ObjectName, Query, Select, SelectItem, SetExpr, SqlOption,
@@ -33,7 +32,6 @@ use crate::error::{SqawkError, SqawkResult};
 use crate::file_handler::FileHandler;
 use crate::string_functions::StringFunction;
 use crate::table::{ColumnDefinition, DataType, SortDirection, Table, Value};
-use crate::vm::executor::SqlVmExecutor;
 
 /// SQL statement executor
 pub struct SqlExecutor<'a> {
@@ -51,9 +49,6 @@ pub struct SqlExecutor<'a> {
 
     /// Number of affected rows from the last statement
     affected_row_count: usize,
-    
-    /// Flag indicating whether to use VM execution
-    use_vm: bool,
 }
 
 impl<'a> SqlExecutor<'a> {
@@ -69,128 +64,11 @@ impl<'a> SqlExecutor<'a> {
             modified_tables: HashSet::new(),
             config: config.clone(),
             affected_row_count: 0,
-            use_vm: false,
         }
-    }
-    
-    /// Sets whether to use VM for execution
-    pub fn set_vm_mode(&mut self, use_vm: bool) {
-        self.use_vm = use_vm;
-    }
-    
-    /// Execute SQL through VM engine
-    /// 
-    /// This method has the same signature as execute() but delegates to the VM-based executor.
-    /// It provides a compatible interface for the VM execution engine to be used transparently.
-    pub fn execute_vm(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
-        if self.config.verbose() {
-            println!("Using VM execution engine for SQL: {}", sql);
-        }
-        
-        // Create a VM executor and delegate the execution
-        let mut vm_executor = SqlVmExecutor::new(
-            self.database,
-            self.file_handler,
-            self.config.write(),
-            self.config.verbose(),
-        );
-        
-        // Execute the SQL through the VM engine
-        let result = vm_executor.execute(sql)?;
-        
-        // Update affected row count from VM executor
-        self.affected_row_count = vm_executor.get_affected_row_count();
-        
-        Ok(result)
     }
 
     /// Get the number of rows affected by the last executed statement
-    pub fn get_affected_row_count(&self) -> usize {
-        self.affected_row_count
-    }
-    
-    /// Get a list of all table names available in the database
-    pub fn get_table_names(&self) -> Vec<String> {
-        self.database.get_table_names()
-    }
-    
-    /// Get a list of column names for a specific table
-    pub fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<String>> {
-        if let Some(table) = self.database.get_table(table_name) {
-            Ok(table.columns())
-        } else {
-            Err(SqawkError::TableNotFound(table_name.to_string()))
-        }
-    }
-    
-    /// Get a list of column names and types for a specific table
-    pub fn get_table_columns_with_types(&self, table_name: &str) -> SqawkResult<Vec<(String, String)>> {
-        if let Some(table) = self.database.get_table(table_name) {
-            let meta = table.column_metadata();
-            let result: Vec<(String, String)> = meta
-                .iter()
-                .map(|col| (col.name.clone(), col.data_type.to_string()))
-                .collect();
-            
-            Ok(result)
-        } else {
-            Err(SqawkError::TableNotFound(table_name.to_string()))
-        }
-    }
-    
-    /// Enable or disable write mode for saving changes back to files
-    pub fn set_write_mode(&mut self, write_mode: bool) {
-        self.config.set_write(write_mode);
-    }
-    
-    /// Get the current write mode
-    pub fn get_write_mode(&self) -> bool {
-        self.config.write()
-    }
-    
-    /// Save modified tables back to their source files
-    pub fn save_modified_tables(&mut self) -> SqawkResult<usize> {
-        self.file_handler.save_modified_tables()
-    }
-    
-    /// Execute an SQL statement
-    ///
-    /// Delegates to the VM executor if VM mode is enabled
-    pub fn execute(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
-        // If VM mode is enabled, use the VM executor
-        if self.use_vm {
-            return self.execute_vm(sql);
-        }
-        
-        // Otherwise, use the regular execution path
-        // For CREATE TABLE statements with LOCATION, we need to use a dialect that
-        // properly supports the LOCATION clause - HiveDialect is made for this
-        let dialect = HiveDialect {}; // Hive dialect is specifically designed for LOCATION clauses
-
-        if self.config.verbose() {
-            println!("Executing SQL: {}", sql);
-        }
-
-        let statements = Parser::parse_sql(&dialect, sql).map_err(SqawkError::SqlParseError)?;
-
-        if statements.is_empty() {
-            return Err(SqawkError::InvalidSqlQuery(
-                "No SQL statements found".to_string(),
-            ));
-        }
-
-        // Execute each statement
-        let mut result = None;
-        for statement in statements {
-            result = self.execute_statement(statement)?;
-        }
-
-        Ok(result)
-    }
-}
-
-    /// Get the number of rows affected by the last executed statement
-    pub fn get_affected_row_count_with_result(&self) -> SqawkResult<usize> {
+    pub fn get_affected_row_count(&self) -> SqawkResult<usize> {
         Ok(self.affected_row_count)
     }
 
@@ -3643,6 +3521,7 @@ impl<'a> SqlExecutor<'a> {
         // This ensures consistency between command-line loaded tables and CREATE TABLE tables
         self.file_handler.save_table(table_name)
     }
+}
 
 /// Result set structure for REPL output
 #[derive(Debug)]
