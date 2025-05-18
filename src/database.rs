@@ -171,38 +171,6 @@ impl Database {
         
         Ok(())
     }
-    
-    /// Drop a table from the database
-    ///
-    /// # Arguments
-    /// * `name` - The name of the table to drop
-    ///
-    /// # Returns
-    /// * `Ok(())` if the table was successfully dropped
-    /// * `Err` if the table doesn't exist
-    pub fn drop_table(&mut self, name: &str) -> SqawkResult<()> {
-        if !self.tables.contains_key(name) {
-            return Err(SqawkError::TableNotFound(name.to_string()));
-        }
-        
-        self.tables.remove(name);
-        self.modified_tables.remove(name);
-        
-        Ok(())
-    }
-    
-    /// Clear all modification flags
-    ///
-    /// This method clears the set of modified tables. It's typically called
-    /// after saving all modified tables to disk.
-    pub fn clear_modifications(&mut self) {
-        self.modified_tables.clear();
-        
-        // Also clear the modified flag in each table
-        for table in self.tables.values_mut() {
-            table.set_modified(false);
-        }
-    }
 }
 
 #[cfg(test)]
