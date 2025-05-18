@@ -72,20 +72,9 @@ impl FileHandler {
             FileFormat::Csv
         };
 
-        // Process any table column definitions
-        let mut table_column_defs = HashMap::new();
-        for def in config.table_definitions() {
-            if let Some((table_name, columns_str)) = def.split_once(':') {
-                let columns = columns_str
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect::<Vec<String>>();
-
-                if !columns.is_empty() {
-                    table_column_defs.insert(table_name.to_string(), columns);
-                }
-            }
-        }
+        // NOTE: Table definitions are now handled directly by Database.compile_table_definitions
+        // We keep this HashMap empty as we're transitioning away from FileHandler managing table schemas
+        let table_column_defs = HashMap::new();
 
         FileHandler {
             csv_handler: CsvHandler::new(),
@@ -120,25 +109,64 @@ impl FileHandler {
         let (table_name, file_path) = self.parse_file_spec(file_spec)?;
         let file_path_str = file_path.to_string_lossy().to_string();
 
+        // First, check if the table already exists in the database
+        // This could happen if it was defined through CLI table definitions
+        let db = self.database_mut();
+        let existing_schema = db.has_table(&table_name);
+        
+        if existing_schema && self.config.verbose() {
+            println!("Table '{}' already exists in database, loading data into existing schema", table_name);
+        }
+        
         // Determine the file format based on extension
         let format = self.detect_format(&file_path);
 
         // Check if custom column names are defined for this table
-        let custom_columns = self.table_column_defs.get(&table_name).cloned();
+        // Note: This is kept for backward compatibility during transition
+        // In the future, column definitions should always come from Database
+        let custom_columns = if !existing_schema {
+            self.table_column_defs.get(&table_name).cloned()
+        } else {
+            // If table already exists in the database, we'll use its schema
+            None
+        };
 
         match format {
             FileFormat::Csv => {
+                // Load the table from the CSV file
                 let table = self.csv_handler.load_csv(file_spec, custom_columns, None)?;
+                
+                // If the table already exists in the database, we need to handle this
+                // differently - either merge, replace, or error
+                if existing_schema {
+                    // For now, we'll replace it - in the future we might want to handle this
+                    // more gracefully with schema validation and merging
+                    if self.config.verbose() {
+                        println!("Replacing existing table '{}' with loaded data", table_name);
+                    }
+                    db.tables.remove(&table_name);
+                }
+                
                 // Add the table to the database
-                self.database_mut().add_table(table_name.clone(), table)?;
+                db.add_table(table_name.clone(), table)?;
             }
             FileFormat::Delimited => {
                 let delimiter = self.config.field_separator().unwrap_or_else(|| "\t".to_string());
-                let table =
-                    self.delim_handler.load_delimited(file_spec, &delimiter, custom_columns)?;
+                let table = self.delim_handler.load_delimited(file_spec, &delimiter, custom_columns)?;
+                
+                // If the table already exists in the database, we need to handle this
+                // differently - either merge, replace, or error
+                if existing_schema {
+                    // For now, we'll replace it - in the future we might want to handle this
+                    // more gracefully with schema validation and merging
+                    if self.config.verbose() {
+                        println!("Replacing existing table '{}' with loaded data", table_name);
+                    }
+                    db.tables.remove(&table_name);
+                }
                 
                 // Add the table to the database
-                self.database_mut().add_table(table_name.clone(), table)?;
+                db.add_table(table_name.clone(), table)?;
             }
         }
 
