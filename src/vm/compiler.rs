@@ -98,7 +98,7 @@ impl<'a> SqlCompiler<'a> {
             SetExpr::Select(select) => {
                 // Handle the special case of SELECT without FROM
                 if select.from.is_empty() {
-                    self.compile_select_without_from(&select.projection)?;
+                    self.compile_select_literal(&select.projection)?;
                 } else {
                     return Err(SqawkError::UnsupportedSqlFeature(
                         "Direct compilation of queries with FROM clause not supported in tests yet".to_string()

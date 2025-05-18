@@ -76,6 +76,7 @@ fn main() -> Result<()> {
         args.field_separator.clone(), // Field separator for tables
         args.tabledef.clone(),        // Table column definitions
         args.write,                   // Whether to write changes to files
+        args.vm,                      // Whether to use VM execution engine
     );
 
     // Configure diagnostics output if verbose mode is enabled (-v flag)
