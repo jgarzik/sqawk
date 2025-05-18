@@ -219,9 +219,6 @@ pub type Row = Vec<Value>;
 pub struct Table {
     /// Name of the table
     name: String,
-
-    /// Column names
-    columns: Vec<String>,
     
     /// Complete column metadata including name and type
     cols: Vec<Column>,
@@ -322,7 +319,6 @@ impl Table {
 
         Table {
             name: name.to_string(),
-            columns: column_names,
             cols,
             column_map,
             rows: Vec::new(),
