@@ -535,6 +535,116 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Continue)
             }
 
+            OpCode::Lt => {
+                // Less than comparison (P1 < P2, result in P3)
+                // P1 and P2 are register indices to compare
+                // P3 is the destination register for the result (1 for true, 0 for false)
+                
+                // Get values from registers P1 and P2
+                let reg1 = self.get_register(inst.p1 as usize)?;
+                let reg2 = self.get_register(inst.p2 as usize)?;
+                
+                // Perform comparison based on register types
+                let result = match (reg1, reg2) {
+                    (Register::Integer(a), Register::Integer(b)) => a < b,
+                    (Register::Float(a), Register::Float(b)) => a < b,
+                    (Register::String(a), Register::String(b)) => a < b,
+                    // For mixed types, try to convert and compare
+                    (Register::Integer(a), Register::Float(b)) => (a as f64) < b,
+                    (Register::Float(a), Register::Integer(b)) => a < (b as f64),
+                    // Other combinations are not comparable
+                    _ => return Err(SqawkError::VmError(
+                        format!("Cannot compare incompatible types: {:?} and {:?}", reg1, reg2)
+                    )),
+                };
+                
+                // Store result in destination register (1 for true, 0 for false)
+                let result_value = if result { Register::Integer(1) } else { Register::Integer(0) };
+                self.set_register(inst.p3 as usize, result_value)?;
+                
+                Ok(ExecuteResult::Continue)
+            }
+            
+            OpCode::Le => {
+                // Less than or equal comparison (P1 <= P2, result in P3)
+                // P1 and P2 are register indices to compare
+                // P3 is the destination register for the result (1 for true, 0 for false)
+                
+                // Get values from registers P1 and P2
+                let reg1 = self.get_register(inst.p1 as usize)?;
+                let reg2 = self.get_register(inst.p2 as usize)?;
+                
+                // Perform comparison based on register types
+                let result = match (reg1, reg2) {
+                    (Register::Integer(a), Register::Integer(b)) => a <= b,
+                    (Register::Float(a), Register::Float(b)) => a <= b,
+                    (Register::String(a), Register::String(b)) => a <= b,
+                    // For mixed types, try to convert and compare
+                    (Register::Integer(a), Register::Float(b)) => (a as f64) <= b,
+                    (Register::Float(a), Register::Integer(b)) => a <= (b as f64),
+                    // Other combinations are not comparable
+                    _ => return Err(SqawkError::VmError(
+                        format!("Cannot compare incompatible types: {:?} and {:?}", reg1, reg2)
+                    )),
+                };
+                
+                // Store result in destination register (1 for true, 0 for false)
+                let result_value = if result { Register::Integer(1) } else { Register::Integer(0) };
+                self.set_register(inst.p3 as usize, result_value)?;
+                
+                Ok(ExecuteResult::Continue)
+            }
+            
+            OpCode::JumpIfTrue => {
+                // Jump to address P2 if register P1 contains a "truthy" value
+                // A value is considered true if it's non-zero, non-empty string, etc.
+                
+                // Get the value to test
+                let value = self.get_register(inst.p1 as usize)?;
+                
+                // Determine if value is "truthy"
+                let is_true = match value {
+                    Register::Integer(i) => i != 0,
+                    Register::Float(f) => f != 0.0,
+                    Register::String(s) => !s.is_empty(),
+                    Register::Boolean(b) => b,
+                    Register::Null => false,
+                };
+                
+                // Jump if condition is true
+                if is_true {
+                    // Set program counter to destination address
+                    self.pc = inst.p2 as usize;
+                }
+                
+                Ok(ExecuteResult::Continue)
+            }
+            
+            OpCode::JumpIfFalse => {
+                // Jump to address P2 if register P1 contains a "falsy" value
+                // A value is considered false if it's zero, empty string, etc.
+                
+                // Get the value to test
+                let value = self.get_register(inst.p1 as usize)?;
+                
+                // Determine if value is "falsy"
+                let is_false = match value {
+                    Register::Integer(i) => i == 0,
+                    Register::Float(f) => f == 0.0,
+                    Register::String(s) => s.is_empty(),
+                    Register::Boolean(b) => !b,
+                    Register::Null => true,
+                };
+                
+                // Jump if condition is false
+                if is_false {
+                    // Set program counter to destination address
+                    self.pc = inst.p2 as usize;
+                }
+                
+                Ok(ExecuteResult::Continue)
+            }
+            
             OpCode::Noop => {
                 // No operation
                 Ok(ExecuteResult::Continue)
