@@ -113,12 +113,12 @@ fn main() -> Result<()> {
 
     // Step 3: Create SQL executor
     // The executor maintains state across statements, allowing multi-statement operations
-    let mut sql_executor = SqlExecutor::new_with_verbose(&mut database, &mut file_handler, args.verbose);
+    let mut sql_executor = SqlExecutor::new(&mut database, &mut file_handler, &config);
 
     // Check if interactive mode is requested
     if args.interactive {
         // Start REPL (Read-Eval-Print Loop) for interactive SQL entry
-        let mut repl = Repl::new(sql_executor, args.verbose, args.write, args.field_separator);
+        let mut repl = Repl::new(sql_executor, &config);
         match repl.run() {
             Ok(_) => return Ok(()),
             Err(e) => return Err(anyhow::anyhow!("Failed to run interactive mode: {}", e)),

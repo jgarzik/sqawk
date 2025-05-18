@@ -247,7 +247,7 @@ impl FileHandler {
         
         // Check if the table has a file path before adding and log information
         if let Some(path) = table.file_path() {
-            if self.verbose {
+            if self.config.verbose() {
                 println!("Adding table '{}' with file path: {:?}", name, path);
             }
             
@@ -257,14 +257,14 @@ impl FileHandler {
                 if let Ok(mut cur_dir) = std::env::current_dir() {
                     // Join with the relative path 
                     cur_dir.push(path.clone());
-                    if self.verbose {
+                    if self.config.verbose() {
                         println!("Converting to absolute path: {:?}", cur_dir);
                     }
                     // Update the file path in the table
                     table.set_file_path(cur_dir);
                 }
             }
-        } else if self.verbose {
+        } else if self.config.verbose() {
             println!("Adding table '{}' with NO file path", name);
         }
         
@@ -316,7 +316,7 @@ impl FileHandler {
         // Get a reference to the table
         let table = self.get_table(table_name)?;
 
-        if self.verbose {
+        if self.config.verbose() {
             eprintln!("In FileHandler::save_table for table '{}'", table_name);
             
             // Access database directly to check if the table exists there
@@ -335,14 +335,14 @@ impl FileHandler {
         // Check if the table has an associated file path
         let file_path = match table.file_path() {
             Some(path) => {
-                if self.verbose {
+                if self.config.verbose() {
                     eprintln!("Table '{}' has file_path '{:?}'", table_name, path);
                 }
                 path
             },
             None => {
                 // Log debugging information
-                if self.verbose {
+                if self.config.verbose() {
                     eprintln!("Table '{}' has NO file_path", table_name);
                     eprintln!("  Table details - Name: {}, Columns: {}, Delimiter: '{}'", 
                               table.name(), 

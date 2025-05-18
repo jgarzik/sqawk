@@ -10,6 +10,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::process::Command;
 
+use crate::config::AppConfig;
 use crate::error::SqawkError;
 use crate::sql_executor::SqlExecutor;
 
@@ -185,14 +186,10 @@ pub struct Repl<'a> {
     executor: SqlExecutor<'a>,
     /// Rustyline editor for command line editing
     editor: Editor<CommandCompleter, DefaultHistory>,
-    /// Whether to print verbose output
-    _verbose: bool,
-    /// Whether to write changes to files
-    write: bool,
+    /// Application configuration for global settings
+    config: AppConfig,
     /// Whether the REPL is running
     running: bool,
-    /// Field separator for delimited files
-    _field_separator: Option<String>,
     /// Whether to show number of rows changed by SQL statements
     show_changes: bool,
     /// Whether to show query statistics
