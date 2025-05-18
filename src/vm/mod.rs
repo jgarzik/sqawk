@@ -10,11 +10,10 @@
 pub mod bytecode;
 pub mod compiler;
 pub mod engine;
-pub mod executor;
 
-use crate::error::SqawkResult;
+use crate::error::{SqawkError, SqawkResult};
 use crate::database::Database;
-use crate::table::{Table, Value};
+use crate::table::Table;
 
 /// Execute SQL using the VM execution engine
 ///
