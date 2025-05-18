@@ -1,0 +1,3 @@
+CREATE TABLE test_types (id INTEGER, name TEXT, price FLOAT, active BOOLEAN) LOCATION './test_types.csv' STORED AS TEXTFILE WITH (DELIMITER=',');
+.schema test_types
+.exit
