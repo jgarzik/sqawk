@@ -285,10 +285,58 @@ impl<'a> SqlExecutor<'a> {
     fn execute_query(&self, query: Query) -> SqawkResult<Option<Table>> {
         match *query.body {
             SetExpr::Select(ref select) => {
+                // Handle special case of SELECT without FROM (e.g., SELECT 1)
                 if select.from.is_empty() {
-                    return Err(SqawkError::InvalidSqlQuery(
-                        "SELECT query must have at least one table".to_string(),
-                    ));
+                    if self.config.use_vm {
+                        // If using VM mode, let the VM handle literal SELECTs
+                        // The VM will execute this correctly
+                        return self.execute_vm_stmt(&Statement::Query(Box::new(query.clone())));
+                    } else {
+                        // For compatibility with old implementation
+                        // When not using VM, create a synthetic single-row table with literals
+                        let mut result_table = Table::new("result", vec![], None);
+                        
+                        // Process each literal in the projection
+                        let mut column_names = Vec::new();
+                        let mut row_values = Vec::new();
+                        
+                        for item in &select.projection {
+                            match item {
+                                SelectItem::UnnamedExpr(expr) => {
+                                    // For unnamed expressions (e.g., SELECT 1), use placeholder names
+                                    let col_name = format!("col{}", column_names.len() + 1);
+                                    column_names.push(col_name);
+                                    
+                                    // Evaluate the literal expression
+                                    let value = self.evaluate_literal_expr(expr)?;
+                                    row_values.push(value);
+                                },
+                                SelectItem::ExprWithAlias { expr, alias } => {
+                                    // For expressions with aliases (e.g., SELECT 1 AS value), use the alias
+                                    column_names.push(alias.value.clone());
+                                    
+                                    // Evaluate the literal expression
+                                    let value = self.evaluate_literal_expr(expr)?;
+                                    row_values.push(value);
+                                },
+                                _ => {
+                                    return Err(SqawkError::UnsupportedSqlFeature(
+                                        "Only simple expressions are supported in SELECT without FROM".to_string()
+                                    ));
+                                }
+                            }
+                        }
+                        
+                        // Add columns to the table
+                        for name in column_names {
+                            result_table.add_column(name, "ANY".to_string());
+                        }
+                        
+                        // Add the single row with our literal values
+                        result_table.add_row(row_values)?;
+                        
+                        return Ok(Some(result_table));
+                    }
                 }
 
                 // Process the FROM clause to get a table or join result
