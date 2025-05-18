@@ -3187,16 +3187,12 @@ impl<'a> SqlExecutor<'a> {
             path
         });
 
-        // Create file format string (only TEXTFILE supported for now)
-        let file_format_str = Some("TEXTFILE".to_string());
-
         // Create the table with schema and file information
         let mut table = Table::new_with_schema(
             &table_name,
             schema,
             file_path.clone(),
             Some(delimiter_str),
-            file_format_str,
             self.config.verbose(),
         );
 
