@@ -220,8 +220,11 @@ pub struct Table {
     /// Name of the table
     name: String,
 
-    /// Column definitions with name and type information
-    columns: Vec<Column>,
+    /// Column names
+    columns: Vec<String>,
+
+    /// Column types (parallel to columns vector)
+    column_types: Vec<DataType>,
 
     /// Map of column names to their indices
     column_map: HashMap<String, usize>,
@@ -299,27 +302,22 @@ pub enum SortDirection {
 impl Table {
     /// Create a new table with the given name and column names
     /// 
-    /// This constructor creates columns with Unknown data type
+    /// This constructor defaults all columns to Text type
     pub fn new(name: &str, column_names: Vec<String>, file_path: Option<PathBuf>) -> Self {
-        // Create Column objects with Unknown data type for backward compatibility
-        let columns = column_names
-            .into_iter()
-            .map(|name| Column {
-                name: name.clone(),
-                data_type: DataType::Text, // Default to Text type for backward compatibility
-            })
-            .collect::<Vec<Column>>();
-
-        // Create column_map from Column objects
-        let column_map = columns
+        // Create column_map from column names
+        let column_map = column_names
             .iter()
             .enumerate()
-            .map(|(i, col)| (col.name.clone(), i))
+            .map(|(i, name)| (name.clone(), i))
             .collect();
+
+        // Create column_types with Text type for backward compatibility
+        let column_types = vec![DataType::Text; column_names.len()];
 
         Table {
             name: name.to_string(),
-            columns,
+            columns: column_names,
+            column_types,
             column_map,
             rows: Vec::new(),
             file_path,
@@ -347,25 +345,23 @@ impl Table {
         file_path: Option<PathBuf>,
         delimiter: Option<String>,
     ) -> Self {
-        // Convert ColumnDefinition objects to Column objects
-        let columns = schema
-            .into_iter()
-            .map(|col_def| Column {
-                name: col_def.name,
-                data_type: col_def.data_type,
-            })
-            .collect::<Vec<Column>>();
+        // Extract column names from the schema
+        let columns: Vec<String> = schema.iter().map(|col_def| col_def.name.clone()).collect();
+        
+        // Extract column types from the schema
+        let column_types: Vec<DataType> = schema.iter().map(|col_def| col_def.data_type).collect();
 
-        // Create column_map from Column objects
+        // Create column_map from column names
         let column_map = columns
             .iter()
             .enumerate()
-            .map(|(i, col)| (col.name.clone(), i))
+            .map(|(i, name)| (name.clone(), i))
             .collect();
 
         Table {
             name: name.to_string(),
             columns,
+            column_types,
             column_map,
             rows: Vec::new(),
             file_path,
@@ -376,17 +372,10 @@ impl Table {
 
     /// Get the columns of the table
     ///
-    /// Returns a vector containing all column names in the table.
+    /// Returns a slice containing all column names in the table.
     /// The column names maintain their original order as specified when
     /// the table was created or loaded from a file.
-    pub fn columns(&self) -> Vec<String> {
-        self.columns.iter().map(|col| col.name.clone()).collect()
-    }
-
-    /// Get the column objects of the table
-    ///
-    /// Returns a slice containing all column objects with name and type information.
-    pub fn column_objects(&self) -> &[Column] {
+    pub fn columns(&self) -> &[String] {
         &self.columns
     }
 
@@ -394,7 +383,7 @@ impl Table {
     ///
     /// Returns the data type of the column at the specified index.
     pub fn column_type(&self, index: usize) -> Option<DataType> {
-        self.columns.get(index).map(|col| col.data_type)
+        self.column_types.get(index).copied()
     }
 
     /// Get a column's type by name
