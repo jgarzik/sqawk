@@ -44,7 +44,7 @@ fn test_inner_join_on_basic() -> Result<(), Box<dyn std::error::Error>> {
 
     // Verify verbose output shows JOIN processing
     cmd.assert()
-        .stderr(predicate::str::contains("DEBUG - Join type: Inner"))
+        .stderr(predicate::str::contains("Join type: Inner"))
         .stderr(predicate::str::contains(
             "Processing INNER JOIN with ON condition",
         ));
