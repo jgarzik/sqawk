@@ -69,7 +69,94 @@ impl<'a> SqlExecutor<'a> {
     
     /// Execute an SQL statement with VM engine
     ///
-    /// This method delegates execution to the VM-based engine, which:
+    /// This method delegates execution to the VM-based bytecode engine, which:
+    /// 1. Parses the SQL using sqlparser
+    /// 2. Compiles the parsed SQL into bytecode
+    /// 3. Executes the bytecode in a VM
+    ///
+    /// # Arguments
+    /// * `sql` - SQL statement to execute
+    ///
+    /// # Returns
+    /// * `SqawkResult<Option<Table>>` - Result of the operation, possibly containing a table
+    pub fn execute_vm(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
+        use crate::vm::bytecode::Program;
+        use crate::vm::compiler::SqlCompiler;
+        use crate::vm::engine::VmEngine;
+        
+        // Parse the SQL statement
+        let dialect = HiveDialect {};
+        let ast = Parser::parse_sql(&dialect, sql)
+            .map_err(|e| SqawkError::InvalidSqlQuery(e.to_string()))?;
+            
+        // Only process the first statement (similar to the regular execute method)
+        if ast.is_empty() {
+            return Ok(None);
+        }
+        
+        let stmt = &ast[0];
+        
+        // The result table (populated for SELECT queries)
+        let mut result_table: Option<Table> = None;
+        
+        // Create a new compiler for this statement
+        let mut compiler = SqlCompiler::new(self.database, self.config.verbose());
+        
+        // Create a program to hold the bytecode instructions
+        let mut program = Program::new();
+        
+        // Compile the SQL statement into bytecode
+        compiler.compile(stmt, &mut program)?;
+        
+        if self.config.verbose() {
+            println!("Compiled SQL to bytecode program:");
+            println!("{}", program);
+        }
+        
+        // Create a new VM engine to execute the bytecode
+        let mut engine = VmEngine::new(
+            self.database,
+            self.config.verbose()
+        );
+        
+        // Initialize the engine with the compiled program
+        engine.init_with_program(program);
+        
+        // Execute the bytecode program
+        engine.execute()?;
+        
+        // Get the results if any were produced
+        if engine.has_results() {
+            // Create a result table from the VM execution results
+            let column_names = engine.get_column_names();
+            let mut table = Table::new("result", vec![], None);
+            
+            // Add columns to the result table
+            for name in &column_names {
+                table.add_column(name.clone(), "ANY".to_string()); 
+            }
+            
+            // Add rows to the result table
+            for row in engine.get_results() {
+                table.add_row(row.clone())?;
+            }
+            
+            result_table = Some(table);
+            
+            // Update the affected row count based on the number of rows in the result
+            self.affected_row_count = engine.get_results().len();
+        } else {
+            // For non-SELECT statements, get the affected row count
+            self.affected_row_count = engine.get_affected_rows();
+            
+            // If tables were modified, add them to the modified_tables set
+            for table_name in engine.get_modified_tables() {
+                self.modified_tables.insert(table_name.clone());
+            }
+        }
+        
+        Ok(result_table)
+    } engine, which:
     /// 1. Compiles the SQL to bytecode
     /// 2. Executes the bytecode in a virtual machine
     pub fn execute_vm(&mut self, sql: &str) -> SqawkResult<Option<Table>> {

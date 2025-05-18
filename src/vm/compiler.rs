@@ -250,7 +250,7 @@ impl<'a> SqlCompiler<'a> {
             0,
             None,
             0,
-            Some("Move to next row or exit loop"),
+            Some("Move to next row or exit loop".to_string()),
         ));
         
         // Close the table cursor
@@ -261,7 +261,7 @@ impl<'a> SqlCompiler<'a> {
             0,
             None,
             0,
-            Some("Close cursor"),
+            Some("Close cursor".to_string()),
         ));
         
         Ok(())

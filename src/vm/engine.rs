@@ -189,17 +189,19 @@ impl<'a> VmEngine<'a> {
                 let cursor_idx = inst.p1 as usize;
                 let table_name = inst.p4.clone().unwrap_or_default();
                 
-                // Get the table from the database
-                match self.database.get_table(&table_name) {
-                    Some(table) => {
-                        // Create a cursor for the table
-                        let cursor = Cursor::new(table.clone());
-                        self.cursors.insert(cursor_idx, cursor);
-                        
-                        Ok(ExecuteResult::Continue)
-                    },
-                    None => Err(SqawkError::TableNotFound(table_name))
+                // Check if the table exists
+                if !self.database.has_table(&table_name) {
+                    return Err(SqawkError::TableNotFound(table_name));
                 }
+                
+                // Get the table from the database (safe to unwrap since we checked it exists)
+                let table = self.database.get_table(&table_name).unwrap();
+                
+                // Create a cursor for the table
+                let cursor = Cursor::new(table.clone());
+                self.cursors.insert(cursor_idx, cursor);
+                
+                Ok(ExecuteResult::Continue)
             },
             
             OpCode::OpenWrite => {
