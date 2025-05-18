@@ -96,6 +96,13 @@ pub struct SqawkArgs {
     /// and their original file format and delimiters will be preserved.
     #[clap(short = 'w', long, help = "Write changes back to input files")]
     pub write: bool,
+    
+    /// Use VM-based SQL execution engine
+    ///
+    /// When enabled, uses the bytecode-based virtual machine execution engine
+    /// instead of the default direct execution engine.
+    #[clap(long, help = "Use VM-based SQL execution engine")]
+    pub vm: bool,
 }
 
 /// Parse command-line arguments into the SqawkArgs structure
