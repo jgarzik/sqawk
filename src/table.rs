@@ -398,6 +398,8 @@ impl Table {
             cols,
             column_map,
             rows: Vec::new(),
+            row_ids: Vec::new(),
+            next_row_id: 1, // Start with 1 as the first row ID
             file_path,
             modified: true, // Tables created with schema are considered modified
             delimiter: delimiter.unwrap_or_else(|| ",".to_string()),

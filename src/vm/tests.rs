@@ -16,7 +16,7 @@ mod bytecode_tests {
     use super::*;
 
     /// Helper function to create a program with given instructions and execute it
-    fn execute_bytecode_program(
+    pub fn execute_bytecode_program(
         instructions: Vec<Instruction>,
         database: &Database,
     ) -> SqawkResult<Option<Table>> {
@@ -36,7 +36,7 @@ mod bytecode_tests {
     }
 
     /// Create an instruction with the given opcode and parameters
-    fn create_instruction(
+    pub fn create_instruction(
         opcode: OpCode,
         p1: i64,
         p2: i64,
@@ -1000,6 +1000,7 @@ fn test_select_star_from_table() {
 /// Test transaction opcodes (Begin, Commit, Rollback)
 #[test]
 fn test_transaction_opcodes() {
+    use crate::vm::tests::bytecode_tests::{create_instruction, execute_bytecode_program};
     // This test verifies that the transaction opcodes work correctly
     let database = Database::new();
 
@@ -1160,7 +1161,7 @@ fn test_transaction_opcodes() {
     let rows = table.rows();
     let first_row = &rows[0];
     match &first_row[0] {
-        Value::Integer(val) => assert_eq!(*val, 99, "Expected value 99 (after rollback), got {}", val),
+        Value::Integer(val) => assert_eq!(*val, 99, "Expected value 99 (after rollback), got {}", *val),
         other => panic!("Expected Integer type, got {:?}", other),
     }
 }
