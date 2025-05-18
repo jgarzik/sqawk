@@ -140,7 +140,11 @@ impl<'a> SqlCompiler<'a> {
         self.compile_statement(stmt)?;
         
         // Add a halt instruction
-        self.add_halt();
+        self.program.add_instruction(super::bytecode::Instruction::new(
+            super::bytecode::OpCode::Halt,
+            0, 0, 0, None, 0,
+            Some("End of program".to_string())
+        ));
         
         // Update the provided program with our compiled result
         *program = self.program.clone();
