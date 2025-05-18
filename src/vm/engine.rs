@@ -579,7 +579,7 @@ impl<'a> VmEngine<'a> {
                     Register::Float(val) => val == 0.0,
                     Register::String(ref val) => val.is_empty(),
                     Register::Null => true, // NULL is considered "zero" for this purpose
-                    // Other register types might be added in the future
+                    Register::Boolean(val) => !val, // false is considered "zero"
                 };
                 
                 // If the register is zero/false, jump to P2
@@ -604,6 +604,8 @@ impl<'a> VmEngine<'a> {
                 let is_positive = match reg {
                     Register::Integer(val) => val > 0,
                     Register::Float(val) => val > 0.0,
+                    // Boolean true is considered positive, false is not
+                    Register::Boolean(val) => val,
                     // String and null aren't treated as positive
                     Register::String(_) | Register::Null => false,
                 };
@@ -629,6 +631,8 @@ impl<'a> VmEngine<'a> {
                 let is_negative = match reg {
                     Register::Integer(val) => val < 0,
                     Register::Float(val) => val < 0.0,
+                    // Boolean values aren't treated as negative
+                    Register::Boolean(_) => false,
                     // String and null aren't treated as negative
                     Register::String(_) | Register::Null => false,
                 };
