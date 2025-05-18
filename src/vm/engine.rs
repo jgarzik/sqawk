@@ -410,14 +410,18 @@ impl<'a> VmEngine<'a> {
             }
 
             OpCode::Begin => {
-                // Begin a transaction
+                // Begin a transaction - initiates a new atomic unit of work
+                // All operations performed between BEGIN and COMMIT/ROLLBACK are treated as a single
+                // logical operation from the perspective of database consistency
                 if self.transaction_state == TransactionState::Active {
                     return Err(SqawkError::VmError(
                         "Transaction already in progress".to_string(),
                     ));
                 }
 
-                // Set transaction state to active and clear the log
+                // Initialize transaction state to track changes
+                // - Set state to Active to indicate transaction is in progress
+                // - Clear any previous transaction log entries
                 self.transaction_state = TransactionState::Active;
                 self.transaction_log.clear();
 
@@ -429,16 +433,23 @@ impl<'a> VmEngine<'a> {
             }
 
             OpCode::Commit => {
-                // Commit a transaction
+                // Commit a transaction - makes all changes permanent
+                // Finalizes the changes made during the transaction and ensures they
+                // become permanent, durable parts of the database state
                 if self.transaction_state != TransactionState::Active {
                     return Err(SqawkError::VmError(
                         "No transaction in progress to commit".to_string(),
                     ));
                 }
 
-                // Set transaction state to committed (changes are permanent)
+                // Finalize transaction
+                // - Update state to Committed to indicate successful completion
+                // - In a WAL implementation, this would flush changes to the main database file
+                // - In an MVCC implementation, this would make changes visible to new transactions
                 self.transaction_state = TransactionState::Committed;
-                // Clear the transaction log as changes are now permanent
+                
+                // Clear the transaction log since changes are now permanent
+                // and don't need to be tracked for potential rollback
                 self.transaction_log.clear();
 
                 if self.verbose {
@@ -449,7 +460,8 @@ impl<'a> VmEngine<'a> {
             }
 
             OpCode::Rollback => {
-                // Rollback a transaction
+                // Rollback a transaction - abandons all changes made during the transaction
+                // Undoes all operations since BEGIN, returning the database to its prior state
                 if self.transaction_state != TransactionState::Active {
                     return Err(SqawkError::VmError(
                         "No transaction in progress to rollback".to_string(),
@@ -457,10 +469,13 @@ impl<'a> VmEngine<'a> {
                 }
 
                 // Revert all changes in the transaction log
-                // Note: In a real implementation, we would need to apply the
-                // changes in reverse order to restore the original state
+                // In a full implementation, this would:
+                // 1. Process the transaction log in reverse chronological order (LIFO)
+                // 2. Restore original data values for each modified row
+                // 3. Remove any newly inserted rows and restore any deleted rows
+                // 4. Maintain referential integrity during the rollback process
 
-                // Set transaction state to rolled back
+                // Update transaction state to reflect rollback completion
                 self.transaction_state = TransactionState::RolledBack;
                 // Clear the transaction log
                 self.transaction_log.clear();
@@ -497,15 +512,20 @@ impl<'a> VmEngine<'a> {
             }
 
             OpCode::Release => {
-                // Release a savepoint (commit up to the savepoint)
+                // Release a savepoint (commit changes up to the savepoint)
+                // This permanently applies all changes made since the savepoint was created
+                // while keeping the transaction active for further operations
                 if self.transaction_state != TransactionState::Active {
                     return Err(SqawkError::VmError(
                         "No active transaction for savepoint release".to_string(),
                     ));
                 }
 
-                // In a real implementation, we would remove the savepoint
-                // and all savepoints created after it
+                // In a complete implementation, we would:
+                // 1. Find the specified savepoint in our transaction log
+                // 2. Make all changes permanent up to that point
+                // 3. Remove this savepoint and any subsequent nested savepoints
+                // 4. Maintain the active transaction state for further operations
                 let savepoint_name = inst.p4.clone().unwrap_or_else(|| format!("sp_{}", inst.p1));
 
                 if self.verbose {
