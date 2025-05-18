@@ -565,6 +565,83 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Continue)
             }
             
+            OpCode::IfZ => {
+                // Jump if register P1 contains 0
+                // P1: Register to test
+                // P2: Jump destination (instruction index)
+                
+                // Get the register value to test
+                let reg = self.get_register(inst.p1 as usize)?;
+                
+                // Check if the register contains 0 (or logical false)
+                let is_zero = match reg {
+                    Register::Integer(val) => val == 0,
+                    Register::Float(val) => val == 0.0,
+                    Register::String(ref val) => val.is_empty(),
+                    Register::Null => true, // NULL is considered "zero" for this purpose
+                    // Other register types might be added in the future
+                };
+                
+                // If the register is zero/false, jump to P2
+                if is_zero {
+                    // Jump to the target instruction
+                    return Ok(ExecuteResult::Jump(inst.p2 as usize));
+                }
+                
+                // Otherwise, continue to the next instruction
+                Ok(ExecuteResult::Continue)
+            }
+            
+            OpCode::IfPos => {
+                // Jump if register P1 contains a positive value (> 0)
+                // P1: Register to test
+                // P2: Jump destination (instruction index)
+                
+                // Get the register value to test
+                let reg = self.get_register(inst.p1 as usize)?;
+                
+                // Check if the register contains a positive value
+                let is_positive = match reg {
+                    Register::Integer(val) => val > 0,
+                    Register::Float(val) => val > 0.0,
+                    // String and null aren't treated as positive
+                    Register::String(_) | Register::Null => false,
+                };
+                
+                // If the register is positive, jump to P2
+                if is_positive {
+                    return Ok(ExecuteResult::Jump(inst.p2 as usize));
+                }
+                
+                // Otherwise, continue to the next instruction
+                Ok(ExecuteResult::Continue)
+            }
+            
+            OpCode::IfNeg => {
+                // Jump if register P1 contains a negative value (< 0)
+                // P1: Register to test
+                // P2: Jump destination (instruction index)
+                
+                // Get the register value to test
+                let reg = self.get_register(inst.p1 as usize)?;
+                
+                // Check if the register contains a negative value
+                let is_negative = match reg {
+                    Register::Integer(val) => val < 0,
+                    Register::Float(val) => val < 0.0,
+                    // String and null aren't treated as negative
+                    Register::String(_) | Register::Null => false,
+                };
+                
+                // If the register is negative, jump to P2
+                if is_negative {
+                    return Ok(ExecuteResult::Jump(inst.p2 as usize));
+                }
+                
+                // Otherwise, continue to the next instruction
+                Ok(ExecuteResult::Continue)
+            }
+            
             OpCode::Le => {
                 // Less than or equal comparison (P1 <= P2, result in P3)
                 // P1 and P2 are register indices to compare

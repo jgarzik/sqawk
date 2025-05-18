@@ -50,8 +50,9 @@ pub enum OpCode {
     Ge,      // Greater than or equal comparison (P1 >= P2, result in P3)
     
     // Conditional jumps
-    JumpIfTrue,  // Jump to P2 if register P1 is true (non-zero)
-    JumpIfFalse, // Jump to P2 if register P1 is false (zero)
+    IfZ,    // Jump to P2 if register P1 contains 0
+    IfPos,  // Jump to P2 if register P1 is positive (> 0)
+    IfNeg,  // Jump to P2 if register P1 is negative (< 0)
     
     // Utility opcodes
     Noop, // No operation
