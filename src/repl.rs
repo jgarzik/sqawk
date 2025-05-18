@@ -13,6 +13,7 @@ use std::process::Command;
 use crate::config::AppConfig;
 use crate::error::SqawkError;
 use crate::executor_trait::SqlExecutorTrait;
+use crate::sql_executor::SqlExecutor;
 
 // Define a custom error type for the REPL
 #[derive(Debug)]
@@ -204,7 +205,7 @@ pub struct Repl<'a> {
 }
 
 impl<'a> Repl<'a> {
-    /// Create a new REPL
+    /// Create a new REPL with a SQL executor that implements the trait
     pub fn new(executor: Box<dyn SqlExecutorTrait + 'a>, app_config: &AppConfig) -> Self {
         // Create rustyline configuration with list-style completion
         let rustyline_config = Config::builder()

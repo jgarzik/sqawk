@@ -17,6 +17,7 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
+use crate::error::SqawkResult;
 use crate::executor_trait::SqlExecutorTrait;
 use sqlparser::ast::{
     Assignment, ColumnDef as SqlColumnDef, Expr, FileFormat as SqlFileFormat, Join as SqlJoin,
@@ -71,7 +72,6 @@ impl<'a> SqlExecutor<'a> {
 
 // Implement the SqlExecutorTrait interface for the standard SQL executor
 impl<'a> SqlExecutorTrait for SqlExecutor<'a> {
-    // Use the existing execute method but avoid recursive call
     fn execute(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
         // For CREATE TABLE statements with LOCATION, we need to use a dialect that
         // properly supports the LOCATION clause - HiveDialect is made for this
@@ -129,7 +129,6 @@ impl<'a> SqlExecutorTrait for SqlExecutor<'a> {
     }
     
     fn set_write_mode(&mut self, write_mode: bool) {
-        // Update config with the new write mode
         self.config.set_write(write_mode);
     }
     
