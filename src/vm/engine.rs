@@ -84,6 +84,15 @@ pub struct VmEngine<'a> {
     /// Result rows from SELECT statements
     results: Vec<Vec<Value>>,
     
+    /// Column names for the result set
+    column_names: Vec<String>,
+    
+    /// Tables modified during execution
+    modified_tables: Vec<String>,
+    
+    /// Number of rows affected by non-SELECT statements
+    affected_rows: usize,
+    
     /// Whether the engine is in verbose mode
     verbose: bool,
 }
@@ -98,6 +107,9 @@ impl<'a> VmEngine<'a> {
             registers: Vec::new(),
             cursors: HashMap::new(),
             results: Vec::new(),
+            column_names: Vec::new(),
+            modified_tables: Vec::new(),
+            affected_rows: 0,
             verbose,
         }
     }
@@ -356,6 +368,26 @@ impl<'a> VmEngine<'a> {
     /// Get the results from execution
     pub fn get_results(&self) -> &Vec<Vec<Value>> {
         &self.results
+    }
+    
+    /// Check if there are any results from execution
+    pub fn has_results(&self) -> bool {
+        !self.results.is_empty()
+    }
+    
+    /// Get the column names for the result set
+    pub fn get_column_names(&self) -> Vec<String> {
+        self.column_names.clone()
+    }
+    
+    /// Get the number of rows affected by non-SELECT statements
+    pub fn get_affected_rows(&self) -> usize {
+        self.affected_rows
+    }
+    
+    /// Get the names of tables modified during execution
+    pub fn get_modified_tables(&self) -> Vec<String> {
+        self.modified_tables.clone()
     }
     
     /// Create a table from the results
