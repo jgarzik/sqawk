@@ -96,10 +96,10 @@ pub struct VmEngine<'a> {
 
     /// Result rows from SELECT statements
     results: Vec<Vec<Value>>,
-    
+
     /// Current transaction state
     transaction_state: TransactionState,
-    
+
     /// Modified rows in the current transaction, to support rollback
     transaction_log: Vec<(usize, Table, Vec<(usize, Value)>)>,
 
@@ -143,7 +143,7 @@ impl<'a> VmEngine<'a> {
 
         // Allocate a few extra registers just in case
         self.registers = vec![Register::Null; (max_reg + 5) as usize];
-        
+
         // Reset transaction state
         self.transaction_state = TransactionState::None;
         self.transaction_log.clear();
@@ -403,103 +403,103 @@ impl<'a> VmEngine<'a> {
                 // Begin a transaction
                 if self.transaction_state == TransactionState::Active {
                     return Err(SqawkError::VmError(
-                        "Transaction already in progress".to_string()
+                        "Transaction already in progress".to_string(),
                     ));
                 }
-                
+
                 // Set transaction state to active and clear the log
                 self.transaction_state = TransactionState::Active;
                 self.transaction_log.clear();
-                
+
                 if self.verbose {
                     println!("BEGIN TRANSACTION");
                 }
-                
+
                 Ok(ExecuteResult::Continue)
             }
-            
+
             OpCode::Commit => {
                 // Commit a transaction
                 if self.transaction_state != TransactionState::Active {
                     return Err(SqawkError::VmError(
-                        "No transaction in progress to commit".to_string()
+                        "No transaction in progress to commit".to_string(),
                     ));
                 }
-                
+
                 // Set transaction state to committed (changes are permanent)
                 self.transaction_state = TransactionState::Committed;
                 // Clear the transaction log as changes are now permanent
                 self.transaction_log.clear();
-                
+
                 if self.verbose {
                     println!("COMMIT TRANSACTION");
                 }
-                
+
                 Ok(ExecuteResult::Continue)
             }
-            
+
             OpCode::Rollback => {
                 // Rollback a transaction
                 if self.transaction_state != TransactionState::Active {
                     return Err(SqawkError::VmError(
-                        "No transaction in progress to rollback".to_string()
+                        "No transaction in progress to rollback".to_string(),
                     ));
                 }
-                
+
                 // Revert all changes in the transaction log
                 // Note: In a real implementation, we would need to apply the
                 // changes in reverse order to restore the original state
-                
+
                 // Set transaction state to rolled back
                 self.transaction_state = TransactionState::RolledBack;
-                // Clear the transaction log 
+                // Clear the transaction log
                 self.transaction_log.clear();
-                
+
                 if self.verbose {
                     println!("ROLLBACK TRANSACTION");
                 }
-                
+
                 Ok(ExecuteResult::Continue)
             }
-            
+
             OpCode::SavePoint => {
                 // Create a savepoint within the current transaction
                 if self.transaction_state != TransactionState::Active {
                     return Err(SqawkError::VmError(
-                        "No active transaction for savepoint".to_string()
+                        "No active transaction for savepoint".to_string(),
                     ));
                 }
-                
+
                 // In a real implementation, we would store the current position
                 // in the transaction log to allow partial rollbacks
                 let savepoint_name = inst.p4.clone().unwrap_or_else(|| format!("sp_{}", inst.p1));
-                
+
                 if self.verbose {
                     println!("SAVEPOINT {}", savepoint_name);
                 }
-                
+
                 Ok(ExecuteResult::Continue)
             }
-            
+
             OpCode::Release => {
                 // Release a savepoint (commit up to the savepoint)
                 if self.transaction_state != TransactionState::Active {
                     return Err(SqawkError::VmError(
-                        "No active transaction for savepoint release".to_string()
+                        "No active transaction for savepoint release".to_string(),
                     ));
                 }
-                
+
                 // In a real implementation, we would remove the savepoint
                 // and all savepoints created after it
                 let savepoint_name = inst.p4.clone().unwrap_or_else(|| format!("sp_{}", inst.p1));
-                
+
                 if self.verbose {
                     println!("RELEASE SAVEPOINT {}", savepoint_name);
                 }
-                
+
                 Ok(ExecuteResult::Continue)
             }
-            
+
             OpCode::Noop => {
                 // No operation
                 Ok(ExecuteResult::Continue)

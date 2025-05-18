@@ -19,9 +19,9 @@ pub enum OpCode {
     Halt, // Stop execution
 
     // Table operations
-    OpenRead, // Open a table for reading
+    OpenRead,  // Open a table for reading
     OpenWrite, // Open a table for writing
-    Close,    // Close a cursor
+    Close,     // Close a cursor
 
     // Cursor operations
     Rewind, // Move cursor to first row

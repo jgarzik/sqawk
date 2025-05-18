@@ -132,9 +132,10 @@ impl<'a> SqlCompiler<'a> {
     fn compile_statement(&mut self, statement: &Statement) -> SqawkResult<()> {
         match statement {
             Statement::Query(query) => self.compile_query(query),
-            _ => Err(SqawkError::UnsupportedSqlFeature(
-                format!("Unsupported SQL statement type: {:?}", statement),
-            )),
+            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Unsupported SQL statement type: {:?}",
+                statement
+            ))),
         }
     }
 

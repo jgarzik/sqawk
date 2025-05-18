@@ -742,8 +742,6 @@ impl<'a> Repl<'a> {
     }
 }
 
-
-
 impl Repl<'_> {
     /// Toggle writing changes to files
     fn toggle_write(&mut self, arg: Option<&str>) -> Result<()> {

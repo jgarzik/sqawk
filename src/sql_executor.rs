@@ -3068,7 +3068,7 @@ impl<'a> SqlExecutor<'a> {
     ///
     /// # Returns
     /// * The number of rows that were updated
-    /// 
+    ///
     ///   Execute a CREATE TABLE statement
     ///
     /// Creates a new table with the specified schema. If a LOCATION is specified,
@@ -3085,7 +3085,7 @@ impl<'a> SqlExecutor<'a> {
     /// # Returns
     /// * `Ok(())` if the table was created successfully
     /// * `Err` if there was an error creating the table
-    /// 
+    ///
     ///   Execute a CREATE TABLE statement
     ///
     /// This function handles the creation of tables from SQL CREATE TABLE statements.

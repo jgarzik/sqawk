@@ -7,7 +7,6 @@
 use crate::database::Database;
 use crate::error::SqawkResult;
 use crate::table::{Table, Value};
-use crate::vm;
 use crate::vm::bytecode::{Instruction, OpCode, Program};
 use crate::vm::engine::VmEngine;
 
@@ -790,11 +789,11 @@ mod bytecode_tests {
         let instructions = vec![
             // Initialize VM
             create_instruction(
-                OpCode::Init, 
-                0, 
-                1, 
-                0, 
-                None, 
+                OpCode::Init,
+                0,
+                1,
+                0,
+                None,
                 Some("Initialize VM".to_string()),
             ),
             // Begin transaction
@@ -867,7 +866,9 @@ mod bytecode_tests {
         let rows = table.rows();
         let first_row = &rows[0];
         match &first_row[0] {
-            Value::Integer(val) => assert_eq!(*val, 99, "Expected value 99 (after rollback), got {}", val),
+            Value::Integer(val) => {
+                assert_eq!(*val, 99, "Expected value 99 (after rollback), got {}", val)
+            }
             other => panic!("Expected Integer type, got {:?}", other),
         }
     }

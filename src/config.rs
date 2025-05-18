@@ -81,6 +81,4 @@ impl AppConfig {
     pub fn use_vm(&self) -> bool {
         self.use_vm
     }
-
-
 }

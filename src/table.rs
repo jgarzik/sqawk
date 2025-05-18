@@ -49,7 +49,7 @@ impl RowId {
     pub fn new(id: u64) -> Self {
         RowId(id)
     }
-    
+
     /// Get the underlying ID value
     pub fn value(&self) -> u64 {
         self.0
@@ -247,10 +247,10 @@ pub struct Table {
 
     /// Rows of data
     rows: Vec<Row>,
-    
+
     /// Row IDs to uniquely identify each row
     row_ids: Vec<RowId>,
-    
+
     /// Next row ID to assign (increments with each row added)
     next_row_id: u64,
 
@@ -417,8 +417,6 @@ impl Table {
         self.cols.iter().map(|col| col.name.clone()).collect()
     }
 
-
-
     /// Get all columns with their metadata
     ///
     /// Returns a slice containing all column metadata including names and types.
@@ -487,7 +485,7 @@ impl Table {
         // Add the row with a new unique row ID
         let row_id = RowId::new(self.next_row_id);
         self.next_row_id += 1;
-        
+
         self.rows.push(row);
         self.row_ids.push(row_id);
         self.modified = true;
@@ -510,13 +508,13 @@ impl Table {
         // Still assign a unique row ID
         let row_id = RowId::new(self.next_row_id);
         self.next_row_id += 1;
-        
+
         self.rows.push(row);
         self.row_ids.push(row_id);
         self.modified = true;
         Ok(())
     }
-    
+
     /// Get a row by its unique row ID
     ///
     /// # Arguments
@@ -530,7 +528,7 @@ impl Table {
         let index = self.row_ids.iter().position(|id| *id == row_id)?;
         self.rows.get(index)
     }
-    
+
     /// Get a mutable reference to a row by its unique row ID
     ///
     /// # Arguments
@@ -544,7 +542,7 @@ impl Table {
         let index = self.row_ids.iter().position(|id| *id == row_id)?;
         self.rows.get_mut(index)
     }
-    
+
     /// Get the row ID for a row at a specific index
     ///
     /// # Arguments
@@ -556,7 +554,7 @@ impl Table {
     pub fn get_row_id_at_index(&self, index: usize) -> Option<RowId> {
         self.row_ids.get(index).copied()
     }
-    
+
     /// Remove a row by its unique row ID
     ///
     /// # Arguments
@@ -575,7 +573,7 @@ impl Table {
             false
         }
     }
-    
+
     /// Get all row IDs in this table
     ///
     /// This is useful for iterating over all rows by ID.
