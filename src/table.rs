@@ -359,10 +359,9 @@ impl Table {
     pub fn new_with_schema_defaults(
         name: &str, 
         schema: Vec<ColumnDefinition>, 
-        file_path: Option<PathBuf>,
-        verbose: bool
+        file_path: Option<PathBuf>
     ) -> Self {
-        Self::new_with_schema(name, schema, file_path, None, None, verbose)
+        Self::new_with_schema(name, schema, file_path, None, None, false)
     }
 
     /// Get the columns of the table

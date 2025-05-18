@@ -219,6 +219,7 @@ impl Database {
             file_path,
             delimiter,
             file_format,
+            false, // Default to non-verbose mode
         );
         
         self.tables.insert(name.to_string(), table);
