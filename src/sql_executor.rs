@@ -66,6 +66,11 @@ impl<'a> SqlExecutor<'a> {
             affected_row_count: 0,
         }
     }
+    
+    /// Check if using VM execution mode
+    pub fn using_vm_mode(&self) -> bool {
+        self.config.use_vm()
+    }
 
     /// Get the number of rows affected by the last executed statement
     pub fn get_affected_row_count(&self) -> SqawkResult<usize> {
