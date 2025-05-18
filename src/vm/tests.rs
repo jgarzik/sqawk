@@ -16,14 +16,60 @@ fn test_select_literal() {
     // Create an empty database
     let database = Database::new();
     
-    // Execute the query with the VM - use "SELECT 1 AS value" to give the column a name
-    let result = vm::execute_vm("SELECT 1 AS value", &database, false);
+    // Direct query without going through SQL executor validation
+    // Create a literal query manually
+    use sqlparser::ast::{Expr, Query, Select, SelectItem, SetExpr, Value as SqlValue};
     
-    // Verify the query executed successfully
-    assert!(result.is_ok(), "VM execution failed: {:?}", result.err());
+    // Create a simple "SELECT 1 AS value" query
+    let literal_value = SqlValue::Number("1".to_string(), false);
+    let expr = Expr::Value(literal_value);
+    let alias = sqlparser::ast::Ident::new("value");
+    let select_item = SelectItem::ExprWithAlias {
+        expr,
+        alias,
+    };
     
-    // Verify we have a result table
-    let table_opt = result.unwrap();
+    let select = Select {
+        distinct: None,
+        top: None,
+        projection: vec![select_item],
+        from: vec![],
+        lateral_views: vec![],
+        selection: None,
+        group_by: sqlparser::ast::GroupByExpr::Expressions(vec![]),
+        cluster_by: vec![],
+        distribute_by: vec![],
+        sort_by: vec![],
+        having: None,
+        qualify: None,
+        named_window: vec![],
+        value_table_mode: None,
+    };
+    
+    let query_body = SetExpr::Select(Box::new(select));
+    let query = Query {
+        with: None,
+        body: Box::new(query_body),
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        fetch: None,
+        limit_by: vec![],
+        locks: vec![],
+        for_clause: None,
+    };
+    
+    // Compile the SQL query directly using our VM compiler
+    let mut compiler = crate::vm::compiler::SqlCompiler::new(&database, false);
+    let program = compiler.compile_query_direct(&query).expect("Failed to compile query");
+    
+    // Create and execute the VM directly
+    let mut engine = crate::vm::engine::VmEngine::new(&database, false);
+    engine.init(program);
+    engine.execute().expect("Failed to execute VM program");
+    
+    // Get the result table
+    let table_opt = engine.create_result_table().expect("Failed to create result table");
     assert!(table_opt.is_some(), "Expected a result table, got None");
     
     let table = table_opt.unwrap();

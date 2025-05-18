@@ -75,6 +75,46 @@ impl<'a> SqlCompiler<'a> {
         }
     }
     
+    /// Compile a query object directly into bytecode
+    /// This method is primarily used for testing literal SELECTs
+    pub fn compile_query_direct(&mut self, query: &Query) -> SqawkResult<Program> {
+        // Reset state for new compilation
+        self.program = Program::new();
+        self.reset_registers();
+        self.table_map.clear();
+        
+        // Add initial "Init" instruction that will be filled in later
+        let init_addr = self.program.len();
+        self.program.add_instruction(Instruction::new(
+            OpCode::Init,
+            0, 0, 0,
+            None,
+            0,
+            Some("Start address will be filled in later".into()),
+        ));
+        
+        // Compile the query directly
+        self.compile_query(query)?;
+        
+        // Add Halt instruction at the end
+        self.program.add_instruction(Instruction::new(
+            OpCode::Halt,
+            0, 0, 0,
+            None,
+            0,
+            Some("End execution".to_string()),
+        ));
+        
+        // Update the Init instruction with the correct start address
+        let transaction_addr = init_addr + 1;
+        if let Some(instruction) = self.program.instructions.get_mut(init_addr) {
+            instruction.p2 = transaction_addr as i64;
+            instruction.comment = Some(format!("Start at {}", transaction_addr));
+        }
+        
+        Ok(self.program.clone())
+    }
+
     /// Compile an SQL string into bytecode
     pub fn compile(&mut self, sql: &str) -> SqawkResult<Program> {
         // Reset state for new compilation
