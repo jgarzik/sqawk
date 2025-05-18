@@ -3596,7 +3596,6 @@ impl<'a> SqlExecutorTrait for SqlExecutor<'a> {
         // This ensures consistency between command-line loaded tables and CREATE TABLE tables
         self.file_handler.save_table(table_name)
     }
-}
 
 /// Result set structure for REPL output
 #[derive(Debug)]

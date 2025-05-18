@@ -1,54 +1,58 @@
-//! Common SQL Executor trait for sqawk
+//! SQL executor trait for sqawk
 //!
 //! This module defines a common interface for SQL executors in the sqawk application.
-//! By implementing this trait, different execution engines (direct execution and VM-based)
-//! can be used interchangeably by the rest of the application, particularly the REPL.
+//! It allows different execution engines (direct and VM-based) to present the same
+//! interface to other components, especially the REPL.
 
 use crate::error::SqawkResult;
 use crate::table::Table;
 
-/// Common interface for SQL executors in sqawk
+/// Trait defining the common interface for SQL executors
 ///
-/// This trait defines the required methods that all SQL executors must implement,
-/// allowing the application to switch between execution engines seamlessly.
+/// This trait allows different SQL execution engines to be used interchangeably
+/// by other components of the application, particularly the REPL.
 pub trait SqlExecutorTrait {
-    /// Execute a SQL statement and return the result
+    /// Execute a SQL statement
     ///
     /// # Arguments
     /// * `sql` - The SQL statement to execute
     ///
     /// # Returns
-    /// * `SqawkResult<Option<Table>>` - Result of the operation, possibly containing a table
+    /// * `Ok(Some(Table))` for SELECT queries with results
+    /// * `Ok(None)` for other statement types (INSERT, UPDATE, DELETE)
+    /// * `Err` if the statement execution fails
     fn execute(&mut self, sql: &str) -> SqawkResult<Option<Table>>;
     
     /// Get the number of rows affected by the last operation
     ///
     /// # Returns
-    /// * `usize` - Number of affected rows
+    /// * The number of rows affected
     fn get_affected_row_count(&self) -> usize;
     
-    /// Get the names of all tables currently loaded
+    /// Get a list of all table names
     ///
     /// # Returns
-    /// * `Vec<String>` - List of table names
+    /// * A vector of table names
     fn get_table_names(&self) -> Vec<String>;
     
-    /// Get column names for a specific table
+    /// Get column names for a table
     ///
     /// # Arguments
-    /// * `table_name` - Name of the table
+    /// * `table_name` - The name of the table
     ///
     /// # Returns
-    /// * `SqawkResult<Vec<String>>` - List of column names
+    /// * `Ok(Vec<String>)` with column names if the table exists
+    /// * `Err` if the table doesn't exist
     fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<String>>;
     
-    /// Get column names and types for a specific table
+    /// Get column names and types for a table
     ///
     /// # Arguments
-    /// * `table_name` - Name of the table
+    /// * `table_name` - The name of the table
     ///
     /// # Returns
-    /// * `SqawkResult<Vec<(String, String)>>` - List of column names and their types
+    /// * `Ok(Vec<(String, String)>)` with column names and types if the table exists
+    /// * `Err` if the table doesn't exist
     fn get_table_columns_with_types(&self, table_name: &str) -> SqawkResult<Vec<(String, String)>>;
     
     /// Set whether to write changes back to files
@@ -60,12 +64,13 @@ pub trait SqlExecutorTrait {
     /// Get whether write mode is enabled
     ///
     /// # Returns
-    /// * `bool` - Whether write mode is enabled
+    /// * Whether write mode is enabled
     fn get_write_mode(&self) -> bool;
     
-    /// Save all modified tables to their associated files
+    /// Save modified tables to their files
     ///
     /// # Returns
-    /// * `SqawkResult<usize>` - Number of tables saved
+    /// * `Ok(usize)` with the number of tables saved
+    /// * `Err` if saving fails
     fn save_modified_tables(&mut self) -> SqawkResult<usize>;
 }
