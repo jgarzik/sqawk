@@ -926,7 +926,7 @@ impl Table {
     /// * A new table with duplicate rows removed
     pub fn distinct(&self) -> SqawkResult<Self> {
         // Create a new table with the same structure
-        let column_names = self.columns().clone();
+        let column_names = self.columns().to_vec();
         let mut result = Table::new(&self.name, column_names, self.file_path.clone());
 
         // Use a vector to track rows we've already seen
