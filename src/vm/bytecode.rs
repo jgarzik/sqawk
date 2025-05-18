@@ -15,10 +15,12 @@ use crate::table::Value;
 pub enum OpCode {
     // Program flow control
     Init,           // Initialize VM
+    Goto,           // Jump to address
     Halt,           // Stop execution
     
     // Table operations
     OpenRead,       // Open a table for reading
+    OpenWrite,      // Open a table for writing
     Close,          // Close a cursor
     
     // Cursor operations
@@ -27,6 +29,9 @@ pub enum OpCode {
     Column,         // Read column value into register
     
     // Data manipulation
+    Integer,        // Load integer constant
+    String,         // Load string constant
+    Null,           // Load NULL value
     ResultRow,      // Return result row to client
     
     // Utility opcodes

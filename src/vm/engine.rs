@@ -355,30 +355,8 @@ impl<'a> VmEngine<'a> {
         }
     }
     
-    /// Get the results from execution
-    pub fn get_results(&self) -> &Vec<Vec<Value>> {
-        &self.results
-    }
-    
-    /// Check if there are any results from execution
-    pub fn has_results(&self) -> bool {
-        !self.results.is_empty()
-    }
-    
-    /// Get the column names for the result set
-    pub fn get_column_names(&self) -> Vec<String> {
-        self.column_names.clone()
-    }
-    
-    /// Get the number of rows affected by non-SELECT statements
-    pub fn get_affected_rows(&self) -> usize {
-        self.affected_rows
-    }
-    
-    /// Get the names of tables modified during execution
-    pub fn get_modified_tables(&self) -> Vec<String> {
-        self.modified_tables.clone()
-    }
+    // Removed unused methods get_results, has_results, get_column_names, 
+    // get_affected_rows, and get_modified_tables
     
     /// Create a table from the results
     pub fn create_result_table(&self) -> SqawkResult<Option<Table>> {
