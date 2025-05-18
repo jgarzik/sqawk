@@ -133,7 +133,7 @@ impl<'a> SqlCompiler<'a> {
         match statement {
             Statement::Query(query) => self.compile_query(query),
             _ => Err(SqawkError::UnsupportedSqlFeature(
-                format!("Unsupported SQL statement type: {:?}", statement).into(),
+                format!("Unsupported SQL statement type: {:?}", statement),
             )),
         }
     }
@@ -307,7 +307,7 @@ impl<'a> SqlCompiler<'a> {
         let table = self.database.get_table(&table_name).unwrap();
 
         // Get column indices for result row based on projection
-        let columns = self.resolve_projection(projection, &table)?;
+        let columns = self.resolve_projection(projection, table)?;
 
         self.add_comment(&format!("Scanning table: {}", table_name));
 
@@ -342,7 +342,7 @@ impl<'a> SqlCompiler<'a> {
 
         // Load each column value into registers
         let mut result_regs = Vec::new();
-        for (_i, col_idx) in columns.iter().enumerate() {
+        for col_idx in columns.iter() {
             let value_reg = self.allocate_register();
             result_regs.push(value_reg);
 
