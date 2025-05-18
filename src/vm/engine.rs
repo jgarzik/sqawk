@@ -64,6 +64,19 @@ impl Cursor {
     }
 }
 
+/// Transaction state for the VM engine
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TransactionState {
+    /// No active transaction
+    None,
+    /// Transaction in progress
+    Active,
+    /// Transaction has been committed
+    Committed,
+    /// Transaction has been rolled back
+    RolledBack,
+}
+
 /// SQL VM engine that executes bytecode
 pub struct VmEngine<'a> {
     /// The database containing tables
@@ -83,6 +96,12 @@ pub struct VmEngine<'a> {
 
     /// Result rows from SELECT statements
     results: Vec<Vec<Value>>,
+    
+    /// Current transaction state
+    transaction_state: TransactionState,
+    
+    /// Modified rows in the current transaction, to support rollback
+    transaction_log: Vec<(usize, Table, Vec<(usize, Value)>)>,
 
     // Removed unused fields for column_names, modified_tables, and affected_rows
     /// Whether the engine is in verbose mode
@@ -99,6 +118,8 @@ impl<'a> VmEngine<'a> {
             registers: Vec::new(),
             cursors: HashMap::new(),
             results: Vec::new(),
+            transaction_state: TransactionState::None,
+            transaction_log: Vec::new(),
             verbose,
         }
     }
@@ -122,6 +143,10 @@ impl<'a> VmEngine<'a> {
 
         // Allocate a few extra registers just in case
         self.registers = vec![Register::Null; (max_reg + 5) as usize];
+        
+        // Reset transaction state
+        self.transaction_state = TransactionState::None;
+        self.transaction_log.clear();
 
         if self.verbose {
             println!("VM initialized with program:\n{}", self.program);
