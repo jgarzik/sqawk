@@ -46,15 +46,15 @@ pub enum SqawkError {
     /// Error when a referenced table doesn't exist
     #[error("Table '{0}' not found")]
     TableNotFound(String),
-    
+
     /// Error when trying to create a table that already exists
     #[error("Table '{0}' already exists")]
     TableAlreadyExists(String),
-    
+
     /// Error when a file doesn't exist
     #[error("File not found: {0}")]
     FileNotFound(String),
-    
+
     /// Error when a table doesn't have an associated file path
     #[error("Table '{0}' has no associated file path")]
     NoFilePath(String),

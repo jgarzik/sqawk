@@ -11,7 +11,7 @@ fn test_repl_basic_dot_commands() {
 
     // Start the sqawk process with sample data loaded
     let mut process = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--bin",
             "sqawk",
@@ -50,7 +50,7 @@ fn test_repl_show_command() {
 
     // Start the sqawk process with sample data loaded
     let mut process = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--bin",
             "sqawk",
@@ -85,11 +85,12 @@ fn test_repl_show_command() {
 #[test]
 fn test_repl_stats_command() {
     // Commands to test the .stats command
-    let test_commands = ".stats on\nSELECT * FROM sample;\n.stats off\nSELECT * FROM sample;\n.exit\n";
+    let test_commands =
+        ".stats on\nSELECT * FROM sample;\n.stats off\nSELECT * FROM sample;\n.exit\n";
 
     // Start the sqawk process with sample data loaded
     let mut process = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--bin",
             "sqawk",

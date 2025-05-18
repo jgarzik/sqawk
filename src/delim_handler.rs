@@ -24,6 +24,12 @@ use crate::table::{Table, Value};
 /// Handles loading and saving delimiter-separated value files
 pub struct DelimHandler {}
 
+impl Default for DelimHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DelimHandler {
     /// Create a new DelimHandler
     ///
@@ -32,7 +38,7 @@ impl DelimHandler {
     pub fn new() -> Self {
         DelimHandler {}
     }
-    
+
     /// Save a table to a delimiter-separated file
     ///
     /// # Arguments
@@ -42,31 +48,34 @@ impl DelimHandler {
     ///
     /// # Returns
     /// * `SqawkResult<()>` - Result of the operation
-    pub fn save_delimited(&self, table: &Table, file_path: &Path, delimiter: &str) -> SqawkResult<()> {
+    pub fn save_delimited(
+        &self,
+        table: &Table,
+        file_path: &Path,
+        delimiter: &str,
+    ) -> SqawkResult<()> {
         use std::fs::File;
         use std::io::{BufWriter, Write};
-        
+
         // Open the file for writing
         let file = File::create(file_path).map_err(SqawkError::IoError)?;
         let mut writer = BufWriter::new(file);
-        
+
         // Write the header row
         let header = table.columns().join(delimiter);
         writeln!(writer, "{}", header).map_err(SqawkError::IoError)?;
-        
+
         // Write data rows
         for row in table.rows() {
-            let row_values: Vec<String> = row.iter()
-                .map(|value| value.to_string())
-                .collect();
-            
+            let row_values: Vec<String> = row.iter().map(|value| value.to_string()).collect();
+
             let row_str = row_values.join(delimiter);
             writeln!(writer, "{}", row_str).map_err(SqawkError::IoError)?;
         }
-        
+
         // Flush and close the writer
         writer.flush().map_err(SqawkError::IoError)?;
-        
+
         Ok(())
     }
 
@@ -193,7 +202,12 @@ impl DelimHandler {
         };
 
         // Create a new table with the determined headers and custom delimiter
-        let mut table = Table::new_with_delimiter(&table_name, headers, Some(file_path.clone()), delimiter.to_string());
+        let mut table = Table::new_with_delimiter(
+            &table_name,
+            headers,
+            Some(file_path.clone()),
+            delimiter.to_string(),
+        );
 
         // Read rows
         for result in csv_reader.records() {

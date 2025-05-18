@@ -13,14 +13,14 @@
 pub struct AppConfig {
     /// Whether to show verbose output
     verbose: bool,
-    
+
     /// Custom field separator for tables
     field_separator: Option<String>,
-    
+
     /// Custom column definitions for tables
     /// Format: "table_name:col1,col2,..."
     table_definitions: Vec<String>,
-    
+
     /// Whether to write changes back to files
     write_changes: bool,
 }
@@ -46,27 +46,27 @@ impl AppConfig {
             write_changes,
         }
     }
-    
+
     /// Get the verbose flag
     pub fn verbose(&self) -> bool {
         self.verbose
     }
-    
+
     /// Get the field separator
     pub fn field_separator(&self) -> Option<String> {
         self.field_separator.clone()
     }
-    
+
     /// Get the table definitions
     pub fn table_definitions(&self) -> &[String] {
         &self.table_definitions
     }
-    
+
     /// Get whether to write changes
     pub fn write_changes(&self) -> bool {
         self.write_changes
     }
-    
+
     /// Set whether to write changes
     pub fn set_write_changes(&mut self, write: bool) {
         self.write_changes = write;

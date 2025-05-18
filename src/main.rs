@@ -71,10 +71,10 @@ fn main() -> Result<()> {
     // Step 1b: Create a centralized application configuration
     // This will be passed to all components that need configuration settings
     let config = AppConfig::new(
-        args.verbose,                                  // Verbose output flag
-        args.field_separator.clone(),                  // Field separator for tables
-        args.tabledef.clone(),                         // Table column definitions
-        args.write,                                    // Whether to write changes to files
+        args.verbose,                 // Verbose output flag
+        args.field_separator.clone(), // Field separator for tables
+        args.tabledef.clone(),        // Table column definitions
+        args.write,                   // Whether to write changes to files
     );
 
     // Configure diagnostics output if verbose mode is enabled (-v flag)
@@ -86,19 +86,17 @@ fn main() -> Result<()> {
 
     // Step 2a: Create a new Database instance to serve as the central store for tables
     let mut database = Database::new();
-    
+
     // Step 2b: Compile table definitions from the CLI arguments
     // This makes Database the source of truth for table schemas defined via CLI
-    database.compile_table_definitions(&config)
+    database
+        .compile_table_definitions(&config)
         .context("Failed to compile table definitions")?;
-    
+
     // Step 2c: Initialize the file handler with the application configuration
     // The file handler uses config for field separator and verbosity
     // Note: table definitions are now handled by Database directly
-    let mut file_handler = FileHandler::new(
-        &config,
-        &mut database,
-    );
+    let mut file_handler = FileHandler::new(&config, &mut database);
 
     // Step 2b: Load all specified files into in-memory tables
     // Each file can specify its table name with table_name=file_path syntax

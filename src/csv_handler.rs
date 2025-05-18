@@ -40,7 +40,7 @@ impl CsvHandler {
     pub fn new() -> Self {
         CsvHandler {}
     }
-    
+
     /// Save a table to a CSV file
     ///
     /// # Arguments
@@ -53,23 +53,23 @@ impl CsvHandler {
         // Create a CSV writer
         let file = File::create(file_path).map_err(SqawkError::IoError)?;
         let mut writer = csv::Writer::from_writer(file);
-            
+
         // Write header row
-        writer.write_record(table.columns())
+        writer
+            .write_record(table.columns())
             .map_err(SqawkError::CsvError)?;
-            
+
         // Write data rows
         for row in table.rows() {
-            let string_values: Vec<String> = row.iter()
-                .map(|value| value.to_string())
-                .collect();
-                
-            writer.write_record(&string_values)
+            let string_values: Vec<String> = row.iter().map(|value| value.to_string()).collect();
+
+            writer
+                .write_record(&string_values)
                 .map_err(SqawkError::CsvError)?;
         }
-        
-        writer.flush().map_err(|err| SqawkError::IoError(err))?;
-        
+
+        writer.flush().map_err(SqawkError::IoError)?;
+
         Ok(())
     }
 
@@ -134,7 +134,12 @@ impl CsvHandler {
         };
 
         // Create a new table with comma delimiter (since this is the CSV handler)
-        let mut table = Table::new_with_delimiter(&table_name, headers, Some(file_path.clone()), ",".to_string());
+        let mut table = Table::new_with_delimiter(
+            &table_name,
+            headers,
+            Some(file_path.clone()),
+            ",".to_string(),
+        );
 
         // Read rows with enhanced error handling
         let should_recover = recover_errors.unwrap_or(false);

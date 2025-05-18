@@ -35,10 +35,10 @@ pub struct FileHandler {
 
     /// Default format to use if not specified (underscore prefix indicates it's intentionally unused for now)
     _default_format: FileFormat,
-    
+
     /// Reference to a database object which is the source of truth for tables
     database: *mut Database,
-    
+
     /// Application configuration for global settings
     config: AppConfig,
 }
@@ -56,10 +56,7 @@ impl FileHandler {
     ///
     /// # Returns
     /// A new FileHandler instance ready to load and manage tables
-    pub fn new(
-        config: &AppConfig,
-        database: &mut Database
-    ) -> Self {
+    pub fn new(config: &AppConfig, database: &mut Database) -> Self {
         let field_separator = config.field_separator();
         let default_format = if field_separator.is_some() {
             FileFormat::Delimited
@@ -76,7 +73,7 @@ impl FileHandler {
             config: config.clone(),
         }
     }
-    
+
     /// Get a mutable reference to the database
     ///
     /// # Returns
@@ -107,13 +104,16 @@ impl FileHandler {
             let db = self.database_mut();
             existing_schema = db.has_table(&table_name);
         }
-        
+
         // Show verbose output if needed
         let verbose = self.config.verbose();
         if existing_schema && verbose {
-            println!("Table '{}' already exists in database, loading data into existing schema", table_name);
+            println!(
+                "Table '{}' already exists in database, loading data into existing schema",
+                table_name
+            );
         }
-        
+
         // Determine the file format based on extension
         let format = self.detect_format(&file_path);
 
@@ -127,17 +127,21 @@ impl FileHandler {
                 self.csv_handler.load_csv(file_spec, None, None)?
             }
             FileFormat::Delimited => {
-                let delimiter = self.config.field_separator().unwrap_or_else(|| "\t".to_string());
+                let delimiter = self
+                    .config
+                    .field_separator()
+                    .unwrap_or_else(|| "\t".to_string());
                 // No custom columns since we use Database schemas
-                self.delim_handler.load_delimited(file_spec, &delimiter, None)?
+                self.delim_handler
+                    .load_delimited(file_spec, &delimiter, None)?
             }
         };
-        
+
         // Now that we have the table, we can update the database without borrowing conflicts
         {
             // Create a new scope for database operations
             let db = self.database_mut();
-            
+
             // Handle existing schema if needed
             if existing_schema {
                 // For now, we'll replace it - in the future we might want to handle this
@@ -147,7 +151,7 @@ impl FileHandler {
                 }
                 db.remove_table(&table_name);
             }
-            
+
             // Add the table to the database
             db.add_table(table_name.clone(), table)?;
         }
@@ -166,38 +170,39 @@ impl FileHandler {
         // Check for explicit table name in format "table_name=file_path"
         if let Some(pos) = file_spec.find('=') {
             let (table_name, file_path) = file_spec.split_at(pos);
-            
+
             // Strip the '=' from the file path
             let file_path = &file_path[1..];
-            
+
             // Validate that the file exists
             let path = PathBuf::from(file_path);
             if !path.exists() {
                 return Err(SqawkError::FileNotFound(file_path.to_string()));
             }
-            
+
             Ok((table_name.to_string(), path))
         } else {
             // No explicit table name, use the file name without extension
             let path = PathBuf::from(file_spec);
-            
+
             // Validate that the file exists
             if !path.exists() {
                 return Err(SqawkError::FileNotFound(file_spec.to_string()));
             }
-            
+
             // Get file name without extension as table name
-            let file_name = path.file_name()
+            let file_name = path
+                .file_name()
                 .ok_or_else(|| SqawkError::InvalidFileSpec(file_spec.to_string()))?
                 .to_string_lossy();
-            
+
             // Extract name without extension
             let table_name = if let Some(pos) = file_name.rfind('.') {
                 file_name[..pos].to_string()
             } else {
                 file_name.to_string()
             };
-            
+
             Ok((table_name, path))
         }
     }
@@ -239,18 +244,18 @@ impl FileHandler {
     pub fn add_table(&mut self, name: String, mut table: Table) -> SqawkResult<()> {
         // Set table verbose flag from configuration
         table.set_verbose(self.config.verbose());
-        
+
         // Check if the table has a file path before adding and log information
         if let Some(path) = table.file_path() {
             if self.config.verbose() {
                 println!("Adding table '{}' with file path: {:?}", name, path);
             }
-            
+
             // Make absolute path if necessary (needed for CREATE TABLE with relative paths)
             if !path.is_absolute() {
                 // Get current directory
                 if let Ok(mut cur_dir) = std::env::current_dir() {
-                    // Join with the relative path 
+                    // Join with the relative path
                     cur_dir.push(path.clone());
                     if self.config.verbose() {
                         println!("Converting to absolute path: {:?}", cur_dir);
@@ -262,7 +267,7 @@ impl FileHandler {
         } else if self.config.verbose() {
             println!("Adding table '{}' with NO file path", name);
         }
-        
+
         // Add the table to the database
         self.database_mut().add_table(name, table)
     }
@@ -313,12 +318,15 @@ impl FileHandler {
 
         if self.config.verbose() {
             eprintln!("In FileHandler::save_table for table '{}'", table_name);
-            
+
             // Access database directly to check if the table exists there
             let db = unsafe { &*self.database };
             if let Ok(db_table) = db.get_table(table_name) {
                 if let Some(path) = db_table.file_path() {
-                    eprintln!("Database has table '{}' with file_path '{:?}'", table_name, path);
+                    eprintln!(
+                        "Database has table '{}' with file_path '{:?}'",
+                        table_name, path
+                    );
                 } else {
                     eprintln!("Database has table '{}' but NO file_path", table_name);
                 }
@@ -334,28 +342,29 @@ impl FileHandler {
                     eprintln!("Table '{}' has file_path '{:?}'", table_name, path);
                 }
                 path
-            },
+            }
             None => {
                 // Log debugging information
                 if self.config.verbose() {
                     eprintln!("Table '{}' has NO file_path", table_name);
-                    eprintln!("  Table details - Name: {}, Columns: {}, Delimiter: '{}'", 
-                              table.name(), 
-                              table.columns().join(","), 
-                              table.delimiter());
+                    eprintln!(
+                        "  Table details - Name: {}, Columns: {}, Delimiter: '{}'",
+                        table.name(),
+                        table.columns().join(","),
+                        table.delimiter()
+                    );
                 }
-                
+
                 // For tables created with CREATE TABLE, the file path should be set
                 return Err(SqawkError::NoFilePath(table_name.to_string()));
-            },
+            }
         };
-        
+
         // For tables created with CREATE TABLE, the file may not exist yet
         // Make sure parent directories exist
         if let Some(parent) = file_path.parent() {
             if !parent.exists() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| SqawkError::IoError(e))?;
+                std::fs::create_dir_all(parent).map_err(SqawkError::IoError)?;
             }
         }
 
@@ -373,12 +382,14 @@ impl FileHandler {
                     self.csv_handler.save_csv(table, file_path)?;
                 } else {
                     // If delimiter is not a comma, use the delimited handler
-                    self.delim_handler.save_delimited(table, file_path, delimiter)?;
+                    self.delim_handler
+                        .save_delimited(table, file_path, delimiter)?;
                 }
             }
             FileFormat::Delimited => {
                 // Delegation to delimited handler
-                self.delim_handler.save_delimited(table, file_path, delimiter)?;
+                self.delim_handler
+                    .save_delimited(table, file_path, delimiter)?;
             }
         }
 

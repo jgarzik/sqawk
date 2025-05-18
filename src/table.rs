@@ -237,7 +237,7 @@ pub struct Table {
 
     /// Custom delimiter for this table's file (default is comma)
     delimiter: String,
-    
+
     /// Flag indicating whether to show verbose output
     verbose: bool,
 }
@@ -300,32 +300,35 @@ impl Table {
             rows: Vec::new(),
             file_path,
             modified: false,
-            delimiter: ",".to_string(),  // Default to comma delimiter
+            delimiter: ",".to_string(), // Default to comma delimiter
             verbose: false,
         }
     }
-    
+
     /// Create a new table with the given name, columns, and a specific delimiter
-    pub fn new_with_delimiter(name: &str, columns: Vec<String>, file_path: Option<PathBuf>, delimiter: String) -> Self {
+    pub fn new_with_delimiter(
+        name: &str,
+        columns: Vec<String>,
+        file_path: Option<PathBuf>,
+        delimiter: String,
+    ) -> Self {
         let mut table = Self::new(name, columns, file_path);
         table.delimiter = delimiter;
         table
     }
-    
+
     /// Create a new table with a schema
     pub fn new_with_schema(
-        name: &str, 
-        schema: Vec<ColumnDefinition>, 
+        name: &str,
+        schema: Vec<ColumnDefinition>,
         file_path: Option<PathBuf>,
         delimiter: Option<String>,
-        _file_format: Option<String>,  // Unused parameter kept for API compatibility
+        _file_format: Option<String>, // Unused parameter kept for API compatibility
         verbose: bool,
     ) -> Self {
         // Extract column names from the schema
-        let columns: Vec<String> = schema.iter()
-            .map(|col_def| col_def.name.clone())
-            .collect();
-            
+        let columns: Vec<String> = schema.iter().map(|col_def| col_def.name.clone()).collect();
+
         let column_map = columns
             .iter()
             .enumerate()
@@ -343,8 +346,6 @@ impl Table {
             verbose,
         }
     }
-    
-
 
     /// Get the columns of the table
     ///
@@ -440,7 +441,7 @@ impl Table {
     ///
     /// Returns the path to the file associated with this table,
     /// either as the source file it was loaded from or the destination
-    /// file specified in CREATE TABLE. This is used when writing 
+    /// file specified in CREATE TABLE. This is used when writing
     /// changes back to disk.
     ///
     /// # Returns
@@ -449,7 +450,7 @@ impl Table {
     pub fn file_path(&self) -> Option<&PathBuf> {
         self.file_path.as_ref()
     }
-    
+
     /// Set file path for this table
     ///
     /// Sets the path to the file associated with this table.
@@ -463,7 +464,7 @@ impl Table {
         }
         self.file_path = Some(path);
     }
-    
+
     /// Set the verbose flag for this table
     ///
     /// # Arguments
@@ -471,7 +472,7 @@ impl Table {
     pub fn set_verbose(&mut self, verbose: bool) {
         self.verbose = verbose;
     }
-    
+
     /// Get the delimiter for this table
     ///
     /// Returns the delimiter used for this table.
@@ -482,7 +483,7 @@ impl Table {
     pub fn delimiter(&self) -> &String {
         &self.delimiter
     }
-    
+
     /// Get the index of a column by name
     ///
     /// Looks up a column by name and returns its index in the table.
@@ -546,7 +547,12 @@ impl Table {
     where
         F: Fn(&Row) -> bool,
     {
-        let mut result = Table::new_with_delimiter(&self.name, self.columns.clone(), None, self.delimiter.clone());
+        let mut result = Table::new_with_delimiter(
+            &self.name,
+            self.columns.clone(),
+            None,
+            self.delimiter.clone(),
+        );
 
         for row in &self.rows {
             if predicate(row) {

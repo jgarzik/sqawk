@@ -14,7 +14,7 @@ fn test_repl_basic_commands() {
 
     // Start the sqawk process with sample data loaded
     let mut process = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--bin",
             "sqawk",
@@ -52,7 +52,7 @@ fn test_repl_table_operations() {
 
     // Start the sqawk process with sample data loaded
     let mut process = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--bin",
             "sqawk",
@@ -89,7 +89,7 @@ fn test_repl_write_toggle() {
 
     // Start the sqawk process with sample data loaded
     let mut process = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--bin",
             "sqawk",
@@ -126,7 +126,7 @@ fn test_repl_multiline_statements() {
 
     // Start the sqawk process with sample data loaded
     let mut process = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--bin",
             "sqawk",
@@ -160,11 +160,11 @@ fn test_repl_save_command() -> Result<(), Box<dyn std::error::Error>> {
     use std::fs;
     use std::io::Write;
     use tempfile::tempdir;
-    
+
     // Create a temporary directory
     let temp_dir = tempdir()?;
     let temp_file_path = temp_dir.path().join("sample.csv");
-    
+
     // Copy sample.csv to the temporary file
     let original_content = fs::read_to_string("tests/data/sample.csv")?;
     let mut temp_file = fs::File::create(&temp_file_path)?;
@@ -172,12 +172,12 @@ fn test_repl_save_command() -> Result<(), Box<dyn std::error::Error>> {
     drop(temp_file); // Close the file
 
     // Commands to test the .save command
-    let test_commands = 
+    let test_commands =
         "UPDATE sample SET age = 33 WHERE id = 1;\n.save\nUPDATE sample SET age = 34 WHERE id = 2;\n.save sample\n.exit\n";
 
     // Start the sqawk process with the temporary file
     let mut process = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--bin",
             "sqawk",
@@ -204,13 +204,16 @@ fn test_repl_save_command() -> Result<(), Box<dyn std::error::Error>> {
     // Wait for process to complete
     let status = process.wait().expect("Failed to wait for sqawk process");
     assert!(status.success(), "Process did not exit successfully");
-    
+
     // Verify the temporary file was modified
     let modified_content = fs::read_to_string(&temp_file_path)?;
-    assert!(modified_content.contains("2,Bob,34"), "File was not modified as expected");
-    
+    assert!(
+        modified_content.contains("2,Bob,34"),
+        "File was not modified as expected"
+    );
+
     // The temporary directory and its contents will be automatically deleted
     // when it goes out of scope at the end of this function
-    
+
     Ok(())
 }

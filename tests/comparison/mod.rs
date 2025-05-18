@@ -3,8 +3,6 @@
 //! This module contains tests for all SQL comparison operators (=, !=, >, <, >=, <=)
 //! to ensure they work correctly with integer types.
 
-use assert_cmd;
-use predicates;
 use predicates::prelude::PredicateBooleanExt;
 use std::path::PathBuf;
 

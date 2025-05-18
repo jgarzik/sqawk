@@ -18,17 +18,17 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use sqlparser::ast::{
-    Assignment, ColumnDef as SqlColumnDef, Expr, FileFormat as SqlFileFormat, 
-    Join as SqlJoin, JoinConstraint, JoinOperator, ObjectName, Query, Select, SelectItem,
-    SetExpr, SqlOption, Statement, TableFactor, TableWithJoins, Value as SqlValue,
+    Assignment, ColumnDef as SqlColumnDef, Expr, FileFormat as SqlFileFormat, Join as SqlJoin,
+    JoinConstraint, JoinOperator, ObjectName, Query, Select, SelectItem, SetExpr, SqlOption,
+    Statement, TableFactor, TableWithJoins, Value as SqlValue,
 };
 use sqlparser::dialect::HiveDialect;
 use sqlparser::parser::Parser;
 
 use crate::aggregate::AggregateFunction;
 use crate::config::AppConfig;
-use crate::error::{SqawkError, SqawkResult};
 use crate::database::Database;
+use crate::error::{SqawkError, SqawkResult};
 use crate::file_handler::FileHandler;
 use crate::string_functions::StringFunction;
 use crate::table::{ColumnDefinition, DataType, SortDirection, Table, Value};
@@ -37,7 +37,7 @@ use crate::table::{ColumnDefinition, DataType, SortDirection, Table, Value};
 pub struct SqlExecutor<'a> {
     /// Database for storing and accessing tables
     database: &'a mut Database,
-    
+
     /// File handler for loading and saving tables
     file_handler: &'a mut FileHandler,
 
@@ -53,7 +53,11 @@ pub struct SqlExecutor<'a> {
 
 impl<'a> SqlExecutor<'a> {
     /// Create a new SQL executor with the given database, file handler, and application configuration
-    pub fn new(database: &'a mut Database, file_handler: &'a mut FileHandler, config: &AppConfig) -> Self {
+    pub fn new(
+        database: &'a mut Database,
+        file_handler: &'a mut FileHandler,
+        config: &AppConfig,
+    ) -> Self {
         SqlExecutor {
             database,
             file_handler,
@@ -75,11 +79,11 @@ impl<'a> SqlExecutor<'a> {
         // For CREATE TABLE statements with LOCATION, we need to use a dialect that
         // properly supports the LOCATION clause - HiveDialect is made for this
         let dialect = HiveDialect {}; // Hive dialect is specifically designed for LOCATION clauses
-        
+
         if self.config.verbose() {
             println!("Executing SQL: {}", sql);
         }
-        
+
         let statements = Parser::parse_sql(&dialect, sql).map_err(SqawkError::SqlParseError)?;
 
         if statements.is_empty() {
@@ -92,7 +96,7 @@ impl<'a> SqlExecutor<'a> {
         let mut result = None;
         for statement in statements {
             // We've handled CREATE TABLE with LOCATION properly now, no need for extra debug logging here
-            
+
             result = self.execute_statement(statement)?;
         }
 
@@ -183,25 +187,28 @@ impl<'a> SqlExecutor<'a> {
                 }
                 Ok(None)
             }
-            Statement::CreateTable { 
-                name, 
-                columns, 
-                file_format, 
+            Statement::CreateTable {
+                name,
+                columns,
+                file_format,
                 location,
                 hive_formats,
-                with_options, 
-                .. 
+                with_options,
+                ..
             } => {
                 // Print complete debug information about the parsed CREATE TABLE statement
                 if self.config.verbose() {
                     println!("Parsed CREATE TABLE statement:");
                     println!("  Table name: {:?}", name);
-                    println!("  LOCATION clause: {:?}", hive_formats.as_ref().and_then(|hf| hf.location.as_ref()));
+                    println!(
+                        "  LOCATION clause: {:?}",
+                        hive_formats.as_ref().and_then(|hf| hf.location.as_ref())
+                    );
                     println!("  File format: {:?}", file_format);
                     println!("  WITH options: {:?}", with_options);
                     println!("  Columns: {:?}", columns.len());
                 }
-                
+
                 // In sqlparser, the LOCATION clause is stored in the hive_formats field
                 // even when using non-Hive dialects like GenericDialect
                 let actual_location = if let Some(hf) = hive_formats.as_ref() {
@@ -210,13 +217,19 @@ impl<'a> SqlExecutor<'a> {
                     // Fallback to direct location field (unlikely to be used)
                     location.clone()
                 };
-                
-                self.execute_create_table(name, columns, file_format, actual_location, with_options)?;
+
+                self.execute_create_table(
+                    name,
+                    columns,
+                    file_format,
+                    actual_location,
+                    with_options,
+                )?;
                 if self.config.verbose() {
                     eprintln!("Table created successfully");
                 }
                 Ok(None)
-            },
+            }
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
                 "Unsupported SQL statement: {:?}",
                 statement
@@ -238,7 +251,7 @@ impl<'a> SqlExecutor<'a> {
     ///
     /// The function serves as a dispatcher that examines query features and directs
     /// to the appropriate specialized query handlers. It handles the full SQL logical
-    /// processing order: FROM/JOIN → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → 
+    /// processing order: FROM/JOIN → WHERE → GROUP BY → HAVING → SELECT → DISTINCT →
     /// ORDER BY → LIMIT/OFFSET.
     ///
     /// # Arguments
@@ -281,10 +294,10 @@ impl<'a> SqlExecutor<'a> {
 
     /// Executes a SQL query containing aggregate functions
     ///
-    /// This function implements specialized processing for SQL queries that use aggregate 
-    /// functions (SUM, AVG, COUNT, MIN, MAX). It follows the standard SQL logical 
+    /// This function implements specialized processing for SQL queries that use aggregate
+    /// functions (SUM, AVG, COUNT, MIN, MAX). It follows the standard SQL logical
     /// processing order with focus on grouping operations:
-    /// 
+    ///
     /// 1. FROM/JOIN → Create working table (already provided as source_table)
     /// 2. WHERE → Pre-filter rows before grouping
     /// 3. GROUP BY → Organize rows into groups based on specified columns
@@ -349,10 +362,10 @@ impl<'a> SqlExecutor<'a> {
 
     /// Executes a simple (non-aggregate) SQL SELECT query
     ///
-    /// This function implements the core SQL processing logic for queries without 
-    /// aggregate functions (SUM, COUNT, etc.). It follows the standard SQL logical 
+    /// This function implements the core SQL processing logic for queries without
+    /// aggregate functions (SUM, COUNT, etc.). It follows the standard SQL logical
     /// processing order:
-    /// 
+    ///
     /// 1. FROM/JOIN → Create working table (already provided as source_table)
     /// 2. WHERE → Filter rows that don't match the selection criteria
     /// 3. SELECT → Extract only the requested columns (projection)
@@ -360,7 +373,7 @@ impl<'a> SqlExecutor<'a> {
     /// 5. ORDER BY → Sort the results based on specified columns
     /// 6. LIMIT/OFFSET → Apply row count limitations and pagination
     ///
-    /// The implementation handles column references, aliases, and expressions in 
+    /// The implementation handles column references, aliases, and expressions in
     /// both the WHERE clause and projection list. Each step transforms the working
     /// table until the final result set is produced.
     ///
@@ -422,8 +435,8 @@ impl<'a> SqlExecutor<'a> {
 
     /// Applies final SQL query post-processing steps: DISTINCT, ORDER BY, LIMIT/OFFSET
     ///
-    /// This function implements the final stages of SQL query processing according to 
-    /// SQL's logical execution order. It handles operations that take place after the 
+    /// This function implements the final stages of SQL query processing according to
+    /// SQL's logical execution order. It handles operations that take place after the
     /// core query execution (FROM/JOIN, WHERE, GROUP BY, HAVING, projection) has completed:
     ///
     /// Processing sequence:
@@ -646,7 +659,7 @@ impl<'a> SqlExecutor<'a> {
     ///
     /// Each join produces a temporary working table that combines columns from both
     /// source tables, maintaining column name qualification for later reference.
-    /// 
+    ///
     /// # Arguments
     /// * `from` - Array of FROM clause items from the SELECT statement
     ///
@@ -904,7 +917,7 @@ impl<'a> SqlExecutor<'a> {
     }
 
     /// Execute a SQL DELETE statement
-    /// 
+    ///
     /// This function implements the SQL DELETE operation by:
     /// 1. Identifying the target table
     /// 2. Applying WHERE clause filtering (if present)
@@ -1255,7 +1268,7 @@ impl<'a> SqlExecutor<'a> {
     /// - Subexpression support through recursive evaluation
     ///
     /// The implementation follows SQL semantics throughout, including proper handling
-    /// of truth tables for logical operations with NULL values, and automatic type 
+    /// of truth tables for logical operations with NULL values, and automatic type
     /// coercion for comparisons between different data types.
     ///
     /// # Arguments
@@ -1322,7 +1335,7 @@ impl<'a> SqlExecutor<'a> {
     /// * `Ok(true)` if both conditions evaluate to true
     /// * `Ok(false)` if either condition evaluates to false
     /// * `Err` if there's an error evaluating either condition
-    /// 
+    ///
     /// Convert a Value to a boolean result, following SQL-like conversion rules
     ///
     /// This helper method centralizes the logic for converting different value types to boolean results:
@@ -1405,7 +1418,7 @@ impl<'a> SqlExecutor<'a> {
     ///
     /// # Arguments
     /// * `left` - The left-side expression of the AND operation
-    /// * `right` - The right-side expression of the AND operation 
+    /// * `right` - The right-side expression of the AND operation
     /// * `row` - The current row data to evaluate against
     /// * `table` - The table metadata for column resolution
     ///
@@ -1436,7 +1449,7 @@ impl<'a> SqlExecutor<'a> {
 
     /// Evaluates a SQL logical OR expression with short-circuit evaluation
     ///
-    /// This function implements the SQL OR operator with SQL-standard three-valued 
+    /// This function implements the SQL OR operator with SQL-standard three-valued
     /// logic and short-circuit evaluation semantics. It follows these rules:
     ///
     /// 1. If left operand evaluates to TRUE: return TRUE (right not evaluated)
@@ -2993,7 +3006,7 @@ impl<'a> SqlExecutor<'a> {
     }
 
     /// Execute a SQL UPDATE statement
-    /// 
+    ///
     /// This function implements the SQL UPDATE operation by:
     /// 1. Identifying the target table
     /// 2. Applying WHERE clause filtering (if present)
@@ -3055,7 +3068,7 @@ impl<'a> SqlExecutor<'a> {
             match format {
                 SqlFileFormat::TEXTFILE => {
                     // This is the only supported format for now
-                },
+                }
                 _ => {
                     return Err(SqawkError::UnsupportedSqlFeature(format!(
                         "Unsupported file format: {:?}. Only TEXTFILE is supported.",
@@ -3064,24 +3077,26 @@ impl<'a> SqlExecutor<'a> {
                 }
             }
         }
-        
+
         // Extract table name
-        let table_name = name.0.iter()
+        let table_name = name
+            .0
+            .iter()
             .map(|i| i.value.clone())
             .collect::<Vec<_>>()
             .join(".");
-        
+
         // Check if table already exists
         if self.file_handler.has_table(&table_name) {
             return Err(SqawkError::TableAlreadyExists(table_name));
         }
-        
+
         // Convert SQL column definitions to our internal ColumnDefinition type
         let schema: Vec<ColumnDefinition> = columns
             .into_iter()
             .map(|col| {
                 let name = col.name.value;
-                
+
                 // Convert SQL data type to our internal DataType
                 let data_type = match col.data_type.to_string().to_uppercase().as_str() {
                     "INTEGER" | "INT" => DataType::Integer,
@@ -3090,17 +3105,21 @@ impl<'a> SqlExecutor<'a> {
                     "BOOLEAN" | "BOOL" => DataType::Boolean,
                     other => {
                         // Default to TEXT for unsupported types
-                        eprintln!("Warning: Unsupported data type '{}', using TEXT instead", other);
+                        eprintln!(
+                            "Warning: Unsupported data type '{}', using TEXT instead",
+                            other
+                        );
                         DataType::Text
                     }
                 };
-                
+
                 ColumnDefinition { name, data_type }
             })
             .collect();
-            
+
         // Extract custom delimiter from WITH options if specified
-        let delimiter = with_options.iter()
+        let delimiter = with_options
+            .iter()
             .find(|opt| opt.name.value.to_lowercase() == "delimiter")
             .and_then(|opt| {
                 if let SqlValue::SingleQuotedString(s) = &opt.value {
@@ -3110,31 +3129,33 @@ impl<'a> SqlExecutor<'a> {
                     None
                 }
             });
-            
+
         // Get the delimiter from options or default to comma
         let delimiter_str = delimiter.unwrap_or_else(|| {
             // Default to comma as separator if not specified
             ",".to_string()
         });
-        
+
         // Check if the LOCATION clause was provided
         if self.config.verbose() {
             if let Some(loc) = &location {
                 println!("LOCATION clause found: '{}'", loc);
             } else {
-                eprintln!("Warning: CREATE TABLE without LOCATION clause - table cannot be saved to disk");
+                eprintln!(
+                    "Warning: CREATE TABLE without LOCATION clause - table cannot be saved to disk"
+                );
             }
         }
-        
+
         // Process the file path from the LOCATION clause
         let file_path = location.map(|loc| {
             // Remove any quotes that might be in the location string
             let loc = loc.trim_matches('\'').trim_matches('"');
-            
+
             if self.config.verbose() {
                 println!("Setting file path for table '{}' to: {}", table_name, loc);
             }
-            
+
             // Convert to absolute path if needed
             let path = if loc.starts_with('/') {
                 // Already absolute
@@ -3148,7 +3169,7 @@ impl<'a> SqlExecutor<'a> {
                             println!("Resolved relative path to absolute: {:?}", cur_dir);
                         }
                         cur_dir
-                    },
+                    }
                     Err(_) => {
                         // Fall back to relative path if current dir can't be determined
                         if self.config.verbose() {
@@ -3158,17 +3179,17 @@ impl<'a> SqlExecutor<'a> {
                     }
                 }
             };
-            
+
             if self.config.verbose() {
                 println!("Final file path for table '{}': {:?}", table_name, path);
             }
-            
+
             path
         });
-        
+
         // Create file format string (only TEXTFILE supported for now)
         let file_format_str = Some("TEXTFILE".to_string());
-        
+
         // Create the table with schema and file information
         let mut table = Table::new_with_schema(
             &table_name,
@@ -3178,39 +3199,48 @@ impl<'a> SqlExecutor<'a> {
             file_format_str,
             self.config.verbose(),
         );
-        
+
         // Double-check file path is set and display it for debug purposes
         if let Some(path) = file_path {
             // Ensure the file path is set in the table
             table.set_file_path(path.clone());
-            
+
             if self.config.verbose() {
                 println!("Table '{}' created with file path: {:?}", table_name, path);
             }
         } else if self.config.verbose() {
-            eprintln!("Warning: Table '{}' created without a file path", table_name);
+            eprintln!(
+                "Warning: Table '{}' created without a file path",
+                table_name
+            );
         }
-        
+
         // Add the table to the file handler
         self.file_handler.add_table(table_name.clone(), table)?;
-        
+
         // Verify the table has a file path in the database
         if let Ok(added_table) = self.file_handler.get_table(&table_name) {
             if let Some(table_path) = added_table.file_path() {
                 if self.config.verbose() {
-                    println!("Confirmed table '{}' has file path: {:?}", table_name, table_path);
+                    println!(
+                        "Confirmed table '{}' has file path: {:?}",
+                        table_name, table_path
+                    );
                 }
             } else if self.config.verbose() {
-                eprintln!("Warning: Table '{}' lost its file path during creation", table_name);
+                eprintln!(
+                    "Warning: Table '{}' lost its file path during creation",
+                    table_name
+                );
             }
         }
-        
+
         // Mark the table as modified (for potential saving)
         self.modified_tables.insert(table_name);
-        
+
         Ok(())
     }
-    
+
     fn execute_update(
         &mut self,
         table: TableWithJoins,
@@ -3467,12 +3497,12 @@ impl<'a> SqlExecutor<'a> {
         if !self.file_handler.has_table(table_name) {
             return Err(SqawkError::TableNotFound(table_name.to_string()));
         }
-        
+
         if !self.modified_tables.contains(table_name) {
             // Table exists but isn't modified, just return success
             return Ok(());
         }
-        
+
         // Use our enhanced file_handler.save_table method which ensures parent directories exist
         // This ensures consistency between command-line loaded tables and CREATE TABLE tables
         self.file_handler.save_table(table_name)

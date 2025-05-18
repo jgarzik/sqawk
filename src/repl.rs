@@ -1,11 +1,11 @@
 use rustyline::completion::{Completer, Pair};
 use rustyline::config::CompletionType;
 use rustyline::error::ReadlineError;
-use rustyline::highlight::{Highlighter, CmdKind};
+use rustyline::highlight::{CmdKind, Highlighter};
 use rustyline::hint::Hinter;
+use rustyline::history::DefaultHistory;
 use rustyline::validate::{self, Validator};
 use rustyline::{Config, Context, Editor, Helper};
-use rustyline::history::DefaultHistory;
 use std::borrow::Cow;
 use std::fmt;
 use std::process::Command;
@@ -75,9 +75,8 @@ impl CommandCompleter {
     /// Create a new command completer with the list of available commands
     fn new() -> Self {
         let commands = vec![
-            ".cd", ".changes", ".exit", ".help", ".load",
-            ".print", ".quit", ".save", ".schema", ".show", ".stats", 
-            ".tables", ".version", ".write",
+            ".cd", ".changes", ".exit", ".help", ".load", ".print", ".quit", ".save", ".schema",
+            ".show", ".stats", ".tables", ".version", ".write",
         ]
         .into_iter()
         .map(|s| s.to_string())
@@ -91,13 +90,18 @@ impl CommandCompleter {
 impl Completer for CommandCompleter {
     type Candidate = Pair;
 
-    fn complete(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
         // Only provide completion for dot commands
         if line.starts_with('.') {
             // Split the input into command and argument parts
             let parts: Vec<&str> = line.splitn(2, ' ').collect();
             let partial_cmd = parts[0];
-            
+
             // We're completing a command (not an argument)
             let start_pos = 0; // Start of the command
             let candidates: Vec<Pair> = self
@@ -138,7 +142,10 @@ impl Highlighter for CommandCompleter {
 }
 
 impl Validator for CommandCompleter {
-    fn validate(&self, _ctx: &mut validate::ValidationContext) -> rustyline::Result<validate::ValidationResult> {
+    fn validate(
+        &self,
+        _ctx: &mut validate::ValidationContext,
+    ) -> rustyline::Result<validate::ValidationResult> {
         Ok(validate::ValidationResult::Valid(None))
     }
 }
@@ -198,10 +205,7 @@ pub struct Repl<'a> {
 
 impl<'a> Repl<'a> {
     /// Create a new REPL
-    pub fn new(
-        executor: SqlExecutor<'a>,
-        app_config: &AppConfig,
-    ) -> Self {
+    pub fn new(executor: SqlExecutor<'a>, app_config: &AppConfig) -> Self {
         // Create rustyline configuration with list-style completion
         let rustyline_config = Config::builder()
             .completion_type(CompletionType::List)
@@ -209,12 +213,11 @@ impl<'a> Repl<'a> {
 
         // Create editor with our custom command completer
         let helper = CommandCompleter::new();
-        let mut editor = Editor::with_config(rustyline_config)
-            .expect("Failed to create editor");
-        
+        let mut editor = Editor::with_config(rustyline_config).expect("Failed to create editor");
+
         // Set the helper manually
         editor.set_helper(Some(helper));
-        
+
         // Load history if available
         let _ = editor.load_history(HISTORY_FILE);
 
@@ -350,21 +353,21 @@ impl<'a> Repl<'a> {
                     } else {
                         ReplCommand::Save(None)
                     }
-                },
+                }
                 "show" => {
                     if parts.len() > 1 {
                         ReplCommand::Show(Some(parts[1].trim().to_string()))
                     } else {
                         ReplCommand::Show(None)
                     }
-                },
+                }
                 "stats" => {
                     if parts.len() > 1 {
                         ReplCommand::Stats(Some(parts[1].trim().to_string()))
                     } else {
                         ReplCommand::Stats(None)
                     }
-                },
+                }
                 _ => ReplCommand::Unknown(format!("Unknown command: .{}", command)),
             }
         } else if !input.is_empty() {
@@ -409,7 +412,7 @@ impl<'a> Repl<'a> {
         } else {
             None
         };
-        
+
         let result = match self.executor.execute_sql(sql) {
             Ok(result) => result,
             Err(err) => return Err(ReplError::SqlExecutor(err)),
@@ -438,7 +441,7 @@ impl<'a> Repl<'a> {
                 }
             }
         }
-        
+
         // Display query statistics if enabled
         if let Some(start_time) = start_time {
             let execution_time = start_time.elapsed();
@@ -558,7 +561,11 @@ impl<'a> Repl<'a> {
         println!("  .version              Show source, library and compiler versions");
         println!(
             "  .write [on|off]       Toggle writing changes to files (currently: {})",
-            if self.config.write_changes() { "ON" } else { "OFF" }
+            if self.config.write_changes() {
+                "ON"
+            } else {
+                "OFF"
+            }
         );
         println!("  SQL_STATEMENT         Execute SQL statement");
         Ok(())
@@ -678,7 +685,7 @@ impl<'a> Repl<'a> {
         println!("Running on Rust {}", get_rustc_version());
         Ok(())
     }
-    
+
     /// Save changes to tables
     ///
     /// Explicitly writes changes to disk for all modified tables or a specific table
@@ -693,12 +700,12 @@ impl<'a> Repl<'a> {
                         name.to_string(),
                     )));
                 }
-                
+
                 if !self.executor.table_is_modified(name) {
                     println!("Table '{}' has no changes to save", name);
                     return Ok(());
                 }
-                
+
                 match self.executor.save_table(name) {
                     Ok(_) => {
                         println!("Changes saved to table '{}'", name);
@@ -709,7 +716,10 @@ impl<'a> Repl<'a> {
                         if let crate::error::SqawkError::NoFilePath(table) = &err {
                             eprintln!("Error: Table '{}' has no associated file path", table);
                             eprintln!("Hint: When creating tables with CREATE TABLE, use the LOCATION clause");
-                            eprintln!("Example: CREATE TABLE {} (...) LOCATION './file.csv';", table);
+                            eprintln!(
+                                "Example: CREATE TABLE {} (...) LOCATION './file.csv';",
+                                table
+                            );
                         } else {
                             eprintln!("Error saving table '{}': {}", name, err);
                         }
@@ -723,7 +733,7 @@ impl<'a> Repl<'a> {
                     println!("No modified tables to save");
                     return Ok(());
                 }
-                
+
                 match self.executor.save_modified_tables() {
                     Ok(count) => {
                         println!("Changes saved to {} tables", count);
@@ -756,7 +766,7 @@ fn get_rustc_version() -> String {
     }
 }
 
-impl<'a> Repl<'a> {
+impl Repl<'_> {
     /// Toggle writing changes to files
     fn toggle_write(&mut self, arg: Option<&str>) -> Result<()> {
         match arg {
@@ -774,7 +784,11 @@ impl<'a> Repl<'a> {
                 self.config.set_write_changes(!current);
                 println!(
                     "Write mode {}",
-                    if self.config.write_changes() { "enabled" } else { "disabled" }
+                    if self.config.write_changes() {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
                 );
             }
         }
@@ -791,32 +805,49 @@ impl<'a> Repl<'a> {
             _ => {
                 // Show general settings
                 println!("Sqawk Settings:");
-                println!("  Write Mode:   {}", if self.config.write_changes() { "ON" } else { "OFF" });
-                println!("  Changes Display: {}", if self.show_changes { "ON" } else { "OFF" });
-                println!("  Statistics:  {}", if self.show_stats { "ON" } else { "OFF" });
-                println!("  Verbose:     {}", if self.config.verbose() { "ON" } else { "OFF" });
-                
+                println!(
+                    "  Write Mode:   {}",
+                    if self.config.write_changes() {
+                        "ON"
+                    } else {
+                        "OFF"
+                    }
+                );
+                println!(
+                    "  Changes Display: {}",
+                    if self.show_changes { "ON" } else { "OFF" }
+                );
+                println!(
+                    "  Statistics:  {}",
+                    if self.show_stats { "ON" } else { "OFF" }
+                );
+                println!(
+                    "  Verbose:     {}",
+                    if self.config.verbose() { "ON" } else { "OFF" }
+                );
+
                 // Show field separator if defined
                 if let Some(sep) = self.config.field_separator() {
                     println!("  Field Separator: '{}'", sep);
                 } else {
                     println!("  Field Separator: Default (auto-detect)");
                 }
-                
+
                 // Show counts
                 let tables = self.executor.table_names();
-                let modified_count = tables.iter()
+                let modified_count = tables
+                    .iter()
                     .filter(|t| self.executor.is_table_modified(t))
                     .count();
-                
+
                 println!("  Tables Loaded: {}", tables.len());
                 println!("  Modified Tables: {}", modified_count);
-                
+
                 Ok(())
             }
         }
     }
-    
+
     /// Show detailed metadata for all tables
     fn show_tables_metadata(&self) -> Result<()> {
         let tables = self.executor.table_names();
@@ -824,7 +855,7 @@ impl<'a> Repl<'a> {
             println!("No tables loaded");
             return Ok(());
         }
-        
+
         println!("Table Information:");
         for table_name in tables {
             // Get table metadata
@@ -833,19 +864,22 @@ impl<'a> Repl<'a> {
                 Ok(cols) => cols.len(),
                 Err(_) => 0,
             };
-            
+
             println!("  Table: {}", table_name);
-            println!("    Status: {}", if is_modified { "MODIFIED" } else { "Unchanged" });
+            println!(
+                "    Status: {}",
+                if is_modified { "MODIFIED" } else { "Unchanged" }
+            );
             println!("    Columns: {}", column_count);
             // We don't have direct access to row count or filename in current implementation
             // These would be good additions to the API in the future
-            
-            println!("");
+
+            println!();
         }
-        
+
         Ok(())
     }
-    
+
     /// Show statistics or toggle statistics mode
     fn show_stats(&mut self, option: Option<&str>) -> Result<()> {
         match option {
@@ -864,7 +898,11 @@ impl<'a> Repl<'a> {
                 self.show_stats = !self.show_stats;
                 println!(
                     "Statistics display {}",
-                    if self.show_stats { "enabled" } else { "disabled" }
+                    if self.show_stats {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
                 );
                 Ok(())
             }

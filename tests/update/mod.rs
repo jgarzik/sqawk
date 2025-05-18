@@ -4,8 +4,6 @@
 
 use crate::helpers::{create_temp_dir, prepare_test_file};
 
-use assert_cmd;
-use predicates;
 use std::fs;
 
 #[test]

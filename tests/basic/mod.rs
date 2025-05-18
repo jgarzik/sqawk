@@ -7,8 +7,6 @@ use crate::helpers::{
     run_test_case_with_static_file, SqawkTestCase,
 };
 
-use assert_cmd;
-use predicates;
 use predicates::prelude::PredicateBooleanExt;
 use std::fs; // Import trait for .not()
 

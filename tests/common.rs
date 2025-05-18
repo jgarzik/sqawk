@@ -61,7 +61,7 @@ pub fn run_repl_script(
     // Combine stdout and stderr
     let mut result = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.stderr.is_empty() {
-        result.push_str("\n");
+        result.push('\n');
         result.push_str(&String::from_utf8_lossy(&output.stderr));
     }
 
