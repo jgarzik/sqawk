@@ -222,9 +222,6 @@ pub struct Table {
 
     /// Column names
     columns: Vec<String>,
-
-    /// Column types (parallel to columns vector)
-    column_types: Vec<DataType>,
     
     /// Complete column metadata including name and type
     cols: Vec<Column>,
@@ -313,9 +310,6 @@ impl Table {
             .enumerate()
             .map(|(i, name)| (name.clone(), i))
             .collect();
-
-        // Create column_types with Text type for backward compatibility
-        let column_types = vec![DataType::Text; column_names.len()];
         
         // Create full column metadata objects
         let cols = column_names
@@ -329,7 +323,6 @@ impl Table {
         Table {
             name: name.to_string(),
             columns: column_names,
-            column_types,
             cols,
             column_map,
             rows: Vec::new(),
@@ -361,9 +354,6 @@ impl Table {
         // Extract column names from the schema
         let columns: Vec<String> = schema.iter().map(|col_def| col_def.name.clone()).collect();
         
-        // Extract column types from the schema
-        let column_types: Vec<DataType> = schema.iter().map(|col_def| col_def.data_type).collect();
-        
         // Create full column metadata objects
         let cols = schema
             .iter()
@@ -383,7 +373,6 @@ impl Table {
         Table {
             name: name.to_string(),
             columns,
-            column_types,
             cols,
             column_map,
             rows: Vec::new(),
@@ -406,7 +395,7 @@ impl Table {
     ///
     /// Returns the data type of the column at the specified index.
     pub fn column_type(&self, index: usize) -> Option<DataType> {
-        self.column_types.get(index).copied()
+        self.cols.get(index).map(|col| col.data_type)
     }
 
     /// Get a column's type by name
