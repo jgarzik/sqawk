@@ -244,6 +244,9 @@ pub struct Table {
 
     /// The file format for this table (currently only TEXTFILE is supported)
     file_format: String,
+    
+    /// Flag indicating whether to show verbose output
+    verbose: bool,
 }
 
 /// Data type for a column in a table schema
@@ -307,6 +310,7 @@ impl Table {
             schema: None,
             delimiter: ",".to_string(),  // Default to comma delimiter
             file_format: "TEXTFILE".to_string(),
+            verbose: false,
         }
     }
     
@@ -324,6 +328,7 @@ impl Table {
         file_path: Option<PathBuf>,
         delimiter: Option<String>,
         file_format: Option<String>,
+        verbose: bool,
     ) -> Self {
         // Extract column names from the schema
         let columns: Vec<String> = schema.iter()
@@ -346,6 +351,7 @@ impl Table {
             schema: Some(schema),
             delimiter: delimiter.unwrap_or_else(|| ",".to_string()),
             file_format: file_format.unwrap_or_else(|| "TEXTFILE".to_string()),
+            verbose,
         }
     }
     
@@ -353,9 +359,10 @@ impl Table {
     pub fn new_with_schema_defaults(
         name: &str, 
         schema: Vec<ColumnDefinition>, 
-        file_path: Option<PathBuf>
+        file_path: Option<PathBuf>,
+        verbose: bool
     ) -> Self {
-        Self::new_with_schema(name, schema, file_path, None, None)
+        Self::new_with_schema(name, schema, file_path, None, None, verbose)
     }
 
     /// Get the columns of the table
@@ -470,7 +477,9 @@ impl Table {
     /// # Arguments
     /// * `path` - The new file path
     pub fn set_file_path(&mut self, path: PathBuf) {
-        println!("DEBUG: Setting file_path for table to: {:?}", path);
+        if self.verbose {
+            println!("Setting file_path for table to: {:?}", path);
+        }
         self.file_path = Some(path);
     }
     

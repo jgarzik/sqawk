@@ -733,7 +733,7 @@ impl<'a> SqlExecutor<'a> {
         for join in joins {
             // Log join type in verbose mode for debugging
             if self.verbose {
-                eprintln!("DEBUG - Join type: {:?}", join.join_operator);
+                eprintln!("Join type: {:?}", join.join_operator);
             }
 
             // Extract the right table name from the join specification
