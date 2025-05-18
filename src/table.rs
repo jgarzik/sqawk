@@ -323,7 +323,6 @@ impl Table {
         schema: Vec<ColumnDefinition>,
         file_path: Option<PathBuf>,
         delimiter: Option<String>,
-        _file_format: Option<String>, // Unused parameter kept for API compatibility
         verbose: bool,
     ) -> Self {
         // Extract column names from the schema

@@ -54,17 +54,9 @@ impl FileHandler {
     /// # Returns
     /// A new FileHandler instance ready to load and manage tables
     pub fn new(config: &AppConfig, database: &mut Database) -> Self {
-        let field_separator = config.field_separator();
-        let default_format = if field_separator.is_some() {
-            FileFormat::Delimited
-        } else {
-            FileFormat::Csv
-        };
-
         FileHandler {
             csv_handler: CsvHandler::new(),
             delim_handler: DelimHandler::new(),
-            _default_format: default_format,
             // SAFETY: The caller must ensure that the database outlives this FileHandler
             database: database as *mut Database,
             config: config.clone(),
