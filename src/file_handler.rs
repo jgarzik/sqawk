@@ -33,9 +33,6 @@ pub struct FileHandler {
     /// Handler for delimiter-separated files
     delim_handler: DelimHandler,
 
-    /// Default format to use if not specified (underscore prefix indicates it's intentionally unused for now)
-    _default_format: FileFormat,
-
     /// Reference to a database object which is the source of truth for tables
     database: *mut Database,
 
