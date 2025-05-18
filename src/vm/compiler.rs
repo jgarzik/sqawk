@@ -175,67 +175,19 @@ impl<'a> SqlCompiler<'a> {
         for item in projection.iter() {
             match item {
                 SelectItem::UnnamedExpr(expr) => {
-                    // Extract the literal value from the expression
-                    match expr {
-                        sqlparser::ast::Expr::Value(value) => {
-                            let reg = self.allocate_register();
-                            result_regs.push(reg);
-                            
-                            // Load the appropriate value based on type
-                            match value {
-                                sqlparser::ast::Value::Number(num, _) => {
-                                    // Try to parse as integer first
-                                    if let Ok(int_val) = num.parse::<i64>() {
-                                        self.program.add_instruction(Instruction::new(
-                                            OpCode::Integer,
-                                            int_val,  // Value
-                                            reg,      // Target register
-                                            0,
-                                            None,
-                                            0,
-                                            Some(format!("r[{}] = {}", reg, int_val)),
-                                        ));
-                                    } else {
-                                        // Return an error for now - we could add float support later
-                                        return Err(SqawkError::UnsupportedSqlFeature(
-                                            format!("Non-integer literals not yet supported: {}", num)
-                                        ));
-                                    }
-                                },
-                                sqlparser::ast::Value::SingleQuotedString(s) => {
-                                    self.program.add_instruction(Instruction::new(
-                                        OpCode::String,
-                                        0,
-                                        reg,
-                                        0,
-                                        Some(s.clone()),
-                                        0,
-                                        Some(format!("r[{}] = '{}'", reg, s)),
-                                    ));
-                                },
-                                sqlparser::ast::Value::Null => {
-                                    self.program.add_instruction(Instruction::new(
-                                        OpCode::Null,
-                                        0,
-                                        reg,
-                                        0,
-                                        None,
-                                        0,
-                                        Some(format!("r[{}] = NULL", reg)),
-                                    ));
-                                },
-                                _ => {
-                                    return Err(SqawkError::UnsupportedSqlFeature(
-                                        format!("Unsupported literal type: {:?}", value)
-                                    ));
-                                }
-                            }
-                        },
-                        _ => {
-                            return Err(SqawkError::UnsupportedSqlFeature(
-                                format!("Only literal values supported in SELECT without FROM: {:?}", expr)
-                            ));
-                        }
+                    // Compile a simple expression and store the value in a register
+                    let reg = self.compile_expr(expr)?;
+                    result_regs.push(reg);
+                },
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    // Same as UnnamedExpr but with an alias (column name)
+                    let reg = self.compile_expr(expr)?;
+                    result_regs.push(reg);
+                    
+                    // We don't need to do anything special with the alias for now
+                    // But we could store it for the result table column names
+                    if self.verbose {
+                        self.add_comment(&format!("Column alias: {}", alias));
                     }
                 },
                 _ => {
@@ -261,6 +213,73 @@ impl<'a> SqlCompiler<'a> {
         }
         
         Ok(())
+    }
+    
+    /// Compile an expression into bytecode and return the register containing the result
+    fn compile_expr(&mut self, expr: &sqlparser::ast::Expr) -> SqawkResult<i64> {
+        let result_reg = self.allocate_register();
+        
+        match expr {
+            sqlparser::ast::Expr::Value(value) => {
+                // Load the appropriate value based on type
+                match value {
+                    sqlparser::ast::Value::Number(num, _) => {
+                        // Try to parse as integer first
+                        if let Ok(int_val) = num.parse::<i64>() {
+                            self.program.add_instruction(Instruction::new(
+                                OpCode::Integer,
+                                int_val,  // Value
+                                result_reg, // Target register
+                                0,
+                                None,
+                                0,
+                                Some(format!("r[{}] = {}", result_reg, int_val)),
+                            ));
+                        } else {
+                            // Return an error for now - we could add float support later
+                            return Err(SqawkError::UnsupportedSqlFeature(
+                                format!("Non-integer literals not yet supported: {}", num)
+                            ));
+                        }
+                    },
+                    sqlparser::ast::Value::SingleQuotedString(s) => {
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::String,
+                            0,
+                            result_reg,
+                            0,
+                            Some(s.clone()),
+                            0,
+                            Some(format!("r[{}] = '{}'", result_reg, s)),
+                        ));
+                    },
+                    sqlparser::ast::Value::Null => {
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Null,
+                            0,
+                            result_reg,
+                            0,
+                            None,
+                            0,
+                            Some(format!("r[{}] = NULL", result_reg)),
+                        ));
+                    },
+                    _ => {
+                        return Err(SqawkError::UnsupportedSqlFeature(
+                            format!("Unsupported literal type: {:?}", value)
+                        ));
+                    }
+                }
+            },
+            // Could add support for other expression types here
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    format!("Unsupported expression type: {:?}", expr)
+                ));
+            }
+        }
+        
+        Ok(result_reg)
     }
     
     /// Compile a table scan for a simple SELECT

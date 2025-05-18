@@ -16,8 +16,8 @@ fn test_select_literal() {
     // Create an empty database
     let database = Database::new();
     
-    // Execute the query with the VM
-    let result = vm::execute_vm("SELECT 1", &database, false);
+    // Execute the query with the VM - use "SELECT 1 AS value" to give the column a name
+    let result = vm::execute_vm("SELECT 1 AS value", &database, false);
     
     // Verify the query executed successfully
     assert!(result.is_ok(), "VM execution failed: {:?}", result.err());
@@ -56,7 +56,7 @@ fn test_vm_bytecode_generation() {
     
     // Set up the compiler directly to see the bytecode
     let mut compiler = vm::compiler::SqlCompiler::new(&database, false);
-    let program = compiler.compile("SELECT 1").expect("Failed to compile SQL");
+    let program = compiler.compile("SELECT 1 AS value").expect("Failed to compile SQL");
     
     // Check we have the right sequence of instructions, similar to SQLite:
     // Init
