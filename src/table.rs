@@ -300,9 +300,7 @@ impl Table {
             rows: Vec::new(),
             file_path,
             modified: false,
-            schema: None,
             delimiter: ",".to_string(),  // Default to comma delimiter
-            file_format: "TEXTFILE".to_string(),
             verbose: false,
         }
     }
