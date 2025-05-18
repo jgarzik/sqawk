@@ -8,7 +8,7 @@ use crate::database::Database;
 use crate::error::SqawkResult;
 use crate::table::{Table, Value};
 use crate::vm;
-use crate::vm::bytecode::{Instruction, OpCode, Program, Register};
+use crate::vm::bytecode::{Instruction, OpCode, Program};
 use crate::vm::engine::VmEngine;
 
 /// Bytecode testing module
