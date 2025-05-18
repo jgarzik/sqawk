@@ -36,14 +36,6 @@ pub enum OpCode {
     Null,           // Load NULL value
     ResultRow,      // Return result row to client
     
-    // Comparison operators (for WHERE clauses)
-    Eq,             // Equal (jump if equal)
-    Ne,             // Not equal (jump if not equal)
-    Lt,             // Less than (jump if less than)
-    Le,             // Less than or equal (jump if less than or equal)
-    Gt,             // Greater than (jump if greater than)
-    Ge,             // Greater than or equal (jump if greater than or equal)
-    
     // Utility opcodes
     Noop,           // No operation
 }
