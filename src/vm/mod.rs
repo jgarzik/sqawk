@@ -11,7 +11,7 @@ pub mod bytecode;
 pub mod compiler;
 pub mod engine;
 
-use crate::error::{SqawkError, SqawkResult};
+use crate::error::SqawkResult;
 use crate::database::Database;
 use crate::table::Table;
 
