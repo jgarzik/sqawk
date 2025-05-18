@@ -3422,6 +3422,25 @@ impl<'a> SqlExecutor<'a> {
         Ok(table.columns().to_vec())
     }
 
+    /// Get the column definitions with type information for a table
+    ///
+    /// # Arguments
+    /// * `table_name` - The name of the table
+    ///
+    /// # Returns
+    /// * `SqawkResult<Vec<(String, DataType)>>` - List of column names with their data types
+    pub fn get_table_column_types(&self, table_name: &str) -> SqawkResult<Vec<(String, DataType)>> {
+        // Get the table from the database
+        let table = self.database.get_table(table_name)?;
+        
+        // Get column metadata and return as name/type pairs
+        let column_types = table.column_metadata().iter()
+            .map(|col| (col.name.clone(), col.data_type))
+            .collect();
+            
+        Ok(column_types)
+    }
+    
     /// Check if any tables have been modified
     ///
     /// # Returns

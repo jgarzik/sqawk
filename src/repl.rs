@@ -596,17 +596,14 @@ impl<'a> Repl<'a> {
         match table_name {
             Some(name) => {
                 // Show schema for specific table
-                match self.executor.get_table_columns(name) {
-                    Ok(columns) => {
+                match self.executor.get_table_column_types(name) {
+                    Ok(column_types) => {
                         println!("CREATE TABLE {} (", name);
-                        for (i, column) in columns.iter().enumerate() {
-                            // For now, we'll just use TEXT as the type
-                            // since we don't have direct type information
-                            let data_type = "TEXT";
-                            if i < columns.len() - 1 {
-                                println!("  {} {},", column, data_type);
+                        for (i, (column_name, data_type)) in column_types.iter().enumerate() {
+                            if i < column_types.len() - 1 {
+                                println!("  {} {},", column_name, data_type);
                             } else {
-                                println!("  {} {}", column, data_type);
+                                println!("  {} {}", column_name, data_type);
                             }
                         }
                         println!(");");
@@ -619,15 +616,13 @@ impl<'a> Repl<'a> {
             None => {
                 // Show schema for all tables
                 for name in self.executor.table_names() {
-                    if let Ok(columns) = self.executor.get_table_columns(&name) {
+                    if let Ok(column_types) = self.executor.get_table_column_types(&name) {
                         println!("CREATE TABLE {} (", name);
-                        for (i, column) in columns.iter().enumerate() {
-                            // For now, we'll just use TEXT as the type
-                            let data_type = "TEXT";
-                            if i < columns.len() - 1 {
-                                println!("  {} {},", column, data_type);
+                        for (i, (column_name, data_type)) in column_types.iter().enumerate() {
+                            if i < column_types.len() - 1 {
+                                println!("  {} {},", column_name, data_type);
                             } else {
-                                println!("  {} {}", column, data_type);
+                                println!("  {} {}", column_name, data_type);
                             }
                         }
                         println!(");");
