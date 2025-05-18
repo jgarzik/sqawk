@@ -67,9 +67,83 @@ impl<'a> SqlExecutor<'a> {
             affected_row_count: 0,
         }
     }
+}
+
+// Implement the SqlExecutorTrait interface for the standard SQL executor
+impl<'a> SqlExecutorTrait for SqlExecutor<'a> {
+    // Use the existing execute method but avoid recursive call
+    fn execute(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
+        // For CREATE TABLE statements with LOCATION, we need to use a dialect that
+        // properly supports the LOCATION clause - HiveDialect is made for this
+        let dialect = HiveDialect {}; // Hive dialect is specifically designed for LOCATION clauses
+
+        if self.config.verbose() {
+            println!("Executing SQL: {}", sql);
+        }
+
+        let statements = Parser::parse_sql(&dialect, sql).map_err(SqawkError::SqlParseError)?;
+
+        if statements.is_empty() {
+            return Err(SqawkError::InvalidSqlQuery(
+                "No SQL statements found".to_string(),
+            ));
+        }
+
+        // Execute each statement
+        let mut result = None;
+        for statement in statements {
+            result = self.execute_statement(statement)?;
+        }
+
+        Ok(result)
+    }
+    
+    fn get_affected_row_count(&self) -> usize {
+        self.affected_row_count
+    }
+    
+    fn get_table_names(&self) -> Vec<String> {
+        self.database.get_table_names()
+    }
+    
+    fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<String>> {
+        if let Some(table) = self.database.get_table(table_name) {
+            Ok(table.columns())
+        } else {
+            Err(SqawkError::TableNotFound(table_name.to_string()))
+        }
+    }
+    
+    fn get_table_columns_with_types(&self, table_name: &str) -> SqawkResult<Vec<(String, String)>> {
+        if let Some(table) = self.database.get_table(table_name) {
+            let meta = table.column_metadata();
+            let result: Vec<(String, String)> = meta
+                .iter()
+                .map(|col| (col.name.clone(), col.data_type.to_string()))
+                .collect();
+            
+            Ok(result)
+        } else {
+            Err(SqawkError::TableNotFound(table_name.to_string()))
+        }
+    }
+    
+    fn set_write_mode(&mut self, write_mode: bool) {
+        // Update config with the new write mode
+        self.config.set_write(write_mode);
+    }
+    
+    fn get_write_mode(&self) -> bool {
+        self.config.write()
+    }
+    
+    fn save_modified_tables(&mut self) -> SqawkResult<usize> {
+        self.file_handler.save_modified_tables()
+    }
+}
 
     /// Get the number of rows affected by the last executed statement
-    pub fn get_affected_row_count(&self) -> SqawkResult<usize> {
+    pub fn get_affected_row_count_with_result(&self) -> SqawkResult<usize> {
         Ok(self.affected_row_count)
     }
 

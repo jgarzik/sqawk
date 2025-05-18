@@ -33,6 +33,7 @@ mod csv_handler;
 mod database;
 mod delim_handler;
 mod error;
+mod executor_trait;
 mod vm;
 mod file_handler;
 mod repl;
@@ -192,7 +193,7 @@ fn main() -> Result<()> {
     if config.write_changes() {
         // Only tables that were actually modified (by UPDATE, INSERT, DELETE)
         // will be written back to their source files
-        sql_executor
+        executor
             .save_modified_tables()
             .context("Failed to save modified tables")?;
     } else if config.verbose() {
