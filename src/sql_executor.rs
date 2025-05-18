@@ -70,7 +70,7 @@ impl<'a> SqlExecutor<'a> {
     /// Execute an SQL statement with VM engine
     ///
     /// This is a no-op implementation that simply returns an error
-    pub fn execute_vm(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
+    pub fn execute_vm(&mut self, _sql: &str) -> SqawkResult<Option<Table>> {
         Err(SqawkError::UnsupportedSqlFeature(
             "VM execution is not yet implemented".to_string(),
         ))

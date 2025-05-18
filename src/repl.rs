@@ -205,7 +205,7 @@ pub struct Repl<'a> {
 
 impl<'a> Repl<'a> {
     /// Create a new REPL
-    pub fn new(executor: SqlExecutor<'a>, app_config: &AppConfig) -> Self {
+    pub fn new(mut executor: SqlExecutor<'a>, app_config: &AppConfig) -> Self {
         // Create rustyline configuration with list-style completion
         let rustyline_config = Config::builder()
             .completion_type(CompletionType::List)
