@@ -44,7 +44,7 @@ fn create_test_persons_database() -> Database {
     ]).unwrap();
     
     // Add the table to the database
-    database.add_table(persons_table);
+    database.add_table(persons_table, None);
     
     database
 }
@@ -204,7 +204,87 @@ fn test_select_star_from_table() {
 }
 
 #[test]
-fn test_select_with_where_comparison() {
+fn test_where_bytecode_generation() {
+    // Test the bytecode generation for a WHERE clause comparison
+    // following the pattern shown in the SQLite EXPLAIN output
+    
+    // Create a test database with sample person data
+    let database = create_test_persons_database();
+    
+    // The SQL query to test
+    let sql = "SELECT name, age FROM persons WHERE age > 20";
+    
+    // Use the compiler directly to get the bytecode
+    let mut compiler = vm::compiler::SqlCompiler::new(&database, false);
+    let program = compiler.compile(sql).expect("Failed to compile SQL");
+    
+    // Verify the program has enough instructions
+    assert!(program.len() >= 10, "Expected at least 10 instructions for a query with WHERE, got {}", program.len());
+    
+    // Find key opcodes that should be present for a WHERE comparison
+    let mut has_open_read = false;
+    let mut has_rewind = false;
+    let mut has_column_read = false;
+    let mut has_comparison_op = false;
+    let mut has_goto_or_jump = false;
+    let mut has_next = false;
+    let mut has_integer_constant = false;
+    
+    // The comparison constant (20) should be loaded into a register
+    // We expect an Integer instruction loading the value 20
+    let mut constant_register: Option<i64> = None;
+    
+    // Check individual instructions
+    for instr in program.instructions.iter() {
+        match instr.opcode {
+            vm::bytecode::OpCode::OpenRead => {
+                has_open_read = true;
+            },
+            vm::bytecode::OpCode::Rewind => {
+                has_rewind = true;
+            },
+            vm::bytecode::OpCode::Column => {
+                has_column_read = true;
+            },
+            vm::bytecode::OpCode::Integer => {
+                if instr.p1 == 20 {
+                    has_integer_constant = true;
+                    constant_register = Some(instr.p2);
+                }
+            },
+            vm::bytecode::OpCode::Le | 
+            vm::bytecode::OpCode::Lt | 
+            vm::bytecode::OpCode::Gt | 
+            vm::bytecode::OpCode::Ge | 
+            vm::bytecode::OpCode::Eq | 
+            vm::bytecode::OpCode::Ne => {
+                has_comparison_op = true;
+                
+                // Verify one operand is the constant register
+                if constant_register.is_some() && 
+                   (instr.p1 == constant_register.unwrap() || instr.p3 == constant_register.unwrap()) {
+                    has_goto_or_jump = true;
+                }
+            },
+            vm::bytecode::OpCode::Next => {
+                has_next = true;
+            },
+            _ => {}
+        }
+    }
+    
+    // Assert that all required instructions are present
+    assert!(has_open_read, "Missing OpenRead opcode");
+    assert!(has_rewind, "Missing Rewind opcode");
+    assert!(has_column_read, "Missing Column opcode");
+    assert!(has_comparison_op, "Missing comparison opcode");
+    assert!(has_goto_or_jump, "Missing branch or jump after comparison");
+    assert!(has_next, "Missing Next opcode for loop control");
+    assert!(has_integer_constant, "Missing Integer 20 constant");
+}
+
+#[test]
+fn test_where_execution_result() {
     // Create a test database with sample person data
     let database = create_test_persons_database();
     
