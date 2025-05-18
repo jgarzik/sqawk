@@ -42,6 +42,9 @@ pub struct FileHandler {
     
     /// Reference to a database object which is the source of truth for tables
     database: *mut Database,
+    
+    /// Flag indicating whether to show verbose output
+    verbose: bool,
 }
 
 // Add safety implementation for the raw pointer to Database
@@ -61,7 +64,8 @@ impl FileHandler {
     pub fn new(
         field_separator: Option<String>, 
         tabledef: Option<Vec<String>>,
-        database: &mut Database
+        database: &mut Database, 
+        verbose: bool
     ) -> Self {
         let default_format = if field_separator.is_some() {
             FileFormat::Delimited
@@ -93,6 +97,7 @@ impl FileHandler {
             table_column_defs,
             // SAFETY: The caller must ensure that the database outlives this FileHandler
             database: database as *mut Database,
+            verbose,
         }
     }
     
@@ -307,33 +312,39 @@ impl FileHandler {
         // Get a reference to the table
         let table = self.get_table(table_name)?;
 
-        eprintln!("DEBUG: In FileHandler::save_table for table '{}'", table_name);
-        
-        // Access database directly to check if the table exists there
-        let db = unsafe { &*self.database };
-        if let Ok(db_table) = db.get_table(table_name) {
-            if let Some(path) = db_table.file_path() {
-                eprintln!("DEBUG: Database has table '{}' with file_path '{:?}'", table_name, path);
+        if self.verbose {
+            eprintln!("In FileHandler::save_table for table '{}'", table_name);
+            
+            // Access database directly to check if the table exists there
+            let db = unsafe { &*self.database };
+            if let Ok(db_table) = db.get_table(table_name) {
+                if let Some(path) = db_table.file_path() {
+                    eprintln!("Database has table '{}' with file_path '{:?}'", table_name, path);
+                } else {
+                    eprintln!("Database has table '{}' but NO file_path", table_name);
+                }
             } else {
-                eprintln!("DEBUG: Database has table '{}' but NO file_path", table_name);
+                eprintln!("Table '{}' not found in database", table_name);
             }
-        } else {
-            eprintln!("DEBUG: Table '{}' not found in database", table_name);
         }
 
         // Check if the table has an associated file path
         let file_path = match table.file_path() {
             Some(path) => {
-                eprintln!("DEBUG: Table '{}' has file_path '{:?}' in FileHandler", table_name, path);
+                if self.verbose {
+                    eprintln!("Table '{}' has file_path '{:?}'", table_name, path);
+                }
                 path
             },
             None => {
                 // Log debugging information
-                eprintln!("DEBUG: Table '{}' has NO file_path in FileHandler", table_name);
-                eprintln!("  Table details - Name: {}, Columns: {}, Delimiter: '{}'", 
-                          table.name(), 
-                          table.columns().join(","), 
-                          table.delimiter());
+                if self.verbose {
+                    eprintln!("Table '{}' has NO file_path", table_name);
+                    eprintln!("  Table details - Name: {}, Columns: {}, Delimiter: '{}'", 
+                              table.name(), 
+                              table.columns().join(","), 
+                              table.delimiter());
+                }
                 
                 // For tables created with CREATE TABLE, the file path should be set
                 return Err(SqawkError::NoFilePath(table_name.to_string()));

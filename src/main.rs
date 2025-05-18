@@ -87,6 +87,7 @@ fn main() -> Result<()> {
             Some(args.tabledef.clone())
         },
         &mut database,
+        args.verbose,
     );
 
     // Step 2b: Load all specified files into in-memory tables
