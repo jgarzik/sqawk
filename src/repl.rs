@@ -12,7 +12,7 @@ use std::process::Command;
 
 use crate::config::AppConfig;
 use crate::error::SqawkError;
-use crate::sql_executor::SqlExecutor;
+use crate::executor_trait::SqlExecutorTrait;
 
 // Define a custom error type for the REPL
 #[derive(Debug)]

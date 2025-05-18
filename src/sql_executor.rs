@@ -17,6 +17,7 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
+use crate::executor_trait::SqlExecutorTrait;
 use sqlparser::ast::{
     Assignment, ColumnDef as SqlColumnDef, Expr, FileFormat as SqlFileFormat, Join as SqlJoin,
     JoinConstraint, JoinOperator, ObjectName, Query, Select, SelectItem, SetExpr, SqlOption,
