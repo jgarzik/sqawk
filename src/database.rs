@@ -9,10 +9,8 @@
 //! - Providing a unified interface for table operations
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::{ColumnDefinition, Table};
+use crate::table::Table;
 
 /// Represents the central database that holds all tables
 pub struct Database {
