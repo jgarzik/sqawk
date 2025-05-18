@@ -208,69 +208,6 @@ impl DelimHandler {
         Ok(table)
     }
 
-    /// Save a table back to a delimiter-separated file
-    ///
-    /// Writes the current state of a table back to its source file,
-    /// preserving column order and formatting values appropriately.
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table to write
-    /// * `table` - The table to save
-    /// * `delimiter` - Delimiter character to use for writing
-    ///
-    /// # Returns
-    /// * `Ok(())` if the table was successfully written
-    /// * `Err` if the table lacks a source file, or if there was an error writing the file
-    pub fn save_table(&self, _table_name: &str, table: &Table, delimiter: &str) -> SqawkResult<()> {
-        // Check if the table has a source file
-        let file_path = table.file_path().ok_or_else(|| {
-            SqawkError::InvalidSqlQuery(format!(
-                "Table '{}' doesn't have a source file",
-                table.name()
-            ))
-        })?;
-
-        // Get the delimiter as a byte
-        let delimiter_byte = if delimiter.len() == 1 {
-            delimiter.as_bytes()[0]
-        } else if delimiter == "\\t" {
-            b'\t' // Handle special case for tab
-        } else {
-            return Err(SqawkError::InvalidFileSpec(format!(
-                "Invalid delimiter: {}. Must be a single character.",
-                delimiter
-            )));
-        };
-
-        // Open the file for writing
-        let file = File::create(file_path)?;
-        let writer = BufWriter::new(file);
-
-        // Create a CSV writer with custom delimiter
-        let mut csv_writer = csv::WriterBuilder::new()
-            .delimiter(delimiter_byte)
-            .from_writer(writer);
-
-        // Write headers
-        csv_writer
-            .write_record(table.columns())
-            .map_err(SqawkError::CsvError)?;
-
-        // Write rows
-        for row in table.rows() {
-            let record: Vec<String> = row.iter().map(|value| value.to_string()).collect();
-
-            csv_writer
-                .write_record(&record)
-                .map_err(SqawkError::CsvError)?;
-        }
-
-        // Flush and finish
-        csv_writer.flush()?;
-
-        Ok(())
-    }
-
     /// Parse a file specification into table name and file path
     ///
     /// Handles two formats:

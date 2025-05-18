@@ -215,7 +215,6 @@ impl CsvHandler {
         Ok(table)
     }
 
-
     /// Parse a file specification into table name and file path
     ///
     /// Handles two formats:

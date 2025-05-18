@@ -106,21 +106,6 @@ impl FileHandler {
         // SAFETY: The caller of `new` ensures the database outlives this FileHandler
         unsafe { &mut *self.database }
     }
-    
-    /// Get the default delimiter based on format
-    ///
-    /// # Arguments
-    /// * `format` - The file format
-    /// * `field_separator` - Optional custom field separator from command line
-    ///
-    /// # Returns
-    /// * `String` - The appropriate delimiter for the format
-    pub fn get_delimiter_for_format(format: FileFormat, field_separator: &Option<String>) -> String {
-        match format {
-            FileFormat::Csv => ",".to_string(),
-            FileFormat::Delimited => field_separator.clone().unwrap_or_else(|| "\t".to_string()),
-        }
-    }
 
     /// Load a file into an in-memory table with explicit return of table name and path
     ///

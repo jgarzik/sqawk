@@ -19,9 +19,6 @@ use crate::table::{ColumnDefinition, Table};
 pub struct Database {
     /// In-memory tables indexed by their names
     tables: HashMap<String, Table>,
-    
-    /// Set of table names that have been modified
-    modified_tables: HashSet<String>,
 }
 
 impl Database {
@@ -29,7 +26,6 @@ impl Database {
     pub fn new() -> Self {
         Database {
             tables: HashMap::new(),
-            modified_tables: HashSet::new(),
         }
     }
     
