@@ -23,7 +23,7 @@ pub struct AppConfig {
 
     /// Whether to write changes back to files
     write_changes: bool,
-    
+
     /// Whether to use the VM execution engine
     use_vm: bool,
 }
@@ -76,14 +76,14 @@ impl AppConfig {
     pub fn set_write_changes(&mut self, write: bool) {
         self.write_changes = write;
     }
-    
+
     /// Get whether to use VM execution engine
     pub fn use_vm(&self) -> bool {
         self.use_vm
     }
-    
+
     /// Set whether to use VM execution engine
-    #[allow(dead_code)]  // Mark as intentionally unused
+    #[allow(dead_code)] // Mark as intentionally unused
     pub fn set_use_vm(&mut self, use_vm: bool) {
         self.use_vm = use_vm;
     }

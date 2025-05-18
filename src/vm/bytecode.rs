@@ -7,37 +7,37 @@
 //! Each instruction has a specific semantics that controls how data is loaded,
 //! manipulated, and stored during SQL query execution.
 
-use std::fmt;
 use crate::table::Value;
+use std::fmt;
 
 /// Opcodes for VM instructions
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OpCode {
     // Program flow control
-    Init,           // Initialize VM
+    Init, // Initialize VM
     #[allow(dead_code)]
-    Goto,           // Jump to address (reserved for future use)
-    Halt,           // Stop execution
-    
+    Goto, // Jump to address (reserved for future use)
+    Halt, // Stop execution
+
     // Table operations
-    OpenRead,       // Open a table for reading
+    OpenRead, // Open a table for reading
     #[allow(dead_code)]
-    OpenWrite,      // Open a table for writing (reserved for future use)
-    Close,          // Close a cursor
-    
+    OpenWrite, // Open a table for writing (reserved for future use)
+    Close,    // Close a cursor
+
     // Cursor operations
-    Rewind,         // Move cursor to first row
-    Next,           // Move cursor to next row
-    Column,         // Read column value into register
-    
+    Rewind, // Move cursor to first row
+    Next,   // Move cursor to next row
+    Column, // Read column value into register
+
     // Data manipulation
-    Integer,        // Load integer constant
-    String,         // Load string constant
-    Null,           // Load NULL value
-    ResultRow,      // Return result row to client
-    
+    Integer,   // Load integer constant
+    String,    // Load string constant
+    Null,      // Load NULL value
+    ResultRow, // Return result row to client
+
     // Utility opcodes
-    Noop,           // No operation
+    Noop, // No operation
 }
 
 /// A SQL VM instruction with opcode and parameters
@@ -45,21 +45,20 @@ pub enum OpCode {
 pub struct Instruction {
     /// The operation code
     pub opcode: OpCode,
-    
+
     /// P1 parameter (typically a register, cursor, or value index)
     pub p1: i64,
-    
+
     /// P2 parameter (typically a jump address, register, or count)
     pub p2: i64,
-    
+
     /// P3 parameter (typically a register)
     pub p3: i64,
-    
+
     /// P4 parameter (typically a string parameter)
     pub p4: Option<String>,
-    
+
     // Removed unused p5 parameter
-    
     /// Comment describing the instruction
     pub comment: Option<String>,
 }
@@ -123,22 +122,22 @@ impl Program {
             instructions: Vec::new(),
         }
     }
-    
+
     /// Add an instruction to the program
     pub fn add_instruction(&mut self, instruction: Instruction) {
         self.instructions.push(instruction);
     }
-    
+
     /// Get the length of the program in instructions
     pub fn len(&self) -> usize {
         self.instructions.len()
     }
-    
+
     /// Check if the program is empty
     pub fn is_empty(&self) -> bool {
         self.instructions.is_empty()
     }
-    
+
     /// Get an instruction at a specific address
     pub fn get(&self, addr: usize) -> Option<&Instruction> {
         self.instructions.get(addr)

@@ -219,7 +219,7 @@ pub type Row = Vec<Value>;
 pub struct Table {
     /// Name of the table
     name: String,
-    
+
     /// Complete column metadata including name and type
     cols: Vec<Column>,
 
@@ -298,7 +298,7 @@ pub enum SortDirection {
 
 impl Table {
     /// Create a new table with the given name and column names
-    /// 
+    ///
     /// This constructor defaults all columns to Text type
     pub fn new(name: &str, column_names: Vec<String>, file_path: Option<PathBuf>) -> Self {
         // Create column_map from column names
@@ -307,7 +307,7 @@ impl Table {
             .enumerate()
             .map(|(i, name)| (name.clone(), i))
             .collect();
-        
+
         // Create full column metadata objects
         let cols = column_names
             .iter()
@@ -349,7 +349,7 @@ impl Table {
     ) -> Self {
         // Extract column names from the schema
         let columns: Vec<String> = schema.iter().map(|col_def| col_def.name.clone()).collect();
-        
+
         // Create full column metadata objects
         let cols = schema
             .iter()
@@ -391,7 +391,7 @@ impl Table {
     /// Get a column's type by index
     ///
     /// Returns the data type of the column at the specified index.
-    #[allow(dead_code)]  // This method may be used in future extensions
+    #[allow(dead_code)] // This method may be used in future extensions
     pub fn column_type(&self, index: usize) -> Option<DataType> {
         self.cols.get(index).map(|col| col.data_type)
     }
@@ -399,11 +399,13 @@ impl Table {
     /// Get a column's type by name
     ///
     /// Returns the data type of the column with the specified name.
-    #[allow(dead_code)]  // This method may be used in future extensions
+    #[allow(dead_code)] // This method may be used in future extensions
     pub fn column_type_by_name(&self, name: &str) -> Option<DataType> {
-        self.column_map.get(name).and_then(|&idx| self.column_type(idx))
+        self.column_map
+            .get(name)
+            .and_then(|&idx| self.column_type(idx))
     }
-    
+
     /// Get all columns with their metadata
     ///
     /// Returns a slice containing all column metadata including names and types.
@@ -622,7 +624,7 @@ impl Table {
         self.rows = new_rows;
         self.modified = true;
     }
-    
+
     /// Add a column to the table with a specified data type
     ///
     /// This method adds a new column to the table with the given name and data type.
@@ -642,20 +644,20 @@ impl Table {
             "BOOL" | "BOOLEAN" => DataType::Boolean,
             _ => DataType::Text, // Default to Text for unknown types
         };
-        
+
         // Create a new Column instance
         let column = Column {
             name: name.clone(),
             data_type,
         };
-        
+
         // Add the column to the table's column list
         self.cols.push(column);
-        
+
         // Update the column map with the new column's index
         let new_index = self.cols.len() - 1;
         self.column_map.insert(name, new_index);
-        
+
         // Mark the table as modified
         self.modified = true;
     }

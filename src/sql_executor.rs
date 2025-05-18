@@ -66,7 +66,7 @@ impl<'a> SqlExecutor<'a> {
             affected_row_count: 0,
         }
     }
-    
+
     /// Execute an SQL statement with VM engine
     ///
     /// This method delegates execution to the VM-based bytecode engine, which:
@@ -83,22 +83,22 @@ impl<'a> SqlExecutor<'a> {
         if self.config.verbose() {
             println!("Using VM execution engine for SQL: {}", sql);
         }
-        
+
         // Delegate to the VM module's execute_vm function
         crate::vm::execute_vm(sql, self.database, self.config.verbose())
     }
-    
+
     /// Execute a parsed SQL statement directly with the VM
     /// This bypasses the regular SQL executor logic for VM execution
     fn execute_vm_stmt(&self, stmt: &Statement) -> SqawkResult<Option<Table>> {
         // Convert the statement back to SQL text
         // This is inefficient but simplifies integration
         let sql = format!("{}", stmt);
-        
+
         if self.config.verbose() {
             println!("VM Engine executing statement: {}", sql);
         }
-        
+
         // Pass directly to VM engine
         crate::vm::execute_vm(&sql, self.database, self.config.verbose())
     }
@@ -169,7 +169,7 @@ impl<'a> SqlExecutor<'a> {
             // Use our VM implementation instead of the regular SQL executor
             return self.execute_vm_stmt(&statement);
         }
-        
+
         // Otherwise use the regular SQL executor
         match statement {
             Statement::Query(query) => self.execute_query(*query),
@@ -309,7 +309,9 @@ impl<'a> SqlExecutor<'a> {
             SetExpr::Select(ref select) => {
                 // Handle special case of SELECT without FROM (e.g., SELECT 1)
                 if select.from.is_empty() {
-                    return Err(SqawkError::InvalidSqlQuery("SELECT query must have at least one table".to_string()));
+                    return Err(SqawkError::InvalidSqlQuery(
+                        "SELECT query must have at least one table".to_string(),
+                    ));
                 }
 
                 // Process the FROM clause to get a table or join result
@@ -3230,12 +3232,8 @@ impl<'a> SqlExecutor<'a> {
         });
 
         // Create the table with schema and file information
-        let mut table = Table::new_with_schema(
-            &table_name,
-            schema,
-            file_path.clone(),
-            Some(delimiter_str),
-        );
+        let mut table =
+            Table::new_with_schema(&table_name, schema, file_path.clone(), Some(delimiter_str));
 
         // Double-check file path is set and display it for debug purposes
         if let Some(path) = file_path {
@@ -3474,15 +3472,17 @@ impl<'a> SqlExecutor<'a> {
     pub fn get_table_column_types(&self, table_name: &str) -> SqawkResult<Vec<(String, DataType)>> {
         // Get the table from the database
         let table = self.database.get_table(table_name)?;
-        
+
         // Get column metadata and return as name/type pairs
-        let column_types = table.column_metadata().iter()
+        let column_types = table
+            .column_metadata()
+            .iter()
             .map(|col| (col.name.clone(), col.data_type))
             .collect();
-            
+
         Ok(column_types)
     }
-    
+
     /// Check if any tables have been modified
     ///
     /// # Returns

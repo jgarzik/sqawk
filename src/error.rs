@@ -86,7 +86,7 @@ pub enum SqawkError {
     /// Error for invalid function arguments
     #[error("Invalid function arguments: {0}")]
     InvalidFunctionArguments(String),
-    
+
     /// Error in VM execution
     #[error("VM execution error: {0}")]
     VmError(String),
@@ -116,7 +116,7 @@ impl PartialEq for SqawkError {
             (SqawkError::DivideByZero, SqawkError::DivideByZero) => true,
             (SqawkError::InvalidFunctionArguments(_), SqawkError::InvalidFunctionArguments(_)) => {
                 true
-            },
+            }
             (SqawkError::VmError(_), SqawkError::VmError(_)) => true,
             // If variants are different, they are not equal
             _ => false,

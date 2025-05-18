@@ -33,12 +33,12 @@ mod csv_handler;
 mod database;
 mod delim_handler;
 mod error;
-mod vm;
 mod file_handler;
 mod repl;
 mod sql_executor;
 mod string_functions;
 mod table;
+mod vm;
 
 use anyhow::{Context, Result};
 // Not explicitly importing SqawkArgs as it's not directly used
