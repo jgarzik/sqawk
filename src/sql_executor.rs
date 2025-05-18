@@ -3193,7 +3193,6 @@ impl<'a> SqlExecutor<'a> {
             schema,
             file_path.clone(),
             Some(delimiter_str),
-            self.config.verbose(),
         );
 
         // Double-check file path is set and display it for debug purposes
