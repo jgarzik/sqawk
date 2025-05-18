@@ -8,7 +8,6 @@ use rustyline::validate::{self, Validator};
 use rustyline::{Config, Context, Editor, Helper};
 use std::borrow::Cow;
 use std::fmt;
-use std::process::Command;
 
 use crate::config::AppConfig;
 use crate::error::SqawkError;
@@ -677,7 +676,6 @@ impl<'a> Repl<'a> {
     /// Show version information
     fn show_version(&self) -> Result<()> {
         println!("Sqawk version 0.1.1");
-        println!("Running on Rust {}", get_rustc_version());
         Ok(())
     }
 
@@ -744,22 +742,7 @@ impl<'a> Repl<'a> {
     }
 }
 
-/// Get the Rust compiler version
-fn get_rustc_version() -> String {
-    match Command::new("rustc").arg("--version").output() {
-        Ok(output) => {
-            if output.status.success() {
-                match String::from_utf8(output.stdout) {
-                    Ok(version) => version.trim().to_string(),
-                    Err(_) => "unknown (utf8 error)".to_string(),
-                }
-            } else {
-                "unknown (command failed)".to_string()
-            }
-        }
-        Err(_) => "unknown (command not found)".to_string(),
-    }
-}
+
 
 impl Repl<'_> {
     /// Toggle writing changes to files
