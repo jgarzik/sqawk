@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::config::AppConfig;
 use crate::csv_handler::CsvHandler;
 use crate::database::Database;
 use crate::delim_handler::DelimHandler;
@@ -43,8 +44,8 @@ pub struct FileHandler {
     /// Reference to a database object which is the source of truth for tables
     database: *mut Database,
     
-    /// Flag indicating whether to show verbose output
-    verbose: bool,
+    /// Application configuration for global settings
+    config: AppConfig,
 }
 
 // Add safety implementation for the raw pointer to Database
@@ -52,21 +53,19 @@ unsafe impl Send for FileHandler {}
 unsafe impl Sync for FileHandler {}
 
 impl FileHandler {
-    /// Create a new FileHandler with a database, field separator, and column definitions
+    /// Create a new FileHandler with application config and database
     ///
     /// # Arguments
-    /// * `field_separator` - Optional field separator character/string from command line
-    /// * `tabledef` - Optional vector of table column definitions in format "table_name:col1,col2,..."
+    /// * `config` - Application configuration with global settings
     /// * `database` - Mutable reference to the database to use as source of truth
     ///
     /// # Returns
     /// A new FileHandler instance ready to load and manage tables
     pub fn new(
-        field_separator: Option<String>, 
-        tabledef: Option<Vec<String>>,
-        database: &mut Database, 
-        verbose: bool
+        config: &AppConfig,
+        database: &mut Database
     ) -> Self {
+        let field_separator = config.field_separator();
         let default_format = if field_separator.is_some() {
             FileFormat::Delimited
         } else {
@@ -75,17 +74,15 @@ impl FileHandler {
 
         // Process any table column definitions
         let mut table_column_defs = HashMap::new();
-        if let Some(defs) = tabledef {
-            for def in defs {
-                if let Some((table_name, columns_str)) = def.split_once(':') {
-                    let columns = columns_str
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .collect::<Vec<String>>();
+        for def in config.table_definitions() {
+            if let Some((table_name, columns_str)) = def.split_once(':') {
+                let columns = columns_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect::<Vec<String>>();
 
-                    if !columns.is_empty() {
-                        table_column_defs.insert(table_name.to_string(), columns);
-                    }
+                if !columns.is_empty() {
+                    table_column_defs.insert(table_name.to_string(), columns);
                 }
             }
         }
@@ -97,7 +94,7 @@ impl FileHandler {
             table_column_defs,
             // SAFETY: The caller must ensure that the database outlives this FileHandler
             database: database as *mut Database,
-            verbose,
+            config: config.clone(),
         }
     }
     
@@ -133,7 +130,7 @@ impl FileHandler {
     ///
     /// # Returns
     /// * `SqawkResult<Option<(String, String)>>` - Tuple of (table_name, file_path) if successful
-    pub fn load_file(&mut self, file_spec: &str, field_separator: &Option<String>) -> SqawkResult<Option<(String, String)>> {
+    pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<Option<(String, String)>> {
         // Parse file spec to get table name and file path
         let (table_name, file_path) = self.parse_file_spec(file_spec)?;
         let file_path_str = file_path.to_string_lossy().to_string();
@@ -151,7 +148,7 @@ impl FileHandler {
                 self.database_mut().add_table(table_name.clone(), table)?;
             }
             FileFormat::Delimited => {
-                let delimiter = field_separator.clone().unwrap_or_else(|| "\t".to_string());
+                let delimiter = self.config.field_separator().unwrap_or_else(|| "\t".to_string());
                 let table =
                     self.delim_handler.load_delimited(file_spec, &delimiter, custom_columns)?;
                 

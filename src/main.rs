@@ -68,9 +68,18 @@ fn main() -> Result<()> {
     // This handles -s/--sql, file specs, -F (field separator), --write, and -v flags
     let args = cli::parse_args()?;
 
+    // Step 1b: Create a centralized application configuration
+    // This will be passed to all components that need configuration settings
+    let config = AppConfig::new(
+        args.verbose,                                  // Verbose output flag
+        args.field_separator.clone(),                  // Field separator for tables
+        args.tabledef.clone(),                         // Table column definitions
+        args.write,                                    // Whether to write changes to files
+    );
+
     // Configure diagnostics output if verbose mode is enabled (-v flag)
     // This is important for debugging and understanding the execution flow
-    if args.verbose {
+    if config.verbose() {
         println!("Running in verbose mode");
         println!("Arguments: {args:?}");
     }
@@ -78,30 +87,23 @@ fn main() -> Result<()> {
     // Step 2a: Create a new Database instance to serve as the central store for tables
     let mut database = Database::new();
     
-    // Step 2b: Initialize the file handler with optional custom field separator and table definitions
-    // The field separator determines how input files are parsed (comma, tab, etc.)
-    // Table definitions allow specifying custom column names for files without headers
+    // Step 2b: Initialize the file handler with the application configuration
+    // The file handler uses config for field separator, table defs, and verbosity
     let mut file_handler = FileHandler::new(
-        args.field_separator.clone(),
-        if args.tabledef.is_empty() {
-            None
-        } else {
-            Some(args.tabledef.clone())
-        },
+        &config,
         &mut database,
-        args.verbose,
     );
 
     // Step 2b: Load all specified files into in-memory tables
     // Each file can specify its table name with table_name=file_path syntax
     for file_spec in &args.files {
         file_handler
-            .load_file(file_spec, &args.field_separator)
+            .load_file(file_spec)
             .with_context(|| format!("Failed to load file: {file_spec}"))?;
     }
 
     // Log table loading results in verbose mode
-    if args.verbose {
+    if config.verbose() {
         let table_count = file_handler.table_count();
         println!("Loaded {table_count} tables");
         for table_name in file_handler.table_names() {
