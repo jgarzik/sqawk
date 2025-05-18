@@ -483,6 +483,14 @@ impl Table {
         self.file_path = Some(path);
     }
     
+    /// Set the verbose flag for this table
+    ///
+    /// # Arguments
+    /// * `verbose` - Whether to show verbose output
+    pub fn set_verbose(&mut self, verbose: bool) {
+        self.verbose = verbose;
+    }
+    
     /// Get the delimiter for this table
     ///
     /// Returns the delimiter used for this table.

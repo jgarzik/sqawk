@@ -3175,6 +3175,7 @@ impl<'a> SqlExecutor<'a> {
             file_path.clone(),
             Some(delimiter_str),
             file_format_str,
+            self.verbose,
         );
         
         // Double-check file path is set and display it for debug purposes

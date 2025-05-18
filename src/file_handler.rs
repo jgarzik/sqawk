@@ -245,9 +245,14 @@ impl FileHandler {
     /// # Returns
     /// * `SqawkResult<()>` - Result of the operation
     pub fn add_table(&mut self, name: String, mut table: Table) -> SqawkResult<()> {
+        // Set table verbose flag from file handler
+        table.set_verbose(self.verbose);
+        
         // Check if the table has a file path before adding and log information
         if let Some(path) = table.file_path() {
-            println!("Adding table '{}' with file path: {:?}", name, path);
+            if self.verbose {
+                println!("Adding table '{}' with file path: {:?}", name, path);
+            }
             
             // Make absolute path if necessary (needed for CREATE TABLE with relative paths)
             if !path.is_absolute() {
@@ -255,12 +260,14 @@ impl FileHandler {
                 if let Ok(mut cur_dir) = std::env::current_dir() {
                     // Join with the relative path 
                     cur_dir.push(path.clone());
-                    println!("Converting to absolute path: {:?}", cur_dir);
+                    if self.verbose {
+                        println!("Converting to absolute path: {:?}", cur_dir);
+                    }
                     // Update the file path in the table
                     table.set_file_path(cur_dir);
                 }
             }
-        } else {
+        } else if self.verbose {
             println!("Adding table '{}' with NO file path", name);
         }
         
