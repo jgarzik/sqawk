@@ -154,14 +154,111 @@ impl<'a> SqlCompiler<'a> {
     /// Compile a SELECT statement
     fn compile_select(&mut self, select: &Select) -> SqawkResult<()> {
         if select.from.is_empty() {
-            return Err(SqawkError::InvalidSqlQuery(
-                "SELECT query must have at least one table".to_string(),
-            ));
+            // This is a SELECT without a FROM clause (e.g., SELECT 1)
+            self.compile_select_literal(&select.projection)?;
+        } else {
+            // Regular table scan
+            let table_with_joins = &select.from[0];
+            self.compile_table_scan(table_with_joins, &select.projection)?;
         }
         
-        // Currently only support simple SELECT * FROM table
-        let table_with_joins = &select.from[0];
-        self.compile_table_scan(table_with_joins, &select.projection)?;
+        Ok(())
+    }
+    
+    /// Compile a SELECT statement with literals (e.g., SELECT 1, SELECT 'text')
+    fn compile_select_literal(&mut self, projection: &[SelectItem]) -> SqawkResult<()> {
+        self.add_comment("Literal value query (no table)");
+        
+        // For each selected literal, add an instruction to load it into a register
+        let mut result_regs = Vec::new();
+        
+        for item in projection.iter() {
+            match item {
+                SelectItem::UnnamedExpr(expr) => {
+                    // Extract the literal value from the expression
+                    match expr {
+                        sqlparser::ast::Expr::Value(value) => {
+                            let reg = self.allocate_register();
+                            result_regs.push(reg);
+                            
+                            // Load the appropriate value based on type
+                            match value {
+                                sqlparser::ast::Value::Number(num, _) => {
+                                    // Try to parse as integer first
+                                    if let Ok(int_val) = num.parse::<i64>() {
+                                        self.program.add_instruction(Instruction::new(
+                                            OpCode::Integer,
+                                            int_val,  // Value
+                                            reg,      // Target register
+                                            0,
+                                            None,
+                                            0,
+                                            Some(format!("r[{}] = {}", reg, int_val)),
+                                        ));
+                                    } else {
+                                        // Return an error for now - we could add float support later
+                                        return Err(SqawkError::UnsupportedSqlFeature(
+                                            format!("Non-integer literals not yet supported: {}", num)
+                                        ));
+                                    }
+                                },
+                                sqlparser::ast::Value::SingleQuotedString(s) => {
+                                    self.program.add_instruction(Instruction::new(
+                                        OpCode::String,
+                                        0,
+                                        reg,
+                                        0,
+                                        Some(s.clone()),
+                                        0,
+                                        Some(format!("r[{}] = '{}'", reg, s)),
+                                    ));
+                                },
+                                sqlparser::ast::Value::Null => {
+                                    self.program.add_instruction(Instruction::new(
+                                        OpCode::Null,
+                                        0,
+                                        reg,
+                                        0,
+                                        None,
+                                        0,
+                                        Some(format!("r[{}] = NULL", reg)),
+                                    ));
+                                },
+                                _ => {
+                                    return Err(SqawkError::UnsupportedSqlFeature(
+                                        format!("Unsupported literal type: {:?}", value)
+                                    ));
+                                }
+                            }
+                        },
+                        _ => {
+                            return Err(SqawkError::UnsupportedSqlFeature(
+                                format!("Only literal values supported in SELECT without FROM: {:?}", expr)
+                            ));
+                        }
+                    }
+                },
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Only simple expressions supported in SELECT without FROM".to_string()
+                    ));
+                }
+            }
+        }
+        
+        // Generate the result row
+        if !result_regs.is_empty() {
+            // Output the result row
+            self.program.add_instruction(Instruction::new(
+                OpCode::ResultRow,
+                result_regs[0],       // First register
+                result_regs.len() as i64,  // Number of columns
+                0,
+                None,
+                0,
+                Some("Output literal result row".to_string()),
+            ));
+        }
         
         Ok(())
     }
