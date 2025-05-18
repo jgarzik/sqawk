@@ -26,6 +26,7 @@ use sqlparser::dialect::HiveDialect;
 use sqlparser::parser::Parser;
 
 use crate::aggregate::AggregateFunction;
+use crate::config::AppConfig;
 use crate::error::{SqawkError, SqawkResult};
 use crate::database::Database;
 use crate::file_handler::FileHandler;
@@ -43,21 +44,21 @@ pub struct SqlExecutor<'a> {
     /// Names of tables that have been modified
     modified_tables: HashSet<String>,
 
-    /// Verbose mode flag
-    verbose: bool,
+    /// Application configuration for global settings
+    config: AppConfig,
 
     /// Number of affected rows from the last statement
     affected_row_count: usize,
 }
 
 impl<'a> SqlExecutor<'a> {
-    /// Create a new SQL executor with the given database, file handler, and verbose flag
-    pub fn new_with_verbose(database: &'a mut Database, file_handler: &'a mut FileHandler, verbose: bool) -> Self {
+    /// Create a new SQL executor with the given database, file handler, and application configuration
+    pub fn new(database: &'a mut Database, file_handler: &'a mut FileHandler, config: &AppConfig) -> Self {
         SqlExecutor {
             database,
             file_handler,
             modified_tables: HashSet::new(),
-            verbose,
+            config: config.clone(),
             affected_row_count: 0,
         }
     }
@@ -75,7 +76,7 @@ impl<'a> SqlExecutor<'a> {
         // properly supports the LOCATION clause - HiveDialect is made for this
         let dialect = HiveDialect {}; // Hive dialect is specifically designed for LOCATION clauses
         
-        if self.verbose {
+        if self.config.verbose() {
             println!("Executing SQL: {}", sql);
         }
         
@@ -144,7 +145,7 @@ impl<'a> SqlExecutor<'a> {
 
                 self.execute_insert(table_name, columns, source)?;
 
-                if self.verbose {
+                if self.config.verbose() {
                     eprintln!("Inserted {} rows", self.affected_row_count);
                 }
                 Ok(None)
@@ -159,7 +160,7 @@ impl<'a> SqlExecutor<'a> {
                 // Store the affected row count for .changes command
                 self.affected_row_count = updated_count;
 
-                if self.verbose {
+                if self.config.verbose() {
                     eprintln!("Updated {} rows", updated_count);
                 }
                 Ok(None)
@@ -177,7 +178,7 @@ impl<'a> SqlExecutor<'a> {
                 // Store the affected row count for .changes command
                 self.affected_row_count = deleted_count;
 
-                if self.verbose {
+                if self.config.verbose() {
                     eprintln!("Deleted {} rows", deleted_count);
                 }
                 Ok(None)
@@ -192,7 +193,7 @@ impl<'a> SqlExecutor<'a> {
                 .. 
             } => {
                 // Print complete debug information about the parsed CREATE TABLE statement
-                if self.verbose {
+                if self.config.verbose() {
                     println!("Parsed CREATE TABLE statement:");
                     println!("  Table name: {:?}", name);
                     println!("  LOCATION clause: {:?}", hive_formats.as_ref().and_then(|hf| hf.location.as_ref()));
@@ -211,7 +212,7 @@ impl<'a> SqlExecutor<'a> {
                 };
                 
                 self.execute_create_table(name, columns, file_format, actual_location, with_options)?;
-                if self.verbose {
+                if self.config.verbose() {
                     eprintln!("Table created successfully");
                 }
                 Ok(None)
@@ -264,7 +265,7 @@ impl<'a> SqlExecutor<'a> {
 
                 // Process based on whether we have aggregates or not
                 if has_aggregates {
-                    if self.verbose {
+                    if self.config.verbose() {
                         eprintln!("Applying aggregate functions");
                     }
                     self.execute_aggregate_query(source_table, select, &query)
@@ -319,7 +320,7 @@ impl<'a> SqlExecutor<'a> {
 
         // Apply GROUP BY if present, otherwise apply simple aggregation
         let result_table = if !select.group_by.is_empty() {
-            if self.verbose {
+            if self.config.verbose() {
                 eprintln!("Applying GROUP BY");
             }
             SqlExecutor::apply_grouped_aggregate_functions(
@@ -333,7 +334,7 @@ impl<'a> SqlExecutor<'a> {
 
         // Apply HAVING if present (only after GROUP BY)
         let result_after_having = if let Some(having_expr) = &select.having {
-            if self.verbose {
+            if self.config.verbose() {
                 eprintln!("Applying HAVING");
             }
             self.apply_having_clause(result_table, having_expr)?
@@ -409,7 +410,7 @@ impl<'a> SqlExecutor<'a> {
         selection: &Option<Expr>,
     ) -> SqawkResult<Table> {
         if let Some(where_clause) = selection {
-            if self.verbose {
+            if self.config.verbose() {
                 eprintln!("WHERE comparison");
             }
             self.apply_where_clause(table, where_clause)
@@ -456,7 +457,7 @@ impl<'a> SqlExecutor<'a> {
     ) -> SqawkResult<Table> {
         // Apply DISTINCT if present
         if select.distinct.is_some() {
-            if self.verbose {
+            if self.config.verbose() {
                 eprintln!("Applying DISTINCT");
             }
             table = table.distinct()?;
@@ -464,7 +465,7 @@ impl<'a> SqlExecutor<'a> {
 
         // Apply ORDER BY if present
         if !query.order_by.is_empty() {
-            if self.verbose {
+            if self.config.verbose() {
                 eprintln!("Applying ORDER BY");
             }
             table = self.apply_order_by(table, &query.order_by)?;
@@ -472,7 +473,7 @@ impl<'a> SqlExecutor<'a> {
 
         // Apply LIMIT and OFFSET if present
         if query.limit.is_some() || query.offset.is_some() {
-            if self.verbose {
+            if self.config.verbose() {
                 eprintln!("Applying LIMIT/OFFSET");
             }
             table = self.apply_limit_offset(table, query)?;
@@ -667,7 +668,7 @@ impl<'a> SqlExecutor<'a> {
         // If there are multiple tables in the FROM clause, join them
         // This is the CROSS JOIN case for "FROM table1, table2, ..."
         if from.len() > 1 {
-            if self.verbose {
+            if self.config.verbose() {
                 eprintln!("Processing multiple tables in FROM clause as CROSS JOINs");
             }
             for table_with_joins in &from[1..] {
@@ -732,7 +733,7 @@ impl<'a> SqlExecutor<'a> {
         // Process each join clause sequentially
         for join in joins {
             // Log join type in verbose mode for debugging
-            if self.verbose {
+            if self.config.verbose() {
                 eprintln!("Join type: {:?}", join.join_operator);
             }
 
@@ -770,7 +771,7 @@ impl<'a> SqlExecutor<'a> {
 
                 // Handle INNER JOIN with ON condition
                 JoinOperator::Inner(JoinConstraint::On(expr)) => {
-                    if self.verbose {
+                    if self.config.verbose() {
                         eprintln!("Processing INNER JOIN with ON condition: {:?}", expr);
                     }
 
@@ -1205,7 +1206,7 @@ impl<'a> SqlExecutor<'a> {
     /// # Returns
     /// * A new table containing only the rows that satisfy the HAVING condition
     fn apply_having_clause(&self, table: Table, having_expr: &Expr) -> SqawkResult<Table> {
-        if self.verbose {
+        if self.config.verbose() {
             eprintln!("HAVING expression: {:?}", having_expr);
             eprintln!("Table columns: {:?}", table.columns());
             eprintln!("Table rows: {} rows to filter", table.rows().len());
@@ -1215,22 +1216,22 @@ impl<'a> SqlExecutor<'a> {
         let result = table.select(|row| {
             let condition_result = self.evaluate_condition(having_expr, row, &table);
 
-            if self.verbose {
+            if self.config.verbose() {
                 eprintln!("Row: {:?}, condition result: {:?}", row, condition_result);
             }
 
             let passes = condition_result.unwrap_or(false);
 
-            if self.verbose && passes {
+            if self.config.verbose() && passes {
                 eprintln!("Row passed HAVING condition");
-            } else if self.verbose {
+            } else if self.config.verbose() {
                 eprintln!("Row filtered out by HAVING condition");
             }
 
             passes
         });
 
-        if self.verbose {
+        if self.config.verbose() {
             eprintln!("HAVING result: {} rows", result.rows().len());
         }
 
@@ -3117,7 +3118,7 @@ impl<'a> SqlExecutor<'a> {
         });
         
         // Check if the LOCATION clause was provided
-        if self.verbose {
+        if self.config.verbose() {
             if let Some(loc) = &location {
                 println!("LOCATION clause found: '{}'", loc);
             } else {
@@ -3130,7 +3131,7 @@ impl<'a> SqlExecutor<'a> {
             // Remove any quotes that might be in the location string
             let loc = loc.trim_matches('\'').trim_matches('"');
             
-            if self.verbose {
+            if self.config.verbose() {
                 println!("Setting file path for table '{}' to: {}", table_name, loc);
             }
             
@@ -3143,14 +3144,14 @@ impl<'a> SqlExecutor<'a> {
                 match std::env::current_dir() {
                     Ok(mut cur_dir) => {
                         cur_dir.push(loc);
-                        if self.verbose {
+                        if self.config.verbose() {
                             println!("Resolved relative path to absolute: {:?}", cur_dir);
                         }
                         cur_dir
                     },
                     Err(_) => {
                         // Fall back to relative path if current dir can't be determined
-                        if self.verbose {
+                        if self.config.verbose() {
                             println!("Warning: Could not resolve absolute path, using relative");
                         }
                         std::path::PathBuf::from(loc)
@@ -3158,7 +3159,7 @@ impl<'a> SqlExecutor<'a> {
                 }
             };
             
-            if self.verbose {
+            if self.config.verbose() {
                 println!("Final file path for table '{}': {:?}", table_name, path);
             }
             
@@ -3175,7 +3176,7 @@ impl<'a> SqlExecutor<'a> {
             file_path.clone(),
             Some(delimiter_str),
             file_format_str,
-            self.verbose,
+            self.config.verbose(),
         );
         
         // Double-check file path is set and display it for debug purposes
@@ -3183,10 +3184,10 @@ impl<'a> SqlExecutor<'a> {
             // Ensure the file path is set in the table
             table.set_file_path(path.clone());
             
-            if self.verbose {
+            if self.config.verbose() {
                 println!("Table '{}' created with file path: {:?}", table_name, path);
             }
-        } else if self.verbose {
+        } else if self.config.verbose() {
             eprintln!("Warning: Table '{}' created without a file path", table_name);
         }
         
@@ -3196,10 +3197,10 @@ impl<'a> SqlExecutor<'a> {
         // Verify the table has a file path in the database
         if let Ok(added_table) = self.file_handler.get_table(&table_name) {
             if let Some(table_path) = added_table.file_path() {
-                if self.verbose {
+                if self.config.verbose() {
                     println!("Confirmed table '{}' has file path: {:?}", table_name, table_path);
                 }
-            } else if self.verbose {
+            } else if self.config.verbose() {
                 eprintln!("Warning: Table '{}' lost its file path during creation", table_name);
             }
         }
