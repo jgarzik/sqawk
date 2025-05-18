@@ -9,7 +9,6 @@
 //! - Providing a unified interface for table operations
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use crate::config::AppConfig;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
@@ -18,6 +17,23 @@ use crate::table::Table;
 pub struct Database {
     /// In-memory tables indexed by their names
     tables: HashMap<String, Table>,
+}
+
+/// Methods for direct table manipulation - used only in special cases
+impl Database {
+    /// Remove a table from the database by name
+    ///
+    /// This is a specialized method intended for use when replacing tables
+    /// that were loaded with different schemas.
+    ///
+    /// # Arguments
+    /// * `name` - The name of the table to remove
+    ///
+    /// # Returns
+    /// * `true` if the table was found and removed, `false` otherwise
+    pub fn remove_table(&mut self, name: &str) -> bool {
+        self.tables.remove(name).is_some()
+    }
 }
 
 impl Database {
@@ -123,12 +139,14 @@ impl Database {
                 if !columns.is_empty() {
                     // Create a new table with the specified columns
                     // Note: No file_path is assigned here as this is a table definition only
+                    let columns_len = columns.len(); // Store the length before we move columns
                     let table = Table::new(table_name, columns, None);
                     
                     // Add the table to the database, overwriting any existing definition with the same name
                     // This ensures CLI definitions take precedence
                     if self.has_table(table_name) {
                         // Remove the existing table first to avoid conflict errors
+                        // Use direct replacement via insert/remove to avoid errors with private fields
                         self.tables.remove(table_name);
                     }
                     
@@ -136,7 +154,7 @@ impl Database {
                     
                     if config.verbose() {
                         println!("Compiled table definition for '{}' with {} columns",
-                            table_name, columns.len());
+                            table_name, columns_len);
                     }
                 }
             } else if config.verbose() {
