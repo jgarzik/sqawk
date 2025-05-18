@@ -6,10 +6,9 @@
 //!
 //! The Database struct is responsible for:
 //! - Storing all tables with their names
-//! - Tracking which tables have been modified
 //! - Providing a unified interface for table operations
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::error::{SqawkError, SqawkResult};
@@ -98,79 +97,6 @@ impl Database {
     pub fn has_table(&self, name: &str) -> bool {
         self.tables.contains_key(name)
     }
-    
-    /// Create a new table with the given name and columns
-    ///
-    /// # Arguments
-    /// * `name` - The name of the new table
-    /// * `columns` - The columns of the new table
-    /// * `file_path` - Optional file path for the table
-    /// * `delimiter` - Optional delimiter for the table (defaults to comma)
-    ///
-    /// # Returns
-    /// * `Ok(())` if the table was successfully created
-    /// * `Err` if a table with the same name already exists
-    pub fn create_table(
-        &mut self,
-        name: &str,
-        columns: Vec<String>,
-        file_path: Option<PathBuf>,
-        delimiter: Option<String>,
-    ) -> SqawkResult<()> {
-        if self.tables.contains_key(name) {
-            return Err(SqawkError::TableAlreadyExists(name.to_string()));
-        }
-        
-        let table = if let Some(delim) = delimiter {
-            Table::new_with_delimiter(name, columns, file_path, delim)
-        } else {
-            Table::new(name, columns, file_path)
-        };
-        
-        self.tables.insert(name.to_string(), table);
-        self.modified_tables.insert(name.to_string());
-        
-        Ok(())
-    }
-    
-    /// Create a new table with a schema
-    ///
-    /// # Arguments
-    /// * `name` - The name of the new table
-    /// * `schema` - The schema of the new table
-    /// * `file_path` - Optional file path for the table
-    /// * `delimiter` - Optional delimiter for the table (defaults to comma)
-    /// * `file_format` - Optional file format for the table (defaults to TEXTFILE)
-    ///
-    /// # Returns
-    /// * `Ok(())` if the table was successfully created
-    /// * `Err` if a table with the same name already exists
-    pub fn create_table_with_schema(
-        &mut self,
-        name: &str,
-        schema: Vec<ColumnDefinition>,
-        file_path: Option<PathBuf>,
-        delimiter: Option<String>,
-        file_format: Option<String>,
-    ) -> SqawkResult<()> {
-        if self.tables.contains_key(name) {
-            return Err(SqawkError::TableAlreadyExists(name.to_string()));
-        }
-        
-        let table = Table::new_with_schema(
-            name,
-            schema,
-            file_path,
-            delimiter,
-            file_format,
-            false, // Default to non-verbose mode
-        );
-        
-        self.tables.insert(name.to_string(), table);
-        self.modified_tables.insert(name.to_string());
-        
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -178,12 +104,12 @@ mod tests {
     use super::*;
     
     #[test]
-    fn test_create_and_get_table() {
+    fn test_add_and_get_table() {
         let mut db = Database::new();
         
-        // Create a table
-        let cols = vec!["id".to_string(), "name".to_string()];
-        db.create_table("test", cols, None, None).unwrap();
+        // Create a table directly
+        let table = Table::new("test", vec!["id".to_string(), "name".to_string()], None);
+        db.add_table("test".to_string(), table).unwrap();
         
         // Get the table
         let table = db.get_table("test").unwrap();
@@ -192,32 +118,14 @@ mod tests {
     }
     
     #[test]
-    fn test_mark_table_modified() {
-        let mut db = Database::new();
-        
-        // Create a table
-        let cols = vec!["id".to_string(), "name".to_string()];
-        db.create_table("test", cols, None, None).unwrap();
-        
-        // Table should be marked as modified when created
-        assert!(db.is_table_modified("test"));
-        
-        // Clear modifications
-        db.clear_modifications();
-        assert!(!db.is_table_modified("test"));
-        
-        // Mark table as modified
-        db.mark_table_modified("test").unwrap();
-        assert!(db.is_table_modified("test"));
-    }
-    
-    #[test]
     fn test_table_operations() {
         let mut db = Database::new();
         
-        // Create some tables
-        db.create_table("table1", vec!["col1".to_string()], None, None).unwrap();
-        db.create_table("table2", vec!["col2".to_string()], None, None).unwrap();
+        // Create some tables directly
+        let table1 = Table::new("table1", vec!["col1".to_string()], None);
+        let table2 = Table::new("table2", vec!["col2".to_string()], None);
+        db.add_table("table1".to_string(), table1).unwrap();
+        db.add_table("table2".to_string(), table2).unwrap();
         
         // Check table count
         assert_eq!(db.table_count(), 2);
@@ -227,42 +135,14 @@ mod tests {
         assert!(names.contains(&"table1".to_string()));
         assert!(names.contains(&"table2".to_string()));
         
-        // Drop a table
-        db.drop_table("table1").unwrap();
+        // Check if table exists
+        assert!(db.has_table("table1"));
+        assert!(db.has_table("table2"));
+        
+        // Remove a table manually
+        db.tables.remove("table1");
         assert_eq!(db.table_count(), 1);
         assert!(!db.has_table("table1"));
         assert!(db.has_table("table2"));
-    }
-    
-    #[test]
-    fn test_create_table_with_schema() {
-        let mut db = Database::new();
-        
-        // Create a schema
-        let schema = vec![
-            ColumnDefinition {
-                name: "id".to_string(),
-                data_type: crate::table::DataType::Integer,
-            },
-            ColumnDefinition {
-                name: "name".to_string(),
-                data_type: crate::table::DataType::Text,
-            },
-        ];
-        
-        // Create a table with the schema
-        db.create_table_with_schema(
-            "test_schema",
-            schema,
-            None,
-            Some("|".to_string()),
-            Some("TEXTFILE".to_string()),
-        ).unwrap();
-        
-        // Get the table
-        let table = db.get_table("test_schema").unwrap();
-        assert_eq!(table.name(), "test_schema");
-        assert_eq!(table.columns(), &["id", "name"]);
-        assert_eq!(table.delimiter(), "|");
     }
 }

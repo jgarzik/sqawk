@@ -235,15 +235,8 @@ pub struct Table {
     /// Whether the table was modified since loading
     modified: bool,
 
-    /// Schema information with column definitions (types)
-    /// This will be None for tables loaded without schema information
-    schema: Option<Vec<ColumnDefinition>>,
-    
     /// Custom delimiter for this table's file (default is comma)
     delimiter: String,
-
-    /// The file format for this table (currently only TEXTFILE is supported)
-    file_format: String,
     
     /// Flag indicating whether to show verbose output
     verbose: bool,
