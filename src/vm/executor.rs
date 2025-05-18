@@ -8,7 +8,7 @@
 //! but it provides the foundation for the real engine to be built incrementally.
 
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::Table;
+use crate::table::{DataType, Table, Value};
 
 /// SQL VM executor that compiles SQL to bytecode and then executes it
 pub struct SqlVmExecutor {
