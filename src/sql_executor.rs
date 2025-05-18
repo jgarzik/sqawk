@@ -66,6 +66,15 @@ impl<'a> SqlExecutor<'a> {
             affected_row_count: 0,
         }
     }
+    
+    /// Execute an SQL statement with VM engine
+    ///
+    /// This is a no-op implementation that simply returns an error
+    pub fn execute_vm(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
+        Err(SqawkError::UnsupportedSqlFeature(
+            "VM execution is not yet implemented".to_string(),
+        ))
+    }
 
     /// Get the number of rows affected by the last executed statement
     pub fn get_affected_row_count(&self) -> SqawkResult<usize> {
