@@ -215,54 +215,6 @@ impl CsvHandler {
         Ok(table)
     }
 
-    /// Save a table back to its source CSV file
-    ///
-    /// Writes the current state of a table back to its source CSV file,
-    /// preserving column order and formatting values appropriately.
-    /// This is used for implementing the --write flag functionality.
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table to write
-    /// * `table` - The table to save
-    ///
-    /// # Returns
-    /// * `Ok(())` if the table was successfully written
-    /// * `Err` if the table lacks a source file, or if there was an error writing the file
-    pub fn save_table(&self, _table_name: &str, table: &Table) -> SqawkResult<()> {
-        // Check if the table has a source file
-        let file_path = table.file_path().ok_or_else(|| {
-            SqawkError::InvalidSqlQuery(format!(
-                "Table '{}' doesn't have a source file",
-                table.name()
-            ))
-        })?;
-
-        // Open the CSV file for writing
-        let file = File::create(file_path)?;
-        let writer = BufWriter::new(file);
-
-        // Create a CSV writer
-        let mut csv_writer = csv::WriterBuilder::new().from_writer(writer);
-
-        // Write headers
-        csv_writer
-            .write_record(table.columns())
-            .map_err(SqawkError::CsvError)?;
-
-        // Write rows
-        for row in table.rows() {
-            let record: Vec<String> = row.iter().map(|value| value.to_string()).collect();
-
-            csv_writer
-                .write_record(&record)
-                .map_err(SqawkError::CsvError)?;
-        }
-
-        // Flush and finish
-        csv_writer.flush()?;
-
-        Ok(())
-    }
 
     /// Parse a file specification into table name and file path
     ///
