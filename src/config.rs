@@ -82,9 +82,5 @@ impl AppConfig {
         self.use_vm
     }
 
-    /// Set whether to use VM execution engine
-    #[allow(dead_code)] // Mark as intentionally unused
-    pub fn set_use_vm(&mut self, use_vm: bool) {
-        self.use_vm = use_vm;
-    }
+
 }

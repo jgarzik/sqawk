@@ -388,23 +388,7 @@ impl Table {
         self.cols.iter().map(|col| col.name.clone()).collect()
     }
 
-    /// Get a column's type by index
-    ///
-    /// Returns the data type of the column at the specified index.
-    #[allow(dead_code)] // This method may be used in future extensions
-    pub fn column_type(&self, index: usize) -> Option<DataType> {
-        self.cols.get(index).map(|col| col.data_type)
-    }
 
-    /// Get a column's type by name
-    ///
-    /// Returns the data type of the column with the specified name.
-    #[allow(dead_code)] // This method may be used in future extensions
-    pub fn column_type_by_name(&self, name: &str) -> Option<DataType> {
-        self.column_map
-            .get(name)
-            .and_then(|&idx| self.column_type(idx))
-    }
 
     /// Get all columns with their metadata
     ///
