@@ -545,13 +545,13 @@ impl<'a> VmEngine<'a> {
                 let reg2 = self.get_register(inst.p2 as usize)?;
                 
                 // Perform comparison based on register types
-                let result = match (reg1, reg2) {
+                let result = match (&reg1, &reg2) {
                     (Register::Integer(a), Register::Integer(b)) => a < b,
                     (Register::Float(a), Register::Float(b)) => a < b,
                     (Register::String(a), Register::String(b)) => a < b,
                     // For mixed types, try to convert and compare
-                    (Register::Integer(a), Register::Float(b)) => (a as f64) < b,
-                    (Register::Float(a), Register::Integer(b)) => a < (b as f64),
+                    (Register::Integer(a), Register::Float(b)) => (*a as f64) < *b,
+                    (Register::Float(a), Register::Integer(b)) => *a < (*b as f64),
                     // Other combinations are not comparable
                     _ => return Err(SqawkError::VmError(
                         format!("Cannot compare incompatible types: {:?} and {:?}", reg1, reg2)
@@ -575,13 +575,13 @@ impl<'a> VmEngine<'a> {
                 let reg2 = self.get_register(inst.p2 as usize)?;
                 
                 // Perform comparison based on register types
-                let result = match (reg1, reg2) {
+                let result = match (&reg1, &reg2) {
                     (Register::Integer(a), Register::Integer(b)) => a <= b,
                     (Register::Float(a), Register::Float(b)) => a <= b,
                     (Register::String(a), Register::String(b)) => a <= b,
                     // For mixed types, try to convert and compare
-                    (Register::Integer(a), Register::Float(b)) => (a as f64) <= b,
-                    (Register::Float(a), Register::Integer(b)) => a <= (b as f64),
+                    (Register::Integer(a), Register::Float(b)) => (*a as f64) <= *b,
+                    (Register::Float(a), Register::Integer(b)) => *a <= (*b as f64),
                     // Other combinations are not comparable
                     _ => return Err(SqawkError::VmError(
                         format!("Cannot compare incompatible types: {:?} and {:?}", reg1, reg2)
@@ -686,6 +686,44 @@ impl<'a> VmEngine<'a> {
         }
 
         Ok(Some(table))
+    }
+    
+    /// Get a register value by index
+    ///
+    /// # Arguments
+    /// * `idx` - The register index
+    ///
+    /// # Returns
+    /// The register value or an error if the index is out of bounds
+    fn get_register(&self, idx: usize) -> SqawkResult<Register> {
+        if idx < self.registers.len() {
+            Ok(self.registers[idx].clone())
+        } else {
+            Err(SqawkError::VmError(format!(
+                "Register index out of bounds: {}",
+                idx
+            )))
+        }
+    }
+    
+    /// Set a register value by index
+    ///
+    /// # Arguments
+    /// * `idx` - The register index
+    /// * `value` - The value to set
+    ///
+    /// # Returns
+    /// Ok(()) if successful, or an error if the index is out of bounds
+    fn set_register(&mut self, idx: usize, value: Register) -> SqawkResult<()> {
+        // Ensure the register exists
+        while idx >= self.registers.len() {
+            self.registers.push(Register::Null);
+        }
+        
+        // Set the value
+        self.registers[idx] = value;
+        
+        Ok(())
     }
 }
 
