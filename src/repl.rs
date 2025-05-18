@@ -189,8 +189,8 @@ enum ReplCommand {
 
 /// REPL interface for interactive SQL entry
 pub struct Repl<'a> {
-    /// SQL executor for running queries
-    executor: SqlExecutor<'a>,
+    /// SQL executor for running queries (can be either direct or VM-based)
+    executor: Box<dyn SqlExecutorTrait + 'a>,
     /// Rustyline editor for command line editing
     editor: Editor<CommandCompleter, DefaultHistory>,
     /// Application configuration for global settings
@@ -205,7 +205,7 @@ pub struct Repl<'a> {
 
 impl<'a> Repl<'a> {
     /// Create a new REPL
-    pub fn new(executor: SqlExecutor<'a>, app_config: &AppConfig) -> Self {
+    pub fn new(executor: Box<dyn SqlExecutorTrait + 'a>, app_config: &AppConfig) -> Self {
         // Create rustyline configuration with list-style completion
         let rustyline_config = Config::builder()
             .completion_type(CompletionType::List)

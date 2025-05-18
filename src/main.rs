@@ -117,69 +117,48 @@ fn main() -> Result<()> {
     }
 
     // Step 3: Create SQL executor based on VM flag
-    if args.vm {
+    // Create the appropriate executor based on the --vm flag
+    let executor: Box<dyn SqlExecutorTrait> = if args.vm {
         if config.verbose() {
             println!("Using VM-based SQL execution engine");
         }
-        
         // Create the VM-based executor
-        let vm_executor = vm::executor::SqlVmExecutor::new(config.verbose());
-        
-        // Process each SQL statement
-        for sql in &args.sql {
-            // Log the SQL being executed in verbose mode
-            if config.verbose() {
-                println!("Executing SQL with VM: {sql}");
-            }
-            
-            // Execute the SQL statement with the VM executor
-            match vm_executor.execute_sql(sql) {
-                Ok(Some(table)) => {
-                    // Output the results to stdout
-                    for row in table.rows() {
-                        println!("{}", row.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
-                    }
-                },
-                Ok(None) => {
-                    if config.verbose() {
-                        println!("Query executed successfully (no results to display)");
-                    }
-                },
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                }
-            }
-        }
-        
-        // Early return when using VM executor
-        return Ok(());
-    }
-    
-    // Use the default SQL executor for non-VM mode
-    // The executor maintains state across statements, allowing multi-statement operations
-    let mut sql_executor = SqlExecutor::new(&mut database, &mut file_handler, &config);
+        Box::new(vm::executor::SqlVmExecutor::new(
+            &mut database,
+            &mut file_handler,
+            config.write(),
+            config.verbose(),
+        ))
+    } else {
+        // Use the default SQL executor for non-VM mode
+        Box::new(SqlExecutor::new(&mut database, &mut file_handler, &config))
+    };
 
     // Check if interactive mode is requested
     if args.interactive {
         // Start REPL (Read-Eval-Print Loop) for interactive SQL entry
-        let mut repl = Repl::new(sql_executor, &config);
+        let mut repl = Repl::new(executor, &config);
         match repl.run() {
             Ok(_) => return Ok(()),
             Err(e) => return Err(anyhow::anyhow!("Failed to run interactive mode: {}", e)),
         }
     }
-
+    
     // Process each SQL statement in the order specified on the command line
     // This allows operations like: UPDATE -> DELETE -> SELECT to see the effects
     for sql in &args.sql {
         // Log the SQL being executed in verbose mode
         if config.verbose() {
-            println!("Executing SQL: {sql}");
+            if args.vm {
+                println!("Executing SQL with VM engine: {sql}");
+            } else {
+                println!("Executing SQL: {sql}");
+            }
         }
 
         // Execute the SQL statement against the in-memory tables
         // The result may be a table (for SELECT) or None (for UPDATE, DELETE, INSERT)
-        let result = sql_executor
+        let result = executor
             .execute(sql)
             .with_context(|| format!("Failed to execute SQL: {sql}"))?;
 
@@ -198,6 +177,11 @@ fn main() -> Result<()> {
             None => {
                 if config.verbose() {
                     println!("Query executed successfully (no results to display)");
+                    
+                    let affected = executor.get_affected_row_count();
+                    if affected > 0 {
+                        println!("{affected} rows affected");
+                    }
                 }
             }
         }
