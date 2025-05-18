@@ -99,7 +99,7 @@ impl<'a> SqlCompiler<'a> {
             0, 0, 0,
             None,
             0,
-            Some("Start address will be filled in later".to_string()),
+            Some("Start address will be filled in later".into()),
         ));
         
         // Compile each statement
@@ -132,7 +132,7 @@ impl<'a> SqlCompiler<'a> {
         match statement {
             Statement::Query(query) => self.compile_query(query),
             _ => Err(SqawkError::UnsupportedSqlFeature(
-                format!("Unsupported SQL statement type: {:?}", statement)
+                format!("Unsupported SQL statement type: {:?}", statement).into()
             )),
         }
     }
@@ -168,7 +168,7 @@ impl<'a> SqlCompiler<'a> {
         let table_name = match &table_with_joins.relation {
             sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
             _ => return Err(SqawkError::UnsupportedSqlFeature(
-                "Only simple table scans are supported".to_string()
+                "Only simple table scans are supported".into()
             )),
         };
         
@@ -290,7 +290,7 @@ impl<'a> SqlCompiler<'a> {
             Ok((0..column_count).collect())
         } else {
             Err(SqawkError::UnsupportedSqlFeature(
-                "Only SELECT * is supported for now".to_string()
+                "Only SELECT * is supported for now".into()
             ))
         }
     }

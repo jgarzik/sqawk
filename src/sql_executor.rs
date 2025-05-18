@@ -69,11 +69,24 @@ impl<'a> SqlExecutor<'a> {
     
     /// Execute an SQL statement with VM engine
     ///
-    /// This is a no-op implementation that simply returns an error
-    pub fn execute_vm(&mut self, _sql: &str) -> SqawkResult<Option<Table>> {
-        Err(SqawkError::UnsupportedSqlFeature(
-            "VM execution is not yet implemented".to_string(),
-        ))
+    /// This method delegates execution to the VM-based engine, which:
+    /// 1. Compiles the SQL to bytecode
+    /// 2. Executes the bytecode in a virtual machine
+    pub fn execute_vm(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
+        if self.config.verbose() {
+            println!("Using VM execution engine for SQL: {}", sql);
+        }
+        
+        // Call the VM execution implementation
+        let result = crate::vm::execute_vm(
+            sql,
+            self.database,
+            self.config.verbose()
+        )?;
+        
+        // TODO: Handle affected rows for non-SELECT statements
+        
+        Ok(result)
     }
 
     /// Get the number of rows affected by the last executed statement
