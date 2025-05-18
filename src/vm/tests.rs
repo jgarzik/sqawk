@@ -1000,7 +1000,6 @@ fn test_select_star_from_table() {
 /// Test transaction opcodes (Begin, Commit, Rollback)
 #[test]
 fn test_transaction_opcodes() {
-    use crate::vm::tests::bytecode_tests::{create_instruction, execute_bytecode_program};
     // This test verifies that the transaction opcodes work correctly
     let database = Database::new();
 
@@ -1076,7 +1075,7 @@ fn test_transaction_opcodes() {
     let rows = table.rows();
     let first_row = &rows[0];
     match &first_row[0] {
-        Value::Integer(val) => assert_eq!(*val, 42, "Expected value 42, got {}", val),
+        Value::Integer(val) => assert_eq!(val, &42, "Expected value 42, got {}", val),
         other => panic!("Expected Integer type, got {:?}", other),
     }
 
@@ -1161,7 +1160,9 @@ fn test_transaction_opcodes() {
     let rows = table.rows();
     let first_row = &rows[0];
     match &first_row[0] {
-        Value::Integer(val) => assert_eq!(*val, 99, "Expected value 99 (after rollback), got {}", *val),
+        Value::Integer(val) => assert_eq!(val, &99, "Expected value 99 (after rollback), got {}", val),
         other => panic!("Expected Integer type, got {:?}", other),
     }
 }
+
+
