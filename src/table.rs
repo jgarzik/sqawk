@@ -937,7 +937,8 @@ impl Table {
     /// * A new table with duplicate rows removed
     pub fn distinct(&self) -> SqawkResult<Self> {
         // Create a new table with the same structure
-        let mut result = Table::new(&self.name, self.columns.clone(), self.file_path.clone());
+        let column_names = self.columns().clone();
+        let mut result = Table::new(&self.name, column_names, self.file_path.clone());
 
         // Use a vector to track rows we've already seen
         // We can't use a HashSet directly because Row is Vec<Value> which may not implement Hash
