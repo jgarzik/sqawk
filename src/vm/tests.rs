@@ -10,63 +10,24 @@ use crate::vm;
 
 #[test]
 fn test_select_literal() {
-    // Test a simple "SELECT 1" query
-    // This tests the basic VM infrastructure with minimal dependencies
+    // Test a simple "SELECT 1" query using the VM
+    // This tests that the VM infrastructure can handle literal queries
     
     // Create an empty database
     let database = Database::new();
     
-    // Direct query without going through SQL executor validation
-    // Create a literal query manually using correct sqlparser 0.36 API
-    use sqlparser::ast::{Expr, Query, Select, SelectItem, SetExpr, Value as SqlValue};
+    // Execute the query
+    // This uses the direct string for parsing by sqlparser and bypasses the SQL executor validation
+    let sql = "SELECT 1 AS value";
     
-    // Create a simple "SELECT 1 AS value" query
-    let literal_value = SqlValue::Number("1".to_string(), false);
-    let expr = Expr::Value(literal_value);
-    let alias = sqlparser::ast::Ident::new("value");
-    let select_item = SelectItem::ExprWithAlias {
-        expr,
-        alias,
-    };
+    // Get the result with our own parser+VM implementation
+    let mut compiler = vm::compiler::SqlCompiler::new(&database, false);
+    let program = compiler.compile(sql).expect("Failed to compile SQL");
     
-    let select = Select {
-        distinct: None,
-        top: None,
-        projection: vec![select_item],
-        into: None,
-        from: vec![],
-        lateral_views: vec![],
-        selection: None,
-        group_by: vec![],
-        cluster_by: vec![],
-        distribute_by: vec![],
-        sort_by: vec![],
-        having: None,
-        qualify: None,
-        named_window: vec![],
-    };
-    
-    let query_body = SetExpr::Select(Box::new(select));
-    let query = Query {
-        with: None,
-        body: Box::new(query_body),
-        order_by: vec![],
-        limit: None,
-        offset: None,
-        fetch: None,
-        locks: vec![],
-    };
-    
-    // Compile the SQL query directly using our VM compiler
-    let mut compiler = crate::vm::compiler::SqlCompiler::new(&database, false);
-    let program = compiler.compile_query_direct(&query).expect("Failed to compile query");
-    
-    // Create and execute the VM directly
-    let mut engine = crate::vm::engine::VmEngine::new(&database, false);
+    let mut engine = vm::engine::VmEngine::new(&database, false);
     engine.init(program);
-    engine.execute().expect("Failed to execute VM program");
+    engine.execute().expect("Failed to execute program");
     
-    // Get the result table
     let table_opt = engine.create_result_table().expect("Failed to create result table");
     assert!(table_opt.is_some(), "Expected a result table, got None");
     
@@ -92,55 +53,14 @@ fn test_select_literal() {
 
 #[test]
 fn test_vm_bytecode_generation() {
-    // This test verifies that the VM can generate correct bytecode
-    // for a simple query, specifically looking at opcode sequences
+    // Test bytecode generation for a simple literal SELECT query
     
     // Create an empty database
     let database = Database::new();
     
-    // Create a simple "SELECT 1 AS value" query object directly with correct sqlparser 0.36 API
-    use sqlparser::ast::{Expr, Query, Select, SelectItem, SetExpr, Value as SqlValue};
-    
-    // Create a simple "SELECT 1 AS value" query
-    let literal_value = SqlValue::Number("1".to_string(), false);
-    let expr = Expr::Value(literal_value);
-    let alias = sqlparser::ast::Ident::new("value");
-    let select_item = SelectItem::ExprWithAlias {
-        expr,
-        alias,
-    };
-    
-    let select = Select {
-        distinct: None,
-        top: None,
-        projection: vec![select_item],
-        into: None,
-        from: vec![],
-        lateral_views: vec![],
-        selection: None,
-        group_by: vec![],
-        cluster_by: vec![],
-        distribute_by: vec![],
-        sort_by: vec![],
-        having: None,
-        qualify: None,
-        named_window: vec![],
-    };
-    
-    let query_body = SetExpr::Select(Box::new(select));
-    let query = Query {
-        with: None,
-        body: Box::new(query_body),
-        order_by: vec![],
-        limit: None,
-        offset: None,
-        fetch: None,
-        locks: vec![],
-    };
-    
-    // Set up the compiler directly to see the bytecode
+    // Set up the compiler with our SQL string
     let mut compiler = vm::compiler::SqlCompiler::new(&database, false);
-    let program = compiler.compile_query_direct(&query).expect("Failed to compile query");
+    let program = compiler.compile("SELECT 1 AS value").expect("Failed to compile SQL");
     
     // Check we have the right sequence of instructions, similar to SQLite:
     // Init
