@@ -225,6 +225,9 @@ pub struct Table {
 
     /// Column types (parallel to columns vector)
     column_types: Vec<DataType>,
+    
+    /// Complete column metadata including name and type
+    cols: Vec<Column>,
 
     /// Map of column names to their indices
     column_map: HashMap<String, usize>,
@@ -313,11 +316,21 @@ impl Table {
 
         // Create column_types with Text type for backward compatibility
         let column_types = vec![DataType::Text; column_names.len()];
+        
+        // Create full column metadata objects
+        let cols = column_names
+            .iter()
+            .map(|name| Column {
+                name: name.clone(),
+                data_type: DataType::Text,
+            })
+            .collect();
 
         Table {
             name: name.to_string(),
             columns: column_names,
             column_types,
+            cols,
             column_map,
             rows: Vec::new(),
             file_path,
@@ -350,6 +363,15 @@ impl Table {
         
         // Extract column types from the schema
         let column_types: Vec<DataType> = schema.iter().map(|col_def| col_def.data_type).collect();
+        
+        // Create full column metadata objects
+        let cols = schema
+            .iter()
+            .map(|col_def| Column {
+                name: col_def.name.clone(),
+                data_type: col_def.data_type,
+            })
+            .collect();
 
         // Create column_map from column names
         let column_map = columns
@@ -362,6 +384,7 @@ impl Table {
             name: name.to_string(),
             columns,
             column_types,
+            cols,
             column_map,
             rows: Vec::new(),
             file_path,
@@ -391,6 +414,13 @@ impl Table {
     /// Returns the data type of the column with the specified name.
     pub fn column_type_by_name(&self, name: &str) -> Option<DataType> {
         self.column_map.get(name).and_then(|&idx| self.column_type(idx))
+    }
+    
+    /// Get all columns with their metadata
+    ///
+    /// Returns a slice containing all column metadata including names and types.
+    pub fn column_metadata(&self) -> &[Column] {
+        &self.cols
     }
 
     /// Get the column count
