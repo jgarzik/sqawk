@@ -200,18 +200,16 @@ impl<'a> Repl<'a> {
     /// Create a new REPL
     pub fn new(
         executor: SqlExecutor<'a>,
-        verbose: bool,
-        write: bool,
-        field_separator: Option<String>,
+        app_config: &AppConfig,
     ) -> Self {
         // Create rustyline configuration with list-style completion
-        let config = Config::builder()
+        let rustyline_config = Config::builder()
             .completion_type(CompletionType::List)
             .build();
 
         // Create editor with our custom command completer
         let helper = CommandCompleter::new();
-        let mut editor = Editor::with_config(config)
+        let mut editor = Editor::with_config(rustyline_config)
             .expect("Failed to create editor");
         
         // Set the helper manually
@@ -223,10 +221,8 @@ impl<'a> Repl<'a> {
         Self {
             executor,
             editor,
-            _verbose: verbose,
-            write,
+            config: app_config.clone(),
             running: true,
-            _field_separator: field_separator,
             show_changes: false, // Default to not showing changes
             show_stats: false,   // Default to not showing stats
         }
@@ -450,7 +446,7 @@ impl<'a> Repl<'a> {
         }
 
         // Save changes if write mode is enabled
-        if self.write {
+        if self.config.write_changes() {
             let saved_count = match self.executor.save_modified_tables() {
                 Ok(count) => count,
                 Err(err) => return Err(ReplError::SqlExecutor(err)),
@@ -562,7 +558,7 @@ impl<'a> Repl<'a> {
         println!("  .version              Show source, library and compiler versions");
         println!(
             "  .write [on|off]       Toggle writing changes to files (currently: {})",
-            if self.write { "ON" } else { "OFF" }
+            if self.config.write_changes() { "ON" } else { "OFF" }
         );
         println!("  SQL_STATEMENT         Execute SQL statement");
         Ok(())
