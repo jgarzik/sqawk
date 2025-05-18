@@ -997,14 +997,7 @@ fn test_select_star_from_table() {
     assert_eq!(rows[1][1], Value::String("Bob".to_string()));
 }
 
-/// Test transaction opcodes (Begin, Commit, Rollback)
-#[test]
-fn test_transaction_opcodes() {
-    // This test verifies that the transaction opcodes work correctly
-    let database = Database::new();
-
-    // Create a program that uses transaction opcodes
-    let instructions = vec![
+}
         // Initialize VM
         create_instruction(
             OpCode::Init,
