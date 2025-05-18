@@ -474,14 +474,19 @@ impl<'a> VmEngine<'a> {
 
             OpCode::SavePoint => {
                 // Create a savepoint within the current transaction
+                // A savepoint marks a point within a transaction to which you can later roll back
+                // without rolling back the entire transaction
                 if self.transaction_state != TransactionState::Active {
                     return Err(SqawkError::VmError(
                         "No active transaction for savepoint".to_string(),
                     ));
                 }
 
-                // In a real implementation, we would store the current position
-                // in the transaction log to allow partial rollbacks
+                // In a full implementation, we would:
+                // 1. Create a marker in the transaction log to identify this position
+                // 2. Allow for multiple savepoints with different names
+                // 3. Support rolling back to any specific savepoint
+                // 4. Properly handle nested savepoints in a hierarchical manner
                 let savepoint_name = inst.p4.clone().unwrap_or_else(|| format!("sp_{}", inst.p1));
 
                 if self.verbose {
