@@ -996,3 +996,171 @@ fn test_select_star_from_table() {
     assert_eq!(rows[1][0], Value::Integer(2));
     assert_eq!(rows[1][1], Value::String("Bob".to_string()));
 }
+
+/// Test transaction opcodes (Begin, Commit, Rollback)
+#[test]
+fn test_transaction_opcodes() {
+    // This test verifies that the transaction opcodes work correctly
+    let database = Database::new();
+
+    // Create a program that uses transaction opcodes
+    let instructions = vec![
+        // Initialize VM
+        create_instruction(
+            OpCode::Init,
+            0,
+            1,
+            0,
+            None,
+            Some("Initialize VM".to_string()),
+        ),
+        // Begin transaction
+        create_instruction(
+            OpCode::Begin,
+            0,
+            0,
+            0,
+            None,
+            Some("Begin transaction".to_string()),
+        ),
+        // Load integer 42 into register 1
+        create_instruction(
+            OpCode::Integer,
+            42,
+            1,
+            0,
+            None,
+            Some("Load value 42".to_string()),
+        ),
+        // Commit transaction
+        create_instruction(
+            OpCode::Commit,
+            0,
+            0,
+            0,
+            None,
+            Some("Commit transaction".to_string()),
+        ),
+        // Return result row with register 1
+        create_instruction(
+            OpCode::ResultRow,
+            1,
+            1,
+            0,
+            None,
+            Some("Return result".to_string()),
+        ),
+        // Halt execution
+        create_instruction(
+            OpCode::Halt,
+            0,
+            0,
+            0,
+            None,
+            Some("Stop execution".to_string()),
+        ),
+    ];
+
+    // Execute the program
+    let result = execute_bytecode_program(instructions, &database)
+        .expect("Failed to execute program with Begin/Commit");
+
+    // Verify the result
+    assert!(result.is_some(), "Expected a result table");
+    let table = result.unwrap();
+    assert_eq!(table.row_count(), 1, "Expected 1 row");
+    assert_eq!(table.column_count(), 1, "Expected 1 column");
+
+    // Check the value
+    let rows = table.rows();
+    let first_row = &rows[0];
+    match &first_row[0] {
+        Value::Integer(val) => assert_eq!(*val, 42, "Expected value 42, got {}", val),
+        other => panic!("Expected Integer type, got {:?}", other),
+    }
+
+    // Test rollback
+    let instructions = vec![
+        // Initialize VM
+        create_instruction(
+            OpCode::Init, 
+            0, 
+            1, 
+            0, 
+            None, 
+            Some("Initialize VM".to_string()),
+        ),
+        // Begin transaction
+        create_instruction(
+            OpCode::Begin,
+            0,
+            0,
+            0,
+            None,
+            Some("Begin transaction".to_string()),
+        ),
+        // Load integer 42 into register 1
+        create_instruction(
+            OpCode::Integer,
+            42,
+            1,
+            0,
+            None,
+            Some("Load value in transaction".to_string()),
+        ),
+        // Rollback transaction
+        create_instruction(
+            OpCode::Rollback,
+            0,
+            0,
+            0,
+            None,
+            Some("Rollback transaction".to_string()),
+        ),
+        // Load integer 99 into register 1 (after rollback)
+        create_instruction(
+            OpCode::Integer,
+            99,
+            1,
+            0,
+            None,
+            Some("Load value after rollback".to_string()),
+        ),
+        // Return result row with register 1
+        create_instruction(
+            OpCode::ResultRow,
+            1,
+            1,
+            0,
+            None,
+            Some("Return result".to_string()),
+        ),
+        // Halt execution
+        create_instruction(
+            OpCode::Halt,
+            0,
+            0,
+            0,
+            None,
+            Some("Stop execution".to_string()),
+        ),
+    ];
+
+    // Execute the program
+    let result = execute_bytecode_program(instructions, &database)
+        .expect("Failed to execute program with Begin/Rollback");
+
+    // Verify the result
+    assert!(result.is_some(), "Expected a result table");
+    let table = result.unwrap();
+    assert_eq!(table.row_count(), 1, "Expected 1 row");
+    assert_eq!(table.column_count(), 1, "Expected 1 column");
+
+    // Check that we got the post-rollback value
+    let rows = table.rows();
+    let first_row = &rows[0];
+    match &first_row[0] {
+        Value::Integer(val) => assert_eq!(*val, 99, "Expected value 99 (after rollback), got {}", val),
+        other => panic!("Expected Integer type, got {:?}", other),
+    }
+}
