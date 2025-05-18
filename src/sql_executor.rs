@@ -156,24 +156,6 @@ impl<'a> SqlExecutor<'a> {
         }
         
         Ok(result_table)
-    } engine, which:
-    /// 1. Compiles the SQL to bytecode
-    /// 2. Executes the bytecode in a virtual machine
-    pub fn execute_vm(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
-        if self.config.verbose() {
-            println!("Using VM execution engine for SQL: {}", sql);
-        }
-        
-        // Call the VM execution implementation
-        let result = crate::vm::execute_vm(
-            sql,
-            self.database,
-            self.config.verbose()
-        )?;
-        
-        // TODO: Handle affected rows for non-SELECT statements
-        
-        Ok(result)
     }
 
     /// Get the number of rows affected by the last executed statement
