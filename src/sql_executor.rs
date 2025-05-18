@@ -87,6 +87,21 @@ impl<'a> SqlExecutor<'a> {
         // Delegate to the VM module's execute_vm function
         crate::vm::execute_vm(sql, self.database, self.config.verbose())
     }
+    
+    /// Execute a parsed SQL statement directly with the VM
+    /// This bypasses the regular SQL executor logic for VM execution
+    fn execute_vm_stmt(&self, stmt: &Statement) -> SqawkResult<Option<Table>> {
+        // Convert the statement back to SQL text
+        // This is inefficient but simplifies integration
+        let sql = format!("{}", stmt);
+        
+        if self.config.verbose() {
+            println!("VM Engine executing statement: {}", sql);
+        }
+        
+        // Pass directly to VM engine
+        crate::vm::execute_vm(&sql, self.database, self.config.verbose())
+    }
 
     /// Get the number of rows affected by the last executed statement
     pub fn get_affected_row_count(&self) -> SqawkResult<usize> {
@@ -149,6 +164,13 @@ impl<'a> SqlExecutor<'a> {
     /// * `Ok(None)` for other statement types (INSERT, UPDATE, DELETE)
     /// * `Err` if the statement cannot be executed or contains unsupported features
     fn execute_statement(&mut self, statement: Statement) -> SqawkResult<Option<Table>> {
+        // If VM mode is enabled, route all statements through the VM engine
+        if self.config.use_vm {
+            // Use our VM implementation instead of the regular SQL executor
+            return self.execute_vm_stmt(&statement);
+        }
+        
+        // Otherwise use the regular SQL executor
         match statement {
             Statement::Query(query) => self.execute_query(*query),
             Statement::Insert {

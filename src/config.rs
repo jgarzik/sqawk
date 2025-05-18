@@ -23,6 +23,9 @@ pub struct AppConfig {
 
     /// Whether to write changes back to files
     write_changes: bool,
+    
+    /// Whether to use the VM execution engine
+    use_vm: bool,
 }
 
 impl AppConfig {
@@ -38,12 +41,14 @@ impl AppConfig {
         field_separator: Option<String>,
         table_definitions: Vec<String>,
         write_changes: bool,
+        use_vm: bool,
     ) -> Self {
         Self {
             verbose,
             field_separator,
             table_definitions,
             write_changes,
+            use_vm,
         }
     }
 
@@ -70,5 +75,15 @@ impl AppConfig {
     /// Set whether to write changes
     pub fn set_write_changes(&mut self, write: bool) {
         self.write_changes = write;
+    }
+    
+    /// Get whether to use VM execution engine
+    pub fn use_vm(&self) -> bool {
+        self.use_vm
+    }
+    
+    /// Set whether to use VM execution engine
+    pub fn set_use_vm(&mut self, use_vm: bool) {
+        self.use_vm = use_vm;
     }
 }
