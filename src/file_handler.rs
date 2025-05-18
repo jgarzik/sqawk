@@ -7,7 +7,6 @@
 //! It abstracts away the specific file format details and provides a consistent API
 //! for the rest of the application to work with in-memory tables.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::AppConfig;
@@ -36,10 +35,6 @@ pub struct FileHandler {
 
     /// Default format to use if not specified (underscore prefix indicates it's intentionally unused for now)
     _default_format: FileFormat,
-
-    /// Custom column names for tables
-    /// Map from table name to a vector of column names
-    table_column_defs: HashMap<String, Vec<String>>,
     
     /// Reference to a database object which is the source of truth for tables
     database: *mut Database,
@@ -72,15 +67,10 @@ impl FileHandler {
             FileFormat::Csv
         };
 
-        // NOTE: Table definitions are now handled directly by Database.compile_table_definitions
-        // We keep this HashMap empty as we're transitioning away from FileHandler managing table schemas
-        let table_column_defs = HashMap::new();
-
         FileHandler {
             csv_handler: CsvHandler::new(),
             delim_handler: DelimHandler::new(),
             _default_format: default_format,
-            table_column_defs,
             // SAFETY: The caller must ensure that the database outlives this FileHandler
             database: database as *mut Database,
             config: config.clone(),
@@ -127,15 +117,10 @@ impl FileHandler {
         // Determine the file format based on extension
         let format = self.detect_format(&file_path);
 
-        // Check if custom column names are defined for this table
-        // Note: This is kept for backward compatibility during transition
-        // In the future, column definitions should always come from Database
-        let custom_columns = if !existing_schema {
-            self.table_column_defs.get(&table_name).cloned()
-        } else {
-            // If table already exists in the database, we'll use its schema
-            None
-        };
+        // We're getting schema information from the Database now
+        // For tables without an existing schema that need custom columns,
+        // they should be defined via CLI table_definitions and compiled into Database
+        let custom_columns = None;
 
         // Create the table based on the format
         let table = match format {
