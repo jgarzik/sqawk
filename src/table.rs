@@ -298,7 +298,6 @@ impl Table {
             file_path,
             modified: false,
             delimiter: ",".to_string(), // Default to comma delimiter
-            verbose: false,
         }
     }
 
@@ -338,7 +337,6 @@ impl Table {
             file_path,
             modified: true, // Tables created with schema are considered modified
             delimiter: delimiter.unwrap_or_else(|| ",".to_string()),
-            verbose,
         }
     }
 
@@ -454,19 +452,11 @@ impl Table {
     /// # Arguments
     /// * `path` - The new file path
     pub fn set_file_path(&mut self, path: PathBuf) {
-        if self.verbose {
-            println!("Setting file_path for table to: {:?}", path);
-        }
+        // Note: Verbose logging now happens at the caller level via AppConfig.verbose()
         self.file_path = Some(path);
     }
 
-    /// Set the verbose flag for this table
-    ///
-    /// # Arguments
-    /// * `verbose` - Whether to show verbose output
-    pub fn set_verbose(&mut self, verbose: bool) {
-        self.verbose = verbose;
-    }
+    // The set_verbose method has been removed as part of cleanup
 
     /// Get the delimiter for this table
     ///
