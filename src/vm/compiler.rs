@@ -585,6 +585,12 @@ impl<'a> SqlCompiler<'a> {
             0,
             Some(format!("Open table {} for reading", table_name)),
         ));
+        
+        // Add a placeholder Rewind instruction (we'll fix the jump target later)
+        self.program.add_instruction(Instruction::new(
+            OpCode::Rewind,
+            cursor_idx as i64,
+            0, // Placeholder jump target
             0,
             None,
             0,
