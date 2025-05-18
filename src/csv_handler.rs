@@ -13,7 +13,7 @@
 //! a mapping between table names and their source files for writeback operations.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use crate::error::{SqawkError, SqawkResult};
