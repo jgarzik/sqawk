@@ -320,7 +320,7 @@ impl Table {
         schema: Vec<ColumnDefinition>, 
         file_path: Option<PathBuf>,
         delimiter: Option<String>,
-        file_format: Option<String>,
+        _file_format: Option<String>,  // Unused parameter kept for API compatibility
         verbose: bool,
     ) -> Self {
         // Extract column names from the schema
@@ -341,21 +341,12 @@ impl Table {
             rows: Vec::new(),
             file_path,
             modified: true, // Tables created with schema are considered modified
-            schema: Some(schema),
             delimiter: delimiter.unwrap_or_else(|| ",".to_string()),
-            file_format: file_format.unwrap_or_else(|| "TEXTFILE".to_string()),
             verbose,
         }
     }
     
-    /// Create a new table with a schema and default values
-    pub fn new_with_schema_defaults(
-        name: &str, 
-        schema: Vec<ColumnDefinition>, 
-        file_path: Option<PathBuf>
-    ) -> Self {
-        Self::new_with_schema(name, schema, file_path, None, None, false)
-    }
+
 
     /// Get the columns of the table
     ///
@@ -494,50 +485,6 @@ impl Table {
         &self.delimiter
     }
     
-    /// Get the file format for this table
-    ///
-    /// Returns the file format for this table.
-    /// Currently only TEXTFILE is supported.
-    ///
-    /// # Returns
-    /// * A string reference to the file format (always defined, defaults to TEXTFILE)
-    pub fn file_format(&self) -> &String {
-        &self.file_format
-    }
-    
-    /// Get the schema for this table
-    ///
-    /// Returns the schema definitions for this table if it was created
-    /// with a schema, or None if it was loaded from a file without 
-    /// schema information.
-    ///
-    /// # Returns
-    /// * `Some(Vec<ColumnDefinition>)` containing the schema
-    /// * `None` if the table has no schema information
-    pub fn schema(&self) -> Option<&Vec<ColumnDefinition>> {
-        self.schema.as_ref()
-    }
-    
-    /// Check if this table has been modified
-    ///
-    /// # Returns
-    /// * `true` if the table has been modified
-    /// * `false` if the table has not been modified
-    pub fn is_modified(&self) -> bool {
-        self.modified
-    }
-    
-    /// Set the modified flag for this table
-    ///
-    /// This method allows explicitly setting the modified state of a table.
-    /// It's primarily used by the Database when managing tables.
-    ///
-    /// # Arguments
-    /// * `modified` - The new modified state
-    pub fn set_modified(&mut self, modified: bool) {
-        self.modified = modified;
-    }
-
     /// Get the index of a column by name
     ///
     /// Looks up a column by name and returns its index in the table.
