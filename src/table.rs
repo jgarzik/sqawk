@@ -368,7 +368,6 @@ impl Table {
 
         Table {
             name: name.to_string(),
-            columns,
             cols,
             column_map,
             rows: Vec::new(),
