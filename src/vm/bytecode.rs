@@ -41,6 +41,18 @@ pub enum OpCode {
     SavePoint, // Create a savepoint in the transaction - establishes a point to which a transaction can be partially rolled back
     Release,   // Release a savepoint - confirms changes up to the specified savepoint
 
+    // Comparison operations
+    Lt,      // Less than comparison (P1 < P2, result in P3)
+    Le,      // Less than or equal comparison (P1 <= P2, result in P3)
+    Eq,      // Equal comparison (P1 == P2, result in P3)
+    Ne,      // Not equal comparison (P1 != P2, result in P3)
+    Gt,      // Greater than comparison (P1 > P2, result in P3)
+    Ge,      // Greater than or equal comparison (P1 >= P2, result in P3)
+    
+    // Conditional jumps
+    JumpIfTrue,  // Jump to P2 if register P1 is true (non-zero)
+    JumpIfFalse, // Jump to P2 if register P1 is false (zero)
+    
     // Utility opcodes
     Noop, // No operation
 }
