@@ -18,7 +18,6 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use crate::error::SqawkResult;
-use crate::executor_trait::SqlExecutorTrait;
 use sqlparser::ast::{
     Assignment, ColumnDef as SqlColumnDef, Expr, FileFormat as SqlFileFormat, Join as SqlJoin,
     JoinConstraint, JoinOperator, ObjectName, Query, Select, SelectItem, SetExpr, SqlOption,
@@ -34,6 +33,7 @@ use crate::error::{SqawkError, SqawkResult};
 use crate::file_handler::FileHandler;
 use crate::string_functions::StringFunction;
 use crate::table::{ColumnDefinition, DataType, SortDirection, Table, Value};
+use crate::vm::executor::VmSqlExecutor;
 
 /// SQL statement executor
 pub struct SqlExecutor<'a> {
@@ -51,6 +51,9 @@ pub struct SqlExecutor<'a> {
 
     /// Number of affected rows from the last statement
     affected_row_count: usize,
+    
+    /// Flag indicating whether to use VM execution
+    use_vm: bool,
 }
 
 impl<'a> SqlExecutor<'a> {
@@ -66,7 +69,39 @@ impl<'a> SqlExecutor<'a> {
             modified_tables: HashSet::new(),
             config: config.clone(),
             affected_row_count: 0,
+            use_vm: false,
         }
+    }
+    
+    /// Sets whether to use VM for execution
+    pub fn set_vm_mode(&mut self, use_vm: bool) {
+        self.use_vm = use_vm;
+    }
+    
+    /// Execute SQL through VM engine
+    /// 
+    /// This method has the same signature as execute() but delegates to the VM-based executor.
+    /// It provides a compatible interface for the VM execution engine to be used transparently.
+    pub fn execute_vm(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
+        if self.config.verbose() {
+            println!("Using VM execution engine for SQL: {}", sql);
+        }
+        
+        // Create a VM executor and delegate the execution
+        let mut vm_executor = VmSqlExecutor::new(
+            self.database,
+            self.file_handler,
+            self.config.write(),
+            self.config.verbose(),
+        );
+        
+        // Execute the SQL through the VM engine
+        let result = vm_executor.execute(sql)?;
+        
+        // Update affected row count from VM executor
+        self.affected_row_count = vm_executor.get_affected_row_count();
+        
+        Ok(result)
     }
 }
 
