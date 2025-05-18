@@ -600,7 +600,7 @@ impl Table {
     {
         let mut result = Table::new_with_delimiter(
             &self.name,
-            self.columns.clone(),
+            self.columns().to_vec(),
             None,
             self.delimiter.clone(),
         );
