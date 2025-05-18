@@ -996,27 +996,6 @@ fn test_select_star_from_table() {
     assert_eq!(rows[1][0], Value::Integer(2));
     assert_eq!(rows[1][1], Value::String("Bob".to_string()));
 }
-
-}
-        // Initialize VM
-        create_instruction(
-            OpCode::Init,
-            0,
-            1,
-            0,
-            None,
-            Some("Initialize VM".to_string()),
-        ),
-        // Begin transaction
-        create_instruction(
-            OpCode::Begin,
-            0,
-            0,
-            0,
-            None,
-            Some("Begin transaction".to_string()),
-        ),
-        // Load integer 42 into register 1
         create_instruction(
             OpCode::Integer,
             42,
