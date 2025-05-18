@@ -620,6 +620,43 @@ impl Table {
         self.rows = new_rows;
         self.modified = true;
     }
+    
+    /// Add a column to the table with a specified data type
+    ///
+    /// This method adds a new column to the table with the given name and data type.
+    /// It's primarily used when creating tables with specific schema definitions.
+    ///
+    /// # Arguments
+    /// * `name` - Name of the column to add
+    /// * `data_type` - Data type for the column (as a string, e.g., "INT", "TEXT")
+    ///
+    /// # Returns
+    /// * `()` - This method doesn't return a result as it cannot fail
+    pub fn add_column(&mut self, name: String, data_type_str: String) {
+        // Map the string data type to our internal DataType enum
+        let data_type = match data_type_str.to_uppercase().as_str() {
+            "INT" | "INTEGER" => DataType::Integer,
+            "FLOAT" | "REAL" | "DOUBLE" => DataType::Float,
+            "BOOL" | "BOOLEAN" => DataType::Boolean,
+            _ => DataType::Text, // Default to Text for unknown types
+        };
+        
+        // Create a new Column instance
+        let column = Column {
+            name: name.clone(),
+            data_type,
+        };
+        
+        // Add the column to the table's column list
+        self.cols.push(column);
+        
+        // Update the column map with the new column's index
+        let new_index = self.cols.len() - 1;
+        self.column_map.insert(name, new_index);
+        
+        // Mark the table as modified
+        self.modified = true;
+    }
 
     /// Update a single value in a specific row and column
     ///

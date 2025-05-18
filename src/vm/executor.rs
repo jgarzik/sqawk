@@ -7,8 +7,9 @@
 //! Currently, this is a mock implementation that will return failure for all operations,
 //! but it provides the foundation for the real engine to be built incrementally.
 
-use crate::error::{SqawkError, SqawkResult};
-use crate::table::{DataType, Table, Value};
+use std::path::PathBuf;
+use crate::error::SqawkResult;
+use crate::table::{Table, Value};
 
 /// SQL VM executor that compiles SQL to bytecode and then executes it
 pub struct SqlVmExecutor {
@@ -38,7 +39,7 @@ impl SqlVmExecutor {
         // For SELECT statements, return a mock table with sample data
         if sql.trim().to_uppercase().starts_with("SELECT") {
             // Create a simple mock table with sample data
-            let mut table = Table::new("mock_result");
+            let mut table = Table::new("mock_result", vec![], None);
             
             // Add column definitions
             table.add_column("column1".to_string(), "INT".to_string());
@@ -46,8 +47,17 @@ impl SqlVmExecutor {
             table.add_column("column3".to_string(), "FLOAT".to_string());
             
             // Add some sample data
-            table.add_row(vec!["1".to_string(), "VM Test".to_string(), "10.5".to_string()]);
-            table.add_row(vec!["2".to_string(), "Bytecode Engine".to_string(), "20.75".to_string()]);
+            table.add_row(vec![
+                Value::Integer(1), 
+                Value::String("VM Test".to_string()), 
+                Value::Float(10.5)
+            ])?;
+            
+            table.add_row(vec![
+                Value::Integer(2), 
+                Value::String("Bytecode Engine".to_string()), 
+                Value::Float(20.75)
+            ])?;
             
             if self.verbose {
                 println!("VM Executor: Created mock result table with 2 rows");
