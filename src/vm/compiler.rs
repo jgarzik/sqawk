@@ -94,7 +94,23 @@ impl<'a> SqlCompiler<'a> {
         ));
         
         // Compile the query directly
-        self.compile_query(query)?;
+        match &*query.body {
+            SetExpr::Select(select) => {
+                // Handle the special case of SELECT without FROM
+                if select.from.is_empty() {
+                    self.compile_select_without_from(&select.projection)?;
+                } else {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Direct compilation of queries with FROM clause not supported in tests yet".to_string()
+                    ));
+                }
+            },
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only SELECT queries supported in direct compilation".to_string()
+                ));
+            }
+        }
         
         // Add Halt instruction at the end
         self.program.add_instruction(Instruction::new(
