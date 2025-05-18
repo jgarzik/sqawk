@@ -463,12 +463,12 @@ impl Table {
     /// * `Ok(())` if the row was successfully added
     /// * `Err` if the row doesn't match the table schema
     pub fn add_row(&mut self, row: Row) -> SqawkResult<()> {
-        if row.len() != self.columns.len() {
+        if row.len() != self.column_count() {
             return Err(SqawkError::InvalidSqlQuery(format!(
                 "Row has {} columns, but table '{}' has {} columns",
                 row.len(),
                 self.name,
-                self.columns.len()
+                self.column_count()
             )));
         }
 
@@ -560,7 +560,8 @@ impl Table {
     /// * `Err` if there was an error writing to stdout
     pub fn print_to_stdout(&self) -> Result<()> {
         // Print header
-        for (i, col) in self.columns.iter().enumerate() {
+        let column_names = self.columns();
+        for (i, col) in column_names.iter().enumerate() {
             if i > 0 {
                 print!(",");
             }
@@ -649,11 +650,11 @@ impl Table {
             )));
         }
 
-        if col_idx >= self.columns.len() {
+        if col_idx >= self.column_count() {
             return Err(SqawkError::ColumnNotFound(format!(
                 "Column index {} is out of bounds (table has {} columns)",
                 col_idx,
-                self.columns.len()
+                self.column_count()
             )));
         }
 
@@ -705,7 +706,7 @@ impl Table {
     ) -> SqawkResult<Self> {
         // Validate column indices
         for &(idx, _) in column_specs {
-            if idx >= self.columns.len() {
+            if idx >= self.column_count() {
                 return Err(SqawkError::ColumnNotFound(format!(
                     "Column index {} out of bounds",
                     idx
@@ -714,13 +715,14 @@ impl Table {
         }
 
         // Create new column list with aliases where specified
+        let column_names = self.columns();
         let columns: Vec<String> = column_specs
             .iter()
             .map(|&(idx, ref alias)| {
                 if let Some(alias_name) = alias {
                     alias_name.clone()
                 } else {
-                    self.columns[idx].clone()
+                    column_names[idx].clone()
                 }
             })
             .collect();
