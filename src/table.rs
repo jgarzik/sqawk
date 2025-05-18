@@ -999,7 +999,7 @@ impl Table {
         }
 
         // Create a new table with the same structure
-        let mut result = Table::new(&self.name, self.columns.clone(), self.file_path.clone());
+        let mut result = Table::new(&self.name, self.columns().to_vec(), self.file_path.clone());
 
         // Clone the rows for sorting
         let mut sorted_rows = self.rows.clone();
@@ -1051,7 +1051,7 @@ impl Table {
     /// * A new table with the specified limit and offset applied
     pub fn limit(&self, limit: usize, offset: usize) -> SqawkResult<Self> {
         // Create a new table with the same structure
-        let mut result = Table::new(&self.name, self.columns.clone(), self.file_path.clone());
+        let mut result = Table::new(&self.name, self.columns().to_vec(), self.file_path.clone());
 
         // If offset is greater than or equal to the number of rows, return an empty table
         if offset >= self.rows.len() {
