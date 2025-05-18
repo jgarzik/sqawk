@@ -37,6 +37,25 @@ impl ColumnRef {
 
 use crate::error::{SqawkError, SqawkResult};
 
+/// A unique identifier for a row in a table
+///
+/// This is used to track rows for transactions and versioning support.
+/// Each row gets a unique ID when inserted into a table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RowId(pub u64);
+
+impl RowId {
+    /// Create a new RowId with the given ID value
+    pub fn new(id: u64) -> Self {
+        RowId(id)
+    }
+    
+    /// Get the underlying ID value
+    pub fn value(&self) -> u64 {
+        self.0
+    }
+}
+
 /// Represents a value in a table cell
 ///
 /// This enum provides the possible data types for a cell value in a table.
@@ -228,6 +247,12 @@ pub struct Table {
 
     /// Rows of data
     rows: Vec<Row>,
+    
+    /// Row IDs to uniquely identify each row
+    row_ids: Vec<RowId>,
+    
+    /// Next row ID to assign (increments with each row added)
+    next_row_id: u64,
 
     /// File path associated with this table (for loading or saving)
     file_path: Option<PathBuf>,
