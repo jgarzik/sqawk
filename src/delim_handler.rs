@@ -22,6 +22,16 @@ use crate::error::{SqawkError, SqawkResult};
 use crate::table::{Table, Value};
 
 /// Handles loading and saving delimiter-separated value files
+///
+/// This struct provides methods for working with files that use custom delimiters
+/// (like tabs, pipes, or spaces) instead of commas. It's similar to the CsvHandler
+/// but allows for flexibility in the field separator character.
+///
+/// Key capabilities:
+/// - Loading files with custom field separators
+/// - Inferring column names when headers are missing
+/// - Automatic data type detection for values
+/// - Writing tables back to delimited files
 pub struct DelimHandler {}
 
 impl Default for DelimHandler {
@@ -84,6 +94,18 @@ impl DelimHandler {
     /// This method parses files with the specified delimiter and header rows,
     /// creating tables with appropriate column names and automatically inferring
     /// data types for each cell.
+    ///
+    /// # Headers and Column Detection
+    /// The method implements several strategies for determining column names:
+    /// - Uses custom column names if provided
+    /// - Detects header row in the file when present
+    /// - Intelligently determines if first row is data rather than headers (for files like /etc/passwd)
+    /// - Generates alphabetical column names (a, b, c...) when headers are missing
+    ///
+    /// # Special Delimiter Handling
+    /// - Supports single-character delimiters (e.g., comma, pipe, colon)
+    /// - Special handling for tab delimiter with `\t` notation
+    /// - Supports comment lines starting with '#' for system files
     ///
     /// # Arguments
     /// * `file_spec` - File specification in the format `[table_name=]file_path`

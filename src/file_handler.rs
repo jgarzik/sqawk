@@ -72,11 +72,20 @@ impl FileHandler {
         unsafe { &mut *self.database }
     }
 
-    /// Load a file into an in-memory table with explicit return of table name and path
+    /// Load a file into an in-memory table and add it to the database
+    ///
+    /// This method handles the complete file loading process:
+    /// 1. Parses the file specification to extract table name and file path
+    /// 2. Checks if the table already exists in the database
+    /// 3. Automatically detects file format (CSV or delimiter-separated)
+    /// 4. Delegates to the appropriate handler based on format
+    /// 5. Adds the loaded table to the database
+    ///
+    /// If a table with the same name already exists in the database, it will be
+    /// replaced with the newly loaded table.
     ///
     /// # Arguments
     /// * `file_spec` - File specification in format [table_name=]file_path
-    /// * `field_separator` - Optional field separator from command line
     ///
     /// # Returns
     /// * `SqawkResult<Option<(String, String)>>` - Tuple of (table_name, file_path) if successful
@@ -382,13 +391,18 @@ impl FileHandler {
         Ok(())
     }
 
-    /// Detect file format based on extension
+    /// Detect file format based on file extension
+    ///
+    /// This method examines the file extension to determine the appropriate handler:
+    /// - `.csv` files are treated as CSV (comma-separated values)
+    /// - All other extensions are treated as delimiter-separated files
+    /// - Files without extensions default to CSV format
     ///
     /// # Arguments
-    /// * `path` - File path
+    /// * `path` - File path to analyze
     ///
     /// # Returns
-    /// * `FileFormat` - Detected format based on file extension
+    /// * `FileFormat` - Detected format (Csv or Delimited) based on file extension
     fn detect_format(&self, path: &Path) -> FileFormat {
         if let Some(ext) = path.extension() {
             match ext.to_string_lossy().to_lowercase().as_str() {
