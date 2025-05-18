@@ -33,7 +33,7 @@ use crate::error::{SqawkError, SqawkResult};
 use crate::file_handler::FileHandler;
 use crate::string_functions::StringFunction;
 use crate::table::{ColumnDefinition, DataType, SortDirection, Table, Value};
-use crate::vm::executor::VmSqlExecutor;
+use crate::vm::executor::SqlVmExecutor;
 
 /// SQL statement executor
 pub struct SqlExecutor<'a> {
@@ -88,7 +88,7 @@ impl<'a> SqlExecutor<'a> {
         }
         
         // Create a VM executor and delegate the execution
-        let mut vm_executor = VmSqlExecutor::new(
+        let mut vm_executor = SqlVmExecutor::new(
             self.database,
             self.file_handler,
             self.config.write(),
@@ -103,11 +103,66 @@ impl<'a> SqlExecutor<'a> {
         
         Ok(result)
     }
-}
 
-// Implement the SqlExecutorTrait interface for the standard SQL executor
-impl<'a> SqlExecutorTrait for SqlExecutor<'a> {
-    fn execute(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
+    /// Get the number of rows affected by the last executed statement
+    pub fn get_affected_row_count(&self) -> usize {
+        self.affected_row_count
+    }
+    
+    /// Get a list of all table names available in the database
+    pub fn get_table_names(&self) -> Vec<String> {
+        self.database.get_table_names()
+    }
+    
+    /// Get a list of column names for a specific table
+    pub fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<String>> {
+        if let Some(table) = self.database.get_table(table_name) {
+            Ok(table.columns())
+        } else {
+            Err(SqawkError::TableNotFound(table_name.to_string()))
+        }
+    }
+    
+    /// Get a list of column names and types for a specific table
+    pub fn get_table_columns_with_types(&self, table_name: &str) -> SqawkResult<Vec<(String, String)>> {
+        if let Some(table) = self.database.get_table(table_name) {
+            let meta = table.column_metadata();
+            let result: Vec<(String, String)> = meta
+                .iter()
+                .map(|col| (col.name.clone(), col.data_type.to_string()))
+                .collect();
+            
+            Ok(result)
+        } else {
+            Err(SqawkError::TableNotFound(table_name.to_string()))
+        }
+    }
+    
+    /// Enable or disable write mode for saving changes back to files
+    pub fn set_write_mode(&mut self, write_mode: bool) {
+        self.config.set_write(write_mode);
+    }
+    
+    /// Get the current write mode
+    pub fn get_write_mode(&self) -> bool {
+        self.config.write()
+    }
+    
+    /// Save modified tables back to their source files
+    pub fn save_modified_tables(&mut self) -> SqawkResult<usize> {
+        self.file_handler.save_modified_tables()
+    }
+    
+    /// Execute an SQL statement
+    ///
+    /// Delegates to the VM executor if VM mode is enabled
+    pub fn execute(&mut self, sql: &str) -> SqawkResult<Option<Table>> {
+        // If VM mode is enabled, use the VM executor
+        if self.use_vm {
+            return self.execute_vm(sql);
+        }
+        
+        // Otherwise, use the regular execution path
         // For CREATE TABLE statements with LOCATION, we need to use a dialect that
         // properly supports the LOCATION clause - HiveDialect is made for this
         let dialect = HiveDialect {}; // Hive dialect is specifically designed for LOCATION clauses
@@ -131,48 +186,6 @@ impl<'a> SqlExecutorTrait for SqlExecutor<'a> {
         }
 
         Ok(result)
-    }
-    
-    fn get_affected_row_count(&self) -> usize {
-        self.affected_row_count
-    }
-    
-    fn get_table_names(&self) -> Vec<String> {
-        self.database.get_table_names()
-    }
-    
-    fn get_table_columns(&self, table_name: &str) -> SqawkResult<Vec<String>> {
-        if let Some(table) = self.database.get_table(table_name) {
-            Ok(table.columns())
-        } else {
-            Err(SqawkError::TableNotFound(table_name.to_string()))
-        }
-    }
-    
-    fn get_table_columns_with_types(&self, table_name: &str) -> SqawkResult<Vec<(String, String)>> {
-        if let Some(table) = self.database.get_table(table_name) {
-            let meta = table.column_metadata();
-            let result: Vec<(String, String)> = meta
-                .iter()
-                .map(|col| (col.name.clone(), col.data_type.to_string()))
-                .collect();
-            
-            Ok(result)
-        } else {
-            Err(SqawkError::TableNotFound(table_name.to_string()))
-        }
-    }
-    
-    fn set_write_mode(&mut self, write_mode: bool) {
-        self.config.set_write(write_mode);
-    }
-    
-    fn get_write_mode(&self) -> bool {
-        self.config.write()
-    }
-    
-    fn save_modified_tables(&mut self) -> SqawkResult<usize> {
-        self.file_handler.save_modified_tables()
     }
 }
 
