@@ -129,30 +129,7 @@ impl<'a> SqlCompiler<'a> {
         Ok(self.program.clone())
     }
     
-    /// Compile a parsed SQL statement directly into the provided program
-    pub fn compile_statement_into_program(&mut self, stmt: &Statement, program: &mut Program) -> SqawkResult<()> {
-        // Save the existing program
-        self.program = program.clone();
-        
-        // Reset other compilation state
-        self.reset_registers();
-        self.table_map.clear();
-        
-        // Compile the statement
-        self.compile_statement(stmt)?;
-        
-        // Add a halt instruction
-        self.program.add_instruction(super::bytecode::Instruction::new(
-            super::bytecode::OpCode::Halt,
-            0, 0, 0, None, 0,
-            Some("End of program".to_string())
-        ));
-        
-        // Update the provided program with our compiled result
-        *program = self.program.clone();
-        
-        Ok(())
-    }
+    // Removed unused compile_statement_into_program method
     
     /// Compile a single SQL statement
     fn compile_statement(&mut self, statement: &Statement) -> SqawkResult<()> {
@@ -243,7 +220,7 @@ impl<'a> SqlCompiler<'a> {
         
         // Load each column value into registers
         let mut result_regs = Vec::new();
-        for (i, col_idx) in columns.iter().enumerate() {
+        for (_i, col_idx) in columns.iter().enumerate() {
             let value_reg = self.allocate_register();
             result_regs.push(value_reg);
             

@@ -84,14 +84,7 @@ pub struct VmEngine<'a> {
     /// Result rows from SELECT statements
     results: Vec<Vec<Value>>,
     
-    /// Column names for the result set
-    column_names: Vec<String>,
-    
-    /// Tables modified during execution
-    modified_tables: Vec<String>,
-    
-    /// Number of rows affected by non-SELECT statements
-    affected_rows: usize,
+    // Removed unused fields for column_names, modified_tables, and affected_rows
     
     /// Whether the engine is in verbose mode
     verbose: bool,
@@ -107,9 +100,6 @@ impl<'a> VmEngine<'a> {
             registers: Vec::new(),
             cursors: HashMap::new(),
             results: Vec::new(),
-            column_names: Vec::new(),
-            modified_tables: Vec::new(),
-            affected_rows: 0,
             verbose,
         }
     }

@@ -15,12 +15,10 @@ use crate::table::Value;
 pub enum OpCode {
     // Program flow control
     Init,           // Initialize VM
-    Goto,           // Jump to address
     Halt,           // Stop execution
     
     // Table operations
     OpenRead,       // Open a table for reading
-    OpenWrite,      // Open a table for writing
     Close,          // Close a cursor
     
     // Cursor operations
@@ -29,14 +27,7 @@ pub enum OpCode {
     Column,         // Read column value into register
     
     // Data manipulation
-    Integer,        // Load integer constant
-    String,         // Load string constant
-    Null,           // Load NULL value
     ResultRow,      // Return result row to client
-    
-    // Simple SELECT operations
-    SeekRowid,      // Position cursor on specific rowid
-    NotFound,       // Jump if cursor doesn't point to valid row
     
     // Utility opcodes
     Noop,           // No operation
@@ -60,8 +51,7 @@ pub struct Instruction {
     /// P4 parameter (typically a string parameter)
     pub p4: Option<String>,
     
-    /// P5 parameter (flags and options)
-    pub p5: i64,
+    // Removed unused p5 parameter
     
     /// Comment describing the instruction
     pub comment: Option<String>,
@@ -75,7 +65,7 @@ impl Instruction {
         p2: i64,
         p3: i64,
         p4: Option<String>,
-        p5: i64,
+        _p5: i64, // Keep parameter for compatibility but don't use it
         comment: Option<String>,
     ) -> Self {
         Self {
@@ -84,7 +74,6 @@ impl Instruction {
             p2,
             p3,
             p4,
-            p5,
             comment,
         }
     }
@@ -172,28 +161,6 @@ pub enum Register {
     Boolean(bool),
     /// Null value
     Null,
-    /// Table cursor index
-    Cursor(usize),
-    /// Row of values (for result rows)
-    Row(Vec<Value>),
-}
-
-impl Register {
-    /// Convert a register value to a string representation
-    pub fn to_string(&self) -> String {
-        match self {
-            Register::Integer(i) => i.to_string(),
-            Register::String(s) => s.clone(),
-            Register::Float(f) => f.to_string(),
-            Register::Boolean(b) => b.to_string(),
-            Register::Null => "NULL".to_string(),
-            Register::Cursor(c) => format!("cursor:{}", c),
-            Register::Row(r) => {
-                let values: Vec<String> = r.iter().map(|v| format!("{}", v)).collect();
-                format!("row:[{}]", values.join(", "))
-            }
-        }
-    }
 }
 
 impl From<Value> for Register {
@@ -216,8 +183,6 @@ impl From<Register> for Value {
             Register::String(s) => Value::String(s),
             Register::Boolean(b) => Value::Boolean(b),
             Register::Null => Value::Null,
-            Register::Cursor(_) => Value::Null, // Cursors don't convert to values
-            Register::Row(_) => Value::Null,    // Rows don't convert to scalar values
         }
     }
 }
