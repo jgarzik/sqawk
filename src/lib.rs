@@ -5,6 +5,7 @@
 
 pub mod aggregate;
 pub mod cli;
+pub mod config;
 pub mod csv_handler;
 pub mod database;
 pub mod delim_handler;

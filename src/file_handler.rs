@@ -242,8 +242,8 @@ impl FileHandler {
     /// # Returns
     /// * `SqawkResult<()>` - Result of the operation
     pub fn add_table(&mut self, name: String, mut table: Table) -> SqawkResult<()> {
-        // Set table verbose flag from file handler
-        table.set_verbose(self.verbose);
+        // Set table verbose flag from configuration
+        table.set_verbose(self.config.verbose());
         
         // Check if the table has a file path before adding and log information
         if let Some(path) = table.file_path() {
