@@ -21,7 +21,7 @@ fn test_select_literal() {
     use sqlparser::ast::{Expr, Query, Select, SelectItem, SetExpr, Value as SqlValue};
     
     // Create a simple "SELECT 1 AS value" query
-    let literal_value = SqlValue::Number("1".to_string());
+    let literal_value = SqlValue::Number("1".to_string(), false);
     let expr = Expr::Value(literal_value);
     let alias = sqlparser::ast::Ident::new("value");
     let select_item = SelectItem::ExprWithAlias {
@@ -30,7 +30,7 @@ fn test_select_literal() {
     };
     
     let select = Select {
-        distinct: false,
+        distinct: None,
         top: None,
         projection: vec![select_item],
         into: None,
@@ -102,7 +102,7 @@ fn test_vm_bytecode_generation() {
     use sqlparser::ast::{Expr, Query, Select, SelectItem, SetExpr, Value as SqlValue};
     
     // Create a simple "SELECT 1 AS value" query
-    let literal_value = SqlValue::Number("1".to_string());
+    let literal_value = SqlValue::Number("1".to_string(), false);
     let expr = Expr::Value(literal_value);
     let alias = sqlparser::ast::Ident::new("value");
     let select_item = SelectItem::ExprWithAlias {
@@ -111,7 +111,7 @@ fn test_vm_bytecode_generation() {
     };
     
     let select = Select {
-        distinct: false,
+        distinct: None,
         top: None,
         projection: vec![select_item],
         into: None,
