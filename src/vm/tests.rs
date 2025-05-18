@@ -964,7 +964,7 @@ mod comparison_tests {
             // Check the result value
             match &table.rows()[0][0] {
                 Value::Integer(val) => assert_eq!(
-                    val, expected, 
+                    *val, expected as i64, 
                     "Expected {} < {} to be {}, got {}", 
                     val1, val2, expected, val
                 ),

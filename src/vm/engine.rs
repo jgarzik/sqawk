@@ -672,55 +672,10 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Continue)
             }
             
-            OpCode::JumpIfTrue => {
-                // Jump to address P2 if register P1 contains a "truthy" value
-                // A value is considered true if it's non-zero, non-empty string, etc.
-                
-                // Get the value to test
-                let value = self.get_register(inst.p1 as usize)?;
-                
-                // Determine if value is "truthy"
-                let is_true = match value {
-                    Register::Integer(i) => i != 0,
-                    Register::Float(f) => f != 0.0,
-                    Register::String(s) => !s.is_empty(),
-                    Register::Boolean(b) => b,
-                    Register::Null => false,
-                };
-                
-                // Jump if condition is true
-                if is_true {
-                    // Set program counter to destination address
-                    self.pc = inst.p2 as usize;
-                }
-                
-                Ok(ExecuteResult::Continue)
-            }
-            
-            OpCode::JumpIfFalse => {
-                // Jump to address P2 if register P1 contains a "falsy" value
-                // A value is considered false if it's zero, empty string, etc.
-                
-                // Get the value to test
-                let value = self.get_register(inst.p1 as usize)?;
-                
-                // Determine if value is "falsy"
-                let is_false = match value {
-                    Register::Integer(i) => i == 0,
-                    Register::Float(f) => f == 0.0,
-                    Register::String(s) => s.is_empty(),
-                    Register::Boolean(b) => !b,
-                    Register::Null => true,
-                };
-                
-                // Jump if condition is false
-                if is_false {
-                    // Set program counter to destination address
-                    self.pc = inst.p2 as usize;
-                }
-                
-                Ok(ExecuteResult::Continue)
-            }
+            // JumpIfTrue and JumpIfFalse have been replaced by SQLite-style opcodes:
+            // - IfZ (jump if zero/false)
+            // - IfPos (jump if positive)
+            // - IfNeg (jump if negative)
             
             OpCode::Noop => {
                 // No operation
