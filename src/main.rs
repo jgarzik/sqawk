@@ -76,6 +76,7 @@ fn main() -> Result<()> {
         args.field_separator.clone(), // Field separator for tables
         args.tabledef.clone(),        // Table column definitions
         args.write,                   // Whether to write changes to files
+        args.vm,                      // Whether to use VM-based execution engine
     );
 
     // Configure diagnostics output if verbose mode is enabled (-v flag)
@@ -161,11 +162,33 @@ fn main() -> Result<()> {
 
     // Check if interactive mode is requested
     if args.interactive {
-        // Start REPL (Read-Eval-Print Loop) for interactive SQL entry
-        let mut repl = Repl::new(sql_executor, &config);
-        match repl.run() {
-            Ok(_) => return Ok(()),
-            Err(e) => return Err(anyhow::anyhow!("Failed to run interactive mode: {}", e)),
+        if config.use_vm() {
+            // Use the VM-based SQL executor for the REPL
+            if config.verbose() {
+                println!("Using VM-based SQL execution engine for REPL");
+            }
+            
+            // Create VM-based SQL executor for REPL
+            let vm_sql_executor = vm::sql_executor::VmSqlExecutor::new(&mut database, &mut file_handler, &config);
+            
+            // Start REPL with VM-based executor
+            let mut repl = Repl::new(vm_sql_executor, &config);
+            match repl.run() {
+                Ok(_) => return Ok(()),
+                Err(e) => return Err(anyhow::anyhow!("Failed to run interactive mode with VM: {}", e)),
+            }
+        } else {
+            // Use the original SQL executor for the REPL
+            if config.verbose() {
+                println!("Using regular SQL execution engine for REPL");
+            }
+            
+            // Start REPL with original executor
+            let mut repl = Repl::new(sql_executor, &config);
+            match repl.run() {
+                Ok(_) => return Ok(()),
+                Err(e) => return Err(anyhow::anyhow!("Failed to run interactive mode: {}", e)),
+            }
         }
     }
 

@@ -8,3 +8,4 @@
 //! For more information on this approach, see: https://www.sqlite.org/opcode.html
 
 pub mod executor;
+pub mod sql_executor;
