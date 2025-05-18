@@ -15,14 +15,12 @@ use std::fmt;
 pub enum OpCode {
     // Program flow control
     Init, // Initialize VM
-    #[allow(dead_code)]
-    Goto, // Jump to address (reserved for future use)
+    Goto, // Jump to address
     Halt, // Stop execution
 
     // Table operations
     OpenRead, // Open a table for reading
-    #[allow(dead_code)]
-    OpenWrite, // Open a table for writing (reserved for future use)
+    OpenWrite, // Open a table for writing
     Close,    // Close a cursor
 
     // Cursor operations
@@ -35,6 +33,13 @@ pub enum OpCode {
     String,    // Load string constant
     Null,      // Load NULL value
     ResultRow, // Return result row to client
+
+    // Transaction operations
+    Begin,     // Begin a transaction
+    Commit,    // Commit a transaction
+    Rollback,  // Rollback a transaction
+    SavePoint, // Create a savepoint in the transaction
+    Release,   // Release a savepoint
 
     // Utility opcodes
     Noop, // No operation

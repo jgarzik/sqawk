@@ -347,6 +347,8 @@ impl Table {
             cols,
             column_map,
             rows: Vec::new(),
+            row_ids: Vec::new(),
+            next_row_id: 1, // Start with 1 as the first row ID
             file_path,
             modified: false,
             delimiter: ",".to_string(), // Default to comma delimiter
@@ -480,7 +482,12 @@ impl Table {
             )));
         }
 
+        // Add the row with a new unique row ID
+        let row_id = RowId::new(self.next_row_id);
+        self.next_row_id += 1;
+        
         self.rows.push(row);
+        self.row_ids.push(row_id);
         self.modified = true;
         Ok(())
     }
@@ -498,9 +505,83 @@ impl Table {
     /// * `Ok(())` always succeeds
     pub fn add_row_recovery(&mut self, row: Row) -> SqawkResult<()> {
         // No validation, assumes the row has been fixed already
+        // Still assign a unique row ID
+        let row_id = RowId::new(self.next_row_id);
+        self.next_row_id += 1;
+        
         self.rows.push(row);
+        self.row_ids.push(row_id);
         self.modified = true;
         Ok(())
+    }
+    
+    /// Get a row by its unique row ID
+    ///
+    /// # Arguments
+    /// * `row_id` - The unique identifier for the row
+    ///
+    /// # Returns
+    /// * `Some(&Row)` if a row with the given ID exists
+    /// * `None` if no row with that ID exists
+    pub fn get_row_by_id(&self, row_id: RowId) -> Option<&Row> {
+        // Find the index of the row with this ID
+        let index = self.row_ids.iter().position(|id| *id == row_id)?;
+        self.rows.get(index)
+    }
+    
+    /// Get a mutable reference to a row by its unique row ID
+    ///
+    /// # Arguments
+    /// * `row_id` - The unique identifier for the row
+    ///
+    /// # Returns
+    /// * `Some(&mut Row)` if a row with the given ID exists
+    /// * `None` if no row with that ID exists
+    pub fn get_row_by_id_mut(&mut self, row_id: RowId) -> Option<&mut Row> {
+        // Find the index of the row with this ID
+        let index = self.row_ids.iter().position(|id| *id == row_id)?;
+        self.rows.get_mut(index)
+    }
+    
+    /// Get the row ID for a row at a specific index
+    ///
+    /// # Arguments
+    /// * `index` - The index of the row
+    ///
+    /// # Returns
+    /// * `Some(RowId)` if the index is valid
+    /// * `None` if the index is out of bounds
+    pub fn get_row_id_at_index(&self, index: usize) -> Option<RowId> {
+        self.row_ids.get(index).copied()
+    }
+    
+    /// Remove a row by its unique row ID
+    ///
+    /// # Arguments
+    /// * `row_id` - The unique identifier for the row to remove
+    ///
+    /// # Returns
+    /// * `true` if a row with the given ID was found and removed
+    /// * `false` if no row with that ID exists
+    pub fn remove_row_by_id(&mut self, row_id: RowId) -> bool {
+        if let Some(index) = self.row_ids.iter().position(|id| *id == row_id) {
+            self.rows.remove(index);
+            self.row_ids.remove(index);
+            self.modified = true;
+            true
+        } else {
+            false
+        }
+    }
+    
+    /// Get all row IDs in this table
+    ///
+    /// This is useful for iterating over all rows by ID.
+    ///
+    /// # Returns
+    /// * A slice containing all row IDs in the table
+    pub fn row_ids(&self) -> &[RowId] {
+        &self.row_ids
     }
 
     /// Get the file path associated with this table
