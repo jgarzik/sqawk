@@ -761,19 +761,20 @@ impl<'a> Repl<'a> {
     fn toggle_write(&mut self, arg: Option<&str>) -> Result<()> {
         match arg {
             Some("on") => {
-                self.write = true;
+                self.config.set_write_changes(true);
                 println!("Write mode enabled - changes will be saved to files");
             }
             Some("off") => {
-                self.write = false;
+                self.config.set_write_changes(false);
                 println!("Write mode disabled - changes will not be saved to files");
             }
             _ => {
                 // Toggle current state
-                self.write = !self.write;
+                let current = self.config.write_changes();
+                self.config.set_write_changes(!current);
                 println!(
                     "Write mode {}",
-                    if self.write { "enabled" } else { "disabled" }
+                    if self.config.write_changes() { "enabled" } else { "disabled" }
                 );
             }
         }
@@ -790,12 +791,13 @@ impl<'a> Repl<'a> {
             _ => {
                 // Show general settings
                 println!("Sqawk Settings:");
-                println!("  Write Mode:   {}", if self.write { "ON" } else { "OFF" });
+                println!("  Write Mode:   {}", if self.config.write_changes() { "ON" } else { "OFF" });
                 println!("  Changes Display: {}", if self.show_changes { "ON" } else { "OFF" });
                 println!("  Statistics:  {}", if self.show_stats { "ON" } else { "OFF" });
+                println!("  Verbose:     {}", if self.config.verbose() { "ON" } else { "OFF" });
                 
                 // Show field separator if defined
-                if let Some(sep) = &self._field_separator {
+                if let Some(sep) = self.config.field_separator() {
                     println!("  Field Separator: '{}'", sep);
                 } else {
                     println!("  Field Separator: Default (auto-detect)");

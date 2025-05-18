@@ -129,7 +129,7 @@ fn main() -> Result<()> {
     // This allows operations like: UPDATE -> DELETE -> SELECT to see the effects
     for sql in &args.sql {
         // Log the SQL being executed in verbose mode
-        if args.verbose {
+        if config.verbose() {
             println!("Executing SQL: {sql}");
         }
 
@@ -143,7 +143,7 @@ fn main() -> Result<()> {
         match result {
             // For SELECT queries that return data
             Some(table) => {
-                if args.verbose {
+                if config.verbose() {
                     let row_count = table.row_count();
                     println!("Query returned {row_count} rows");
                 }
@@ -152,22 +152,22 @@ fn main() -> Result<()> {
             }
             // For statements that don't return data (UPDATE, DELETE, INSERT)
             None => {
-                if args.verbose {
+                if config.verbose() {
                     println!("Query executed successfully (no results to display)");
                 }
             }
         }
     }
 
-    // Step 5: Handle file writeback based on the --write flag
+    // Step 5: Handle file writeback based on the configuration
     // By default, Sqawk operates in read-only mode unless explicitly told to write
-    if args.write {
+    if config.write_changes() {
         // Only tables that were actually modified (by UPDATE, INSERT, DELETE)
         // will be written back to their source files
         sql_executor
             .save_modified_tables()
             .context("Failed to save modified tables")?;
-    } else if args.verbose {
+    } else if config.verbose() {
         // In verbose mode, remind the user that changes weren't saved
         println!("Changes not saved: use --write to save changes to files");
     }
