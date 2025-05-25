@@ -1408,4 +1408,106 @@ mod comparison_tests {
             }
         }
     }
+    
+    /// Test Column opcode with simple cursor operations
+    #[test]
+    fn test_column_opcode_basic() {
+        use crate::database::Database;
+        use crate::table::Table;
+        
+        // Create a simple test database
+        let mut database = Database::new();
+        let mut test_table = Table::new("simple_test", vec![], None);
+        
+        // Add columns: id, value
+        test_table.add_column("id".to_string(), "INTEGER".to_string());
+        test_table.add_column("value".to_string(), "INTEGER".to_string());
+        
+        // Add one test row
+        test_table.add_row(vec![
+            crate::table::Value::Integer(1),
+            crate::table::Value::Integer(42),
+        ]).expect("Failed to add test row");
+        
+        database.add_table("simple_test".to_string(), test_table).expect("Failed to add table");
+        
+        // Simple test: Read the value column (index 1)
+        let instructions = vec![
+            create_instruction(OpCode::Init, 0, 1, 0, None, Some("Initialize".to_string())),
+            create_instruction(OpCode::OpenRead, 0, 0, 0, Some("simple_test".to_string()), Some("Open table".to_string())),
+            create_instruction(OpCode::Rewind, 0, 5, 0, None, Some("Rewind".to_string())),
+            create_instruction(OpCode::Column, 0, 1, 1, None, Some("Read value column".to_string())),
+            create_instruction(OpCode::ResultRow, 1, 1, 0, None, Some("Output value".to_string())),
+            create_instruction(OpCode::Halt, 0, 0, 0, None, Some("Stop".to_string())),
+        ];
+        
+        let result = execute_bytecode_program(instructions, &database)
+            .expect("Failed to execute column test");
+        
+        // Verify we got the expected value
+        assert!(result.is_some(), "Expected a result table");
+        let table = result.unwrap();
+        assert_eq!(table.row_count(), 1, "Expected 1 row");
+        
+        match &table.rows()[0][0] {
+            crate::table::Value::Integer(value) => {
+                assert_eq!(*value, 42, "Expected value 42, got {}", value);
+            }
+            other => panic!("Expected Integer value, got {:?}", other),
+        }
+    }
+    
+    /// Test comparison operations with Column data
+    #[test]
+    fn test_column_with_comparison() {
+        use crate::database::Database;
+        use crate::table::Table;
+        
+        // Create test database with two values: one matches, one doesn't
+        let mut database = Database::new();
+        let mut test_table = Table::new("comparison_test", vec![], None);
+        
+        test_table.add_column("id".to_string(), "INTEGER".to_string());
+        test_table.add_column("score".to_string(), "INTEGER".to_string());
+        
+        // Add two rows: score 25 (should not match > 30), score 35 (should match > 30)
+        test_table.add_row(vec![
+            crate::table::Value::Integer(1),
+            crate::table::Value::Integer(25),
+        ]).expect("Failed to add test row");
+        
+        test_table.add_row(vec![
+            crate::table::Value::Integer(2),
+            crate::table::Value::Integer(35),
+        ]).expect("Failed to add test row");
+        
+        database.add_table("comparison_test".to_string(), test_table).expect("Failed to add table");
+        
+        // Test first row (score = 25, should fail > 30 test)
+        let instructions_row1 = vec![
+            create_instruction(OpCode::Init, 0, 1, 0, None, Some("Initialize".to_string())),
+            create_instruction(OpCode::OpenRead, 0, 0, 0, Some("comparison_test".to_string()), Some("Open table".to_string())),
+            create_instruction(OpCode::Rewind, 0, 7, 0, None, Some("Rewind".to_string())),
+            create_instruction(OpCode::Column, 0, 1, 1, None, Some("Read score".to_string())),
+            create_instruction(OpCode::Integer, 30, 2, 0, None, Some("Load 30".to_string())),
+            create_instruction(OpCode::Gt, 1, 2, 3, None, Some("Test score > 30".to_string())),
+            create_instruction(OpCode::ResultRow, 3, 1, 0, None, Some("Output comparison result".to_string())),
+            create_instruction(OpCode::Halt, 0, 0, 0, None, Some("Stop".to_string())),
+        ];
+        
+        let result = execute_bytecode_program(instructions_row1, &database)
+            .expect("Failed to execute comparison test");
+        
+        assert!(result.is_some(), "Expected a result");
+        let table = result.unwrap();
+        assert_eq!(table.row_count(), 1, "Expected 1 result row");
+        
+        // Should be 0 (false) since 25 > 30 is false
+        match &table.rows()[0][0] {
+            crate::table::Value::Integer(result_val) => {
+                assert_eq!(*result_val, 0, "Expected comparison result 0 (false), got {}", result_val);
+            }
+            other => panic!("Expected Integer comparison result, got {:?}", other),
+        }
+    }
 }
