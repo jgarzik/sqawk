@@ -1190,4 +1190,222 @@ mod comparison_tests {
             }
         }
     }
+    
+    /// Test the IfPos conditional jump opcode
+    #[test]
+    fn test_if_pos_opcode() {
+        let database = Database::new();
+        
+        // Test cases: [(register_value, expected_result_after_jump)]
+        let test_cases = vec![
+            (5, 777),   // 5 > 0 = true, should jump to 777
+            (0, 888),   // 0 = 0, should NOT jump, continue to 888
+            (-3, 888),  // -3 < 0, should NOT jump, continue to 888
+        ];
+        
+        for (reg_value, expected) in test_cases {
+            let instructions = vec![
+                // Initialize VM
+                create_instruction(
+                    OpCode::Init,
+                    0,
+                    1,
+                    0,
+                    None,
+                    Some("Initialize VM".to_string()),
+                ),
+                // Load test value into register 1
+                create_instruction(
+                    OpCode::Integer,
+                    reg_value,
+                    1,
+                    0,
+                    None,
+                    Some(format!("Load test value {}", reg_value)),
+                ),
+                // Jump to instruction 5 if reg1 is positive (> 0)
+                create_instruction(
+                    OpCode::IfPos,
+                    1,
+                    5,
+                    0,
+                    None,
+                    Some("Jump if positive".to_string()),
+                ),
+                // Not jumped path - load 888 into register 2
+                create_instruction(
+                    OpCode::Integer,
+                    888,
+                    2,
+                    0,
+                    None,
+                    Some("Load not-jumped value (888)".to_string()),
+                ),
+                // Jump to end
+                create_instruction(
+                    OpCode::Goto,
+                    0,
+                    6,
+                    0,
+                    None,
+                    Some("Jump to end".to_string()),
+                ),
+                // Jumped path - load 777 into register 2
+                create_instruction(
+                    OpCode::Integer,
+                    777,
+                    2,
+                    0,
+                    None,
+                    Some("Load jumped value (777)".to_string()),
+                ),
+                // Return result from register 2
+                create_instruction(
+                    OpCode::ResultRow,
+                    2,
+                    1,
+                    0,
+                    None,
+                    Some("Return result".to_string()),
+                ),
+                // Halt execution
+                create_instruction(
+                    OpCode::Halt,
+                    0,
+                    0,
+                    0,
+                    None,
+                    Some("Stop execution".to_string()),
+                ),
+            ];
+            
+            // Execute the program
+            let result = execute_bytecode_program(instructions, &database)
+                .expect("Failed to execute program with IfPos");
+            
+            // Verify the result
+            assert!(result.is_some(), "Expected a result table");
+            let table = result.unwrap();
+            assert_eq!(table.row_count(), 1, "Expected 1 row");
+            
+            // Check the conditional jump outcome
+            match &table.rows()[0][0] {
+                Value::Integer(val) => assert_eq!(
+                    *val, expected as i64,
+                    "Expected {} for IfPos test with value {}, got {}",
+                    expected, reg_value, val
+                ),
+                other => panic!("Expected Integer type, got {:?}", other),
+            }
+        }
+    }
+    
+    /// Test the IfNeg conditional jump opcode
+    #[test]
+    fn test_if_neg_opcode() {
+        let database = Database::new();
+        
+        // Test cases: [(register_value, expected_result_after_jump)]
+        let test_cases = vec![
+            (-5, 333),  // -5 < 0 = true, should jump to 333
+            (0, 444),   // 0 = 0, should NOT jump, continue to 444
+            (3, 444),   // 3 > 0, should NOT jump, continue to 444
+        ];
+        
+        for (reg_value, expected) in test_cases {
+            let instructions = vec![
+                // Initialize VM
+                create_instruction(
+                    OpCode::Init,
+                    0,
+                    1,
+                    0,
+                    None,
+                    Some("Initialize VM".to_string()),
+                ),
+                // Load test value into register 1
+                create_instruction(
+                    OpCode::Integer,
+                    reg_value,
+                    1,
+                    0,
+                    None,
+                    Some(format!("Load test value {}", reg_value)),
+                ),
+                // Jump to instruction 5 if reg1 is negative (< 0)
+                create_instruction(
+                    OpCode::IfNeg,
+                    1,
+                    5,
+                    0,
+                    None,
+                    Some("Jump if negative".to_string()),
+                ),
+                // Not jumped path - load 444 into register 2
+                create_instruction(
+                    OpCode::Integer,
+                    444,
+                    2,
+                    0,
+                    None,
+                    Some("Load not-jumped value (444)".to_string()),
+                ),
+                // Jump to end
+                create_instruction(
+                    OpCode::Goto,
+                    0,
+                    6,
+                    0,
+                    None,
+                    Some("Jump to end".to_string()),
+                ),
+                // Jumped path - load 333 into register 2
+                create_instruction(
+                    OpCode::Integer,
+                    333,
+                    2,
+                    0,
+                    None,
+                    Some("Load jumped value (333)".to_string()),
+                ),
+                // Return result from register 2
+                create_instruction(
+                    OpCode::ResultRow,
+                    2,
+                    1,
+                    0,
+                    None,
+                    Some("Return result".to_string()),
+                ),
+                // Halt execution
+                create_instruction(
+                    OpCode::Halt,
+                    0,
+                    0,
+                    0,
+                    None,
+                    Some("Stop execution".to_string()),
+                ),
+            ];
+            
+            // Execute the program
+            let result = execute_bytecode_program(instructions, &database)
+                .expect("Failed to execute program with IfNeg");
+            
+            // Verify the result
+            assert!(result.is_some(), "Expected a result table");
+            let table = result.unwrap();
+            assert_eq!(table.row_count(), 1, "Expected 1 row");
+            
+            // Check the conditional jump outcome
+            match &table.rows()[0][0] {
+                Value::Integer(val) => assert_eq!(
+                    *val, expected as i64,
+                    "Expected {} for IfNeg test with value {}, got {}",
+                    expected, reg_value, val
+                ),
+                other => panic!("Expected Integer type, got {:?}", other),
+            }
+        }
+    }
 }
