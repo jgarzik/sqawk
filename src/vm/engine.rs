@@ -646,6 +646,126 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Continue)
             }
             
+            OpCode::Gt => {
+                // Greater than comparison (P1 > P2, result in P3)
+                // P1 and P2 are register indices to compare
+                // P3 is the destination register for the result (1 for true, 0 for false)
+                
+                // Get values from registers P1 and P2
+                let reg1 = self.get_register(inst.p1 as usize)?;
+                let reg2 = self.get_register(inst.p2 as usize)?;
+                
+                // Perform comparison based on register types
+                let result = match (&reg1, &reg2) {
+                    (Register::Integer(a), Register::Integer(b)) => a > b,
+                    (Register::Float(a), Register::Float(b)) => a > b,
+                    (Register::String(a), Register::String(b)) => a > b,
+                    // For mixed types, try to convert and compare
+                    (Register::Integer(a), Register::Float(b)) => (*a as f64) > *b,
+                    (Register::Float(a), Register::Integer(b)) => *a > (*b as f64),
+                    // Other combinations are not comparable
+                    _ => return Err(SqawkError::VmError(
+                        format!("Cannot compare incompatible types: {:?} and {:?}", reg1, reg2)
+                    )),
+                };
+                
+                // Store result in destination register (1 for true, 0 for false)
+                let result_value = if result { Register::Integer(1) } else { Register::Integer(0) };
+                self.set_register(inst.p3 as usize, result_value)?;
+                
+                Ok(ExecuteResult::Continue)
+            }
+            
+            OpCode::Ge => {
+                // Greater than or equal comparison (P1 >= P2, result in P3)
+                // P1 and P2 are register indices to compare
+                // P3 is the destination register for the result (1 for true, 0 for false)
+                
+                // Get values from registers P1 and P2
+                let reg1 = self.get_register(inst.p1 as usize)?;
+                let reg2 = self.get_register(inst.p2 as usize)?;
+                
+                // Perform comparison based on register types
+                let result = match (&reg1, &reg2) {
+                    (Register::Integer(a), Register::Integer(b)) => a >= b,
+                    (Register::Float(a), Register::Float(b)) => a >= b,
+                    (Register::String(a), Register::String(b)) => a >= b,
+                    // For mixed types, try to convert and compare
+                    (Register::Integer(a), Register::Float(b)) => (*a as f64) >= *b,
+                    (Register::Float(a), Register::Integer(b)) => *a >= (*b as f64),
+                    // Other combinations are not comparable
+                    _ => return Err(SqawkError::VmError(
+                        format!("Cannot compare incompatible types: {:?} and {:?}", reg1, reg2)
+                    )),
+                };
+                
+                // Store result in destination register (1 for true, 0 for false)
+                let result_value = if result { Register::Integer(1) } else { Register::Integer(0) };
+                self.set_register(inst.p3 as usize, result_value)?;
+                
+                Ok(ExecuteResult::Continue)
+            }
+            
+            OpCode::Eq => {
+                // Equal comparison (P1 == P2, result in P3)
+                // P1 and P2 are register indices to compare
+                // P3 is the destination register for the result (1 for true, 0 for false)
+                
+                // Get values from registers P1 and P2
+                let reg1 = self.get_register(inst.p1 as usize)?;
+                let reg2 = self.get_register(inst.p2 as usize)?;
+                
+                // Perform comparison based on register types
+                let result = match (&reg1, &reg2) {
+                    (Register::Integer(a), Register::Integer(b)) => a == b,
+                    (Register::Float(a), Register::Float(b)) => a == b,
+                    (Register::String(a), Register::String(b)) => a == b,
+                    (Register::Boolean(a), Register::Boolean(b)) => a == b,
+                    (Register::Null, Register::Null) => true,
+                    // For mixed types, try to convert and compare
+                    (Register::Integer(a), Register::Float(b)) => (*a as f64) == *b,
+                    (Register::Float(a), Register::Integer(b)) => *a == (*b as f64),
+                    // Different types are not equal (except for numeric conversions above)
+                    _ => false,
+                };
+                
+                // Store result in destination register (1 for true, 0 for false)
+                let result_value = if result { Register::Integer(1) } else { Register::Integer(0) };
+                self.set_register(inst.p3 as usize, result_value)?;
+                
+                Ok(ExecuteResult::Continue)
+            }
+            
+            OpCode::Ne => {
+                // Not equal comparison (P1 != P2, result in P3)
+                // P1 and P2 are register indices to compare
+                // P3 is the destination register for the result (1 for true, 0 for false)
+                
+                // Get values from registers P1 and P2
+                let reg1 = self.get_register(inst.p1 as usize)?;
+                let reg2 = self.get_register(inst.p2 as usize)?;
+                
+                // Perform comparison based on register types (opposite of Eq)
+                let result = match (&reg1, &reg2) {
+                    (Register::Integer(a), Register::Integer(b)) => a != b,
+                    (Register::Float(a), Register::Float(b)) => a != b,
+                    (Register::String(a), Register::String(b)) => a != b,
+                    (Register::Boolean(a), Register::Boolean(b)) => a != b,
+                    (Register::Null, Register::Null) => false,
+                    // For mixed types, try to convert and compare
+                    (Register::Integer(a), Register::Float(b)) => (*a as f64) != *b,
+                    (Register::Float(a), Register::Integer(b)) => *a != (*b as f64),
+                    // Different types are not equal (so they are "not equal" = true)
+                    _ => true,
+                };
+                
+                // Store result in destination register (1 for true, 0 for false)
+                let result_value = if result { Register::Integer(1) } else { Register::Integer(0) };
+                self.set_register(inst.p3 as usize, result_value)?;
+                
+                Ok(ExecuteResult::Continue)
+            }
+            
             OpCode::Le => {
                 // Less than or equal comparison (P1 <= P2, result in P3)
                 // P1 and P2 are register indices to compare
