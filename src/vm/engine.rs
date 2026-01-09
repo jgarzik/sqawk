@@ -634,7 +634,12 @@ impl<'a> VmEngine<'a> {
                         matches!(m, TableModification::CreateTable { table_name: tn, .. } if tn == &table_name)
                     });
 
-                    if let Some(TableModification::CreateTable { columns, table_name: pending_name, .. }) = pending_create.cloned() {
+                    if let Some(TableModification::CreateTable {
+                        columns,
+                        table_name: pending_name,
+                        ..
+                    }) = pending_create.cloned()
+                    {
                         // Create a named ephemeral cursor with the schema from pending CreateTable
                         let col_count = columns.len();
                         let cursor = Cursor::named_ephemeral(col_count, pending_name);
@@ -906,7 +911,8 @@ impl<'a> VmEngine<'a> {
 
                 if parts.len() < 3 {
                     return Err(SqawkError::VmError(
-                        "AlterTableAdd: invalid specification, expected table:column:type".to_string(),
+                        "AlterTableAdd: invalid specification, expected table:column:type"
+                            .to_string(),
                     ));
                 }
 

@@ -32,11 +32,7 @@ fn test_drop_table_basic() -> Result<(), Box<dyn std::error::Error>> {
 fn test_drop_table_nonexistent() -> Result<(), Box<dyn std::error::Error>> {
     // Test that DROP TABLE fails for non-existent table
     let temp_dir = create_temp_dir()?;
-    let file_path = create_custom_csv(
-        temp_dir.path(),
-        "people.csv",
-        "id,name,age\n1,Alice,32\n",
-    )?;
+    let file_path = create_custom_csv(temp_dir.path(), "people.csv", "id,name,age\n1,Alice,32\n")?;
 
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
@@ -116,7 +112,9 @@ fn test_truncate_table() -> Result<(), Box<dyn std::error::Error>> {
         .arg("SELECT COUNT(*) as cnt FROM people")
         .arg(file_path.to_str().unwrap());
 
-    cmd.assert().success().stdout(predicates::str::contains("0"));
+    cmd.assert()
+        .success()
+        .stdout(predicates::str::contains("0"));
 
     Ok(())
 }
@@ -259,7 +257,9 @@ fn test_create_table_as_select_with_filter() -> Result<(), Box<dyn std::error::E
         .arg(file_path.to_str().unwrap());
 
     // Should have Alice (32) and Charlie (35) = 2 rows
-    cmd.assert().success().stdout(predicates::str::contains("2"));
+    cmd.assert()
+        .success()
+        .stdout(predicates::str::contains("2"));
 
     Ok(())
 }
@@ -268,11 +268,7 @@ fn test_create_table_as_select_with_filter() -> Result<(), Box<dyn std::error::E
 fn test_create_table_verbose() -> Result<(), Box<dyn std::error::Error>> {
     // Test CREATE TABLE AS SELECT in verbose mode
     let temp_dir = create_temp_dir()?;
-    let file_path = create_custom_csv(
-        temp_dir.path(),
-        "people.csv",
-        "id,name\n1,Alice\n2,Bob\n",
-    )?;
+    let file_path = create_custom_csv(temp_dir.path(), "people.csv", "id,name\n1,Alice\n2,Bob\n")?;
 
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")

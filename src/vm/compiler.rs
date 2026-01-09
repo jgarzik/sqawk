@@ -212,9 +212,9 @@ impl<'a> SqlCompiler<'a> {
                 if_exists,
                 ..
             } => self.compile_drop(object_type, names, *if_exists),
-            Statement::AlterTable { name, operation, .. } => {
-                self.compile_alter_table(name, operation)
-            }
+            Statement::AlterTable {
+                name, operation, ..
+            } => self.compile_alter_table(name, operation),
             Statement::Truncate { table_name, .. } => self.compile_truncate(table_name),
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
                 "Unsupported SQL statement type: {:?}",
@@ -11477,7 +11477,14 @@ impl<'a> SqlCompiler<'a> {
 
         // Rewind source
         let rewind_addr = self.program.len();
-        self.emit(OpCode::Rewind, source_cursor, 0, 0, None, "Start reading source");
+        self.emit(
+            OpCode::Rewind,
+            source_cursor,
+            0,
+            0,
+            None,
+            "Start reading source",
+        );
 
         let loop_start = self.program.len();
 
@@ -11485,7 +11492,8 @@ impl<'a> SqlCompiler<'a> {
         let mut skip_insert_addr: Option<usize> = None;
         if let Some(selection) = &select.selection {
             // Compile the WHERE clause condition (returns the result register)
-            let cond_reg = self.compile_where_condition(selection, source_table, source_cursor as usize)?;
+            let cond_reg =
+                self.compile_where_condition(selection, source_table, source_cursor as usize)?;
 
             // If condition is false (zero), skip the insert
             skip_insert_addr = Some(self.program.len());
@@ -11511,7 +11519,10 @@ impl<'a> SqlCompiler<'a> {
         for item in &select.projection {
             match item {
                 SelectItem::UnnamedExpr(Expr::Identifier(ident))
-                | SelectItem::ExprWithAlias { expr: Expr::Identifier(ident), .. } => {
+                | SelectItem::ExprWithAlias {
+                    expr: Expr::Identifier(ident),
+                    ..
+                } => {
                     if let Some(col_idx) = source_table.column_index(&ident.value) {
                         self.emit(
                             OpCode::Column,
@@ -11587,7 +11598,14 @@ impl<'a> SqlCompiler<'a> {
 
         // Close cursors
         self.emit(OpCode::Close, cursor_idx, 0, 0, None, "Close new table");
-        self.emit(OpCode::Close, source_cursor, 0, 0, None, "Close source table");
+        self.emit(
+            OpCode::Close,
+            source_cursor,
+            0,
+            0,
+            None,
+            "Close source table",
+        );
 
         // Halt
         self.emit(OpCode::Halt, 0, 0, 0, None, "End CREATE TABLE AS SELECT");
