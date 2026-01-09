@@ -14,9 +14,10 @@ use sqlparser::parser::Parser;
 use std::collections::HashMap;
 
 use super::bytecode::{Instruction, OpCode, Program};
+use crate::aggregate::AggregateFunction;
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::Table;
+use crate::table::{Table, Value as TableValue};
 
 /// SQL statement compiler that generates bytecode for the VM engine
 pub struct SqlCompiler<'a> {
@@ -1557,17 +1558,120 @@ impl<'a> SqlCompiler<'a> {
     /// Compile a scalar subquery (Phase 4F)
     ///
     /// Scalar subqueries return a single value that can be used in expressions.
+    /// Uses compile-time execution: executes the subquery during compilation
+    /// and emits the result as a literal in the bytecode.
+    ///
     /// Example: SELECT * FROM users WHERE age = (SELECT MAX(age) FROM users)
     fn compile_scalar_subquery(&mut self, subquery: &Query) -> SqawkResult<i64> {
-        // For scalar subqueries, we need to:
-        // 1. Save current state
-        // 2. Compile and execute the subquery
-        // 3. Extract the single result value
-        // 4. Restore state and return the value register
+        let result_reg = self.allocate_register();
 
-        // Allocate a register for the result (will be used in future enhancement)
-        let _result_reg = self.allocate_register();
+        // Evaluate the subquery at compile time
+        let result_value = self.evaluate_scalar_subquery(subquery)?;
 
+        // Emit bytecode to load the computed value as a literal
+        self.emit_value_literal(result_reg, &result_value)?;
+
+        Ok(result_reg)
+    }
+
+    /// Extract the column index from an aggregate function argument
+    fn extract_agg_column_index(&self, func: &Function, table: &Table) -> SqawkResult<usize> {
+        // Handle COUNT(*) specially
+        if !func.args.is_empty() {
+            match &func.args[0] {
+                FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => {
+                    // COUNT(*) - use first column (doesn't matter which for count)
+                    return Ok(0);
+                }
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident))) => {
+                    let col_name = ident.value.to_lowercase();
+                    return table.column_index(&col_name).ok_or(
+                        SqawkError::ColumnNotFound(col_name)
+                    );
+                }
+                _ => {}
+            }
+        }
+        // Default to first column
+        Ok(0)
+    }
+
+    /// Emit bytecode to load a value as a literal
+    fn emit_value_literal(&mut self, reg: i64, value: &TableValue) -> SqawkResult<()> {
+        match value {
+            TableValue::Integer(i) => {
+                self.program.add_instruction(Instruction::new(
+                    OpCode::Integer,
+                    *i,
+                    reg,
+                    0,
+                    None,
+                    0,
+                    Some(format!("r[{}] = {} (subquery result)", reg, i)),
+                ));
+            }
+            TableValue::Float(f) => {
+                // Store float as string and use String opcode, then cast
+                self.program.add_instruction(Instruction::new(
+                    OpCode::String,
+                    0,
+                    reg,
+                    0,
+                    Some(f.to_string()),
+                    0,
+                    Some(format!("r[{}] = {} (subquery result)", reg, f)),
+                ));
+                // Cast to float
+                self.program.add_instruction(Instruction::new(
+                    OpCode::Cast,
+                    reg,
+                    reg,
+                    0,
+                    Some("REAL".to_string()),
+                    0,
+                    Some(format!("Cast r[{}] to REAL", reg)),
+                ));
+            }
+            TableValue::String(s) => {
+                self.program.add_instruction(Instruction::new(
+                    OpCode::String,
+                    0,
+                    reg,
+                    0,
+                    Some(s.clone()),
+                    0,
+                    Some(format!("r[{}] = '{}' (subquery result)", reg, s)),
+                ));
+            }
+            TableValue::Boolean(b) => {
+                self.program.add_instruction(Instruction::new(
+                    OpCode::Integer,
+                    if *b { 1 } else { 0 },
+                    reg,
+                    0,
+                    None,
+                    0,
+                    Some(format!("r[{}] = {} (subquery result)", reg, b)),
+                ));
+            }
+            TableValue::Null => {
+                self.program.add_instruction(Instruction::new(
+                    OpCode::Null,
+                    0,
+                    reg,
+                    0,
+                    None,
+                    0,
+                    Some(format!("r[{}] = NULL (subquery result)", reg)),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Evaluate a scalar subquery at compile time and return the result value
+    /// This is used when a subquery appears as an operand in a comparison
+    fn evaluate_scalar_subquery(&self, subquery: &Query) -> SqawkResult<TableValue> {
         // Get the subquery's SELECT body
         let select = match &*subquery.body {
             SetExpr::Select(select) => select,
@@ -1578,7 +1682,7 @@ impl<'a> SqlCompiler<'a> {
             }
         };
 
-        // Verify it's a single-table query (no JOINs for now)
+        // Verify it's a single-table query
         if select.from.is_empty() {
             return Err(SqawkError::UnsupportedSqlFeature(
                 "Subquery must have a FROM clause".to_string(),
@@ -1601,180 +1705,690 @@ impl<'a> SqlCompiler<'a> {
         }
         let table = self.database.get_table(&table_name).unwrap();
 
-        // Allocate a cursor for the subquery
-        let subquery_cursor = self.allocate_register() as usize;
+        // Filter rows if there's a WHERE clause in the subquery
+        let filtered_rows: Vec<&Vec<TableValue>> = if let Some(where_expr) = &select.selection {
+            table
+                .rows()
+                .iter()
+                .filter(|row| self.evaluate_where_at_compile_time(where_expr, row, table))
+                .collect()
+        } else {
+            table.rows().iter().collect()
+        };
 
-        // Open the table
-        self.program.add_instruction(Instruction::new(
-            OpCode::OpenRead,
-            subquery_cursor as i64,
-            0,
-            0,
-            Some(table_name.clone()),
-            0,
-            Some(format!("Open {} for subquery", table_name)),
-        ));
+        // Check the projection to determine what value to compute
+        if select.projection.is_empty() {
+            return Err(SqawkError::InvalidSqlQuery(
+                "Subquery must have a projection".to_string(),
+            ));
+        }
 
-        // Rewind cursor
-        let rewind_addr = self.program.len();
-        self.program.add_instruction(Instruction::new(
-            OpCode::Rewind,
-            subquery_cursor as i64,
-            0, // Will be patched to jump to end
-            0,
-            None,
-            0,
-            Some("Rewind subquery cursor".to_string()),
-        ));
+        let result_value = match &select.projection[0] {
+            SelectItem::UnnamedExpr(expr) => match expr {
+                Expr::Function(func) => {
+                    // Handle aggregate functions (MAX, MIN, COUNT, SUM, AVG)
+                    let func_name = func
+                        .name
+                        .0
+                        .first()
+                        .map(|id| id.value.to_uppercase())
+                        .unwrap_or_default();
 
-        // For aggregate subqueries (MAX, MIN, COUNT, etc.), we need special handling
-        // For now, just get the first column value from the first row
-        let col_reg = self.allocate_register();
+                    // Get the aggregate function
+                    let agg_func = AggregateFunction::from_name(&func_name).ok_or_else(|| {
+                        SqawkError::UnsupportedSqlFeature(format!(
+                            "Unsupported aggregate function in subquery: {}",
+                            func_name
+                        ))
+                    })?;
 
-        // Get the projection column (first column)
-        if !select.projection.is_empty() {
-            match &select.projection[0] {
-                SelectItem::UnnamedExpr(expr) => match expr {
-                    Expr::Function(func) => {
-                        // Handle aggregate functions in subquery
-                        let func_name = func
-                            .name
-                            .0
-                            .first()
-                            .map(|id| id.value.to_uppercase())
-                            .unwrap_or_default();
+                    // Extract the column index from the function argument
+                    let col_idx = self.extract_agg_column_index(func, table)?;
 
-                        // For now, treat aggregate subqueries as computing a value
-                        // This is a simplified implementation
-                        self.program.add_instruction(Instruction::new(
-                            OpCode::Column,
-                            subquery_cursor as i64,
-                            0, // First column
-                            col_reg,
-                            None,
-                            0,
-                            Some(format!("Load subquery result for {}", func_name)),
-                        ));
+                    // Collect all values from that column
+                    let values: Vec<TableValue> = filtered_rows
+                        .iter()
+                        .map(|row| row[col_idx].clone())
+                        .collect();
+
+                    // Execute the aggregate function
+                    agg_func.execute(&values)?
+                }
+                Expr::Identifier(ident) => {
+                    // Simple column reference - get first row's value
+                    let col_name = ident.value.to_lowercase();
+                    let col_idx = table.column_index(&col_name).ok_or(
+                        SqawkError::ColumnNotFound(col_name.clone())
+                    )?;
+
+                    if filtered_rows.is_empty() {
+                        TableValue::Null
+                    } else {
+                        filtered_rows[0][col_idx].clone()
                     }
-                    Expr::Identifier(ident) => {
-                        let col_name = ident.value.to_lowercase();
-                        let col_idx = table.column_index(&col_name).ok_or_else(|| {
-                            SqawkError::ColumnNotFound(col_name.clone())
-                        })?;
-                        self.program.add_instruction(Instruction::new(
-                            OpCode::Column,
-                            subquery_cursor as i64,
-                            col_idx as i64,
-                            col_reg,
-                            None,
-                            0,
-                            Some(format!("Load {} from subquery", col_name)),
-                        ));
-                    }
-                    _ => {
-                        // Default: load first column
-                        self.program.add_instruction(Instruction::new(
-                            OpCode::Column,
-                            subquery_cursor as i64,
-                            0,
-                            col_reg,
-                            None,
-                            0,
-                            Some("Load subquery result".to_string()),
-                        ));
-                    }
-                },
-                SelectItem::Wildcard(_) => {
-                    // SELECT * - just get first column
-                    self.program.add_instruction(Instruction::new(
-                        OpCode::Column,
-                        subquery_cursor as i64,
-                        0,
-                        col_reg,
-                        None,
-                        0,
-                        Some("Load first column from subquery".to_string()),
-                    ));
                 }
                 _ => {
-                    return Err(SqawkError::UnsupportedSqlFeature(
-                        "Unsupported projection in scalar subquery".to_string(),
-                    ))
+                    // Default: get first column of first row
+                    if filtered_rows.is_empty() {
+                        TableValue::Null
+                    } else {
+                        filtered_rows[0][0].clone()
+                    }
+                }
+            },
+            SelectItem::Wildcard(_) => {
+                // SELECT * - just get first column of first row
+                if filtered_rows.is_empty() {
+                    TableValue::Null
+                } else {
+                    filtered_rows[0][0].clone()
                 }
             }
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Unsupported projection in scalar subquery".to_string(),
+                ))
+            }
+        };
+
+        Ok(result_value)
+    }
+
+    /// Evaluate an EXISTS subquery at compile time and return true/false
+    fn evaluate_exists_subquery(&self, subquery: &Query, negated: bool) -> SqawkResult<bool> {
+        // Get the subquery's SELECT body
+        let select = match &*subquery.body {
+            SetExpr::Select(select) => select,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only simple SELECT subqueries are supported in EXISTS clause".to_string(),
+                ))
+            }
+        };
+
+        // Verify it's a single-table query
+        if select.from.is_empty() {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "EXISTS subquery must have a FROM clause".to_string(),
+            ));
         }
 
-        // Copy to result register
-        // For scalar subquery, we just use the first row's value
-        self.program.add_instruction(Instruction::new(
-            OpCode::Goto,
-            0,
-            (self.program.len() + 2) as i64, // Skip to end (past Next)
-            0,
-            None,
-            0,
-            Some("Got first row, skip to end".to_string()),
-        ));
+        // Get the subquery table name
+        let subquery_table_name = match &select.from[0].relation {
+            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only simple table references are supported in EXISTS subqueries".to_string(),
+                ))
+            }
+        };
 
-        // Next instruction (only reached if we need more rows - which we don't for scalar)
-        self.program.add_instruction(Instruction::new(
-            OpCode::Next,
-            subquery_cursor as i64,
-            rewind_addr as i64,
-            0,
-            None,
-            0,
-            Some("Next subquery row (not used for scalar)".to_string()),
-        ));
+        // Get the subquery table
+        if !self.database.has_table(&subquery_table_name) {
+            return Err(SqawkError::TableNotFound(subquery_table_name.clone()));
+        }
+        let subquery_table = self.database.get_table(&subquery_table_name).unwrap();
 
-        // Patch the Rewind to jump here if no rows
-        let end_addr = self.program.len();
-        if let Some(inst) = self.program.instructions.get_mut(rewind_addr) {
-            inst.p2 = end_addr as i64;
+        // Check if any rows match the subquery's WHERE clause
+        let has_rows = if let Some(where_expr) = &select.selection {
+            subquery_table
+                .rows()
+                .iter()
+                .any(|row| self.evaluate_where_at_compile_time(where_expr, row, subquery_table))
+        } else {
+            !subquery_table.rows().is_empty()
+        };
+
+        Ok(if negated { !has_rows } else { has_rows })
+    }
+
+    /// Evaluate an IN subquery at compile time and return the list of values
+    fn evaluate_in_subquery_values(&self, subquery: &Query) -> SqawkResult<Vec<TableValue>> {
+        // Get the subquery's SELECT body
+        let select = match &*subquery.body {
+            SetExpr::Select(select) => select,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only simple SELECT subqueries are supported in IN clause".to_string(),
+                ))
+            }
+        };
+
+        // Verify it's a single-table query
+        if select.from.is_empty() {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "IN subquery must have a FROM clause".to_string(),
+            ));
         }
 
-        // Close the cursor
-        self.program.add_instruction(Instruction::new(
-            OpCode::Close,
-            subquery_cursor as i64,
-            0,
-            0,
-            None,
-            0,
-            Some("Close subquery cursor".to_string()),
-        ));
+        // Get the subquery table name
+        let subquery_table_name = match &select.from[0].relation {
+            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only simple table references are supported in IN subqueries".to_string(),
+                ))
+            }
+        };
 
-        // The value is now in col_reg
-        Ok(col_reg)
+        // Get the subquery table
+        if !self.database.has_table(&subquery_table_name) {
+            return Err(SqawkError::TableNotFound(subquery_table_name.clone()));
+        }
+        let subquery_table = self.database.get_table(&subquery_table_name).unwrap();
+
+        // Filter rows if there's a WHERE clause in the subquery
+        let filtered_rows: Vec<&Vec<TableValue>> = if let Some(where_expr) = &select.selection {
+            subquery_table
+                .rows()
+                .iter()
+                .filter(|row| self.evaluate_where_at_compile_time(where_expr, row, subquery_table))
+                .collect()
+        } else {
+            subquery_table.rows().iter().collect()
+        };
+
+        // Get the column index from the subquery projection
+        let col_idx = if select.projection.is_empty() {
+            return Err(SqawkError::InvalidSqlQuery(
+                "IN subquery must have a projection".to_string(),
+            ));
+        } else {
+            match &select.projection[0] {
+                SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
+                    let col_name = ident.value.to_lowercase();
+                    subquery_table.column_index(&col_name).ok_or(
+                        SqawkError::ColumnNotFound(col_name)
+                    )?
+                }
+                SelectItem::Wildcard(_) => 0,
+                _ => 0, // Default to first column
+            }
+        };
+
+        // Collect values from the subquery result
+        let values: Vec<TableValue> = filtered_rows
+            .iter()
+            .map(|row| row[col_idx].clone())
+            .collect();
+
+        Ok(values)
+    }
+
+    /// Evaluate a WHERE expression at compile time for subquery filtering
+    fn evaluate_where_at_compile_time(
+        &self,
+        expr: &Expr,
+        row: &[TableValue],
+        table: &Table,
+    ) -> bool {
+        match expr {
+            Expr::BinaryOp { left, op, right } => {
+                match op {
+                    BinaryOperator::And => {
+                        self.evaluate_where_at_compile_time(left, row, table)
+                            && self.evaluate_where_at_compile_time(right, row, table)
+                    }
+                    BinaryOperator::Or => {
+                        self.evaluate_where_at_compile_time(left, row, table)
+                            || self.evaluate_where_at_compile_time(right, row, table)
+                    }
+                    BinaryOperator::Eq
+                    | BinaryOperator::NotEq
+                    | BinaryOperator::Lt
+                    | BinaryOperator::LtEq
+                    | BinaryOperator::Gt
+                    | BinaryOperator::GtEq => {
+                        let left_val = self.evaluate_expr_at_compile_time(left, row, table);
+                        let right_val = self.evaluate_expr_at_compile_time(right, row, table);
+                        self.compare_values(&left_val, &right_val, op)
+                    }
+                    _ => true, // Unknown op, assume true
+                }
+            }
+            Expr::IsNull(inner) => {
+                let val = self.evaluate_expr_at_compile_time(inner, row, table);
+                matches!(val, TableValue::Null)
+            }
+            Expr::IsNotNull(inner) => {
+                let val = self.evaluate_expr_at_compile_time(inner, row, table);
+                !matches!(val, TableValue::Null)
+            }
+            _ => true, // Unknown expression, assume true
+        }
+    }
+
+    /// Evaluate an expression at compile time to get a value
+    fn evaluate_expr_at_compile_time(
+        &self,
+        expr: &Expr,
+        row: &[TableValue],
+        table: &Table,
+    ) -> TableValue {
+        match expr {
+            Expr::Identifier(ident) => {
+                let col_name = ident.value.to_lowercase();
+                if let Some(idx) = table.column_index(&col_name) {
+                    row[idx].clone()
+                } else {
+                    TableValue::Null
+                }
+            }
+            Expr::Value(val) => match val {
+                Value::Number(n, _) => {
+                    if let Ok(i) = n.parse::<i64>() {
+                        TableValue::Integer(i)
+                    } else if let Ok(f) = n.parse::<f64>() {
+                        TableValue::Float(f)
+                    } else {
+                        TableValue::String(n.clone())
+                    }
+                }
+                Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
+                    TableValue::String(s.clone())
+                }
+                Value::Boolean(b) => TableValue::Boolean(*b),
+                Value::Null => TableValue::Null,
+                _ => TableValue::Null,
+            },
+            _ => TableValue::Null,
+        }
+    }
+
+    /// Compare two values using the given operator
+    fn compare_values(
+        &self,
+        left: &TableValue,
+        right: &TableValue,
+        op: &BinaryOperator,
+    ) -> bool {
+        match (left, right) {
+            (TableValue::Integer(l), TableValue::Integer(r)) => match op {
+                BinaryOperator::Eq => l == r,
+                BinaryOperator::NotEq => l != r,
+                BinaryOperator::Lt => l < r,
+                BinaryOperator::LtEq => l <= r,
+                BinaryOperator::Gt => l > r,
+                BinaryOperator::GtEq => l >= r,
+                _ => false,
+            },
+            (TableValue::Float(l), TableValue::Float(r)) => match op {
+                BinaryOperator::Eq => (l - r).abs() < f64::EPSILON,
+                BinaryOperator::NotEq => (l - r).abs() >= f64::EPSILON,
+                BinaryOperator::Lt => l < r,
+                BinaryOperator::LtEq => l <= r,
+                BinaryOperator::Gt => l > r,
+                BinaryOperator::GtEq => l >= r,
+                _ => false,
+            },
+            (TableValue::Integer(l), TableValue::Float(r)) => {
+                let l = *l as f64;
+                match op {
+                    BinaryOperator::Eq => (l - r).abs() < f64::EPSILON,
+                    BinaryOperator::NotEq => (l - r).abs() >= f64::EPSILON,
+                    BinaryOperator::Lt => l < *r,
+                    BinaryOperator::LtEq => l <= *r,
+                    BinaryOperator::Gt => l > *r,
+                    BinaryOperator::GtEq => l >= *r,
+                    _ => false,
+                }
+            }
+            (TableValue::Float(l), TableValue::Integer(r)) => {
+                let r = *r as f64;
+                match op {
+                    BinaryOperator::Eq => (l - r).abs() < f64::EPSILON,
+                    BinaryOperator::NotEq => (l - r).abs() >= f64::EPSILON,
+                    BinaryOperator::Lt => *l < r,
+                    BinaryOperator::LtEq => *l <= r,
+                    BinaryOperator::Gt => *l > r,
+                    BinaryOperator::GtEq => *l >= r,
+                    _ => false,
+                }
+            }
+            (TableValue::String(l), TableValue::String(r)) => match op {
+                BinaryOperator::Eq => l == r,
+                BinaryOperator::NotEq => l != r,
+                BinaryOperator::Lt => l < r,
+                BinaryOperator::LtEq => l <= r,
+                BinaryOperator::Gt => l > r,
+                BinaryOperator::GtEq => l >= r,
+                _ => false,
+            },
+            (TableValue::Boolean(l), TableValue::Boolean(r)) => match op {
+                BinaryOperator::Eq => l == r,
+                BinaryOperator::NotEq => l != r,
+                _ => false,
+            },
+            // Handle string to number comparisons
+            (TableValue::String(s), TableValue::Integer(i)) => {
+                if let Ok(n) = s.parse::<i64>() {
+                    match op {
+                        BinaryOperator::Eq => n == *i,
+                        BinaryOperator::NotEq => n != *i,
+                        BinaryOperator::Lt => n < *i,
+                        BinaryOperator::LtEq => n <= *i,
+                        BinaryOperator::Gt => n > *i,
+                        BinaryOperator::GtEq => n >= *i,
+                        _ => false,
+                    }
+                } else {
+                    false
+                }
+            }
+            (TableValue::Integer(i), TableValue::String(s)) => {
+                if let Ok(n) = s.parse::<i64>() {
+                    match op {
+                        BinaryOperator::Eq => *i == n,
+                        BinaryOperator::NotEq => *i != n,
+                        BinaryOperator::Lt => *i < n,
+                        BinaryOperator::LtEq => *i <= n,
+                        BinaryOperator::Gt => *i > n,
+                        BinaryOperator::GtEq => *i >= n,
+                        _ => false,
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => false, // NULL comparisons return false
+        }
     }
 
     /// Compile an IN (SELECT ...) subquery (Phase 4F)
+    ///
+    /// Uses compile-time execution: executes the subquery during compilation
+    /// and generates comparison code similar to IN (list).
+    ///
+    /// Example: SELECT * FROM orders WHERE user_id IN (SELECT id FROM users WHERE active = 1)
     fn compile_in_subquery(
         &mut self,
-        _expr: &Expr,
-        _subquery: &Query,
-        _negated: bool,
-        _table: &Table,
-        _cursor_idx: usize,
+        expr: &Expr,
+        subquery: &Query,
+        negated: bool,
+        table: &Table,
+        cursor_idx: usize,
     ) -> SqawkResult<i64> {
-        // TODO: Implement IN subquery
-        // 1. Execute subquery to get list of values
-        // 2. Build a lookup structure (HashSet)
-        // 3. Check if expr's value exists in the set
-        Err(SqawkError::UnsupportedSqlFeature(
-            "IN (SELECT ...) subqueries not yet implemented - Phase 4F".to_string(),
-        ))
+        // Get the subquery's SELECT body
+        let select = match &*subquery.body {
+            SetExpr::Select(select) => select,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only simple SELECT subqueries are supported in IN clause".to_string(),
+                ))
+            }
+        };
+
+        // Verify it's a single-table query
+        if select.from.is_empty() {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "IN subquery must have a FROM clause".to_string(),
+            ));
+        }
+
+        // Get the subquery table name
+        let subquery_table_name = match &select.from[0].relation {
+            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only simple table references are supported in IN subqueries".to_string(),
+                ))
+            }
+        };
+
+        // Get the subquery table
+        if !self.database.has_table(&subquery_table_name) {
+            return Err(SqawkError::TableNotFound(subquery_table_name.clone()));
+        }
+        let subquery_table = self.database.get_table(&subquery_table_name).unwrap();
+
+        // Filter rows if there's a WHERE clause in the subquery
+        let filtered_rows: Vec<&Vec<TableValue>> = if let Some(where_expr) = &select.selection {
+            subquery_table
+                .rows()
+                .iter()
+                .filter(|row| self.evaluate_where_at_compile_time(where_expr, row, subquery_table))
+                .collect()
+        } else {
+            subquery_table.rows().iter().collect()
+        };
+
+        // Get the column index from the subquery projection
+        let col_idx = if select.projection.is_empty() {
+            return Err(SqawkError::InvalidSqlQuery(
+                "IN subquery must have a projection".to_string(),
+            ));
+        } else {
+            match &select.projection[0] {
+                SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
+                    let col_name = ident.value.to_lowercase();
+                    subquery_table.column_index(&col_name).ok_or(
+                        SqawkError::ColumnNotFound(col_name)
+                    )?
+                }
+                SelectItem::Wildcard(_) => 0,
+                _ => 0, // Default to first column
+            }
+        };
+
+        // Collect values from the subquery result
+        let subquery_values: Vec<TableValue> = filtered_rows
+            .iter()
+            .map(|row| row[col_idx].clone())
+            .collect();
+
+        // If subquery returns no values, handle specially
+        if subquery_values.is_empty() {
+            let result_reg = self.allocate_register();
+            self.program.add_instruction(Instruction::new(
+                OpCode::Integer,
+                if negated { 1 } else { 0 },
+                result_reg,
+                0,
+                None,
+                0,
+                Some(format!(
+                    "r[{}] = {} (empty IN subquery)",
+                    result_reg,
+                    if negated { 1 } else { 0 }
+                )),
+            ));
+            return Ok(result_reg);
+        }
+
+        // Allocate registers
+        let expr_reg = self.allocate_register();
+        let result_reg = self.allocate_register();
+        let temp_reg = self.allocate_register();
+
+        // Compile the expression value (from the outer query)
+        self.compile_where_operand(expr, table, cursor_idx, expr_reg)?;
+
+        // Initialize result to 0 (false, not found)
+        self.program.add_instruction(Instruction::new(
+            OpCode::Integer,
+            0,
+            result_reg,
+            0,
+            None,
+            0,
+            Some(format!("r[{}] = 0 (IN subquery initial)", result_reg)),
+        ));
+
+        // Track jump addresses that need to be patched to skip to end when match found
+        let mut jump_to_end_addrs = Vec::new();
+
+        // Compare against each value from the subquery
+        for value in &subquery_values {
+            let item_reg = self.allocate_register();
+
+            // Emit the subquery value as a literal
+            self.emit_value_literal(item_reg, value)?;
+
+            // Compare expr == item
+            self.program.add_instruction(Instruction::new(
+                OpCode::Eq,
+                expr_reg,
+                item_reg,
+                temp_reg,
+                None,
+                0,
+                Some(format!(
+                    "r[{}] = (r[{}] == r[{}])",
+                    temp_reg, expr_reg, item_reg
+                )),
+            ));
+
+            // If match found (temp_reg != 0), set result to 1 and jump to end
+            let skip_set_addr = self.program.len();
+            self.program.add_instruction(Instruction::new(
+                OpCode::IfZ,
+                temp_reg,
+                0, // Will be patched to skip the next instructions
+                0,
+                None,
+                0,
+                Some("if no match, skip to next item".to_string()),
+            ));
+
+            // Set result to 1 (found)
+            self.program.add_instruction(Instruction::new(
+                OpCode::Integer,
+                1,
+                result_reg,
+                0,
+                None,
+                0,
+                Some(format!("r[{}] = 1 (found in subquery)", result_reg)),
+            ));
+
+            // Jump to end (skip remaining comparisons)
+            jump_to_end_addrs.push(self.program.len());
+            self.program.add_instruction(Instruction::new(
+                OpCode::Goto,
+                0,
+                0, // Will be patched to end
+                0,
+                None,
+                0,
+                Some("skip to end".to_string()),
+            ));
+
+            // Patch the skip address to continue to next comparison
+            let continue_addr = self.program.len();
+            if let Some(inst) = self.program.instructions.get_mut(skip_set_addr) {
+                inst.p2 = continue_addr as i64;
+            }
+        }
+
+        // End label - all "found" jumps come here
+        let end_label = self.program.len();
+
+        // Patch all jump-to-end addresses
+        for addr in jump_to_end_addrs {
+            if let Some(inst) = self.program.instructions.get_mut(addr) {
+                inst.p2 = end_label as i64;
+            }
+        }
+
+        // Handle negation: if NOT IN, invert the result
+        if negated {
+            let zero_reg = self.allocate_register();
+            self.program.add_instruction(Instruction::new(
+                OpCode::Integer,
+                0,
+                zero_reg,
+                0,
+                None,
+                0,
+                Some(format!("r[{}] = 0 for NOT IN", zero_reg)),
+            ));
+            self.program.add_instruction(Instruction::new(
+                OpCode::Eq,
+                result_reg,
+                zero_reg,
+                result_reg,
+                None,
+                0,
+                Some(format!(
+                    "r[{}] = (r[{}] == 0) for NOT IN",
+                    result_reg, result_reg
+                )),
+            ));
+        }
+
+        Ok(result_reg)
     }
 
     /// Compile an EXISTS (SELECT ...) subquery (Phase 4F)
-    fn compile_exists_subquery(&mut self, _subquery: &Query, _negated: bool) -> SqawkResult<i64> {
-        // TODO: Implement EXISTS subquery
-        // 1. Execute subquery
-        // 2. Check if any rows were returned
-        // 3. Return 1 if exists (or 0 if negated), 0 otherwise
-        Err(SqawkError::UnsupportedSqlFeature(
-            "EXISTS (SELECT ...) subqueries not yet implemented - Phase 4F".to_string(),
-        ))
+    ///
+    /// Uses compile-time execution: checks if the subquery would return any rows
+    /// and emits a literal 1 or 0.
+    ///
+    /// Example: SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)
+    fn compile_exists_subquery(&mut self, subquery: &Query, negated: bool) -> SqawkResult<i64> {
+        let result_reg = self.allocate_register();
+
+        // Get the subquery's SELECT body
+        let select = match &*subquery.body {
+            SetExpr::Select(select) => select,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only simple SELECT subqueries are supported in EXISTS clause".to_string(),
+                ))
+            }
+        };
+
+        // Verify it's a single-table query
+        if select.from.is_empty() {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "EXISTS subquery must have a FROM clause".to_string(),
+            ));
+        }
+
+        // Get the subquery table name
+        let subquery_table_name = match &select.from[0].relation {
+            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only simple table references are supported in EXISTS subqueries".to_string(),
+                ))
+            }
+        };
+
+        // Get the subquery table
+        if !self.database.has_table(&subquery_table_name) {
+            return Err(SqawkError::TableNotFound(subquery_table_name.clone()));
+        }
+        let subquery_table = self.database.get_table(&subquery_table_name).unwrap();
+
+        // Check if any rows match the subquery's WHERE clause
+        let has_rows = if let Some(where_expr) = &select.selection {
+            subquery_table
+                .rows()
+                .iter()
+                .any(|row| self.evaluate_where_at_compile_time(where_expr, row, subquery_table))
+        } else {
+            !subquery_table.rows().is_empty()
+        };
+
+        // Emit the result
+        let exists = if negated { !has_rows } else { has_rows };
+        self.program.add_instruction(Instruction::new(
+            OpCode::Integer,
+            if exists { 1 } else { 0 },
+            result_reg,
+            0,
+            None,
+            0,
+            Some(format!(
+                "r[{}] = {} ({}EXISTS result)",
+                result_reg,
+                if exists { 1 } else { 0 },
+                if negated { "NOT " } else { "" }
+            )),
+        ));
+
+        Ok(result_reg)
     }
 
     /// Compile a LIKE/ILIKE pattern match operation
@@ -2506,6 +3120,194 @@ impl<'a> SqlCompiler<'a> {
         table: &Table,
         cursor_idx: usize,
     ) -> SqawkResult<i64> {
+        // Handle logical operators (AND, OR) specially
+        match op {
+            BinaryOperator::And => {
+                // For AND, both conditions must be true
+                // Compile left condition
+                let left_result = self.compile_where_condition(left, table, cursor_idx)?;
+
+                // If left is false, skip right evaluation and return 0
+                let skip_to_false = self.program.len();
+                self.program.add_instruction(Instruction::new(
+                    OpCode::IfZ,
+                    left_result,
+                    0, // Will be patched
+                    0,
+                    None,
+                    0,
+                    Some("if left is false, skip to false".to_string()),
+                ));
+
+                // Compile right condition
+                let right_result = self.compile_where_condition(right, table, cursor_idx)?;
+
+                // Result is right_result (if we got here, left was true)
+                let result_reg = self.allocate_register();
+                self.program.add_instruction(Instruction::new(
+                    OpCode::Integer,
+                    0,
+                    result_reg,
+                    0,
+                    None,
+                    0,
+                    Some(format!("r[{}] = 0 (default AND result)", result_reg)),
+                ));
+
+                // If right is false, skip setting result to 1
+                let skip_to_end = self.program.len();
+                self.program.add_instruction(Instruction::new(
+                    OpCode::IfZ,
+                    right_result,
+                    0, // Will be patched to skip to end
+                    0,
+                    None,
+                    0,
+                    Some("if right is false, skip to end".to_string()),
+                ));
+
+                // Both are true, set result to 1
+                self.program.add_instruction(Instruction::new(
+                    OpCode::Integer,
+                    1,
+                    result_reg,
+                    0,
+                    None,
+                    0,
+                    Some(format!("r[{}] = 1 (AND true)", result_reg)),
+                ));
+
+                // Jump to end
+                let goto_end = self.program.len();
+                self.program.add_instruction(Instruction::new(
+                    OpCode::Goto,
+                    0,
+                    0, // Will be patched
+                    0,
+                    None,
+                    0,
+                    Some("goto end".to_string()),
+                ));
+
+                // False label (left was false)
+                let false_label = self.program.len();
+                if let Some(inst) = self.program.instructions.get_mut(skip_to_false) {
+                    inst.p2 = false_label as i64;
+                }
+
+                // Result is already 0 (set above), so we just fall through
+
+                // End label
+                let end_label = self.program.len();
+                if let Some(inst) = self.program.instructions.get_mut(skip_to_end) {
+                    inst.p2 = end_label as i64;
+                }
+                if let Some(inst) = self.program.instructions.get_mut(goto_end) {
+                    inst.p2 = end_label as i64;
+                }
+
+                return Ok(result_reg);
+            }
+            BinaryOperator::Or => {
+                // For OR, at least one condition must be true
+                let result_reg = self.allocate_register();
+
+                // Initialize result to 0
+                self.program.add_instruction(Instruction::new(
+                    OpCode::Integer,
+                    0,
+                    result_reg,
+                    0,
+                    None,
+                    0,
+                    Some(format!("r[{}] = 0 (default OR result)", result_reg)),
+                ));
+
+                // Compile left condition
+                let left_result = self.compile_where_condition(left, table, cursor_idx)?;
+
+                // If left is true, set result to 1 and skip right
+                let skip_if_left_true = self.program.len();
+                self.program.add_instruction(Instruction::new(
+                    OpCode::IfZ,
+                    left_result,
+                    0, // Will be patched to check right
+                    0,
+                    None,
+                    0,
+                    Some("if left is false, check right".to_string()),
+                ));
+
+                // Left is true, set result to 1
+                self.program.add_instruction(Instruction::new(
+                    OpCode::Integer,
+                    1,
+                    result_reg,
+                    0,
+                    None,
+                    0,
+                    Some(format!("r[{}] = 1 (OR left true)", result_reg)),
+                ));
+
+                // Jump to end
+                let goto_end = self.program.len();
+                self.program.add_instruction(Instruction::new(
+                    OpCode::Goto,
+                    0,
+                    0, // Will be patched
+                    0,
+                    None,
+                    0,
+                    Some("goto end".to_string()),
+                ));
+
+                // Check right label
+                let check_right_label = self.program.len();
+                if let Some(inst) = self.program.instructions.get_mut(skip_if_left_true) {
+                    inst.p2 = check_right_label as i64;
+                }
+
+                // Compile right condition
+                let right_result = self.compile_where_condition(right, table, cursor_idx)?;
+
+                // If right is false, skip setting result to 1
+                let skip_to_end = self.program.len();
+                self.program.add_instruction(Instruction::new(
+                    OpCode::IfZ,
+                    right_result,
+                    0, // Will be patched to skip to end
+                    0,
+                    None,
+                    0,
+                    Some("if right is false, skip to end".to_string()),
+                ));
+
+                // Right is true, set result to 1
+                self.program.add_instruction(Instruction::new(
+                    OpCode::Integer,
+                    1,
+                    result_reg,
+                    0,
+                    None,
+                    0,
+                    Some(format!("r[{}] = 1 (OR right true)", result_reg)),
+                ));
+
+                // End label
+                let end_label = self.program.len();
+                if let Some(inst) = self.program.instructions.get_mut(goto_end) {
+                    inst.p2 = end_label as i64;
+                }
+                if let Some(inst) = self.program.instructions.get_mut(skip_to_end) {
+                    inst.p2 = end_label as i64;
+                }
+
+                return Ok(result_reg);
+            }
+            _ => {}
+        }
+
+        // Handle comparison operators
         // Allocate registers for operands and result
         let left_reg = self.allocate_register();
         let right_reg = self.allocate_register();
@@ -2707,6 +3509,147 @@ impl<'a> SqlCompiler<'a> {
             Expr::Function(func) => {
                 // Handle COALESCE and NULLIF functions
                 self.compile_function(func, table, cursor_idx, target_reg)?;
+            }
+            Expr::Subquery(subquery) => {
+                // Handle scalar subquery as an operand
+                // Execute subquery at compile time and emit result directly to target register
+                let result_value = self.evaluate_scalar_subquery(subquery)?;
+                self.emit_value_literal(target_reg, &result_value)?;
+            }
+            Expr::Exists { subquery, negated } => {
+                // Handle EXISTS (SELECT ...) as an operand
+                // Evaluate at compile time and emit 1 or 0
+                let exists_result = self.evaluate_exists_subquery(subquery, *negated)?;
+                self.program.add_instruction(Instruction::new(
+                    OpCode::Integer,
+                    if exists_result { 1 } else { 0 },
+                    target_reg,
+                    0,
+                    None,
+                    0,
+                    Some(format!(
+                        "r[{}] = {} ({}EXISTS result)",
+                        target_reg,
+                        if exists_result { 1 } else { 0 },
+                        if *negated { "NOT " } else { "" }
+                    )),
+                ));
+            }
+            Expr::InSubquery { expr: inner_expr, subquery, negated } => {
+                // Handle IN (SELECT ...) as an operand when combined with other conditions
+                // We need to evaluate this at compile time for non-correlated subqueries
+                let subquery_values = self.evaluate_in_subquery_values(subquery)?;
+                if subquery_values.is_empty() {
+                    // Empty subquery: IN is false, NOT IN is true
+                    self.program.add_instruction(Instruction::new(
+                        OpCode::Integer,
+                        if *negated { 1 } else { 0 },
+                        target_reg,
+                        0,
+                        None,
+                        0,
+                        Some(format!("r[{}] = {} (empty IN subquery)", target_reg, if *negated { 1 } else { 0 })),
+                    ));
+                } else {
+                    // Get the expression value
+                    let expr_reg = self.allocate_register();
+                    self.compile_where_operand(inner_expr, table, cursor_idx, expr_reg)?;
+
+                    // Initialize result
+                    self.program.add_instruction(Instruction::new(
+                        OpCode::Integer,
+                        0,
+                        target_reg,
+                        0,
+                        None,
+                        0,
+                        Some(format!("r[{}] = 0 (IN subquery initial)", target_reg)),
+                    ));
+
+                    let temp_reg = self.allocate_register();
+                    let mut jump_to_end_addrs = Vec::new();
+
+                    for value in &subquery_values {
+                        let item_reg = self.allocate_register();
+                        self.emit_value_literal(item_reg, value)?;
+
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Eq,
+                            expr_reg,
+                            item_reg,
+                            temp_reg,
+                            None,
+                            0,
+                            Some(format!("r[{}] = (r[{}] == r[{}])", temp_reg, expr_reg, item_reg)),
+                        ));
+
+                        let skip_set_addr = self.program.len();
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::IfZ,
+                            temp_reg,
+                            0,
+                            0,
+                            None,
+                            0,
+                            Some("if no match, skip".to_string()),
+                        ));
+
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Integer,
+                            1,
+                            target_reg,
+                            0,
+                            None,
+                            0,
+                            Some(format!("r[{}] = 1 (found)", target_reg)),
+                        ));
+
+                        jump_to_end_addrs.push(self.program.len());
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Goto,
+                            0,
+                            0,
+                            0,
+                            None,
+                            0,
+                            Some("skip to end".to_string()),
+                        ));
+
+                        let continue_addr = self.program.len();
+                        if let Some(inst) = self.program.instructions.get_mut(skip_set_addr) {
+                            inst.p2 = continue_addr as i64;
+                        }
+                    }
+
+                    let end_label = self.program.len();
+                    for addr in jump_to_end_addrs {
+                        if let Some(inst) = self.program.instructions.get_mut(addr) {
+                            inst.p2 = end_label as i64;
+                        }
+                    }
+
+                    if *negated {
+                        let zero_reg = self.allocate_register();
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Integer,
+                            0,
+                            zero_reg,
+                            0,
+                            None,
+                            0,
+                            Some(format!("r[{}] = 0 for NOT IN", zero_reg)),
+                        ));
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Eq,
+                            target_reg,
+                            zero_reg,
+                            target_reg,
+                            None,
+                            0,
+                            Some(format!("r[{}] = (r[{}] == 0) for NOT IN", target_reg, target_reg)),
+                        ));
+                    }
+                }
             }
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -2956,22 +3899,16 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_operator_error() {
+    fn test_in_subquery_compilation() {
         let database = create_test_database();
         let mut compiler = SqlCompiler::new(&database, false);
 
-        // Test with unsupported operator (IN with subquery is not implemented yet)
+        // Test IN (SELECT ...) subquery - now supported in Phase 4F
         let sql = "SELECT * FROM users WHERE age IN (SELECT age FROM users)";
         let result = compiler.compile(sql);
 
-        // Should fail with unsupported feature error
-        assert!(result.is_err(), "Expected compilation to fail");
-        match result.unwrap_err() {
-            SqawkError::UnsupportedSqlFeature(_) => {
-                // Expected
-            }
-            other => panic!("Expected UnsupportedSqlFeature error, got {:?}", other),
-        }
+        // Should compile successfully now
+        assert!(result.is_ok(), "Expected compilation to succeed: {:?}", result.unwrap_err());
     }
 
     #[test]

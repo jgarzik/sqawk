@@ -36,6 +36,11 @@ mod full_join; // Tests for FULL OUTER JOIN
 mod left_join; // Tests for LEFT OUTER JOIN
 mod right_join; // Tests for RIGHT OUTER JOIN
 
+// Phase 4F: Subquery Support (VM implementation)
+mod exists; // Tests for EXISTS/NOT EXISTS subqueries
+mod in_subquery; // Tests for IN (SELECT ...) subqueries
+mod subquery; // Tests for scalar subqueries with aggregates
+
 mod repl; // Tests for interactive REPL functionality with pre-generated input
 mod string_functions; // Tests for string functions (UPPER, LOWER, TRIM, SUBSTR, REPLACE)
 
