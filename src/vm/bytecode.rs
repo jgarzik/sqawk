@@ -81,6 +81,18 @@ pub enum OpCode {
     RewindInner, // Rewind cursor P1, used for inner loop of nested join
     MarkMatch,   // Set register P1 to 1 to indicate a match was found
     CheckMatch,  // If register P1 is 0 (no match), jump to P2; reset register to 0
+
+    // Subquery/Coroutine operations (inspired by SQLite)
+    InitCoroutine, // P1 = register to store return address, P2 = jump over coroutine, P3 = coroutine entry
+    Yield,         // Swap program counter with register P1 (coroutine yield)
+    EndCoroutine,  // Jump back to Yield that invoked this coroutine, set P1 for next Yield return
+    Once,          // First time: continue. Subsequently: jump to P2. Used for one-time init.
+
+    // Subquery result operations
+    AggStep,   // P1 = function type, P2 = value reg, P3 = accumulator reg. Step aggregate.
+    AggFinal,  // P1 = accumulator reg, P2 = result reg. Finalize aggregate.
+    Exists,    // P1 = flag reg (set to 1 if cursor P2 has rows, else 0)
+    NotExists, // P1 = flag reg (set to 1 if cursor P2 has no rows, else 0)
 }
 
 /// A SQL VM instruction with opcode and parameters
