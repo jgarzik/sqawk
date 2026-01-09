@@ -9,8 +9,15 @@
 
 pub mod bytecode;
 pub mod compiler;
+mod compiler_aggregate;
+mod compiler_ddl;
+mod compiler_dml;
+mod compiler_join;
+mod compiler_window;
 pub mod engine;
 
+#[cfg(test)]
+mod compiler_tests;
 #[cfg(test)]
 mod tests;
 
