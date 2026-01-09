@@ -50,6 +50,9 @@ mod date_functions; // Tests for date/time functions (DATE, TIME, NOW)
 mod math_functions; // Tests for math functions (ABS, ROUND, CEIL, FLOOR)
 mod string_functions_ext; // Tests for extended string functions (CONCAT, LEFT, RIGHT)
 
+// Phase 8: Window Functions (VM implementation)
+mod window; // Tests for window functions (ROW_NUMBER, RANK, DENSE_RANK)
+
 mod repl; // Tests for interactive REPL functionality with pre-generated input
 mod string_functions; // Tests for string functions (UPPER, LOWER, TRIM, SUBSTR, REPLACE)
 

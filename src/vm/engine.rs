@@ -231,6 +231,39 @@ impl<'a> Cursor<'a> {
             CursorData::Ephemeral { rows, .. } => rows,
         }
     }
+
+    /// Get a column value at a specific row offset from current position
+    /// Positive offset = forward (for LEAD), negative offset = backward (for LAG)
+    /// Returns None if the offset position is out of bounds
+    fn column_at_offset(&self, col_idx: usize, offset: i64) -> Option<Value> {
+        if !self.valid {
+            return None;
+        }
+
+        let target_pos = (self.position as i64) + offset;
+        if target_pos < 0 {
+            return None;
+        }
+
+        let target_pos = target_pos as usize;
+        match &self.data {
+            CursorData::Table { table } => {
+                if col_idx >= table.column_count() || target_pos >= table.row_count() {
+                    return None;
+                }
+                let rows = table.rows();
+                rows.get(target_pos)?.get(col_idx).cloned()
+            }
+            CursorData::Ephemeral {
+                rows, col_count, ..
+            } => {
+                if col_idx >= *col_count || target_pos >= rows.len() {
+                    return None;
+                }
+                rows.get(target_pos)?.get(col_idx).cloned()
+            }
+        }
+    }
 }
 
 /// Compare two Values for ordering
@@ -1194,6 +1227,443 @@ impl<'a> VmEngine<'a> {
                         "Remainder: r[{}] %% r[{}] -> r[{}]",
                         left_reg, right_reg, dest_reg
                     );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::WindowAggStep => {
+                // Window aggregate step: update window state based on current row
+                // P1 = func type, P2 = value reg, P3 = cursor, P4 = window spec
+                let func_type = inst.p1;
+                let _value_reg = inst.p2 as usize;
+                let cursor_id = inst.p3 as usize;
+                let window_spec = inst.p4.clone().unwrap_or_default();
+
+                // Parse state registers from window spec
+                let state_part = window_spec.split(":state=").nth(1).unwrap_or("");
+                let mut row_num_reg = 0usize;
+                let mut prev_part_reg = 0usize;
+                let mut rank_reg = 0usize;
+                let mut prev_ord_reg = 0usize;
+                let mut dense_rank_reg = 0usize;
+                let mut agg_sum_reg = 0usize;
+                let mut agg_count_reg = 0usize;
+                let mut agg_min_reg = 0usize;
+                let mut agg_max_reg = 0usize;
+                let mut agg_col = 0usize;
+
+                for part in state_part.split(',') {
+                    let kv: Vec<&str> = part.split(':').collect();
+                    if kv.len() == 2 {
+                        let val = kv[1].parse::<usize>().unwrap_or(0);
+                        match kv[0] {
+                            "row_num" => row_num_reg = val,
+                            "prev_part" => prev_part_reg = val,
+                            "rank" => rank_reg = val,
+                            "prev_ord" => prev_ord_reg = val,
+                            "dense_rank" => dense_rank_reg = val,
+                            "agg_sum" => agg_sum_reg = val,
+                            "agg_count" => agg_count_reg = val,
+                            "agg_min" => agg_min_reg = val,
+                            "agg_max" => agg_max_reg = val,
+                            "agg_col" => agg_col = val,
+                            _ => {}
+                        }
+                    }
+                }
+
+                // Parse partition and order column indices
+                let part_str = window_spec
+                    .split(":part=")
+                    .nth(1)
+                    .and_then(|s| s.split(':').next())
+                    .unwrap_or("");
+                let ord_str = window_spec
+                    .split(":ord=")
+                    .nth(1)
+                    .and_then(|s| s.split(':').next())
+                    .unwrap_or("");
+
+                let part_cols: Vec<usize> =
+                    part_str.split(',').filter_map(|s| s.parse().ok()).collect();
+                let ord_cols: Vec<usize> =
+                    ord_str.split(',').filter_map(|s| s.parse().ok()).collect();
+
+                // Get current partition key value (first partition column if any)
+                let current_part_val = if !part_cols.is_empty() {
+                    if let Some(cursor) = self.cursors.get(&cursor_id) {
+                        cursor.column(part_cols[0]).unwrap_or(Value::Null)
+                    } else {
+                        Value::Null
+                    }
+                } else {
+                    Value::Null // No partition = all rows in same partition
+                };
+
+                // Get current order key value
+                let current_ord_val = if !ord_cols.is_empty() {
+                    if let Some(cursor) = self.cursors.get(&cursor_id) {
+                        cursor.column(ord_cols[0]).unwrap_or(Value::Null)
+                    } else {
+                        Value::Null
+                    }
+                } else {
+                    Value::Null
+                };
+
+                // Check if partition changed
+                // Use a special marker to detect first row: check if row_num is 0
+                let is_first_row = match self.get_register(row_num_reg)? {
+                    Register::Integer(n) => n == 0,
+                    _ => true,
+                };
+
+                let prev_part_val = self.get_register(prev_part_reg)?;
+                let partition_changed = if is_first_row {
+                    true // First row is always a "new partition"
+                } else {
+                    match (&prev_part_val, &current_part_val) {
+                        (Register::Null, Value::Null) => false, // Both null = same partition (or no partition)
+                        (Register::Null, _) => true, // Was null, now has value = new partition
+                        (_, Value::Null) => true,    // Had value, now null = new partition
+                        (Register::Integer(p), Value::Integer(c)) => *p != *c,
+                        (Register::String(p), Value::String(c)) => p != c,
+                        (Register::Float(p), Value::Float(c)) => *p != *c,
+                        _ => true, // Different types = partition changed
+                    }
+                };
+
+                // Check if order value changed (for RANK)
+                let prev_ord_val = self.get_register(prev_ord_reg)?;
+                let order_changed = if is_first_row {
+                    true
+                } else {
+                    match (&prev_ord_val, &current_ord_val) {
+                        (Register::Null, Value::Null) => false,
+                        (Register::Null, _) => true,
+                        (_, Value::Null) => true,
+                        (Register::Integer(p), Value::Integer(c)) => *p != *c,
+                        (Register::String(p), Value::String(c)) => p != c,
+                        (Register::Float(p), Value::Float(c)) => *p != *c,
+                        _ => true,
+                    }
+                };
+
+                // Update window state based on function type
+                match func_type {
+                    0 => {
+                        // ROW_NUMBER: increment, reset on partition change
+                        let current = if partition_changed {
+                            1
+                        } else {
+                            match self.get_register(row_num_reg)? {
+                                Register::Integer(n) => n + 1,
+                                _ => 1,
+                            }
+                        };
+                        self.set_register(row_num_reg, Register::Integer(current))?;
+                    }
+                    1 => {
+                        // RANK: like row_number but same value for ties
+                        let row_num = if partition_changed {
+                            1
+                        } else {
+                            match self.get_register(row_num_reg)? {
+                                Register::Integer(n) => n + 1,
+                                _ => 1,
+                            }
+                        };
+                        self.set_register(row_num_reg, Register::Integer(row_num))?;
+
+                        if partition_changed || order_changed {
+                            self.set_register(rank_reg, Register::Integer(row_num))?;
+                        }
+                        // else rank stays the same (tie)
+                    }
+                    2 => {
+                        // DENSE_RANK: increment only when value changes
+                        let row_num = if partition_changed {
+                            1
+                        } else {
+                            match self.get_register(row_num_reg)? {
+                                Register::Integer(n) => n + 1,
+                                _ => 1,
+                            }
+                        };
+                        self.set_register(row_num_reg, Register::Integer(row_num))?;
+
+                        let dense = if partition_changed {
+                            1
+                        } else if order_changed {
+                            match self.get_register(dense_rank_reg)? {
+                                Register::Integer(n) => n + 1,
+                                _ => 1,
+                            }
+                        } else {
+                            match self.get_register(dense_rank_reg)? {
+                                Register::Integer(n) => n,
+                                _ => 1,
+                            }
+                        };
+                        self.set_register(dense_rank_reg, Register::Integer(dense))?;
+                    }
+                    5..=9 => {
+                        // Aggregate window functions: SUM(5), AVG(6), COUNT(7), MIN(8), MAX(9)
+                        // Track row number for partition detection
+                        let current = if partition_changed {
+                            1
+                        } else {
+                            match self.get_register(row_num_reg)? {
+                                Register::Integer(n) => n + 1,
+                                _ => 1,
+                            }
+                        };
+                        self.set_register(row_num_reg, Register::Integer(current))?;
+
+                        // Get the value from the aggregate column
+                        let agg_value = if let Some(cursor) = self.cursors.get(&cursor_id) {
+                            cursor.column(agg_col).unwrap_or(Value::Null)
+                        } else {
+                            Value::Null
+                        };
+
+                        // Reset aggregates on partition change
+                        if partition_changed {
+                            self.set_register(agg_sum_reg, Register::Integer(0))?;
+                            self.set_register(agg_count_reg, Register::Integer(0))?;
+                            self.set_register(agg_min_reg, Register::Null)?;
+                            self.set_register(agg_max_reg, Register::Null)?;
+                        }
+
+                        // Update aggregates based on current value
+                        if !matches!(agg_value, Value::Null) {
+                            // Update count
+                            let new_count = match self.get_register(agg_count_reg)? {
+                                Register::Integer(n) => n + 1,
+                                _ => 1,
+                            };
+                            self.set_register(agg_count_reg, Register::Integer(new_count))?;
+
+                            // Update sum
+                            let val_num = match &agg_value {
+                                Value::Integer(n) => *n as f64,
+                                Value::Float(f) => *f,
+                                Value::String(s) => s.parse::<f64>().unwrap_or(0.0),
+                                _ => 0.0,
+                            };
+                            let current_sum = match self.get_register(agg_sum_reg)? {
+                                Register::Integer(n) => n as f64,
+                                Register::Float(f) => f,
+                                _ => 0.0,
+                            };
+                            self.set_register(agg_sum_reg, Register::Float(current_sum + val_num))?;
+
+                            // Update min
+                            let should_update_min = match self.get_register(agg_min_reg)? {
+                                Register::Null => true,
+                                Register::Integer(n) => val_num < (n as f64),
+                                Register::Float(f) => val_num < f,
+                                _ => false,
+                            };
+                            if should_update_min {
+                                self.set_register(agg_min_reg, Register::Float(val_num))?;
+                            }
+
+                            // Update max
+                            let should_update_max = match self.get_register(agg_max_reg)? {
+                                Register::Null => true,
+                                Register::Integer(n) => val_num > (n as f64),
+                                Register::Float(f) => val_num > f,
+                                _ => false,
+                            };
+                            if should_update_max {
+                                self.set_register(agg_max_reg, Register::Float(val_num))?;
+                            }
+                        }
+                    }
+                    _ => {
+                        // Other window functions - just track row number
+                        let current = if partition_changed {
+                            1
+                        } else {
+                            match self.get_register(row_num_reg)? {
+                                Register::Integer(n) => n + 1,
+                                _ => 1,
+                            }
+                        };
+                        self.set_register(row_num_reg, Register::Integer(current))?;
+                    }
+                }
+
+                // Store current partition/order values for next iteration
+                self.set_register(prev_part_reg, Register::from(current_part_val))?;
+                self.set_register(prev_ord_reg, Register::from(current_ord_val))?;
+
+                if self.verbose {
+                    println!(
+                        "WindowAggStep: func_type={}, partition_changed={}",
+                        func_type, partition_changed
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::WindowValue => {
+                // Get current window function value
+                // P1 = state base reg, P2 = dest reg, P3 = func type
+                // P4 = for LAG/LEAD: "LAG:cursor=N:col=N:offset=N:parts=N,N,..."
+                let state_base_reg = inst.p1 as usize;
+                let dest_reg = inst.p2 as usize;
+                let func_type = inst.p3;
+
+                let value = match func_type {
+                    0 => {
+                        // ROW_NUMBER - value is in state_base_reg (row_num_reg)
+                        self.get_register(state_base_reg)?
+                    }
+                    1 => {
+                        // RANK - value is in rank_reg (state_base_reg + 2)
+                        self.get_register(state_base_reg + 2)?
+                    }
+                    2 => {
+                        // DENSE_RANK - value is in dense_rank_reg (state_base_reg + 4)
+                        self.get_register(state_base_reg + 4)?
+                    }
+                    3 | 4 => {
+                        // LAG (3) or LEAD (4)
+                        // Parse P4 to get cursor, column, offset, partition columns
+                        let p4 = inst.p4.clone().unwrap_or_default();
+                        let mut cursor_id = 1usize;
+                        let mut col_pos = 0usize;
+                        let mut offset = 1i64;
+                        let mut partition_cols: Vec<usize> = Vec::new();
+
+                        for part in p4.split(':') {
+                            if let Some(val) = part.strip_prefix("cursor=") {
+                                cursor_id = val.parse().unwrap_or(1);
+                            } else if let Some(val) = part.strip_prefix("col=") {
+                                col_pos = val.parse().unwrap_or(0);
+                            } else if let Some(val) = part.strip_prefix("offset=") {
+                                offset = val.parse().unwrap_or(1);
+                            } else if let Some(parts_str) = part.strip_prefix("parts=") {
+                                if !parts_str.is_empty() {
+                                    partition_cols = parts_str
+                                        .split(',')
+                                        .filter_map(|s| s.parse::<usize>().ok())
+                                        .collect();
+                                }
+                            }
+                        }
+
+                        // Get the current row number in partition (1-based)
+                        let row_num = match self.get_register(state_base_reg)? {
+                            Register::Integer(n) => n,
+                            _ => 1,
+                        };
+
+                        // Calculate the row offset
+                        let row_offset = if func_type == 3 { -offset } else { offset }; // LAG = negative, LEAD = positive
+
+                        // For LAG: check if we have enough rows behind us in this partition
+                        // For LEAD: check if target row exists and is in same partition
+                        if let Some(cursor) = self.cursors.get(&cursor_id) {
+                            let current_pos = cursor.position;
+
+                            // For LAG: row_num is 1-based row in partition
+                            // If row_num <= offset, we can't look back that far, return NULL
+                            if func_type == 3 && row_num <= offset {
+                                Register::Null
+                            } else if func_type == 4 {
+                                // For LEAD: need to check if target row is in same partition
+                                let target_pos = (current_pos as i64 + row_offset) as usize;
+                                let rows = cursor.rows();
+
+                                if target_pos >= rows.len() {
+                                    Register::Null
+                                } else {
+                                    // Check if target row has same partition keys
+                                    let current_row = &rows[current_pos];
+                                    let target_row = &rows[target_pos];
+
+                                    let same_partition = if partition_cols.is_empty() {
+                                        true // No partition = all in same partition
+                                    } else {
+                                        partition_cols
+                                            .iter()
+                                            .all(|&col| current_row.get(col) == target_row.get(col))
+                                    };
+
+                                    if same_partition {
+                                        target_row
+                                            .get(col_pos)
+                                            .cloned()
+                                            .map(Register::from)
+                                            .unwrap_or(Register::Null)
+                                    } else {
+                                        Register::Null
+                                    }
+                                }
+                            } else {
+                                // LAG with valid offset
+                                cursor
+                                    .column_at_offset(col_pos, row_offset)
+                                    .map(Register::from)
+                                    .unwrap_or(Register::Null)
+                            }
+                        } else {
+                            Register::Null
+                        }
+                    }
+                    5 => {
+                        // SUM - return running sum
+                        // agg_sum is at state_base_reg + 6
+                        self.get_register(state_base_reg + 6)?
+                    }
+                    6 => {
+                        // AVG - return running average (sum / count)
+                        // agg_sum is at state_base_reg + 6, agg_count is at state_base_reg + 7
+                        let sum = match self.get_register(state_base_reg + 6)? {
+                            Register::Float(f) => f,
+                            Register::Integer(n) => n as f64,
+                            _ => 0.0,
+                        };
+                        let count = match self.get_register(state_base_reg + 7)? {
+                            Register::Integer(n) => n,
+                            _ => 1,
+                        };
+                        if count > 0 {
+                            Register::Float(sum / count as f64)
+                        } else {
+                            Register::Null
+                        }
+                    }
+                    7 => {
+                        // COUNT - return running count
+                        // agg_count is at state_base_reg + 7
+                        self.get_register(state_base_reg + 7)?
+                    }
+                    8 => {
+                        // MIN - return running min
+                        // agg_min is at state_base_reg + 8
+                        self.get_register(state_base_reg + 8)?
+                    }
+                    9 => {
+                        // MAX - return running max
+                        // agg_max is at state_base_reg + 9
+                        self.get_register(state_base_reg + 9)?
+                    }
+                    _ => {
+                        // Default to row number
+                        self.get_register(state_base_reg)?
+                    }
+                };
+
+                self.set_register(dest_reg, value)?;
+
+                if self.verbose {
+                    println!("WindowValue: func_type={}, dest=r[{}]", func_type, dest_reg);
                 }
 
                 Ok(ExecuteResult::Continue)

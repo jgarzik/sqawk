@@ -79,11 +79,11 @@ Support all SQL commands from sqlparser crate that make sense for CSV file colle
 ---
 
 ## Phase 8: Window Functions
-- [ ] ROW_NUMBER() (opcodes: WindowStep, WindowValue)
-- [ ] RANK(), DENSE_RANK() (opcodes: WindowStep, WindowValue)
-- [ ] LAG(), LEAD() (opcodes: WindowStep, WindowValue)
-- [ ] SUM/AVG/COUNT OVER() (opcodes: AggStep with window frame)
-- [ ] **Phase 8 Validation**: build, test, clippy clean
+- [x] ROW_NUMBER() (opcodes: WindowAggStep, WindowValue)
+- [x] RANK(), DENSE_RANK() (opcodes: WindowAggStep, WindowValue)
+- [x] LAG(), LEAD() (opcodes: WindowAggStep, WindowValue)
+- [x] SUM/AVG/COUNT/MIN/MAX OVER() (opcodes: WindowAggStep, WindowValue)
+- [x] **Phase 8 Validation**: build, test, clippy clean (219 tests pass)
 
 ---
 
