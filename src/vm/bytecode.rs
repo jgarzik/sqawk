@@ -11,7 +11,11 @@ use crate::table::Value;
 use std::fmt;
 
 /// Opcodes for VM instructions
+///
+/// Note: Some opcodes are defined but not yet used by the compiler.
+/// They are kept for planned features in the SQL expansion roadmap.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub enum OpCode {
     // Program flow control
     Init, // Initialize VM
@@ -35,25 +39,35 @@ pub enum OpCode {
     ResultRow, // Return result row to client
 
     // Transaction operations
-    Begin,     // Begin a transaction - marks the start of a set of changes that can be committed or rolled back
-    Commit,    // Commit a transaction - permanently applies all changes made since the Begin operation
-    Rollback,  // Rollback a transaction - discards all changes made since the Begin operation
+    Begin, // Begin a transaction - marks the start of a set of changes that can be committed or rolled back
+    Commit, // Commit a transaction - permanently applies all changes made since the Begin operation
+    Rollback, // Rollback a transaction - discards all changes made since the Begin operation
     SavePoint, // Create a savepoint in the transaction - establishes a point to which a transaction can be partially rolled back
     Release,   // Release a savepoint - confirms changes up to the specified savepoint
 
     // Comparison operations
-    Lt,      // Less than comparison (P1 < P2, result in P3)
-    Le,      // Less than or equal comparison (P1 <= P2, result in P3)
-    Eq,      // Equal comparison (P1 == P2, result in P3)
-    Ne,      // Not equal comparison (P1 != P2, result in P3)
-    Gt,      // Greater than comparison (P1 > P2, result in P3)
-    Ge,      // Greater than or equal comparison (P1 >= P2, result in P3)
-    
+    Lt, // Less than comparison (P1 < P2, result in P3)
+    Le, // Less than or equal comparison (P1 <= P2, result in P3)
+    Eq, // Equal comparison (P1 == P2, result in P3)
+    Ne, // Not equal comparison (P1 != P2, result in P3)
+    Gt, // Greater than comparison (P1 > P2, result in P3)
+    Ge, // Greater than or equal comparison (P1 >= P2, result in P3)
+
+    // Pattern matching operations
+    Like, // LIKE pattern match (P1 LIKE P4 pattern, result in P3). Case-sensitive.
+    Glob, // GLOB pattern match (P1 GLOB P4 pattern, result in P3). Unix-style wildcards.
+
+    // Type conversion
+    Cast, // Cast value in P1 to type in P4, result in P2. Types: "INTEGER", "TEXT", "REAL"
+
+    // Null operations
+    IsNull, // Set P2 to 1 if P1 is NULL, 0 otherwise
+
     // Conditional jumps
-    IfZ,    // Jump to P2 if register P1 contains 0
-    IfPos,  // Jump to P2 if register P1 is positive (> 0)
-    IfNeg,  // Jump to P2 if register P1 is negative (< 0)
-    
+    IfZ,   // Jump to P2 if register P1 contains 0
+    IfPos, // Jump to P2 if register P1 is positive (> 0)
+    IfNeg, // Jump to P2 if register P1 is negative (< 0)
+
     // Utility opcodes
     Noop, // No operation
 }

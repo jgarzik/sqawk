@@ -1,0 +1,134 @@
+# Sqawk SQL Feature Expansion TODO
+
+## Mission
+Support all SQL commands from sqlparser crate that make sense for CSV file collections, implementing VM operations similar to SQLite opcodes.
+
+## Strategy
+**VM-only for new features** - New SQL features implemented in VM execution path only.
+
+---
+
+## Phase 1: Expression Enhancements
+- [x] LIKE/ILIKE pattern matching (opcodes: Like, Glob)
+- [x] BETWEEN operator (opcodes: reuse Ge/Le with conditional jumps)
+- [x] IN (list) operator (opcodes: reuse Eq with conditional jumps)
+- [x] CASE WHEN expressions (opcodes: reuse Eq/comparisons with IfZ/Goto jumps)
+- [x] CAST type conversion (opcodes: Cast)
+- [x] COALESCE/NULLIF (opcodes: IsNull with conditional jumps)
+- [x] **Phase 1 Validation**: build, test, clippy clean
+
+---
+
+## Phase 2: Set Operations
+- [ ] UNION / UNION ALL (opcodes: Union, UnionAll)
+- [ ] INTERSECT (opcodes: Intersect)
+- [ ] EXCEPT (opcodes: Except)
+- [ ] **Phase 2 Validation**: build, test, clippy clean
+
+---
+
+## Phase 3: Outer Joins
+- [ ] LEFT OUTER JOIN (opcodes: LeftJoin, NullRow)
+- [ ] RIGHT OUTER JOIN (opcodes: RightJoin)
+- [ ] FULL OUTER JOIN (opcodes: FullJoin)
+- [ ] **Phase 3 Validation**: build, test, clippy clean
+
+---
+
+## Phase 4: Subqueries
+- [ ] Scalar subqueries (opcodes: Subquery, Once)
+- [ ] IN (subquery) (opcodes: InSubquery)
+- [ ] EXISTS operator (opcodes: Exists, Found)
+- [ ] Correlated subqueries (opcodes: CorrelatedSubquery)
+- [ ] **Phase 4 Validation**: build, test, clippy clean
+
+---
+
+## Phase 5: VM Completeness for DML
+- [ ] VM INSERT (opcodes: Insert, NewRowid, MakeRecord)
+- [ ] VM UPDATE (opcodes: Update, SetColumn)
+- [ ] VM DELETE (opcodes: Delete, RowSetAdd)
+- [ ] INSERT...SELECT (opcodes: InsertSelect)
+- [ ] **Phase 5 Validation**: build, test, clippy clean
+
+---
+
+## Phase 6: VM Completeness for Aggregates & Sorting
+- [ ] VM COUNT/SUM/AVG/MIN/MAX (opcodes: AggStep, AggFinal, AggValue)
+- [ ] VM GROUP BY (opcodes: SorterOpen, SorterInsert, SorterSort)
+- [ ] VM ORDER BY (opcodes: Sort, SorterNext)
+- [ ] VM DISTINCT (opcodes: Distinct, Found)
+- [ ] **Phase 6 Validation**: build, test, clippy clean
+
+---
+
+## Phase 7: Advanced Expressions
+- [ ] Math functions: ABS, ROUND, CEIL, FLOOR (opcodes: Function)
+- [ ] String functions: LENGTH, CONCAT, LEFT, RIGHT (opcodes: Function)
+- [ ] Date functions: DATE, TIME, NOW (opcodes: Function)
+- [ ] Arithmetic operators: +, -, *, /, % (opcodes: Add, Subtract, Multiply, Divide, Remainder)
+- [ ] **Phase 7 Validation**: build, test, clippy clean
+
+---
+
+## Phase 8: Window Functions
+- [ ] ROW_NUMBER() (opcodes: WindowStep, WindowValue)
+- [ ] RANK(), DENSE_RANK() (opcodes: WindowStep, WindowValue)
+- [ ] LAG(), LEAD() (opcodes: WindowStep, WindowValue)
+- [ ] SUM/AVG/COUNT OVER() (opcodes: AggStep with window frame)
+- [ ] **Phase 8 Validation**: build, test, clippy clean
+
+---
+
+## Phase 9: Common Table Expressions (CTEs)
+- [ ] Non-recursive CTEs (opcodes: CteOpen, CteRead)
+- [ ] Multiple CTEs in single query
+- [ ] Recursive CTEs (optional) (opcodes: RecursiveCte)
+- [ ] **Phase 9 Validation**: build, test, clippy clean
+
+---
+
+## Phase 10: DDL Enhancements
+- [ ] DROP TABLE (opcodes: DropTable, Destroy)
+- [ ] ALTER TABLE ADD COLUMN (opcodes: AlterTable)
+- [ ] CREATE TABLE AS SELECT (opcodes: CreateTableAs)
+- [ ] TRUNCATE TABLE (opcodes: Clear)
+- [ ] **Phase 10 Validation**: build, test, clippy clean
+
+---
+
+## Test Files to Create
+- `tests/like/mod.rs`
+- `tests/between/mod.rs`
+- `tests/in_list/mod.rs`
+- `tests/case/mod.rs`
+- `tests/cast/mod.rs`
+- `tests/coalesce/mod.rs`
+- `tests/union/mod.rs`
+- `tests/intersect/mod.rs`
+- `tests/except/mod.rs`
+- `tests/left_join/mod.rs`
+- `tests/right_join/mod.rs`
+- `tests/full_join/mod.rs`
+- `tests/subquery/mod.rs`
+- `tests/in_subquery/mod.rs`
+- `tests/exists/mod.rs`
+- `tests/correlated/mod.rs`
+- `tests/vm/insert.rs`
+- `tests/vm/update.rs`
+- `tests/vm/delete.rs`
+- `tests/insert_select/mod.rs`
+- `tests/vm/aggregates.rs`
+- `tests/vm/group_by.rs`
+- `tests/vm/order_by.rs`
+- `tests/vm/distinct.rs`
+- `tests/math_functions/mod.rs`
+- `tests/string_functions_ext/mod.rs`
+- `tests/date_functions/mod.rs`
+- `tests/arithmetic/mod.rs`
+- `tests/window/mod.rs`
+- `tests/cte/mod.rs`
+- `tests/drop_table/mod.rs`
+- `tests/alter_table/mod.rs`
+- `tests/create_as/mod.rs`
+- `tests/truncate/mod.rs`

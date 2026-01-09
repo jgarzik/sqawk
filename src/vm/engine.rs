@@ -105,15 +105,6 @@ pub struct VmEngine<'a> {
     /// Tracks the lifecycle of a transaction and enforces proper operation sequencing
     transaction_state: TransactionState,
 
-    /// Transaction log tracking changes made during an active transaction
-    /// 
-    /// This stores the modified data to enable rollback operations:
-    /// - First element (usize): Cursor ID that made the modification
-    /// - Second element (Table): Original state of the table before modification
-    /// - Third element (Vec<(usize, Value)>): List of (column_index, new_value) pairs representing changes
-    transaction_log: Vec<(usize, Table, Vec<(usize, Value)>)>,
-
-    // Removed unused fields for column_names, modified_tables, and affected_rows
     /// Whether the engine is in verbose mode
     verbose: bool,
 }
@@ -129,7 +120,6 @@ impl<'a> VmEngine<'a> {
             cursors: HashMap::new(),
             results: Vec::new(),
             transaction_state: TransactionState::None,
-            transaction_log: Vec::new(),
             verbose,
         }
     }
@@ -156,7 +146,6 @@ impl<'a> VmEngine<'a> {
 
         // Reset transaction state
         self.transaction_state = TransactionState::None;
-        self.transaction_log.clear();
 
         if self.verbose {
             println!("VM initialized with program:\n{}", self.program);
@@ -420,10 +409,7 @@ impl<'a> VmEngine<'a> {
                 }
 
                 // Initialize transaction state to track changes
-                // - Set state to Active to indicate transaction is in progress
-                // - Clear any previous transaction log entries
                 self.transaction_state = TransactionState::Active;
-                self.transaction_log.clear();
 
                 if self.verbose {
                     println!("BEGIN TRANSACTION");
@@ -443,14 +429,7 @@ impl<'a> VmEngine<'a> {
                 }
 
                 // Finalize transaction
-                // - Update state to Committed to indicate successful completion
-                // - In a WAL implementation, this would flush changes to the main database file
-                // - In an MVCC implementation, this would make changes visible to new transactions
                 self.transaction_state = TransactionState::Committed;
-                
-                // Clear the transaction log since changes are now permanent
-                // and don't need to be tracked for potential rollback
-                self.transaction_log.clear();
 
                 if self.verbose {
                     println!("COMMIT TRANSACTION");
@@ -468,17 +447,8 @@ impl<'a> VmEngine<'a> {
                     ));
                 }
 
-                // Revert all changes in the transaction log
-                // In a full implementation, this would:
-                // 1. Process the transaction log in reverse chronological order (LIFO)
-                // 2. Restore original data values for each modified row
-                // 3. Remove any newly inserted rows and restore any deleted rows
-                // 4. Maintain referential integrity during the rollback process
-
                 // Update transaction state to reflect rollback completion
                 self.transaction_state = TransactionState::RolledBack;
-                // Clear the transaction log
-                self.transaction_log.clear();
 
                 if self.verbose {
                     println!("ROLLBACK TRANSACTION");
@@ -539,11 +509,11 @@ impl<'a> VmEngine<'a> {
                 // Less than comparison (P1 < P2, result in P3)
                 // P1 and P2 are register indices to compare
                 // P3 is the destination register for the result (1 for true, 0 for false)
-                
+
                 // Get values from registers P1 and P2
                 let reg1 = self.get_register(inst.p1 as usize)?;
                 let reg2 = self.get_register(inst.p2 as usize)?;
-                
+
                 // Perform comparison based on register types
                 let result = match (&reg1, &reg2) {
                     (Register::Integer(a), Register::Integer(b)) => a < b,
@@ -553,26 +523,33 @@ impl<'a> VmEngine<'a> {
                     (Register::Integer(a), Register::Float(b)) => (*a as f64) < *b,
                     (Register::Float(a), Register::Integer(b)) => *a < (*b as f64),
                     // Other combinations are not comparable
-                    _ => return Err(SqawkError::VmError(
-                        format!("Cannot compare incompatible types: {:?} and {:?}", reg1, reg2)
-                    )),
+                    _ => {
+                        return Err(SqawkError::VmError(format!(
+                            "Cannot compare incompatible types: {:?} and {:?}",
+                            reg1, reg2
+                        )))
+                    }
                 };
-                
+
                 // Store result in destination register (1 for true, 0 for false)
-                let result_value = if result { Register::Integer(1) } else { Register::Integer(0) };
+                let result_value = if result {
+                    Register::Integer(1)
+                } else {
+                    Register::Integer(0)
+                };
                 self.set_register(inst.p3 as usize, result_value)?;
-                
+
                 Ok(ExecuteResult::Continue)
             }
-            
+
             OpCode::IfZ => {
                 // Jump if register P1 contains 0
                 // P1: Register to test
                 // P2: Jump destination (instruction index)
-                
+
                 // Get the register value to test
                 let reg = self.get_register(inst.p1 as usize)?;
-                
+
                 // Check if the register contains 0 (or logical false)
                 let is_zero = match reg {
                     Register::Integer(val) => val == 0,
@@ -581,25 +558,25 @@ impl<'a> VmEngine<'a> {
                     Register::Null => true, // NULL is considered "zero" for this purpose
                     Register::Boolean(val) => !val, // false is considered "zero"
                 };
-                
+
                 // If the register is zero/false, jump to P2
                 if is_zero {
                     // Jump to the target instruction
                     return Ok(ExecuteResult::Jump(inst.p2 as usize));
                 }
-                
+
                 // Otherwise, continue to the next instruction
                 Ok(ExecuteResult::Continue)
             }
-            
+
             OpCode::IfPos => {
                 // Jump if register P1 contains a positive value (> 0)
                 // P1: Register to test
                 // P2: Jump destination (instruction index)
-                
+
                 // Get the register value to test
                 let reg = self.get_register(inst.p1 as usize)?;
-                
+
                 // Check if the register contains a positive value
                 let is_positive = match reg {
                     Register::Integer(val) => val > 0,
@@ -609,24 +586,24 @@ impl<'a> VmEngine<'a> {
                     // String and null aren't treated as positive
                     Register::String(_) | Register::Null => false,
                 };
-                
+
                 // If the register is positive, jump to P2
                 if is_positive {
                     return Ok(ExecuteResult::Jump(inst.p2 as usize));
                 }
-                
+
                 // Otherwise, continue to the next instruction
                 Ok(ExecuteResult::Continue)
             }
-            
+
             OpCode::IfNeg => {
                 // Jump if register P1 contains a negative value (< 0)
                 // P1: Register to test
                 // P2: Jump destination (instruction index)
-                
+
                 // Get the register value to test
                 let reg = self.get_register(inst.p1 as usize)?;
-                
+
                 // Check if the register contains a negative value
                 let is_negative = match reg {
                     Register::Integer(val) => val < 0,
@@ -636,25 +613,25 @@ impl<'a> VmEngine<'a> {
                     // String and null aren't treated as negative
                     Register::String(_) | Register::Null => false,
                 };
-                
+
                 // If the register is negative, jump to P2
                 if is_negative {
                     return Ok(ExecuteResult::Jump(inst.p2 as usize));
                 }
-                
+
                 // Otherwise, continue to the next instruction
                 Ok(ExecuteResult::Continue)
             }
-            
+
             OpCode::Gt => {
                 // Greater than comparison (P1 > P2, result in P3)
                 // P1 and P2 are register indices to compare
                 // P3 is the destination register for the result (1 for true, 0 for false)
-                
+
                 // Get values from registers P1 and P2
                 let reg1 = self.get_register(inst.p1 as usize)?;
                 let reg2 = self.get_register(inst.p2 as usize)?;
-                
+
                 // Perform comparison based on register types
                 let result = match (&reg1, &reg2) {
                     (Register::Integer(a), Register::Integer(b)) => a > b,
@@ -664,27 +641,34 @@ impl<'a> VmEngine<'a> {
                     (Register::Integer(a), Register::Float(b)) => (*a as f64) > *b,
                     (Register::Float(a), Register::Integer(b)) => *a > (*b as f64),
                     // Other combinations are not comparable
-                    _ => return Err(SqawkError::VmError(
-                        format!("Cannot compare incompatible types: {:?} and {:?}", reg1, reg2)
-                    )),
+                    _ => {
+                        return Err(SqawkError::VmError(format!(
+                            "Cannot compare incompatible types: {:?} and {:?}",
+                            reg1, reg2
+                        )))
+                    }
                 };
-                
+
                 // Store result in destination register (1 for true, 0 for false)
-                let result_value = if result { Register::Integer(1) } else { Register::Integer(0) };
+                let result_value = if result {
+                    Register::Integer(1)
+                } else {
+                    Register::Integer(0)
+                };
                 self.set_register(inst.p3 as usize, result_value)?;
-                
+
                 Ok(ExecuteResult::Continue)
             }
-            
+
             OpCode::Ge => {
                 // Greater than or equal comparison (P1 >= P2, result in P3)
                 // P1 and P2 are register indices to compare
                 // P3 is the destination register for the result (1 for true, 0 for false)
-                
+
                 // Get values from registers P1 and P2
                 let reg1 = self.get_register(inst.p1 as usize)?;
                 let reg2 = self.get_register(inst.p2 as usize)?;
-                
+
                 // Perform comparison based on register types
                 let result = match (&reg1, &reg2) {
                     (Register::Integer(a), Register::Integer(b)) => a >= b,
@@ -694,27 +678,34 @@ impl<'a> VmEngine<'a> {
                     (Register::Integer(a), Register::Float(b)) => (*a as f64) >= *b,
                     (Register::Float(a), Register::Integer(b)) => *a >= (*b as f64),
                     // Other combinations are not comparable
-                    _ => return Err(SqawkError::VmError(
-                        format!("Cannot compare incompatible types: {:?} and {:?}", reg1, reg2)
-                    )),
+                    _ => {
+                        return Err(SqawkError::VmError(format!(
+                            "Cannot compare incompatible types: {:?} and {:?}",
+                            reg1, reg2
+                        )))
+                    }
                 };
-                
+
                 // Store result in destination register (1 for true, 0 for false)
-                let result_value = if result { Register::Integer(1) } else { Register::Integer(0) };
+                let result_value = if result {
+                    Register::Integer(1)
+                } else {
+                    Register::Integer(0)
+                };
                 self.set_register(inst.p3 as usize, result_value)?;
-                
+
                 Ok(ExecuteResult::Continue)
             }
-            
+
             OpCode::Eq => {
                 // Equal comparison (P1 == P2, result in P3)
                 // P1 and P2 are register indices to compare
                 // P3 is the destination register for the result (1 for true, 0 for false)
-                
+
                 // Get values from registers P1 and P2
                 let reg1 = self.get_register(inst.p1 as usize)?;
                 let reg2 = self.get_register(inst.p2 as usize)?;
-                
+
                 // Perform comparison based on register types
                 let result = match (&reg1, &reg2) {
                     (Register::Integer(a), Register::Integer(b)) => a == b,
@@ -728,23 +719,27 @@ impl<'a> VmEngine<'a> {
                     // Different types are not equal (except for numeric conversions above)
                     _ => false,
                 };
-                
+
                 // Store result in destination register (1 for true, 0 for false)
-                let result_value = if result { Register::Integer(1) } else { Register::Integer(0) };
+                let result_value = if result {
+                    Register::Integer(1)
+                } else {
+                    Register::Integer(0)
+                };
                 self.set_register(inst.p3 as usize, result_value)?;
-                
+
                 Ok(ExecuteResult::Continue)
             }
-            
+
             OpCode::Ne => {
                 // Not equal comparison (P1 != P2, result in P3)
                 // P1 and P2 are register indices to compare
                 // P3 is the destination register for the result (1 for true, 0 for false)
-                
+
                 // Get values from registers P1 and P2
                 let reg1 = self.get_register(inst.p1 as usize)?;
                 let reg2 = self.get_register(inst.p2 as usize)?;
-                
+
                 // Perform comparison based on register types (opposite of Eq)
                 let result = match (&reg1, &reg2) {
                     (Register::Integer(a), Register::Integer(b)) => a != b,
@@ -758,23 +753,189 @@ impl<'a> VmEngine<'a> {
                     // Different types are not equal (so they are "not equal" = true)
                     _ => true,
                 };
-                
+
                 // Store result in destination register (1 for true, 0 for false)
-                let result_value = if result { Register::Integer(1) } else { Register::Integer(0) };
+                let result_value = if result {
+                    Register::Integer(1)
+                } else {
+                    Register::Integer(0)
+                };
                 self.set_register(inst.p3 as usize, result_value)?;
-                
+
                 Ok(ExecuteResult::Continue)
             }
-            
+
+            OpCode::Like => {
+                // LIKE pattern matching (P1 LIKE P4 pattern, result in P3)
+                // P1: Register containing value to test
+                // P2: Flags (bit 0 = negated, bit 1 = case_insensitive)
+                // P3: Destination register for result (1 for match, 0 for no match)
+                // P4: Pattern string with SQL LIKE wildcards (% = any sequence, _ = any single char)
+
+                let value_reg = inst.p1 as usize;
+                let flags = inst.p2;
+                let result_reg = inst.p3 as usize;
+                let pattern = inst.p4.clone().unwrap_or_default();
+
+                let negated = (flags & 1) != 0;
+                let case_insensitive = (flags & 2) != 0;
+
+                // Get the value to test
+                let value = self.get_register(value_reg)?;
+                let value_str = match value {
+                    Register::String(s) => s,
+                    Register::Integer(i) => i.to_string(),
+                    Register::Float(f) => f.to_string(),
+                    Register::Boolean(b) => b.to_string(),
+                    Register::Null => {
+                        // NULL LIKE anything is NULL (treated as false for filtering)
+                        self.set_register(result_reg, Register::Integer(0))?;
+                        return Ok(ExecuteResult::Continue);
+                    }
+                };
+
+                // Convert SQL LIKE pattern to regex
+                let regex_pattern = self.like_pattern_to_regex(&pattern, case_insensitive);
+
+                // Perform the match
+                let matched = match regex::Regex::new(&regex_pattern) {
+                    Ok(re) => re.is_match(&value_str),
+                    Err(_) => false,
+                };
+
+                // Apply negation if needed
+                let result = if negated { !matched } else { matched };
+
+                self.set_register(result_reg, Register::Integer(if result { 1 } else { 0 }))?;
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Glob => {
+                // GLOB pattern matching (Unix-style wildcards)
+                // P1: Register containing value to test
+                // P2: Flags (bit 0 = negated)
+                // P3: Destination register for result
+                // P4: Pattern string with GLOB wildcards (* = any sequence, ? = any single char)
+
+                let value_reg = inst.p1 as usize;
+                let flags = inst.p2;
+                let result_reg = inst.p3 as usize;
+                let pattern = inst.p4.clone().unwrap_or_default();
+
+                let negated = (flags & 1) != 0;
+
+                // Get the value to test
+                let value = self.get_register(value_reg)?;
+                let value_str = match value {
+                    Register::String(s) => s,
+                    Register::Integer(i) => i.to_string(),
+                    Register::Float(f) => f.to_string(),
+                    Register::Boolean(b) => b.to_string(),
+                    Register::Null => {
+                        self.set_register(result_reg, Register::Integer(0))?;
+                        return Ok(ExecuteResult::Continue);
+                    }
+                };
+
+                // Convert GLOB pattern to regex (case-sensitive)
+                let regex_pattern = self.glob_pattern_to_regex(&pattern);
+
+                // Perform the match
+                let matched = match regex::Regex::new(&regex_pattern) {
+                    Ok(re) => re.is_match(&value_str),
+                    Err(_) => false,
+                };
+
+                // Apply negation if needed
+                let result = if negated { !matched } else { matched };
+
+                self.set_register(result_reg, Register::Integer(if result { 1 } else { 0 }))?;
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Cast => {
+                // Cast value in P1 to type specified in P4, result in P2
+                // P1: Source register containing value to cast
+                // P2: Destination register for result
+                // P4: Target type name ("INTEGER", "TEXT", "REAL", "BOOLEAN")
+
+                let src_reg = inst.p1 as usize;
+                let dest_reg = inst.p2 as usize;
+                let target_type = inst.p4.clone().unwrap_or_else(|| "TEXT".to_string());
+
+                let src_value = self.get_register(src_reg)?;
+
+                let result = match target_type.to_uppercase().as_str() {
+                    "INTEGER" | "INT" => match src_value {
+                        Register::Integer(i) => Register::Integer(i),
+                        Register::Float(f) => Register::Integer(f as i64),
+                        Register::String(s) => Register::Integer(s.parse::<i64>().unwrap_or(0)),
+                        Register::Boolean(b) => Register::Integer(if b { 1 } else { 0 }),
+                        Register::Null => Register::Null,
+                    },
+                    "REAL" | "FLOAT" | "DOUBLE" => match src_value {
+                        Register::Integer(i) => Register::Float(i as f64),
+                        Register::Float(f) => Register::Float(f),
+                        Register::String(s) => Register::Float(s.parse::<f64>().unwrap_or(0.0)),
+                        Register::Boolean(b) => Register::Float(if b { 1.0 } else { 0.0 }),
+                        Register::Null => Register::Null,
+                    },
+                    "TEXT" | "VARCHAR" | "CHAR" | "STRING" => match src_value {
+                        Register::Integer(i) => Register::String(i.to_string()),
+                        Register::Float(f) => Register::String(f.to_string()),
+                        Register::String(s) => Register::String(s),
+                        Register::Boolean(b) => Register::String(b.to_string()),
+                        Register::Null => Register::Null,
+                    },
+                    "BOOLEAN" | "BOOL" => match src_value {
+                        Register::Integer(i) => Register::Boolean(i != 0),
+                        Register::Float(f) => Register::Boolean(f != 0.0),
+                        Register::String(s) => {
+                            let lower = s.to_lowercase();
+                            Register::Boolean(lower == "true" || lower == "1" || lower == "yes")
+                        }
+                        Register::Boolean(b) => Register::Boolean(b),
+                        Register::Null => Register::Null,
+                    },
+                    _ => {
+                        // Unknown type - default to TEXT
+                        match src_value {
+                            Register::Integer(i) => Register::String(i.to_string()),
+                            Register::Float(f) => Register::String(f.to_string()),
+                            Register::String(s) => Register::String(s),
+                            Register::Boolean(b) => Register::String(b.to_string()),
+                            Register::Null => Register::Null,
+                        }
+                    }
+                };
+
+                self.set_register(dest_reg, result)?;
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::IsNull => {
+                // Check if P1 is NULL, set P2 to 1 if NULL, 0 otherwise
+                let src_reg = inst.p1 as usize;
+                let dest_reg = inst.p2 as usize;
+
+                let src_value = self.get_register(src_reg)?;
+                let is_null = matches!(src_value, Register::Null);
+
+                self.set_register(dest_reg, Register::Integer(if is_null { 1 } else { 0 }))?;
+                Ok(ExecuteResult::Continue)
+            }
+
             OpCode::Le => {
                 // Less than or equal comparison (P1 <= P2, result in P3)
                 // P1 and P2 are register indices to compare
                 // P3 is the destination register for the result (1 for true, 0 for false)
-                
+
                 // Get values from registers P1 and P2
                 let reg1 = self.get_register(inst.p1 as usize)?;
                 let reg2 = self.get_register(inst.p2 as usize)?;
-                
+
                 // Perform comparison based on register types
                 let result = match (&reg1, &reg2) {
                     (Register::Integer(a), Register::Integer(b)) => a <= b,
@@ -784,23 +945,29 @@ impl<'a> VmEngine<'a> {
                     (Register::Integer(a), Register::Float(b)) => (*a as f64) <= *b,
                     (Register::Float(a), Register::Integer(b)) => *a <= (*b as f64),
                     // Other combinations are not comparable
-                    _ => return Err(SqawkError::VmError(
-                        format!("Cannot compare incompatible types: {:?} and {:?}", reg1, reg2)
-                    )),
+                    _ => {
+                        return Err(SqawkError::VmError(format!(
+                            "Cannot compare incompatible types: {:?} and {:?}",
+                            reg1, reg2
+                        )))
+                    }
                 };
-                
+
                 // Store result in destination register (1 for true, 0 for false)
-                let result_value = if result { Register::Integer(1) } else { Register::Integer(0) };
+                let result_value = if result {
+                    Register::Integer(1)
+                } else {
+                    Register::Integer(0)
+                };
                 self.set_register(inst.p3 as usize, result_value)?;
-                
+
                 Ok(ExecuteResult::Continue)
             }
-            
+
             // JumpIfTrue and JumpIfFalse have been replaced by SQLite-style opcodes:
             // - IfZ (jump if zero/false)
             // - IfPos (jump if positive)
             // - IfNeg (jump if negative)
-            
             OpCode::Noop => {
                 // No operation
                 Ok(ExecuteResult::Continue)
@@ -843,7 +1010,7 @@ impl<'a> VmEngine<'a> {
 
         Ok(Some(table))
     }
-    
+
     /// Get a register value by index
     ///
     /// # Arguments
@@ -861,7 +1028,7 @@ impl<'a> VmEngine<'a> {
             )))
         }
     }
-    
+
     /// Set a register value by index
     ///
     /// # Arguments
@@ -875,11 +1042,117 @@ impl<'a> VmEngine<'a> {
         while idx >= self.registers.len() {
             self.registers.push(Register::Null);
         }
-        
+
         // Set the value
         self.registers[idx] = value;
-        
+
         Ok(())
+    }
+
+    /// Convert a SQL LIKE pattern to a regex pattern
+    ///
+    /// SQL LIKE uses:
+    /// - % to match any sequence of zero or more characters
+    /// - _ to match any single character
+    ///
+    /// # Arguments
+    /// * `pattern` - The SQL LIKE pattern
+    /// * `case_insensitive` - Whether to perform case-insensitive matching (for ILIKE)
+    ///
+    /// # Returns
+    /// A regex pattern string
+    fn like_pattern_to_regex(&self, pattern: &str, case_insensitive: bool) -> String {
+        let mut regex = String::new();
+
+        // Add case-insensitive flag if needed
+        if case_insensitive {
+            regex.push_str("(?i)");
+        }
+
+        // Anchor at start
+        regex.push('^');
+
+        // Convert each character
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            match chars[i] {
+                '%' => regex.push_str(".*"),
+                '_' => regex.push('.'),
+                // Escape regex special characters
+                '.' | '*' | '+' | '?' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|'
+                | '\\' => {
+                    regex.push('\\');
+                    regex.push(chars[i]);
+                }
+                c => regex.push(c),
+            }
+            i += 1;
+        }
+
+        // Anchor at end
+        regex.push('$');
+
+        regex
+    }
+
+    /// Convert a GLOB pattern to a regex pattern
+    ///
+    /// GLOB uses Unix-style wildcards:
+    /// - * to match any sequence of zero or more characters
+    /// - ? to match any single character
+    /// - [...] for character classes
+    ///
+    /// # Arguments
+    /// * `pattern` - The GLOB pattern
+    ///
+    /// # Returns
+    /// A regex pattern string
+    fn glob_pattern_to_regex(&self, pattern: &str) -> String {
+        let mut regex = String::new();
+
+        // Anchor at start
+        regex.push('^');
+
+        // Convert each character
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            match chars[i] {
+                '*' => regex.push_str(".*"),
+                '?' => regex.push('.'),
+                '[' => {
+                    // Pass through character class as-is (with some escaping)
+                    regex.push('[');
+                    i += 1;
+                    while i < chars.len() && chars[i] != ']' {
+                        if chars[i] == '\\' && i + 1 < chars.len() {
+                            regex.push('\\');
+                            regex.push(chars[i + 1]);
+                            i += 2;
+                        } else {
+                            regex.push(chars[i]);
+                            i += 1;
+                        }
+                    }
+                    if i < chars.len() {
+                        regex.push(']');
+                    }
+                }
+                // Escape regex special characters (except those handled above)
+                '.' | '+' | '^' | '$' | '(' | ')' | '{' | '}' | '|' | '\\' => {
+                    regex.push('\\');
+                    regex.push(chars[i]);
+                }
+                c => regex.push(c),
+            }
+            i += 1;
+        }
+
+        // Anchor at end
+        regex.push('$');
+
+        regex
     }
 }
 

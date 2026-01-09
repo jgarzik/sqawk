@@ -60,15 +60,17 @@ pub fn execute_vm(sql: &str, database: &Database, verbose: bool) -> SqawkResult<
     // Build a table from the execution results
     let result_table = vm.create_result_table();
 
-    if verbose && result_table.is_ok() {
-        if let Some(table) = &result_table.as_ref().unwrap() {
-            println!(
-                "Result table created with {} rows and {} columns",
-                table.row_count(),
-                table.column_count()
-            );
-        } else {
-            println!("Query executed successfully with no result table");
+    if verbose {
+        if let Ok(ref result) = result_table {
+            if let Some(table) = result {
+                println!(
+                    "Result table created with {} rows and {} columns",
+                    table.row_count(),
+                    table.column_count()
+                );
+            } else {
+                println!("Query executed successfully with no result table");
+            }
         }
     }
 

@@ -14,10 +14,16 @@ mod update; // UPDATE statement tests
 mod advanced; // Tests for advanced SQL features and edge cases
 mod aggregate; // Tests for aggregate functions (COUNT, SUM, AVG, MIN, MAX)
 mod alias; // Tests for column aliases (AS keyword)
+mod between; // Tests for BETWEEN operator (VM implementation)
+mod case; // Tests for CASE WHEN expressions (VM implementation)
+mod cast; // Tests for CAST type conversion (VM implementation)
+mod coalesce; // Tests for COALESCE and NULLIF functions (VM implementation)
 mod csv_handler; // Tests for CSV handler features (comments, error recovery)
 mod delimiter; // Tests for delimiter options (-F flag)
 mod group_by; // Tests for GROUP BY functionality
+mod in_list; // Tests for IN list operator (VM implementation)
 mod join_on; // Tests for JOIN ON syntax (as opposed to WHERE for joins)
+mod like; // Tests for LIKE/ILIKE pattern matching (VM implementation)
 mod limit_offset; // Tests for LIMIT and OFFSET clauses
 mod repl; // Tests for interactive REPL functionality with pre-generated input
 mod string_functions; // Tests for string functions (UPPER, LOWER, TRIM, SUBSTR, REPLACE)
