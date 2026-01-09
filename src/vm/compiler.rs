@@ -490,8 +490,8 @@ impl<'a> SqlCompiler<'a> {
             }
         }
 
-        // Check if projection contains function expressions
-        let has_function_expr = select.projection.iter().any(|item| {
+        // Check if projection contains function expressions or computed expressions
+        let has_computed_expr = select.projection.iter().any(|item| {
             let expr = match item {
                 SelectItem::UnnamedExpr(e) => Some(e),
                 SelectItem::ExprWithAlias { expr: e, .. } => Some(e),
@@ -500,16 +500,22 @@ impl<'a> SqlCompiler<'a> {
             if let Some(e) = expr {
                 matches!(
                     e,
-                    Expr::Function(_) | Expr::Trim { .. } | Expr::Substring { .. }
+                    Expr::Function(_)
+                        | Expr::Trim { .. }
+                        | Expr::Substring { .. }
+                        | Expr::BinaryOp { .. }
+                        | Expr::UnaryOp { .. }
+                        | Expr::Ceil { .. }
+                        | Expr::Floor { .. }
                 )
             } else {
                 false
             }
         });
 
-        // If we have functions and only LIMIT (no ORDER BY), use compile_table_scan
+        // If we have functions/computed expressions and only LIMIT (no ORDER BY), use compile_table_scan
         // which handles function expressions properly
-        if has_function_expr && !has_order_by {
+        if has_computed_expr && !has_order_by {
             return self.compile_table_scan_with_limit(select, query, &table_name);
         }
 
@@ -1217,10 +1223,33 @@ impl<'a> SqlCompiler<'a> {
 
         // Generate the result row
         if !result_regs.is_empty() {
-            // Output the result row
+            // ResultRow requires contiguous registers, but compile_expr may have
+            // allocated non-contiguous registers. Copy results to contiguous block.
+            let start_reg = self.allocate_register();
+            for _ in 1..result_regs.len() {
+                self.allocate_register();
+            }
+
+            // Copy each result to the contiguous block
+            for (i, &src_reg) in result_regs.iter().enumerate() {
+                let dest_reg = start_reg + i as i64;
+                if src_reg != dest_reg {
+                    self.program.add_instruction(Instruction::new(
+                        OpCode::Copy,
+                        src_reg,
+                        dest_reg,
+                        0,
+                        None,
+                        0,
+                        Some(format!("Copy r[{}] -> r[{}]", src_reg, dest_reg)),
+                    ));
+                }
+            }
+
+            // Output the result row from contiguous registers
             self.program.add_instruction(Instruction::new(
                 OpCode::ResultRow,
-                result_regs[0],           // First register
+                start_reg,                // First register
                 result_regs.len() as i64, // Number of columns
                 0,
                 None,
@@ -1276,10 +1305,20 @@ impl<'a> SqlCompiler<'a> {
                                 0,
                                 Some(format!("r[{}] = {}", result_reg, int_val)),
                             ));
+                        } else if let Ok(float_val) = num.parse::<f64>() {
+                            // For floats, use String opcode and rely on runtime conversion
+                            self.program.add_instruction(Instruction::new(
+                                OpCode::String,
+                                0,
+                                result_reg,
+                                0,
+                                Some(float_val.to_string()),
+                                0,
+                                Some(format!("r[{}] = {} (float)", result_reg, float_val)),
+                            ));
                         } else {
-                            // Return an error for now - we could add float support later
                             return Err(SqawkError::UnsupportedSqlFeature(format!(
-                                "Non-integer literals not yet supported: {}",
+                                "Invalid numeric literal: {}",
                                 num
                             )));
                         }
@@ -1314,7 +1353,183 @@ impl<'a> SqlCompiler<'a> {
                     }
                 }
             }
-            // Could add support for other expression types here
+            sqlparser::ast::Expr::UnaryOp { op, expr } => {
+                // Handle unary operators (e.g., -5, +3)
+                match op {
+                    sqlparser::ast::UnaryOperator::Minus => {
+                        // Compile the inner expression
+                        let inner_reg = self.compile_expr(expr)?;
+                        // Negate using 0 - value (avoids Integer -1 special case)
+                        let zero_reg = self.allocate_register();
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Integer,
+                            0,
+                            zero_reg,
+                            0,
+                            None,
+                            0,
+                            Some(format!("r[{}] = 0", zero_reg)),
+                        ));
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Subtract,
+                            zero_reg,
+                            inner_reg,
+                            result_reg,
+                            None,
+                            0,
+                            Some(format!("r[{}] = -r[{}]", result_reg, inner_reg)),
+                        ));
+                    }
+                    sqlparser::ast::UnaryOperator::Plus => {
+                        // Unary plus is a no-op, just compile the inner expression
+                        let inner_reg = self.compile_expr(expr)?;
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Copy,
+                            inner_reg,
+                            result_reg,
+                            0,
+                            None,
+                            0,
+                            Some(format!("r[{}] = +r[{}]", result_reg, inner_reg)),
+                        ));
+                    }
+                    _ => {
+                        return Err(SqawkError::UnsupportedSqlFeature(format!(
+                            "Unsupported unary operator: {:?}",
+                            op
+                        )));
+                    }
+                }
+            }
+            sqlparser::ast::Expr::BinaryOp { left, op, right } => {
+                // Handle arithmetic binary operators
+                let left_reg = self.compile_expr(left)?;
+                let right_reg = self.compile_expr(right)?;
+
+                let opcode = match op {
+                    sqlparser::ast::BinaryOperator::Plus => OpCode::Add,
+                    sqlparser::ast::BinaryOperator::Minus => OpCode::Subtract,
+                    sqlparser::ast::BinaryOperator::Multiply => OpCode::Multiply,
+                    sqlparser::ast::BinaryOperator::Divide => OpCode::Divide,
+                    sqlparser::ast::BinaryOperator::Modulo => OpCode::Remainder,
+                    _ => {
+                        return Err(SqawkError::UnsupportedSqlFeature(format!(
+                            "Unsupported binary operator: {:?}",
+                            op
+                        )));
+                    }
+                };
+
+                self.program.add_instruction(Instruction::new(
+                    opcode,
+                    left_reg,
+                    right_reg,
+                    result_reg,
+                    None,
+                    0,
+                    Some(format!(
+                        "r[{}] = r[{}] {:?} r[{}]",
+                        result_reg, left_reg, op, right_reg
+                    )),
+                ));
+            }
+            sqlparser::ast::Expr::Function(func) => {
+                // Handle function calls (ABS, ROUND, etc.)
+                let func_name = func
+                    .name
+                    .0
+                    .iter()
+                    .map(|id| id.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".")
+                    .to_uppercase();
+
+                match func_name.as_str() {
+                    "ABS" | "ROUND" | "CEIL" | "CEILING" | "FLOOR" => {
+                        if func.args.is_empty() {
+                            return Err(SqawkError::InvalidSqlQuery(format!(
+                                "{} requires one argument",
+                                func_name
+                            )));
+                        }
+                        let arg_expr = self.extract_function_arg_expr(&func.args[0])?;
+                        let src_reg = self.compile_expr(&arg_expr)?;
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::MathFunc,
+                            src_reg,
+                            result_reg,
+                            0,
+                            Some(func_name.clone()),
+                            0,
+                            Some(format!("r[{}] = {}(r[{}])", result_reg, func_name, src_reg)),
+                        ));
+                    }
+                    "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" => {
+                        // No-argument date/time functions
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::DateFunc,
+                            0, // No source register needed
+                            result_reg,
+                            0,
+                            Some(func_name.clone()),
+                            0,
+                            Some(format!("r[{}] = {}()", result_reg, func_name)),
+                        ));
+                    }
+                    "DATE" | "TIME" => {
+                        // Single-argument date/time functions
+                        if func.args.is_empty() {
+                            return Err(SqawkError::InvalidSqlQuery(format!(
+                                "{} requires one argument",
+                                func_name
+                            )));
+                        }
+                        let arg_expr = self.extract_function_arg_expr(&func.args[0])?;
+                        let src_reg = self.compile_expr(&arg_expr)?;
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::DateFunc,
+                            src_reg,
+                            result_reg,
+                            0,
+                            Some(func_name.clone()),
+                            0,
+                            Some(format!("r[{}] = {}(r[{}])", result_reg, func_name, src_reg)),
+                        ));
+                    }
+                    _ => {
+                        return Err(SqawkError::UnsupportedSqlFeature(format!(
+                            "Unsupported function in expression: {}",
+                            func_name
+                        )));
+                    }
+                }
+            }
+            sqlparser::ast::Expr::Ceil { expr, .. } => {
+                // CEIL is a special expression type in sqlparser
+                let src_reg = self.compile_expr(expr)?;
+                self.program.add_instruction(Instruction::new(
+                    OpCode::MathFunc,
+                    src_reg,
+                    result_reg,
+                    0,
+                    Some("CEIL".to_string()),
+                    0,
+                    Some(format!("r[{}] = CEIL(r[{}])", result_reg, src_reg)),
+                ));
+            }
+            sqlparser::ast::Expr::Floor { expr, .. } => {
+                // FLOOR is a special expression type in sqlparser
+                let src_reg = self.compile_expr(expr)?;
+                self.program.add_instruction(Instruction::new(
+                    OpCode::MathFunc,
+                    src_reg,
+                    result_reg,
+                    0,
+                    Some("FLOOR".to_string()),
+                    0,
+                    Some(format!("r[{}] = FLOOR(r[{}])", result_reg, src_reg)),
+                ));
+            }
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(format!(
                     "Unsupported expression type: {:?}",
@@ -1357,7 +1572,7 @@ impl<'a> SqlCompiler<'a> {
 
         let table = self.database.get_table(&table_name).unwrap();
 
-        // Check if projection contains function expressions (including special syntax forms)
+        // Check if projection contains function expressions or computed expressions
         let has_function_expr = projection.iter().any(|item| {
             let expr = match item {
                 SelectItem::UnnamedExpr(e) => Some(e),
@@ -1372,6 +1587,10 @@ impl<'a> SqlCompiler<'a> {
                         | Expr::Substring { .. }
                         | Expr::Position { .. }
                         | Expr::Overlay { .. }
+                        | Expr::BinaryOp { .. }
+                        | Expr::UnaryOp { .. }
+                        | Expr::Ceil { .. }
+                        | Expr::Floor { .. }
                 )
             } else {
                 false
@@ -1559,6 +1778,109 @@ impl<'a> SqlCompiler<'a> {
                                     None,
                                     0,
                                     Some(format!("r[{}] = column {}", value_reg, col_idx)),
+                                ));
+                            }
+                            Expr::BinaryOp { left, op, right } => {
+                                // Handle arithmetic binary operators
+                                let left_reg = self.allocate_register();
+                                let right_reg = self.allocate_register();
+
+                                self.compile_where_operand(left, table, cursor_idx, left_reg)?;
+                                self.compile_where_operand(right, table, cursor_idx, right_reg)?;
+
+                                let opcode = match op {
+                                    BinaryOperator::Plus => OpCode::Add,
+                                    BinaryOperator::Minus => OpCode::Subtract,
+                                    BinaryOperator::Multiply => OpCode::Multiply,
+                                    BinaryOperator::Divide => OpCode::Divide,
+                                    BinaryOperator::Modulo => OpCode::Remainder,
+                                    _ => {
+                                        return Err(SqawkError::UnsupportedSqlFeature(format!(
+                                            "Unsupported binary operator in SELECT: {:?}",
+                                            op
+                                        )));
+                                    }
+                                };
+
+                                self.program.add_instruction(Instruction::new(
+                                    opcode,
+                                    left_reg,
+                                    right_reg,
+                                    value_reg,
+                                    None,
+                                    0,
+                                    Some(format!(
+                                        "r[{}] = r[{}] {:?} r[{}]",
+                                        value_reg, left_reg, op, right_reg
+                                    )),
+                                ));
+                            }
+                            Expr::UnaryOp { op, expr: inner } => {
+                                // Handle unary operators (e.g., -value)
+                                match op {
+                                    sqlparser::ast::UnaryOperator::Minus => {
+                                        let inner_reg = self.allocate_register();
+                                        self.compile_where_operand(
+                                            inner, table, cursor_idx, inner_reg,
+                                        )?;
+                                        // Negate using 0 - value (avoids Integer -1 special case)
+                                        let zero_reg = self.allocate_register();
+                                        self.program.add_instruction(Instruction::new(
+                                            OpCode::Integer,
+                                            0,
+                                            zero_reg,
+                                            0,
+                                            None,
+                                            0,
+                                            Some(format!("r[{}] = 0", zero_reg)),
+                                        ));
+                                        self.program.add_instruction(Instruction::new(
+                                            OpCode::Subtract,
+                                            zero_reg,
+                                            inner_reg,
+                                            value_reg,
+                                            None,
+                                            0,
+                                            Some(format!("r[{}] = -r[{}]", value_reg, inner_reg)),
+                                        ));
+                                    }
+                                    sqlparser::ast::UnaryOperator::Plus => {
+                                        self.compile_where_operand(
+                                            inner, table, cursor_idx, value_reg,
+                                        )?;
+                                    }
+                                    _ => {
+                                        return Err(SqawkError::UnsupportedSqlFeature(format!(
+                                            "Unsupported unary operator: {:?}",
+                                            op
+                                        )));
+                                    }
+                                }
+                            }
+                            Expr::Ceil { expr: inner, .. } => {
+                                let src_reg = self.allocate_register();
+                                self.compile_where_operand(inner, table, cursor_idx, src_reg)?;
+                                self.program.add_instruction(Instruction::new(
+                                    OpCode::MathFunc,
+                                    src_reg,
+                                    value_reg,
+                                    0,
+                                    Some("CEIL".to_string()),
+                                    0,
+                                    Some(format!("r[{}] = CEIL(r[{}])", value_reg, src_reg)),
+                                ));
+                            }
+                            Expr::Floor { expr: inner, .. } => {
+                                let src_reg = self.allocate_register();
+                                self.compile_where_operand(inner, table, cursor_idx, src_reg)?;
+                                self.program.add_instruction(Instruction::new(
+                                    OpCode::MathFunc,
+                                    src_reg,
+                                    value_reg,
+                                    0,
+                                    Some("FLOOR".to_string()),
+                                    0,
+                                    Some(format!("r[{}] = FLOOR(r[{}])", value_reg, src_reg)),
                                 ));
                             }
                             _ => {
@@ -7373,6 +7695,101 @@ impl<'a> SqlCompiler<'a> {
                     Some(format!("r[{}] = REPLACE(...)", target_reg)),
                 ));
             }
+            "CONCAT" => {
+                // CONCAT(str1, str2, ...) - concatenate multiple strings
+                if func.args.len() < 2 {
+                    return Err(SqawkError::InvalidSqlQuery(
+                        "CONCAT requires at least two arguments".to_string(),
+                    ));
+                }
+
+                // Compile first argument to src_reg
+                let first_expr = self.extract_function_arg_expr(&func.args[0])?;
+                let src_reg = self.allocate_register();
+                self.compile_where_operand(&first_expr, table, cursor_idx, src_reg)?;
+
+                // Compile remaining arguments and build P4 spec
+                let mut arg_regs = Vec::new();
+                for arg in func.args.iter().skip(1) {
+                    let expr = self.extract_function_arg_expr(arg)?;
+                    let reg = self.allocate_register();
+                    self.compile_where_operand(&expr, table, cursor_idx, reg)?;
+                    arg_regs.push(reg.to_string());
+                }
+
+                // P4 = "CONCAT:reg1:reg2:..."
+                let func_spec = format!("CONCAT:{}", arg_regs.join(":"));
+
+                self.program.add_instruction(Instruction::new(
+                    OpCode::StringFunc,
+                    src_reg,
+                    target_reg,
+                    0,
+                    Some(func_spec),
+                    0,
+                    Some(format!("r[{}] = CONCAT(...)", target_reg)),
+                ));
+            }
+            "LEFT" => {
+                // LEFT(str, n) - return leftmost n characters
+                if func.args.len() != 2 {
+                    return Err(SqawkError::InvalidSqlQuery(
+                        "LEFT requires exactly two arguments".to_string(),
+                    ));
+                }
+
+                let str_expr = self.extract_function_arg_expr(&func.args[0])?;
+                let len_expr = self.extract_function_arg_expr(&func.args[1])?;
+
+                let str_reg = self.allocate_register();
+                let len_reg = self.allocate_register();
+
+                self.compile_where_operand(&str_expr, table, cursor_idx, str_reg)?;
+                self.compile_where_operand(&len_expr, table, cursor_idx, len_reg)?;
+
+                self.program.add_instruction(Instruction::new(
+                    OpCode::StringFunc,
+                    str_reg,
+                    target_reg,
+                    len_reg,
+                    Some("LEFT".to_string()),
+                    0,
+                    Some(format!(
+                        "r[{}] = LEFT(r[{}], r[{}])",
+                        target_reg, str_reg, len_reg
+                    )),
+                ));
+            }
+            "RIGHT" => {
+                // RIGHT(str, n) - return rightmost n characters
+                if func.args.len() != 2 {
+                    return Err(SqawkError::InvalidSqlQuery(
+                        "RIGHT requires exactly two arguments".to_string(),
+                    ));
+                }
+
+                let str_expr = self.extract_function_arg_expr(&func.args[0])?;
+                let len_expr = self.extract_function_arg_expr(&func.args[1])?;
+
+                let str_reg = self.allocate_register();
+                let len_reg = self.allocate_register();
+
+                self.compile_where_operand(&str_expr, table, cursor_idx, str_reg)?;
+                self.compile_where_operand(&len_expr, table, cursor_idx, len_reg)?;
+
+                self.program.add_instruction(Instruction::new(
+                    OpCode::StringFunc,
+                    str_reg,
+                    target_reg,
+                    len_reg,
+                    Some("RIGHT".to_string()),
+                    0,
+                    Some(format!(
+                        "r[{}] = RIGHT(r[{}], r[{}])",
+                        target_reg, str_reg, len_reg
+                    )),
+                ));
+            }
             "NULLIF" => {
                 // NULLIF(a, b) returns NULL if a == b, otherwise returns a
                 if func.args.len() != 2 {
@@ -7462,6 +7879,70 @@ impl<'a> SqlCompiler<'a> {
                 if let Some(inst) = self.program.instructions.get_mut(skip_else_addr) {
                     inst.p2 = end_addr as i64;
                 }
+            }
+            "ABS" | "ROUND" | "CEIL" | "CEILING" | "FLOOR" => {
+                // Single-argument math functions
+                if func.args.is_empty() {
+                    return Err(SqawkError::InvalidSqlQuery(format!(
+                        "{} requires one argument",
+                        func_name
+                    )));
+                }
+
+                let expr = self.extract_function_arg_expr(&func.args[0])?;
+                let src_reg = self.allocate_register();
+
+                // Compile the argument
+                self.compile_where_operand(&expr, table, cursor_idx, src_reg)?;
+
+                // Emit MathFunc opcode
+                self.program.add_instruction(Instruction::new(
+                    OpCode::MathFunc,
+                    src_reg,
+                    target_reg,
+                    0,
+                    Some(func_name.clone()),
+                    0,
+                    Some(format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg)),
+                ));
+            }
+            "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" => {
+                // No-argument date/time functions
+                self.program.add_instruction(Instruction::new(
+                    OpCode::DateFunc,
+                    0, // No source register needed
+                    target_reg,
+                    0,
+                    Some(func_name.clone()),
+                    0,
+                    Some(format!("r[{}] = {}()", target_reg, func_name)),
+                ));
+            }
+            "DATE" | "TIME" => {
+                // Single-argument date/time functions
+                if func.args.is_empty() {
+                    return Err(SqawkError::InvalidSqlQuery(format!(
+                        "{} requires one argument",
+                        func_name
+                    )));
+                }
+
+                let expr = self.extract_function_arg_expr(&func.args[0])?;
+                let src_reg = self.allocate_register();
+
+                // Compile the argument
+                self.compile_where_operand(&expr, table, cursor_idx, src_reg)?;
+
+                // Emit DateFunc opcode
+                self.program.add_instruction(Instruction::new(
+                    OpCode::DateFunc,
+                    src_reg,
+                    target_reg,
+                    0,
+                    Some(func_name.clone()),
+                    0,
+                    Some(format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg)),
+                ));
             }
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -7769,9 +8250,20 @@ impl<'a> SqlCompiler<'a> {
                                 0,
                                 Some(format!("r[{}] = {}", target_reg, int_val)),
                             ));
+                        } else if let Ok(float_val) = num.parse::<f64>() {
+                            // Store float as string for runtime conversion
+                            self.program.add_instruction(Instruction::new(
+                                OpCode::String,
+                                0,
+                                target_reg,
+                                0,
+                                Some(float_val.to_string()),
+                                0,
+                                Some(format!("r[{}] = {} (float)", target_reg, float_val)),
+                            ));
                         } else {
                             return Err(SqawkError::UnsupportedSqlFeature(format!(
-                                "Non-integer literals not supported in WHERE: {}",
+                                "Invalid numeric literal in WHERE: {}",
                                 num
                             )));
                         }
@@ -7824,7 +8316,7 @@ impl<'a> SqlCompiler<'a> {
                 )?;
             }
             Expr::BinaryOp { left, op, right } => {
-                // Handle binary operations as operands (e.g., in CASE WHEN conditions)
+                // Handle binary operations as operands (e.g., in CASE WHEN conditions or arithmetic)
                 let left_reg = self.allocate_register();
                 let right_reg = self.allocate_register();
 
@@ -7832,12 +8324,19 @@ impl<'a> SqlCompiler<'a> {
                 self.compile_where_operand(right, table, cursor_idx, right_reg)?;
 
                 let opcode = match op {
+                    // Comparison operators
                     BinaryOperator::Gt => OpCode::Gt,
                     BinaryOperator::Lt => OpCode::Lt,
                     BinaryOperator::GtEq => OpCode::Ge,
                     BinaryOperator::LtEq => OpCode::Le,
                     BinaryOperator::Eq => OpCode::Eq,
                     BinaryOperator::NotEq => OpCode::Ne,
+                    // Arithmetic operators
+                    BinaryOperator::Plus => OpCode::Add,
+                    BinaryOperator::Minus => OpCode::Subtract,
+                    BinaryOperator::Multiply => OpCode::Multiply,
+                    BinaryOperator::Divide => OpCode::Divide,
+                    BinaryOperator::Modulo => OpCode::Remainder,
                     _ => {
                         return Err(SqawkError::UnsupportedSqlFeature(format!(
                             "Unsupported binary operator in operand: {:?}",
@@ -8072,32 +8571,28 @@ impl<'a> SqlCompiler<'a> {
             Expr::UnaryOp { op, expr: inner } => {
                 match op {
                     UnaryOperator::Minus => {
-                        // Handle negative numbers - only literals are supported
-                        if let Expr::Value(Value::Number(num, _)) = inner.as_ref() {
-                            // Parse as negative number directly
-                            let neg_str = format!("-{}", num);
-                            if let Ok(int_val) = neg_str.parse::<i64>() {
-                                self.program.add_instruction(Instruction::new(
-                                    OpCode::Integer,
-                                    int_val,
-                                    target_reg,
-                                    0,
-                                    None,
-                                    0,
-                                    Some(format!("r[{}] = {}", target_reg, int_val)),
-                                ));
-                            } else {
-                                return Err(SqawkError::UnsupportedSqlFeature(format!(
-                                    "Cannot parse negative number: {}",
-                                    neg_str
-                                )));
-                            }
-                        } else {
-                            return Err(SqawkError::UnsupportedSqlFeature(format!(
-                                "Negative expressions on non-literals not supported: {:?}",
-                                inner
-                            )));
-                        }
+                        // Handle unary minus using 0 - value (avoids Integer -1 special case)
+                        let inner_reg = self.allocate_register();
+                        self.compile_where_operand(inner, table, cursor_idx, inner_reg)?;
+                        let zero_reg = self.allocate_register();
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Integer,
+                            0,
+                            zero_reg,
+                            0,
+                            None,
+                            0,
+                            Some(format!("r[{}] = 0", zero_reg)),
+                        ));
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Subtract,
+                            zero_reg,
+                            inner_reg,
+                            target_reg,
+                            None,
+                            0,
+                            Some(format!("r[{}] = -r[{}]", target_reg, inner_reg)),
+                        ));
                     }
                     UnaryOperator::Plus => {
                         // Unary plus is a no-op, just compile the inner expression
@@ -9451,12 +9946,7 @@ impl<'a> SqlCompiler<'a> {
 
             SetExpr::Select(select) => {
                 // INSERT ... SELECT
-                self.compile_insert_select(
-                    &table_name_str,
-                    column_count,
-                    &column_indices,
-                    select,
-                )?;
+                self.compile_insert_select(&table_name_str, column_count, &column_indices, select)?;
             }
 
             _ => {

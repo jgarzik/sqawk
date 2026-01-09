@@ -164,6 +164,19 @@ pub enum OpCode {
 
     // String functions
     StringFunc, // P1 = src reg, P2 = dest reg, P3 = arg2 reg (for SUBSTR/REPLACE), P4 = function name
+
+    // Math functions
+    MathFunc, // P1 = src reg, P2 = dest reg, P4 = function name (ABS, ROUND, CEIL, FLOOR)
+
+    // Date/Time functions
+    DateFunc, // P1 = src reg (optional), P2 = dest reg, P4 = function name (DATE, TIME, NOW)
+
+    // Arithmetic operations
+    Add,       // P1 = left reg, P2 = right reg, P3 = dest reg. dest = left + right
+    Subtract,  // P1 = left reg, P2 = right reg, P3 = dest reg. dest = left - right
+    Multiply,  // P1 = left reg, P2 = right reg, P3 = dest reg. dest = left * right
+    Divide,    // P1 = left reg, P2 = right reg, P3 = dest reg. dest = left / right
+    Remainder, // P1 = left reg, P2 = right reg, P3 = dest reg. dest = left % right
 }
 
 /// A SQL VM instruction with opcode and parameters

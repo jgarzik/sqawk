@@ -44,6 +44,12 @@ mod subquery; // Tests for scalar subqueries with aggregates
 // Phase 4B: Correlated Subquery Support (VM implementation)
 mod correlated; // Tests for correlated subqueries with runtime execution
 
+// Phase 7: Advanced Expressions (VM implementation)
+mod arithmetic; // Tests for arithmetic operators (+, -, *, /, %)
+mod date_functions; // Tests for date/time functions (DATE, TIME, NOW)
+mod math_functions; // Tests for math functions (ABS, ROUND, CEIL, FLOOR)
+mod string_functions_ext; // Tests for extended string functions (CONCAT, LEFT, RIGHT)
+
 mod repl; // Tests for interactive REPL functionality with pre-generated input
 mod string_functions; // Tests for string functions (UPPER, LOWER, TRIM, SUBSTR, REPLACE)
 

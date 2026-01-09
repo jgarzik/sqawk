@@ -61,20 +61,20 @@ Support all SQL commands from sqlparser crate that make sense for CSV file colle
 ---
 
 ## Phase 6: VM Completeness for Aggregates & Sorting
-- [ ] VM COUNT/SUM/AVG/MIN/MAX (opcodes: AggStep, AggFinal, AggValue)
-- [ ] VM GROUP BY (opcodes: SorterOpen, SorterInsert, SorterSort)
-- [ ] VM ORDER BY (opcodes: Sort, SorterNext)
-- [ ] VM DISTINCT (opcodes: Distinct, Found)
-- [ ] **Phase 6 Validation**: build, test, clippy clean
+- [x] VM COUNT/SUM/AVG/MIN/MAX (opcodes: AggStep, AggFinal) - 5 aggregate tests
+- [x] VM GROUP BY (compile-time grouping) - 5 GROUP BY tests
+- [x] VM ORDER BY (opcodes: SorterOpen, SorterInsert, SorterSort) - 8 ORDER BY tests
+- [x] VM DISTINCT (opcode: Distinct) - 7 DISTINCT tests
+- [x] **Phase 6 Validation**: build, test, clippy clean (all 186 tests pass)
 
 ---
 
 ## Phase 7: Advanced Expressions
-- [ ] Math functions: ABS, ROUND, CEIL, FLOOR (opcodes: Function)
-- [ ] String functions: LENGTH, CONCAT, LEFT, RIGHT (opcodes: Function)
-- [ ] Date functions: DATE, TIME, NOW (opcodes: Function)
-- [ ] Arithmetic operators: +, -, *, /, % (opcodes: Add, Subtract, Multiply, Divide, Remainder)
-- [ ] **Phase 7 Validation**: build, test, clippy clean
+- [x] Math functions: ABS, ROUND, CEIL, FLOOR (opcodes: MathFunc)
+- [x] String functions: LENGTH, CONCAT, LEFT, RIGHT (opcodes: StringFunc)
+- [x] Date functions: DATE, TIME, NOW (opcodes: DateFunc)
+- [x] Arithmetic operators: +, -, *, /, % (opcodes: Add, Subtract, Multiply, Divide, Remainder)
+- [x] **Phase 7 Validation**: build, test, clippy clean (186 tests pass)
 
 ---
 

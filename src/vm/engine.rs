@@ -868,6 +868,46 @@ impl<'a> VmEngine<'a> {
                             src_str
                         }
                     }
+                    "CONCAT" => {
+                        // Concatenate strings: parts[1..] contain additional register numbers
+                        let mut result = src_str;
+                        for part in parts.iter().skip(1) {
+                            if let Ok(reg) = part.parse::<usize>() {
+                                let val = match self.get_register(reg)? {
+                                    Register::String(s) => s,
+                                    Register::Integer(i) => i.to_string(),
+                                    Register::Float(f) => f.to_string(),
+                                    Register::Boolean(b) => b.to_string(),
+                                    Register::Null => String::new(),
+                                };
+                                result.push_str(&val);
+                            }
+                        }
+                        result
+                    }
+                    "LEFT" => {
+                        // LEFT(str, n) - return leftmost n characters
+                        let len_reg = inst.p3 as usize;
+                        let len = match self.get_register(len_reg)? {
+                            Register::Integer(i) => i.max(0) as usize,
+                            _ => 0,
+                        };
+                        src_str.chars().take(len).collect()
+                    }
+                    "RIGHT" => {
+                        // RIGHT(str, n) - return rightmost n characters
+                        let len_reg = inst.p3 as usize;
+                        let len = match self.get_register(len_reg)? {
+                            Register::Integer(i) => i.max(0) as usize,
+                            _ => 0,
+                        };
+                        let char_count = src_str.chars().count();
+                        if len >= char_count {
+                            src_str
+                        } else {
+                            src_str.chars().skip(char_count - len).collect()
+                        }
+                    }
                     _ => {
                         return Err(SqawkError::VmError(format!(
                             "Unknown string function: {}",
@@ -882,6 +922,277 @@ impl<'a> VmEngine<'a> {
                     println!(
                         "StringFunc {}: r[{}] -> r[{}]",
                         func_name, src_reg, dest_reg
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::MathFunc => {
+                // Execute a math function
+                // P1 = src reg, P2 = dest reg, P4 = function name (ABS, ROUND, CEIL, FLOOR)
+                let src_reg = inst.p1 as usize;
+                let dest_reg = inst.p2 as usize;
+                let func_name = inst.p4.clone().unwrap_or_default();
+
+                // Get source value as a number
+                let src_value = self.get_register(src_reg)?;
+                let num = match src_value {
+                    Register::Integer(i) => i as f64,
+                    Register::Float(f) => f,
+                    Register::String(s) => s.parse::<f64>().unwrap_or(0.0),
+                    Register::Null => {
+                        // NULL in, NULL out
+                        self.set_register(dest_reg, Register::Null)?;
+                        return Ok(ExecuteResult::Continue);
+                    }
+                    Register::Boolean(b) => {
+                        if b {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                };
+
+                let result = match func_name.as_str() {
+                    "ABS" => num.abs(),
+                    "ROUND" => num.round(),
+                    "CEIL" | "CEILING" => num.ceil(),
+                    "FLOOR" => num.floor(),
+                    _ => {
+                        return Err(SqawkError::VmError(format!(
+                            "Unknown math function: {}",
+                            func_name
+                        )));
+                    }
+                };
+
+                // Store result - preserve integer type if possible
+                let result_reg = if result.fract() == 0.0
+                    && result >= i64::MIN as f64
+                    && result <= i64::MAX as f64
+                {
+                    Register::Integer(result as i64)
+                } else {
+                    Register::Float(result)
+                };
+                self.set_register(dest_reg, result_reg)?;
+
+                if self.verbose {
+                    println!(
+                        "MathFunc {}: r[{}] ({}) -> r[{}] ({})",
+                        func_name, src_reg, num, dest_reg, result
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::DateFunc => {
+                // Execute a date/time function
+                // P1 = src reg (optional, for DATE/TIME), P2 = dest reg, P4 = function name
+                let src_reg = inst.p1 as usize;
+                let dest_reg = inst.p2 as usize;
+                let func_name = inst.p4.clone().unwrap_or_default();
+
+                let result = match func_name.as_str() {
+                    "NOW" | "CURRENT_TIMESTAMP" => {
+                        // Return current date and time in ISO 8601 format
+                        use std::time::SystemTime;
+                        let now = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        let secs = now.as_secs();
+                        // Convert to datetime string (simplified - just date for now)
+                        let days_since_epoch = secs / 86400;
+                        let years = 1970 + (days_since_epoch / 365);
+                        let remaining_days = days_since_epoch % 365;
+                        let months = remaining_days / 30 + 1;
+                        let days = remaining_days % 30 + 1;
+                        let hours = (secs % 86400) / 3600;
+                        let minutes = (secs % 3600) / 60;
+                        let seconds = secs % 60;
+                        format!(
+                            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                            years, months, days, hours, minutes, seconds
+                        )
+                    }
+                    "DATE" => {
+                        // Extract or validate date from input
+                        let src_value = self.get_register(src_reg)?;
+                        match src_value {
+                            Register::String(s) => {
+                                // Try to extract just the date part (YYYY-MM-DD)
+                                if s.len() >= 10 {
+                                    s[..10].to_string()
+                                } else {
+                                    s
+                                }
+                            }
+                            Register::Null => {
+                                self.set_register(dest_reg, Register::Null)?;
+                                return Ok(ExecuteResult::Continue);
+                            }
+                            _ => {
+                                // Convert to string and try to extract date
+                                match src_value {
+                                    Register::Integer(i) => i.to_string(),
+                                    Register::Float(f) => f.to_string(),
+                                    _ => String::new(),
+                                }
+                            }
+                        }
+                    }
+                    "TIME" => {
+                        // Extract or validate time from input
+                        let src_value = self.get_register(src_reg)?;
+                        match src_value {
+                            Register::String(s) => {
+                                // Try to extract time part (HH:MM:SS)
+                                if s.contains(' ') {
+                                    // Datetime format, extract time after space
+                                    s.split(' ').nth(1).unwrap_or(&s).to_string()
+                                } else {
+                                    // Already a time string or return as-is
+                                    s
+                                }
+                            }
+                            Register::Null => {
+                                self.set_register(dest_reg, Register::Null)?;
+                                return Ok(ExecuteResult::Continue);
+                            }
+                            _ => String::new(),
+                        }
+                    }
+                    "CURRENT_DATE" => {
+                        // Return current date only
+                        use std::time::SystemTime;
+                        let now = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        let days_since_epoch = now.as_secs() / 86400;
+                        let years = 1970 + (days_since_epoch / 365);
+                        let remaining_days = days_since_epoch % 365;
+                        let months = remaining_days / 30 + 1;
+                        let days = remaining_days % 30 + 1;
+                        format!("{:04}-{:02}-{:02}", years, months, days)
+                    }
+                    "CURRENT_TIME" => {
+                        // Return current time only
+                        use std::time::SystemTime;
+                        let now = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        let secs = now.as_secs();
+                        let hours = (secs % 86400) / 3600;
+                        let minutes = (secs % 3600) / 60;
+                        let seconds = secs % 60;
+                        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+                    }
+                    _ => {
+                        return Err(SqawkError::VmError(format!(
+                            "Unknown date function: {}",
+                            func_name
+                        )));
+                    }
+                };
+
+                self.set_register(dest_reg, Register::String(result))?;
+
+                if self.verbose {
+                    println!("DateFunc {}: -> r[{}]", func_name, dest_reg);
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Add => {
+                // dest = left + right
+                let left_reg = inst.p1 as usize;
+                let right_reg = inst.p2 as usize;
+                let dest_reg = inst.p3 as usize;
+
+                let result = self.arithmetic_op(left_reg, right_reg, "+")?;
+                self.set_register(dest_reg, result)?;
+
+                if self.verbose {
+                    println!("Add: r[{}] + r[{}] -> r[{}]", left_reg, right_reg, dest_reg);
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Subtract => {
+                // dest = left - right
+                let left_reg = inst.p1 as usize;
+                let right_reg = inst.p2 as usize;
+                let dest_reg = inst.p3 as usize;
+
+                let result = self.arithmetic_op(left_reg, right_reg, "-")?;
+                self.set_register(dest_reg, result)?;
+
+                if self.verbose {
+                    println!(
+                        "Subtract: r[{}] - r[{}] -> r[{}]",
+                        left_reg, right_reg, dest_reg
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Multiply => {
+                // dest = left * right
+                let left_reg = inst.p1 as usize;
+                let right_reg = inst.p2 as usize;
+                let dest_reg = inst.p3 as usize;
+
+                let result = self.arithmetic_op(left_reg, right_reg, "*")?;
+                self.set_register(dest_reg, result)?;
+
+                if self.verbose {
+                    println!(
+                        "Multiply: r[{}] * r[{}] -> r[{}]",
+                        left_reg, right_reg, dest_reg
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Divide => {
+                // dest = left / right
+                let left_reg = inst.p1 as usize;
+                let right_reg = inst.p2 as usize;
+                let dest_reg = inst.p3 as usize;
+
+                let result = self.arithmetic_op(left_reg, right_reg, "/")?;
+                self.set_register(dest_reg, result)?;
+
+                if self.verbose {
+                    println!(
+                        "Divide: r[{}] / r[{}] -> r[{}]",
+                        left_reg, right_reg, dest_reg
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Remainder => {
+                // dest = left % right
+                let left_reg = inst.p1 as usize;
+                let right_reg = inst.p2 as usize;
+                let dest_reg = inst.p3 as usize;
+
+                let result = self.arithmetic_op(left_reg, right_reg, "%")?;
+                self.set_register(dest_reg, result)?;
+
+                if self.verbose {
+                    println!(
+                        "Remainder: r[{}] %% r[{}] -> r[{}]",
+                        left_reg, right_reg, dest_reg
                     );
                 }
 
@@ -2701,6 +3012,85 @@ impl<'a> VmEngine<'a> {
         self.registers[idx] = value;
 
         Ok(())
+    }
+
+    /// Perform an arithmetic operation on two register values
+    ///
+    /// # Arguments
+    /// * `left_reg` - Left operand register index
+    /// * `right_reg` - Right operand register index
+    /// * `op` - The operator: "+", "-", "*", "/", "%"
+    ///
+    /// # Returns
+    /// The result as a Register value
+    fn arithmetic_op(&self, left_reg: usize, right_reg: usize, op: &str) -> SqawkResult<Register> {
+        let left = self.get_register(left_reg)?;
+        let right = self.get_register(right_reg)?;
+
+        // Handle NULL propagation
+        if matches!(left, Register::Null) || matches!(right, Register::Null) {
+            return Ok(Register::Null);
+        }
+
+        // Convert to numbers
+        let left_num = match left {
+            Register::Integer(i) => i as f64,
+            Register::Float(f) => f,
+            Register::String(s) => s.parse::<f64>().unwrap_or(0.0),
+            Register::Boolean(b) => {
+                if b {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Register::Null => unreachable!(),
+        };
+
+        let right_num = match right {
+            Register::Integer(i) => i as f64,
+            Register::Float(f) => f,
+            Register::String(s) => s.parse::<f64>().unwrap_or(0.0),
+            Register::Boolean(b) => {
+                if b {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Register::Null => unreachable!(),
+        };
+
+        let result = match op {
+            "+" => left_num + right_num,
+            "-" => left_num - right_num,
+            "*" => left_num * right_num,
+            "/" => {
+                if right_num == 0.0 {
+                    return Ok(Register::Null); // Division by zero returns NULL
+                }
+                left_num / right_num
+            }
+            "%" => {
+                if right_num == 0.0 {
+                    return Ok(Register::Null); // Modulo by zero returns NULL
+                }
+                left_num % right_num
+            }
+            _ => {
+                return Err(SqawkError::VmError(format!(
+                    "Unknown arithmetic operator: {}",
+                    op
+                )));
+            }
+        };
+
+        // Preserve integer type if possible
+        if result.fract() == 0.0 && result >= i64::MIN as f64 && result <= i64::MAX as f64 {
+            Ok(Register::Integer(result as i64))
+        } else {
+            Ok(Register::Float(result))
+        }
     }
 
     /// Convert a SQL LIKE pattern to a regex pattern
