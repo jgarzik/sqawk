@@ -41,6 +41,9 @@ mod exists; // Tests for EXISTS/NOT EXISTS subqueries
 mod in_subquery; // Tests for IN (SELECT ...) subqueries
 mod subquery; // Tests for scalar subqueries with aggregates
 
+// Phase 4B: Correlated Subquery Support (VM implementation)
+mod correlated; // Tests for correlated subqueries with runtime execution
+
 mod repl; // Tests for interactive REPL functionality with pre-generated input
 mod string_functions; // Tests for string functions (UPPER, LOWER, TRIM, SUBSTR, REPLACE)
 

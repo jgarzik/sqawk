@@ -961,5 +961,4 @@ impl Table {
             .map(|row| row.iter().map(|value| value.to_string()).collect())
             .collect()
     }
-
 }

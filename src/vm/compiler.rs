@@ -22,6 +22,14 @@ use crate::table::{DataType, Table, Value as TableValue};
 /// Result type for multi-table projection resolution
 /// Contains: (columns_per_table, output_column_refs, schema, is_wildcard)
 type MultiTableProjection = (Vec<Vec<usize>>, Vec<(usize, usize)>, ResultSchema, bool);
+/// Outer column reference found in a correlated subquery (Phase 4B)
+#[derive(Debug, Clone)]
+struct OuterColumnRef {
+    /// The table qualifier (alias or table name)
+    qualifier: String,
+    /// The column name
+    column: String,
+}
 
 /// SQL statement compiler that generates bytecode for the VM engine
 pub struct SqlCompiler<'a> {
@@ -39,6 +47,9 @@ pub struct SqlCompiler<'a> {
 
     /// Whether to generate verbose bytecode with detailed comments
     verbose: bool,
+
+    /// Current outer table alias for correlated subquery detection
+    current_outer_alias: Option<String>,
 }
 
 impl<'a> SqlCompiler<'a> {
@@ -50,6 +61,7 @@ impl<'a> SqlCompiler<'a> {
             program: Program::new(),
             register_counter: 0,
             verbose,
+            current_outer_alias: None,
         }
     }
 
@@ -66,7 +78,15 @@ impl<'a> SqlCompiler<'a> {
     }
 
     /// Helper method to emit an instruction
-    fn emit(&mut self, opcode: OpCode, p1: i64, p2: i64, p3: i64, p4: Option<String>, comment: &str) {
+    fn emit(
+        &mut self,
+        opcode: OpCode,
+        p1: i64,
+        p2: i64,
+        p3: i64,
+        p4: Option<String>,
+        comment: &str,
+    ) {
         self.program.add_instruction(Instruction::new(
             opcode,
             p1,
@@ -161,9 +181,7 @@ impl<'a> SqlCompiler<'a> {
                 ..
             } => self.compile_insert(table_name, columns, source),
             Statement::Delete {
-                from,
-                selection,
-                ..
+                from, selection, ..
             } => self.compile_delete(from, selection.as_ref()),
             Statement::Update {
                 table,
@@ -480,7 +498,10 @@ impl<'a> SqlCompiler<'a> {
                 _ => None,
             };
             if let Some(e) = expr {
-                matches!(e, Expr::Function(_) | Expr::Trim { .. } | Expr::Substring { .. })
+                matches!(
+                    e,
+                    Expr::Function(_) | Expr::Trim { .. } | Expr::Substring { .. }
+                )
             } else {
                 false
             }
@@ -808,7 +829,11 @@ impl<'a> SqlCompiler<'a> {
                     0,
                     None,
                     0,
-                    Some(format!("Limit {} offset {}", limit_val.unwrap_or(i64::MAX), offset_val)),
+                    Some(format!(
+                        "Limit {} offset {}",
+                        limit_val.unwrap_or(i64::MAX),
+                        offset_val
+                    )),
                 ));
             }
         }
@@ -1093,7 +1118,10 @@ impl<'a> SqlCompiler<'a> {
                         .ok_or(SqawkError::ColumnNotFound(col_name))?
                 }
                 Expr::CompoundIdentifier(parts) => {
-                    let col_name = parts.last().map(|p| p.value.to_lowercase()).unwrap_or_default();
+                    let col_name = parts
+                        .last()
+                        .map(|p| p.value.to_lowercase())
+                        .unwrap_or_default();
                     table
                         .column_index(&col_name)
                         .ok_or(SqawkError::ColumnNotFound(col_name))?
@@ -1305,15 +1333,22 @@ impl<'a> SqlCompiler<'a> {
         projection: &[SelectItem],
         where_clause: &Option<Expr>,
     ) -> SqawkResult<()> {
-        // Get the table name
-        let table_name = match &table_with_joins.relation {
-            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
+        // Get the table name and alias
+        let (table_name, table_alias) = match &table_with_joins.relation {
+            sqlparser::ast::TableFactor::Table { name, alias, .. } => {
+                let tname = self.get_table_name(name)?;
+                let talias = alias.as_ref().map(|a| a.name.value.clone());
+                (tname, talias)
+            }
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(
                     "Only simple table scans are supported".into(),
                 ))
             }
         };
+
+        // Set the current outer alias for correlated subquery detection
+        self.current_outer_alias = table_alias;
 
         // Check if the table exists by trying to get it
         if !self.database.has_table(&table_name) {
@@ -1428,7 +1463,9 @@ impl<'a> SqlCompiler<'a> {
                             Expr::Function(func) => {
                                 self.compile_function(func, table, cursor_idx, value_reg)?;
                             }
-                            Expr::Trim { expr: trim_expr, .. } => {
+                            Expr::Trim {
+                                expr: trim_expr, ..
+                            } => {
                                 // Compile TRIM expression
                                 let src_reg = self.allocate_register();
                                 self.compile_where_operand(trim_expr, table, cursor_idx, src_reg)?;
@@ -1455,7 +1492,9 @@ impl<'a> SqlCompiler<'a> {
                                 // Compile start position
                                 let start_reg = self.allocate_register();
                                 if let Some(from_expr) = substring_from {
-                                    self.compile_where_operand(from_expr, table, cursor_idx, start_reg)?;
+                                    self.compile_where_operand(
+                                        from_expr, table, cursor_idx, start_reg,
+                                    )?;
                                 } else {
                                     self.program.add_instruction(Instruction::new(
                                         OpCode::Integer,
@@ -1471,7 +1510,9 @@ impl<'a> SqlCompiler<'a> {
                                 // Check if we have a length
                                 let func_spec = if let Some(for_expr) = substring_for {
                                     let len_reg = self.allocate_register();
-                                    self.compile_where_operand(for_expr, table, cursor_idx, len_reg)?;
+                                    self.compile_where_operand(
+                                        for_expr, table, cursor_idx, len_reg,
+                                    )?;
                                     format!("SUBSTR:{}", len_reg)
                                 } else {
                                     "SUBSTR".to_string()
@@ -1670,7 +1711,14 @@ impl<'a> SqlCompiler<'a> {
         // Initialize limit counter
         let limit_reg = if let Some(limit) = limit_val {
             let reg = self.allocate_register();
-            self.emit(OpCode::Integer, limit, reg, 0, None, "Initialize limit counter");
+            self.emit(
+                OpCode::Integer,
+                limit,
+                reg,
+                0,
+                None,
+                "Initialize limit counter",
+            );
             Some(reg)
         } else {
             None
@@ -1743,8 +1791,7 @@ impl<'a> SqlCompiler<'a> {
 
         // WHERE clause
         if let Some(where_expr) = &select.selection {
-            let cond_reg =
-                self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
+            let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
             // Jump to Next if condition fails
             let next_addr = self.program.len()
                 + 1
@@ -1775,7 +1822,14 @@ impl<'a> SqlCompiler<'a> {
             );
             // Jump to next row (skip output)
             let next_addr = self.program.len() + if limit_reg.is_some() { 3 } else { 1 } + 1;
-            self.emit(OpCode::Goto, 0, next_addr as i64, 0, None, "Skip row for offset");
+            self.emit(
+                OpCode::Goto,
+                0,
+                next_addr as i64,
+                0,
+                None,
+                "Skip row for offset",
+            );
         }
 
         // Output result row
@@ -1890,14 +1944,7 @@ impl<'a> SqlCompiler<'a> {
                                     "SUBSTR start",
                                 );
                                 let len_reg = self.allocate_register();
-                                self.emit(
-                                    OpCode::Integer,
-                                    len,
-                                    len_reg,
-                                    0,
-                                    None,
-                                    "SUBSTR length",
-                                );
+                                self.emit(OpCode::Integer, len, len_reg, 0, None, "SUBSTR length");
                                 // P3 = start register, P4 = "SUBSTR:len_reg"
                                 self.emit(
                                     OpCode::StringFunc,
@@ -1910,14 +1957,7 @@ impl<'a> SqlCompiler<'a> {
                             }
                             _ => {
                                 // Copy source to dest for unknown functions
-                                self.emit(
-                                    OpCode::Copy,
-                                    src_reg,
-                                    dest_reg,
-                                    0,
-                                    None,
-                                    "Copy value",
-                                );
+                                self.emit(OpCode::Copy, src_reg, dest_reg, 0, None, "Copy value");
                             }
                         };
                     }
@@ -2009,11 +2049,7 @@ impl<'a> SqlCompiler<'a> {
 
         // Check for CROSS JOIN - handle separately
         if matches!(&join.join_operator, JoinOperator::CrossJoin) {
-            return self.compile_cross_join(
-                &left_table_name,
-                &right_table_name,
-                projection,
-            );
+            return self.compile_cross_join(&left_table_name, &right_table_name, projection);
         }
 
         // Determine join type and constraint
@@ -2046,7 +2082,14 @@ impl<'a> SqlCompiler<'a> {
         };
 
         if self.verbose {
-            eprintln!("Join type: {}", if join_type == "INNER" { "Inner" } else { join_type });
+            eprintln!(
+                "Join type: {}",
+                if join_type == "INNER" {
+                    "Inner"
+                } else {
+                    join_type
+                }
+            );
             eprintln!("Processing {} JOIN with ON condition", join_type);
         }
         self.add_comment(&format!("{} JOIN {} ON ...", join_type, right_table_name));
@@ -2055,8 +2098,13 @@ impl<'a> SqlCompiler<'a> {
         let right_table = self.database.get_table(&right_table_name).unwrap();
 
         // Determine which columns to output based on projection
-        let (left_cols, right_cols, schema) =
-            self.resolve_join_projection(projection, left_table, right_table, &left_table_name, &right_table_name)?;
+        let (left_cols, right_cols, schema) = self.resolve_join_projection(
+            projection,
+            left_table,
+            right_table,
+            &left_table_name,
+            &right_table_name,
+        )?;
 
         // Set result schema
         self.program.set_result_schema(schema);
@@ -2631,8 +2679,13 @@ impl<'a> SqlCompiler<'a> {
         let right_table = self.database.get_table(right_table_name).unwrap();
 
         // Determine which columns to output based on projection
-        let (left_cols, right_cols, schema) =
-            self.resolve_join_projection(projection, left_table, right_table, left_table_name, right_table_name)?;
+        let (left_cols, right_cols, schema) = self.resolve_join_projection(
+            projection,
+            left_table,
+            right_table,
+            left_table_name,
+            right_table_name,
+        )?;
 
         // Set result schema
         self.program.set_result_schema(schema);
@@ -2717,11 +2770,7 @@ impl<'a> SqlCompiler<'a> {
                 *col_idx as i64,
                 right_start_reg + i as i64,
                 None,
-                &format!(
-                    "r[{}] = right.col[{}]",
-                    right_start_reg + i as i64,
-                    col_idx
-                ),
+                &format!("r[{}] = right.col[{}]", right_start_reg + i as i64, col_idx),
             );
         }
 
@@ -2781,11 +2830,7 @@ impl<'a> SqlCompiler<'a> {
         );
 
         // Patch jump addresses
-        if let Some(inst) = self
-            .program
-            .instructions
-            .get_mut(left_loop_end_placeholder)
-        {
+        if let Some(inst) = self.program.instructions.get_mut(left_loop_end_placeholder) {
             inst.p2 = left_loop_end as i64;
         }
         if let Some(inst) = self
@@ -2919,11 +2964,8 @@ impl<'a> SqlCompiler<'a> {
                 eprintln!("WHERE comparison: {:?}", where_expr);
             }
             // Use compile_multi_table_condition to handle table.column references
-            let condition_reg = self.compile_multi_table_condition(
-                where_expr,
-                &tables,
-                &table_names,
-            )?;
+            let condition_reg =
+                self.compile_multi_table_condition(where_expr, &tables, &table_names)?;
 
             // Jump to next iteration if condition is false (0)
             let skip_addr = self.program.len();
@@ -3237,14 +3279,7 @@ impl<'a> SqlCompiler<'a> {
 
                         // If left is non-zero, skip to end (result stays 1)
                         let one_reg = self.allocate_register();
-                        self.emit(
-                            OpCode::Integer,
-                            1,
-                            one_reg,
-                            0,
-                            None,
-                            "temp = 1",
-                        );
+                        self.emit(OpCode::Integer, 1, one_reg, 0, None, "temp = 1");
                         let check_reg = self.allocate_register();
                         self.emit(
                             OpCode::Ge,
@@ -3326,7 +3361,10 @@ impl<'a> SqlCompiler<'a> {
                             right_reg,
                             result_reg,
                             None,
-                            &format!("r[{}] = (r[{}] {:?} r[{}])", result_reg, left_reg, op, right_reg),
+                            &format!(
+                                "r[{}] = (r[{}] {:?} r[{}])",
+                                result_reg, left_reg, op, right_reg
+                            ),
                         );
 
                         Ok(result_reg)
@@ -3611,11 +3649,7 @@ impl<'a> SqlCompiler<'a> {
                 *col_idx as i64,
                 right_start_reg + i as i64,
                 None,
-                &format!(
-                    "r[{}] = right.col[{}]",
-                    right_start_reg + i as i64,
-                    col_idx
-                ),
+                &format!("r[{}] = right.col[{}]", right_start_reg + i as i64, col_idx),
             );
         }
 
@@ -3756,11 +3790,7 @@ impl<'a> SqlCompiler<'a> {
         );
 
         // Patch jump addresses
-        if let Some(inst) = self
-            .program
-            .instructions
-            .get_mut(left_loop_end_placeholder)
-        {
+        if let Some(inst) = self.program.instructions.get_mut(left_loop_end_placeholder) {
             inst.p2 = left_loop_end as i64;
         }
         if let Some(inst) = self
@@ -3954,11 +3984,8 @@ impl<'a> SqlCompiler<'a> {
             if self.verbose {
                 eprintln!("Compiling WHERE clause for multi-join: {:?}", where_expr);
             }
-            let where_reg = self.compile_multi_table_condition(
-                where_expr,
-                &tables,
-                &table_names,
-            )?;
+            let where_reg =
+                self.compile_multi_table_condition(where_expr, &tables, &table_names)?;
 
             // If WHERE fails, skip to next innermost iteration (placeholder)
             let skip_addr = self.program.len();
@@ -4232,7 +4259,10 @@ impl<'a> SqlCompiler<'a> {
                     schema.add_column(format!("{}.{}", left_table_name, meta.name), meta.data_type);
                 }
                 for meta in right_meta {
-                    schema.add_column(format!("{}.{}", right_table_name, meta.name), meta.data_type);
+                    schema.add_column(
+                        format!("{}.{}", right_table_name, meta.name),
+                        meta.data_type,
+                    );
                 }
                 return Ok((left_cols, right_cols, schema));
             }
@@ -4250,14 +4280,20 @@ impl<'a> SqlCompiler<'a> {
                     let output_name = format!("{}.{}", table_name, col_name);
 
                     if table_name.eq_ignore_ascii_case(left_table_name) {
-                        if let Some(idx) = left_columns.iter().position(|c| c.eq_ignore_ascii_case(&col_name)) {
+                        if let Some(idx) = left_columns
+                            .iter()
+                            .position(|c| c.eq_ignore_ascii_case(&col_name))
+                        {
                             left_cols.push(idx);
                             schema.add_column(output_name, left_meta[idx].data_type);
                         } else {
                             return Err(SqawkError::ColumnNotFound(col_name.clone()));
                         }
                     } else if table_name.eq_ignore_ascii_case(right_table_name) {
-                        if let Some(idx) = right_columns.iter().position(|c| c.eq_ignore_ascii_case(&col_name)) {
+                        if let Some(idx) = right_columns
+                            .iter()
+                            .position(|c| c.eq_ignore_ascii_case(&col_name))
+                        {
                             right_cols.push(idx);
                             schema.add_column(output_name, right_meta[idx].data_type);
                         } else {
@@ -4272,14 +4308,20 @@ impl<'a> SqlCompiler<'a> {
                     let output_name = alias.value.clone();
 
                     if table_name.eq_ignore_ascii_case(left_table_name) {
-                        if let Some(idx) = left_columns.iter().position(|c| c.eq_ignore_ascii_case(&col_name)) {
+                        if let Some(idx) = left_columns
+                            .iter()
+                            .position(|c| c.eq_ignore_ascii_case(&col_name))
+                        {
                             left_cols.push(idx);
                             schema.add_column(output_name, left_meta[idx].data_type);
                         } else {
                             return Err(SqawkError::ColumnNotFound(col_name.clone()));
                         }
                     } else if table_name.eq_ignore_ascii_case(right_table_name) {
-                        if let Some(idx) = right_columns.iter().position(|c| c.eq_ignore_ascii_case(&col_name)) {
+                        if let Some(idx) = right_columns
+                            .iter()
+                            .position(|c| c.eq_ignore_ascii_case(&col_name))
+                        {
                             right_cols.push(idx);
                             schema.add_column(output_name, right_meta[idx].data_type);
                         } else {
@@ -4308,22 +4350,24 @@ impl<'a> SqlCompiler<'a> {
                 if parts.len() == 2 {
                     Ok((parts[0].value.clone(), parts[1].value.clone()))
                 } else {
-                    Err(SqawkError::UnsupportedSqlFeature(
-                        format!("Expected table.column reference, got {} parts", parts.len()),
-                    ))
+                    Err(SqawkError::UnsupportedSqlFeature(format!(
+                        "Expected table.column reference, got {} parts",
+                        parts.len()
+                    )))
                 }
             }
             Expr::Identifier(ident) => {
                 // Unqualified column - would need to search both tables
                 // For now, return an error asking for qualified names
-                Err(SqawkError::UnsupportedSqlFeature(
-                    format!("Column '{}' must be qualified with table name in JOIN (e.g., table.{})",
-                            ident.value, ident.value),
-                ))
+                Err(SqawkError::UnsupportedSqlFeature(format!(
+                    "Column '{}' must be qualified with table name in JOIN (e.g., table.{})",
+                    ident.value, ident.value
+                )))
             }
-            _ => Err(SqawkError::UnsupportedSqlFeature(
-                format!("Unsupported expression in JOIN projection: {:?}", expr),
-            )),
+            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Unsupported expression in JOIN projection: {:?}",
+                expr
+            ))),
         }
     }
 
@@ -4693,7 +4737,7 @@ impl<'a> SqlCompiler<'a> {
             // Phase 4F: Subquery support
             Expr::Subquery(subquery) => {
                 // Scalar subquery - returns a single value
-                self.compile_scalar_subquery(subquery)
+                self.compile_scalar_subquery(subquery, table, cursor_idx)
             }
             Expr::InSubquery {
                 expr,
@@ -4705,7 +4749,7 @@ impl<'a> SqlCompiler<'a> {
             }
             Expr::Exists { subquery, negated } => {
                 // EXISTS (SELECT ...) - check if subquery returns any rows
-                self.compile_exists_subquery(subquery, *negated)
+                self.compile_exists_subquery(subquery, *negated, table, cursor_idx)
             }
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
                 "Unsupported WHERE clause expression: {:?}",
@@ -4714,21 +4758,38 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// Compile a scalar subquery (Phase 4F)
+    /// Compile a scalar subquery (Phase 4F/4B)
     ///
     /// Scalar subqueries return a single value that can be used in expressions.
-    /// Uses compile-time execution: executes the subquery during compilation
-    /// and emits the result as a literal in the bytecode.
+    /// - Non-correlated: uses compile-time execution
+    /// - Correlated: uses runtime execution with coroutines
     ///
     /// Example: SELECT * FROM users WHERE age = (SELECT MAX(age) FROM users)
-    fn compile_scalar_subquery(&mut self, subquery: &Query) -> SqawkResult<i64> {
+    fn compile_scalar_subquery(
+        &mut self,
+        subquery: &Query,
+        outer_table: &Table,
+        outer_cursor_idx: usize,
+    ) -> SqawkResult<i64> {
         let result_reg = self.allocate_register();
 
-        // Evaluate the subquery at compile time
-        let result_value = self.evaluate_scalar_subquery(subquery)?;
+        // Detect if this is a correlated subquery
+        let outer_refs = self.detect_outer_references(subquery, outer_table.name(), None);
 
-        // Emit bytecode to load the computed value as a literal
-        self.emit_value_literal(result_reg, &result_value)?;
+        if outer_refs.is_empty() {
+            // Non-correlated: evaluate at compile time
+            let result_value = self.evaluate_scalar_subquery(subquery)?;
+            self.emit_value_literal(result_reg, &result_value)?;
+        } else {
+            // Correlated: emit runtime execution bytecode
+            self.compile_correlated_scalar_subquery(
+                subquery,
+                outer_table,
+                outer_cursor_idx,
+                &outer_refs,
+                result_reg,
+            )?;
+        }
 
         Ok(result_reg)
     }
@@ -5473,15 +5534,37 @@ impl<'a> SqlCompiler<'a> {
         Ok(result_reg)
     }
 
-    /// Compile an EXISTS (SELECT ...) subquery (Phase 4F)
+    /// Compile an EXISTS (SELECT ...) subquery (Phase 4F/4B)
     ///
-    /// Uses compile-time execution: checks if the subquery would return any rows
-    /// and emits a literal 1 or 0.
+    /// - Non-correlated: uses compile-time execution
+    /// - Correlated: uses runtime execution with inline subquery iteration
     ///
     /// Example: SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)
-    fn compile_exists_subquery(&mut self, subquery: &Query, negated: bool) -> SqawkResult<i64> {
+    fn compile_exists_subquery(
+        &mut self,
+        subquery: &Query,
+        negated: bool,
+        outer_table: &Table,
+        outer_cursor_idx: usize,
+    ) -> SqawkResult<i64> {
         let result_reg = self.allocate_register();
 
+        // Detect if this is a correlated subquery
+        let outer_refs = self.detect_outer_references(subquery, outer_table.name(), None);
+
+        if !outer_refs.is_empty() {
+            // Correlated: emit runtime execution bytecode
+            return self.compile_correlated_exists_subquery(
+                subquery,
+                negated,
+                outer_table,
+                outer_cursor_idx,
+                &outer_refs,
+                result_reg,
+            );
+        }
+
+        // Non-correlated: use compile-time execution
         // Get the subquery's SELECT body
         let select = match &*subquery.body {
             SetExpr::Select(select) => select,
@@ -5543,6 +5626,1049 @@ impl<'a> SqlCompiler<'a> {
         ));
 
         Ok(result_reg)
+    }
+
+    // =========================================================================
+    // Phase 4B: Correlated Subquery Support
+    // =========================================================================
+
+    /// Detect if a subquery references outer query columns (making it correlated)
+    ///
+    /// A correlated subquery contains references to columns from the outer query,
+    /// like: SELECT * FROM orders o WHERE amount > (SELECT AVG(amount) FROM orders WHERE user_id = o.user_id)
+    /// Here, `o.user_id` is an outer reference.
+    fn detect_outer_references(
+        &self,
+        subquery: &Query,
+        outer_table_name: &str,
+        outer_alias: Option<&str>,
+    ) -> Vec<OuterColumnRef> {
+        let mut outer_refs = Vec::new();
+
+        // Get the subquery's SELECT body
+        let select = match &*subquery.body {
+            SetExpr::Select(select) => select,
+            _ => return outer_refs,
+        };
+
+        // Get the subquery's table name to distinguish from outer refs
+        let subquery_table_name = select.from.first().and_then(|f| match &f.relation {
+            sqlparser::ast::TableFactor::Table { name, alias, .. } => {
+                let table_name = name
+                    .0
+                    .last()
+                    .map(|p| p.value.to_lowercase())
+                    .unwrap_or_default();
+                let alias_name = alias.as_ref().map(|a| a.name.value.to_lowercase());
+                Some((table_name, alias_name))
+            }
+            _ => None,
+        });
+
+        // Use the passed outer_alias, or fall back to self.current_outer_alias
+        let effective_outer_alias = outer_alias.or(self.current_outer_alias.as_deref());
+
+        // Walk the subquery's WHERE clause looking for outer references
+        if let Some(where_expr) = &select.selection {
+            self.collect_outer_refs_from_expr(
+                where_expr,
+                outer_table_name,
+                effective_outer_alias,
+                subquery_table_name.as_ref(),
+                &mut outer_refs,
+            );
+        }
+
+        outer_refs
+    }
+
+    /// Recursively collect outer column references from an expression
+    fn collect_outer_refs_from_expr(
+        &self,
+        expr: &Expr,
+        outer_table_name: &str,
+        outer_alias: Option<&str>,
+        subquery_table: Option<&(String, Option<String>)>,
+        refs: &mut Vec<OuterColumnRef>,
+    ) {
+        match expr {
+            Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                let qualifier = parts[0].value.to_lowercase();
+                let column = parts[1].value.to_lowercase();
+
+                // Check if this references the outer table (not the subquery's own table)
+                let is_outer_ref = {
+                    let matches_outer_alias = outer_alias
+                        .map(|a| a.to_lowercase() == qualifier)
+                        .unwrap_or(false);
+                    let matches_outer_table = outer_table_name.to_lowercase() == qualifier;
+
+                    // Make sure it's not referencing the subquery's own table
+                    let matches_subquery = subquery_table
+                        .map(|(name, alias)| {
+                            name == &qualifier
+                                || alias.as_ref().map(|a| a == &qualifier).unwrap_or(false)
+                        })
+                        .unwrap_or(false);
+
+                    (matches_outer_alias || matches_outer_table) && !matches_subquery
+                };
+
+                if is_outer_ref {
+                    refs.push(OuterColumnRef { qualifier, column });
+                }
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                self.collect_outer_refs_from_expr(
+                    left,
+                    outer_table_name,
+                    outer_alias,
+                    subquery_table,
+                    refs,
+                );
+                self.collect_outer_refs_from_expr(
+                    right,
+                    outer_table_name,
+                    outer_alias,
+                    subquery_table,
+                    refs,
+                );
+            }
+            Expr::Nested(inner) => {
+                self.collect_outer_refs_from_expr(
+                    inner,
+                    outer_table_name,
+                    outer_alias,
+                    subquery_table,
+                    refs,
+                );
+            }
+            Expr::UnaryOp { expr, .. } => {
+                self.collect_outer_refs_from_expr(
+                    expr,
+                    outer_table_name,
+                    outer_alias,
+                    subquery_table,
+                    refs,
+                );
+            }
+            Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+                self.collect_outer_refs_from_expr(
+                    inner,
+                    outer_table_name,
+                    outer_alias,
+                    subquery_table,
+                    refs,
+                );
+            }
+            Expr::Between {
+                expr,
+                low,
+                high,
+                negated: _,
+            } => {
+                self.collect_outer_refs_from_expr(
+                    expr,
+                    outer_table_name,
+                    outer_alias,
+                    subquery_table,
+                    refs,
+                );
+                self.collect_outer_refs_from_expr(
+                    low,
+                    outer_table_name,
+                    outer_alias,
+                    subquery_table,
+                    refs,
+                );
+                self.collect_outer_refs_from_expr(
+                    high,
+                    outer_table_name,
+                    outer_alias,
+                    subquery_table,
+                    refs,
+                );
+            }
+            Expr::InList { expr, list, .. } => {
+                self.collect_outer_refs_from_expr(
+                    expr,
+                    outer_table_name,
+                    outer_alias,
+                    subquery_table,
+                    refs,
+                );
+                for item in list {
+                    self.collect_outer_refs_from_expr(
+                        item,
+                        outer_table_name,
+                        outer_alias,
+                        subquery_table,
+                        refs,
+                    );
+                }
+            }
+            Expr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => {
+                if let Some(op) = operand {
+                    self.collect_outer_refs_from_expr(
+                        op,
+                        outer_table_name,
+                        outer_alias,
+                        subquery_table,
+                        refs,
+                    );
+                }
+                for cond in conditions {
+                    self.collect_outer_refs_from_expr(
+                        cond,
+                        outer_table_name,
+                        outer_alias,
+                        subquery_table,
+                        refs,
+                    );
+                }
+                for result in results {
+                    self.collect_outer_refs_from_expr(
+                        result,
+                        outer_table_name,
+                        outer_alias,
+                        subquery_table,
+                        refs,
+                    );
+                }
+                if let Some(else_r) = else_result {
+                    self.collect_outer_refs_from_expr(
+                        else_r,
+                        outer_table_name,
+                        outer_alias,
+                        subquery_table,
+                        refs,
+                    );
+                }
+            }
+            Expr::Function(func) => {
+                for arg in &func.args {
+                    if let FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) = arg {
+                        self.collect_outer_refs_from_expr(
+                            e,
+                            outer_table_name,
+                            outer_alias,
+                            subquery_table,
+                            refs,
+                        );
+                    }
+                }
+            }
+            // Other expression types don't contain column references
+            _ => {}
+        }
+    }
+
+    /// Compile a correlated EXISTS subquery (Phase 4B)
+    ///
+    /// For each outer row, iterates through the subquery table and checks
+    /// if any row matches the correlated condition.
+    fn compile_correlated_exists_subquery(
+        &mut self,
+        subquery: &Query,
+        negated: bool,
+        outer_table: &Table,
+        outer_cursor_idx: usize,
+        outer_refs: &[OuterColumnRef],
+        result_reg: i64,
+    ) -> SqawkResult<i64> {
+        // Get the subquery's SELECT body
+        let select = match &*subquery.body {
+            SetExpr::Select(select) => select,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only simple SELECT subqueries are supported in correlated EXISTS".to_string(),
+                ))
+            }
+        };
+
+        // Verify it's a single-table query
+        if select.from.is_empty() {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "Correlated EXISTS subquery must have a FROM clause".to_string(),
+            ));
+        }
+
+        // Get the subquery table name
+        let subquery_table_name = match &select.from[0].relation {
+            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only simple table references are supported in correlated EXISTS".to_string(),
+                ))
+            }
+        };
+
+        // Get the subquery table
+        if !self.database.has_table(&subquery_table_name) {
+            return Err(SqawkError::TableNotFound(subquery_table_name.clone()));
+        }
+        let subquery_table = self.database.get_table(&subquery_table_name).unwrap();
+
+        // Use a unique cursor ID for the subquery (offset from outer cursor)
+        let sub_cursor_idx = outer_cursor_idx + 100;
+
+        // Initialize result to 0 (not found)
+        self.program.add_instruction(Instruction::new(
+            OpCode::Integer,
+            0,
+            result_reg,
+            0,
+            None,
+            0,
+            Some(format!("r[{}] = 0 (EXISTS init)", result_reg)),
+        ));
+
+        // Open the subquery table
+        self.program.add_instruction(Instruction::new(
+            OpCode::OpenRead,
+            sub_cursor_idx as i64,
+            0,
+            0,
+            Some(subquery_table_name.clone()),
+            0,
+            Some(format!(
+                "Open {} for correlated EXISTS",
+                subquery_table_name
+            )),
+        ));
+
+        // Rewind to first row (jump to done if empty)
+        let rewind_addr = self.program.len();
+        self.program.add_instruction(Instruction::new(
+            OpCode::Rewind,
+            sub_cursor_idx as i64,
+            0, // Will be patched to done_addr
+            0,
+            None,
+            0,
+            Some("Rewind subquery cursor".to_string()),
+        ));
+
+        let loop_start = self.program.len();
+
+        // For the WHERE clause, we need to evaluate the correlated condition
+        // This requires comparing subquery columns with outer columns
+        if let Some(where_expr) = &select.selection {
+            let cmp_reg = self.allocate_register();
+
+            // Compile the WHERE condition with both tables accessible
+            // For correlated subqueries, we need to handle outer references specially
+            self.compile_correlated_where(
+                where_expr,
+                subquery_table,
+                sub_cursor_idx,
+                outer_table,
+                outer_cursor_idx,
+                outer_refs,
+                cmp_reg,
+            )?;
+
+            // If condition is false (0), jump to next row
+            let skip_match_addr = self.program.len();
+            self.program.add_instruction(Instruction::new(
+                OpCode::IfZ,
+                cmp_reg,
+                0, // Will be patched to next_row
+                0,
+                None,
+                0,
+                Some("Skip if WHERE condition false".to_string()),
+            ));
+
+            // Match found! Set result to 1
+            self.program.add_instruction(Instruction::new(
+                OpCode::Integer,
+                1,
+                result_reg,
+                0,
+                None,
+                0,
+                Some(format!("r[{}] = 1 (EXISTS match found)", result_reg)),
+            ));
+
+            // Jump to done (exit early)
+            let goto_done_addr = self.program.len();
+            self.program.add_instruction(Instruction::new(
+                OpCode::Goto,
+                0,
+                0, // Will be patched to done_addr
+                0,
+                None,
+                0,
+                Some("Exit early on match".to_string()),
+            ));
+
+            // Patch skip_match to jump here
+            let next_row_addr = self.program.len();
+            if let Some(inst) = self.program.instructions.get_mut(skip_match_addr) {
+                inst.p2 = next_row_addr as i64;
+            }
+
+            // Next row
+            self.program.add_instruction(Instruction::new(
+                OpCode::Next,
+                sub_cursor_idx as i64,
+                loop_start as i64,
+                0,
+                None,
+                0,
+                Some("Next subquery row".to_string()),
+            ));
+
+            // Done label
+            let done_addr = self.program.len();
+
+            // Patch rewind to jump to done if empty
+            if let Some(inst) = self.program.instructions.get_mut(rewind_addr) {
+                inst.p2 = done_addr as i64;
+            }
+
+            // Patch goto_done to jump here
+            if let Some(inst) = self.program.instructions.get_mut(goto_done_addr) {
+                inst.p2 = done_addr as i64;
+            }
+        } else {
+            // No WHERE clause - if table has any rows, EXISTS is true
+            self.program.add_instruction(Instruction::new(
+                OpCode::Integer,
+                1,
+                result_reg,
+                0,
+                None,
+                0,
+                Some(format!("r[{}] = 1 (EXISTS: table has rows)", result_reg)),
+            ));
+
+            // Done
+            let done_addr = self.program.len();
+            if let Some(inst) = self.program.instructions.get_mut(rewind_addr) {
+                inst.p2 = done_addr as i64;
+            }
+        }
+
+        // Close the subquery cursor
+        self.program.add_instruction(Instruction::new(
+            OpCode::Close,
+            sub_cursor_idx as i64,
+            0,
+            0,
+            None,
+            0,
+            Some("Close subquery cursor".to_string()),
+        ));
+
+        // Handle NOT EXISTS: flip the result
+        if negated {
+            // result = (result == 0) ? 1 : 0
+            // Use branching: if result is 0, set to 1; else set to 0
+            let skip_zero_addr = self.program.len();
+            self.program.add_instruction(Instruction::new(
+                OpCode::IfZ,
+                result_reg,
+                0, // Will be patched
+                0,
+                None,
+                0,
+                Some(format!("if r[{}] == 0, jump to set 1", result_reg)),
+            ));
+
+            // result was non-zero (EXISTS found rows), so NOT EXISTS = 0
+            self.program.add_instruction(Instruction::new(
+                OpCode::Integer,
+                0,
+                result_reg,
+                0,
+                None,
+                0,
+                Some(format!("r[{}] = 0 (NOT EXISTS false)", result_reg)),
+            ));
+
+            let goto_end_addr = self.program.len();
+            self.program.add_instruction(Instruction::new(
+                OpCode::Goto,
+                0,
+                0, // Will be patched
+                0,
+                None,
+                0,
+                Some("skip to end".to_string()),
+            ));
+
+            // result was zero (EXISTS found no rows), so NOT EXISTS = 1
+            let set_one_addr = self.program.len();
+            if let Some(inst) = self.program.instructions.get_mut(skip_zero_addr) {
+                inst.p2 = set_one_addr as i64;
+            }
+
+            self.program.add_instruction(Instruction::new(
+                OpCode::Integer,
+                1,
+                result_reg,
+                0,
+                None,
+                0,
+                Some(format!("r[{}] = 1 (NOT EXISTS true)", result_reg)),
+            ));
+
+            // Patch goto to end
+            let end_addr = self.program.len();
+            if let Some(inst) = self.program.instructions.get_mut(goto_end_addr) {
+                inst.p2 = end_addr as i64;
+            }
+        }
+
+        Ok(result_reg)
+    }
+
+    /// Compile a WHERE clause with correlated column references
+    #[allow(clippy::too_many_arguments)]
+    fn compile_correlated_where(
+        &mut self,
+        where_expr: &Expr,
+        subquery_table: &Table,
+        sub_cursor_idx: usize,
+        outer_table: &Table,
+        outer_cursor_idx: usize,
+        outer_refs: &[OuterColumnRef],
+        result_reg: i64,
+    ) -> SqawkResult<()> {
+        match where_expr {
+            Expr::BinaryOp { left, op, right } => {
+                match op {
+                    BinaryOperator::And => {
+                        // Compile both sides and AND them
+                        let left_reg = self.allocate_register();
+                        let right_reg = self.allocate_register();
+                        self.compile_correlated_where(
+                            left,
+                            subquery_table,
+                            sub_cursor_idx,
+                            outer_table,
+                            outer_cursor_idx,
+                            outer_refs,
+                            left_reg,
+                        )?;
+                        self.compile_correlated_where(
+                            right,
+                            subquery_table,
+                            sub_cursor_idx,
+                            outer_table,
+                            outer_cursor_idx,
+                            outer_refs,
+                            right_reg,
+                        )?;
+                        // AND: result = left AND right
+                        // If left is 0, result is 0; else result is right
+                        let skip_addr = self.program.len();
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::IfZ,
+                            left_reg,
+                            0, // Will patch to set result=0
+                            0,
+                            None,
+                            0,
+                            Some("AND: skip if left is false".to_string()),
+                        ));
+                        // Left is true, result = right
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Copy,
+                            right_reg,
+                            result_reg,
+                            0,
+                            None,
+                            0,
+                            Some(format!("r[{}] = r[{}] (AND right)", result_reg, right_reg)),
+                        ));
+                        let goto_end_addr = self.program.len();
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Goto,
+                            0,
+                            0, // Will patch to end
+                            0,
+                            None,
+                            0,
+                            None,
+                        ));
+                        // Left is false, result = 0
+                        let false_addr = self.program.len();
+                        if let Some(inst) = self.program.instructions.get_mut(skip_addr) {
+                            inst.p2 = false_addr as i64;
+                        }
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Integer,
+                            0,
+                            result_reg,
+                            0,
+                            None,
+                            0,
+                            Some(format!("r[{}] = 0 (AND false)", result_reg)),
+                        ));
+                        let end_addr = self.program.len();
+                        if let Some(inst) = self.program.instructions.get_mut(goto_end_addr) {
+                            inst.p2 = end_addr as i64;
+                        }
+                        Ok(())
+                    }
+                    BinaryOperator::Eq
+                    | BinaryOperator::NotEq
+                    | BinaryOperator::Lt
+                    | BinaryOperator::LtEq
+                    | BinaryOperator::Gt
+                    | BinaryOperator::GtEq => {
+                        // Compile left and right operands
+                        let left_reg = self.allocate_register();
+                        let right_reg = self.allocate_register();
+
+                        self.compile_correlated_operand(
+                            left,
+                            subquery_table,
+                            sub_cursor_idx,
+                            outer_table,
+                            outer_cursor_idx,
+                            outer_refs,
+                            left_reg,
+                        )?;
+                        self.compile_correlated_operand(
+                            right,
+                            subquery_table,
+                            sub_cursor_idx,
+                            outer_table,
+                            outer_cursor_idx,
+                            outer_refs,
+                            right_reg,
+                        )?;
+
+                        // Emit comparison
+                        let cmp_opcode = match op {
+                            BinaryOperator::Eq => OpCode::Eq,
+                            BinaryOperator::NotEq => OpCode::Ne,
+                            BinaryOperator::Lt => OpCode::Lt,
+                            BinaryOperator::LtEq => OpCode::Le,
+                            BinaryOperator::Gt => OpCode::Gt,
+                            BinaryOperator::GtEq => OpCode::Ge,
+                            _ => unreachable!(),
+                        };
+
+                        self.program.add_instruction(Instruction::new(
+                            cmp_opcode,
+                            left_reg,
+                            right_reg,
+                            result_reg,
+                            None,
+                            0,
+                            Some(format!(
+                                "r[{}] = r[{}] {:?} r[{}]",
+                                result_reg, left_reg, op, right_reg
+                            )),
+                        ));
+                        Ok(())
+                    }
+                    _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                        "Unsupported operator in correlated subquery WHERE: {:?}",
+                        op
+                    ))),
+                }
+            }
+            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Unsupported expression in correlated subquery WHERE: {:?}",
+                where_expr
+            ))),
+        }
+    }
+
+    /// Compile an operand in a correlated WHERE clause
+    #[allow(clippy::too_many_arguments)]
+    fn compile_correlated_operand(
+        &mut self,
+        expr: &Expr,
+        subquery_table: &Table,
+        sub_cursor_idx: usize,
+        outer_table: &Table,
+        outer_cursor_idx: usize,
+        outer_refs: &[OuterColumnRef],
+        dest_reg: i64,
+    ) -> SqawkResult<()> {
+        match expr {
+            Expr::Identifier(ident) => {
+                // Unqualified column - must be from subquery table
+                let col_name = ident.value.to_lowercase();
+                let col_idx = subquery_table
+                    .column_index(&col_name)
+                    .ok_or(SqawkError::ColumnNotFound(col_name.clone()))?;
+                self.program.add_instruction(Instruction::new(
+                    OpCode::Column,
+                    sub_cursor_idx as i64,
+                    col_idx as i64,
+                    dest_reg,
+                    None,
+                    0,
+                    Some(format!("r[{}] = subquery.{}", dest_reg, col_name)),
+                ));
+                Ok(())
+            }
+            Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                let qualifier = parts[0].value.to_lowercase();
+                let col_name = parts[1].value.to_lowercase();
+
+                // Check if this is an outer reference
+                let is_outer = outer_refs
+                    .iter()
+                    .any(|r| r.qualifier == qualifier && r.column == col_name)
+                    || qualifier == outer_table.name().to_lowercase();
+
+                if is_outer {
+                    // Load from outer table
+                    let col_idx = outer_table
+                        .column_index(&col_name)
+                        .ok_or(SqawkError::ColumnNotFound(col_name.clone()))?;
+                    self.program.add_instruction(Instruction::new(
+                        OpCode::Column,
+                        outer_cursor_idx as i64,
+                        col_idx as i64,
+                        dest_reg,
+                        None,
+                        0,
+                        Some(format!("r[{}] = outer.{}", dest_reg, col_name)),
+                    ));
+                } else {
+                    // Load from subquery table
+                    let col_idx = subquery_table
+                        .column_index(&col_name)
+                        .ok_or(SqawkError::ColumnNotFound(col_name.clone()))?;
+                    self.program.add_instruction(Instruction::new(
+                        OpCode::Column,
+                        sub_cursor_idx as i64,
+                        col_idx as i64,
+                        dest_reg,
+                        None,
+                        0,
+                        Some(format!("r[{}] = subquery.{}", dest_reg, col_name)),
+                    ));
+                }
+                Ok(())
+            }
+            Expr::Value(v) => {
+                match v {
+                    Value::Number(n, _) => {
+                        if let Ok(i) = n.parse::<i64>() {
+                            self.program.add_instruction(Instruction::new(
+                                OpCode::Integer,
+                                i,
+                                dest_reg,
+                                0,
+                                None,
+                                0,
+                                Some(format!("r[{}] = {}", dest_reg, i)),
+                            ));
+                        } else if let Ok(f) = n.parse::<f64>() {
+                            self.program.add_instruction(Instruction::new(
+                                OpCode::String,
+                                0,
+                                dest_reg,
+                                0,
+                                Some(f.to_string()),
+                                0,
+                                Some(format!("r[{}] = {}", dest_reg, f)),
+                            ));
+                            self.program.add_instruction(Instruction::new(
+                                OpCode::Cast,
+                                dest_reg,
+                                dest_reg,
+                                0,
+                                Some("REAL".to_string()),
+                                0,
+                                None,
+                            ));
+                        }
+                    }
+                    Value::SingleQuotedString(s) => {
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::String,
+                            0,
+                            dest_reg,
+                            0,
+                            Some(s.clone()),
+                            0,
+                            Some(format!("r[{}] = '{}'", dest_reg, s)),
+                        ));
+                    }
+                    _ => {
+                        return Err(SqawkError::UnsupportedSqlFeature(format!(
+                            "Unsupported value type in correlated subquery: {:?}",
+                            v
+                        )))
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Unsupported operand in correlated subquery: {:?}",
+                expr
+            ))),
+        }
+    }
+
+    /// Compile a correlated scalar subquery (Phase 4B)
+    ///
+    /// For each outer row, iterates through the subquery table and computes
+    /// an aggregate over matching rows.
+    fn compile_correlated_scalar_subquery(
+        &mut self,
+        subquery: &Query,
+        outer_table: &Table,
+        outer_cursor_idx: usize,
+        outer_refs: &[OuterColumnRef],
+        result_reg: i64,
+    ) -> SqawkResult<()> {
+        // Get the subquery's SELECT body
+        let select = match &*subquery.body {
+            SetExpr::Select(select) => select,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only simple SELECT subqueries are supported in correlated scalar".to_string(),
+                ))
+            }
+        };
+
+        // Verify it's a single-table query
+        if select.from.is_empty() {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "Correlated scalar subquery must have a FROM clause".to_string(),
+            ));
+        }
+
+        // Get the subquery table name
+        let subquery_table_name = match &select.from[0].relation {
+            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only simple table references are supported in correlated scalar".to_string(),
+                ))
+            }
+        };
+
+        // Get the subquery table
+        if !self.database.has_table(&subquery_table_name) {
+            return Err(SqawkError::TableNotFound(subquery_table_name.clone()));
+        }
+        let subquery_table = self.database.get_table(&subquery_table_name).unwrap();
+
+        // Get the aggregate function from the SELECT list
+        if select.projection.is_empty() {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "Correlated scalar subquery must have a SELECT expression".to_string(),
+            ));
+        }
+
+        let (agg_func_name, agg_col_idx) = match &select.projection[0] {
+            SelectItem::UnnamedExpr(Expr::Function(func)) => {
+                let func_name = func.name.to_string().to_uppercase();
+                let col_idx = self.extract_agg_column_index(func, subquery_table)?;
+                (func_name, col_idx)
+            }
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Correlated scalar subquery must select an aggregate function".to_string(),
+                ))
+            }
+        };
+
+        // Use a unique cursor ID for the subquery
+        let sub_cursor_idx = outer_cursor_idx + 100;
+
+        // Allocate registers for aggregate computation
+        let acc_reg = self.allocate_register(); // Accumulator
+        let _count_reg = self.allocate_register(); // Count for AVG (unused for now)
+        let val_reg = self.allocate_register(); // Current value
+
+        // Initialize accumulator with Null (like SQLite does)
+        // AggStep/AggFinal will treat Null as "no data yet"
+        self.program.add_instruction(Instruction::new(
+            OpCode::Null,
+            0,
+            acc_reg,
+            acc_reg, // P3=P2 means just set one register
+            None,
+            0,
+            Some(format!(
+                "r[{}]=NULL; Init {} accumulator",
+                acc_reg, agg_func_name
+            )),
+        ));
+
+        // Validate aggregate function is supported
+        match agg_func_name.as_str() {
+            "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" => {}
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(format!(
+                    "Unsupported aggregate in correlated subquery: {}",
+                    agg_func_name
+                )))
+            }
+        }
+
+        // Open the subquery table
+        self.program.add_instruction(Instruction::new(
+            OpCode::OpenRead,
+            sub_cursor_idx as i64,
+            0,
+            0,
+            Some(subquery_table_name.clone()),
+            0,
+            Some(format!(
+                "Open {} for correlated scalar",
+                subquery_table_name
+            )),
+        ));
+
+        // Rewind to first row
+        let rewind_addr = self.program.len();
+        self.program.add_instruction(Instruction::new(
+            OpCode::Rewind,
+            sub_cursor_idx as i64,
+            0, // Will be patched to done_addr
+            0,
+            None,
+            0,
+            Some("Rewind subquery cursor".to_string()),
+        ));
+
+        let loop_start = self.program.len();
+
+        // Compile WHERE condition if present
+        let cmp_reg = self.allocate_register();
+        let has_where = select.selection.is_some();
+
+        if let Some(where_expr) = &select.selection {
+            self.compile_correlated_where(
+                where_expr,
+                subquery_table,
+                sub_cursor_idx,
+                outer_table,
+                outer_cursor_idx,
+                outer_refs,
+                cmp_reg,
+            )?;
+        }
+
+        // If WHERE fails, skip to next row
+        let skip_agg_addr = if has_where {
+            let addr = self.program.len();
+            self.program.add_instruction(Instruction::new(
+                OpCode::IfZ,
+                cmp_reg,
+                0, // Will be patched
+                0,
+                None,
+                0,
+                Some("Skip if WHERE false".to_string()),
+            ));
+            Some(addr)
+        } else {
+            None
+        };
+
+        // Load the value for aggregation
+        self.program.add_instruction(Instruction::new(
+            OpCode::Column,
+            sub_cursor_idx as i64,
+            agg_col_idx as i64,
+            val_reg,
+            None,
+            0,
+            Some(format!("r[{}] = subquery column for agg", val_reg)),
+        ));
+
+        // Update accumulator based on aggregate type
+        self.program.add_instruction(Instruction::new(
+            OpCode::AggStep,
+            match agg_func_name.as_str() {
+                "COUNT" => 0,
+                "SUM" => 1,
+                "AVG" => 2,
+                "MIN" => 3,
+                "MAX" => 4,
+                _ => 0,
+            },
+            val_reg,
+            acc_reg,
+            None,
+            0,
+            Some(format!(
+                "Aggregate step: {} r[{}] -> r[{}]",
+                agg_func_name, val_reg, acc_reg
+            )),
+        ));
+
+        // Next row
+        let next_row_addr = self.program.len();
+        if let Some(skip_addr) = skip_agg_addr {
+            if let Some(inst) = self.program.instructions.get_mut(skip_addr) {
+                inst.p2 = next_row_addr as i64;
+            }
+        }
+
+        self.program.add_instruction(Instruction::new(
+            OpCode::Next,
+            sub_cursor_idx as i64,
+            loop_start as i64,
+            0,
+            None,
+            0,
+            Some("Next subquery row".to_string()),
+        ));
+
+        // Done - finalize aggregate
+        let done_addr = self.program.len();
+        if let Some(inst) = self.program.instructions.get_mut(rewind_addr) {
+            inst.p2 = done_addr as i64;
+        }
+
+        // Finalize aggregate into result_reg
+        // P3 = function type hint for when no AggStep was called (register still Null)
+        let func_type = match agg_func_name.as_str() {
+            "COUNT" => 0,
+            "SUM" => 1,
+            "AVG" => 2,
+            "MIN" => 3,
+            "MAX" => 4,
+            _ => 0,
+        };
+        self.program.add_instruction(Instruction::new(
+            OpCode::AggFinal,
+            acc_reg,
+            result_reg,
+            func_type,
+            None,
+            0,
+            Some(format!(
+                "r[{}] = final {} result",
+                result_reg, agg_func_name
+            )),
+        ));
+
+        // Close the subquery cursor
+        self.program.add_instruction(Instruction::new(
+            OpCode::Close,
+            sub_cursor_idx as i64,
+            0,
+            0,
+            None,
+            0,
+            Some("Close subquery cursor".to_string()),
+        ));
+
+        Ok(())
     }
 
     /// Compile a LIKE/ILIKE pattern match operation
@@ -6763,28 +7889,55 @@ impl<'a> SqlCompiler<'a> {
             }
             Expr::Subquery(subquery) => {
                 // Handle scalar subquery as an operand
-                // Execute subquery at compile time and emit result directly to target register
-                let result_value = self.evaluate_scalar_subquery(subquery)?;
-                self.emit_value_literal(target_reg, &result_value)?;
+                // Check for correlation first
+                let outer_refs = self.detect_outer_references(subquery, table.name(), None);
+                if outer_refs.is_empty() {
+                    // Non-correlated: Execute subquery at compile time
+                    let result_value = self.evaluate_scalar_subquery(subquery)?;
+                    self.emit_value_literal(target_reg, &result_value)?;
+                } else {
+                    // Correlated: emit runtime execution bytecode
+                    self.compile_correlated_scalar_subquery(
+                        subquery,
+                        table,
+                        cursor_idx,
+                        &outer_refs,
+                        target_reg,
+                    )?;
+                }
             }
             Expr::Exists { subquery, negated } => {
                 // Handle EXISTS (SELECT ...) as an operand
-                // Evaluate at compile time and emit 1 or 0
-                let exists_result = self.evaluate_exists_subquery(subquery, *negated)?;
-                self.program.add_instruction(Instruction::new(
-                    OpCode::Integer,
-                    if exists_result { 1 } else { 0 },
-                    target_reg,
-                    0,
-                    None,
-                    0,
-                    Some(format!(
-                        "r[{}] = {} ({}EXISTS result)",
-                        target_reg,
+                // Check for correlation first
+                let outer_refs = self.detect_outer_references(subquery, table.name(), None);
+                if outer_refs.is_empty() {
+                    // Non-correlated: Evaluate at compile time and emit 1 or 0
+                    let exists_result = self.evaluate_exists_subquery(subquery, *negated)?;
+                    self.program.add_instruction(Instruction::new(
+                        OpCode::Integer,
                         if exists_result { 1 } else { 0 },
-                        if *negated { "NOT " } else { "" }
-                    )),
-                ));
+                        target_reg,
+                        0,
+                        None,
+                        0,
+                        Some(format!(
+                            "r[{}] = {} ({}EXISTS result)",
+                            target_reg,
+                            if exists_result { 1 } else { 0 },
+                            if *negated { "NOT " } else { "" }
+                        )),
+                    ));
+                } else {
+                    // Correlated: emit runtime execution bytecode
+                    self.compile_correlated_exists_subquery(
+                        subquery,
+                        *negated,
+                        table,
+                        cursor_idx,
+                        &outer_refs,
+                        target_reg,
+                    )?;
+                }
             }
             Expr::InSubquery {
                 expr: inner_expr,
@@ -6987,9 +8140,10 @@ impl<'a> SqlCompiler<'a> {
             | SqlDataType::BigInt(_)
             | SqlDataType::SmallInt(_) => "INTEGER".to_string(),
             SqlDataType::Real | SqlDataType::Float(_) | SqlDataType::Double => "REAL".to_string(),
-            SqlDataType::Text | SqlDataType::Varchar(_) | SqlDataType::Char(_) | SqlDataType::String => {
-                "TEXT".to_string()
-            }
+            SqlDataType::Text
+            | SqlDataType::Varchar(_)
+            | SqlDataType::Char(_)
+            | SqlDataType::String => "TEXT".to_string(),
             SqlDataType::Boolean => "BOOLEAN".to_string(),
             _ => format!("{:?}", data_type),
         }
@@ -7083,12 +8237,18 @@ impl<'a> SqlCompiler<'a> {
                 let func_name = func.name.to_string().to_uppercase();
                 if matches!(func_name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX") {
                     func_name
-                } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) = func.args.first() {
+                } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
+                    func.args.first()
+                {
                     format!("{}(*)", func_name)
                 } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr))) =
                     func.args.first()
                 {
-                    format!("{}({})", func_name, self.get_column_name_from_expr(arg_expr))
+                    format!(
+                        "{}({})",
+                        func_name,
+                        self.get_column_name_from_expr(arg_expr)
+                    )
                 } else {
                     format!("{}()", func_name)
                 }
@@ -7161,7 +8321,9 @@ impl<'a> SqlCompiler<'a> {
                             DataType::Float
                         } else {
                             // Try to infer from argument
-                            if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))) = func.args.first() {
+                            if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))) =
+                                func.args.first()
+                            {
                                 let arg_type = self.infer_expr_type(arg, table);
                                 if matches!(arg_type, DataType::Integer) {
                                     return DataType::Integer;
@@ -7172,20 +8334,26 @@ impl<'a> SqlCompiler<'a> {
                     }
                     "MIN" | "MAX" => {
                         // MIN/MAX preserves the type of the argument
-                        if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))) = func.args.first() {
+                        if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))) =
+                            func.args.first()
+                        {
                             return self.infer_expr_type(arg, table);
                         }
                         DataType::Text
                     }
-                    "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "SUBSTR" | "REPLACE" => DataType::Text,
+                    "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "SUBSTR" | "REPLACE" => {
+                        DataType::Text
+                    }
                     "COALESCE" => {
                         // COALESCE returns the type of its first non-null argument
-                        if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))) = func.args.first() {
+                        if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))) =
+                            func.args.first()
+                        {
                             return self.infer_expr_type(arg, table);
                         }
                         DataType::Text
                     }
-                    _ => DataType::Text
+                    _ => DataType::Text,
                 }
             }
             Expr::Value(val) => {
@@ -7194,24 +8362,34 @@ impl<'a> SqlCompiler<'a> {
                     Value::SingleQuotedString(_) | Value::DoubleQuotedString(_) => DataType::Text,
                     Value::Boolean(_) => DataType::Boolean,
                     Value::Null => DataType::Text, // NULL doesn't have a type, default to Text
-                    _ => DataType::Text
+                    _ => DataType::Text,
                 }
             }
             Expr::BinaryOp { left, op, right: _ } => {
                 // Arithmetic ops return numeric, comparisons return boolean
                 match op {
-                    BinaryOperator::Plus | BinaryOperator::Minus |
-                    BinaryOperator::Multiply | BinaryOperator::Divide |
-                    BinaryOperator::Modulo => self.infer_expr_type(left, table),
-                    BinaryOperator::Eq | BinaryOperator::NotEq |
-                    BinaryOperator::Lt | BinaryOperator::LtEq |
-                    BinaryOperator::Gt | BinaryOperator::GtEq |
-                    BinaryOperator::And | BinaryOperator::Or => DataType::Boolean,
+                    BinaryOperator::Plus
+                    | BinaryOperator::Minus
+                    | BinaryOperator::Multiply
+                    | BinaryOperator::Divide
+                    | BinaryOperator::Modulo => self.infer_expr_type(left, table),
+                    BinaryOperator::Eq
+                    | BinaryOperator::NotEq
+                    | BinaryOperator::Lt
+                    | BinaryOperator::LtEq
+                    | BinaryOperator::Gt
+                    | BinaryOperator::GtEq
+                    | BinaryOperator::And
+                    | BinaryOperator::Or => DataType::Boolean,
                     BinaryOperator::StringConcat => DataType::Text,
-                    _ => DataType::Text
+                    _ => DataType::Text,
                 }
             }
-            Expr::Case { results, else_result, .. } => {
+            Expr::Case {
+                results,
+                else_result,
+                ..
+            } => {
                 // CASE returns the type of its first result
                 if let Some(first_result) = results.first() {
                     return self.infer_expr_type(first_result, table);
@@ -7224,13 +8402,18 @@ impl<'a> SqlCompiler<'a> {
             Expr::Cast { data_type, .. } => {
                 // CAST returns the target type
                 match data_type {
-                    SqlDataType::Int(_) | SqlDataType::Integer(_) | SqlDataType::BigInt(_) | SqlDataType::SmallInt(_) => DataType::Integer,
-                    SqlDataType::Real | SqlDataType::Float(_) | SqlDataType::Double => DataType::Float,
+                    SqlDataType::Int(_)
+                    | SqlDataType::Integer(_)
+                    | SqlDataType::BigInt(_)
+                    | SqlDataType::SmallInt(_) => DataType::Integer,
+                    SqlDataType::Real | SqlDataType::Float(_) | SqlDataType::Double => {
+                        DataType::Float
+                    }
                     SqlDataType::Boolean => DataType::Boolean,
-                    _ => DataType::Text
+                    _ => DataType::Text,
                 }
             }
-            _ => DataType::Text // Default
+            _ => DataType::Text, // Default
         }
     }
 
@@ -7469,7 +8652,11 @@ impl<'a> SqlCompiler<'a> {
     }
 
     /// Build result schema for aggregate queries
-    fn build_aggregate_result_schema(&self, projection: &[SelectItem], table: &Table) -> ResultSchema {
+    fn build_aggregate_result_schema(
+        &self,
+        projection: &[SelectItem],
+        table: &Table,
+    ) -> ResultSchema {
         let mut schema = ResultSchema::new();
         for item in projection {
             match item {
@@ -8068,13 +9255,7 @@ impl<'a> SqlCompiler<'a> {
                 };
 
                 self.program.add_instruction(Instruction::new(
-                    opcode,
-                    left_reg,
-                    right_reg,
-                    result_reg,
-                    None,
-                    0,
-                    None,
+                    opcode, left_reg, right_reg, result_reg, None, 0, None,
                 ));
 
                 Ok(result_reg)
@@ -8321,7 +9502,14 @@ impl<'a> SqlCompiler<'a> {
 
         // Rewind to first row
         let rewind_addr = self.program.len();
-        self.emit(OpCode::Rewind, cursor_idx, 0, 0, None, "Rewind to first row");
+        self.emit(
+            OpCode::Rewind,
+            cursor_idx,
+            0,
+            0,
+            None,
+            "Rewind to first row",
+        );
 
         // Main loop: iterate over rows
         let loop_start = self.program.len();

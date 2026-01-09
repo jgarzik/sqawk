@@ -38,7 +38,11 @@ pub struct VmExecutionResult {
 /// 2. VM execution of bytecode instructions
 ///
 /// Returns both the result table and a set of modified table names.
-pub fn execute_vm(sql: &str, database: &mut Database, verbose: bool) -> SqawkResult<VmExecutionResult> {
+pub fn execute_vm(
+    sql: &str,
+    database: &mut Database,
+    verbose: bool,
+) -> SqawkResult<VmExecutionResult> {
     if verbose {
         println!("VM Engine: Executing SQL via bytecode: {}", sql);
     }
@@ -120,7 +124,9 @@ pub fn execute_vm(sql: &str, database: &mut Database, verbose: bool) -> SqawkRes
             engine::TableModification::Insert { table_name, row } => {
                 let table = database.get_table_mut(&table_name)?;
                 table.add_row(row)?;
-                *insert_counts_by_table.entry(table_name.clone()).or_insert(0) += 1;
+                *insert_counts_by_table
+                    .entry(table_name.clone())
+                    .or_insert(0) += 1;
                 modified_tables.insert(table_name);
             }
             engine::TableModification::Delete {
@@ -172,7 +178,10 @@ pub fn execute_vm(sql: &str, database: &mut Database, verbose: bool) -> SqawkRes
     // Count pure inserts (not part of UPDATE) as affected rows first
     // (before deletions_by_table is consumed)
     for (table_name, insert_count) in &insert_counts_by_table {
-        let delete_count = deletions_by_table.get(table_name).map(|s| s.len()).unwrap_or(0);
+        let delete_count = deletions_by_table
+            .get(table_name)
+            .map(|s| s.len())
+            .unwrap_or(0);
         if delete_count == 0 {
             // Pure INSERT (not UPDATE)
             affected_rows += insert_count;
@@ -195,7 +204,10 @@ pub fn execute_vm(sql: &str, database: &mut Database, verbose: bool) -> SqawkRes
 
         // If we have equal deletes and inserts for this table, it's an UPDATE
         // Otherwise it's a DELETE
-        let insert_count = insert_counts_by_table.get(&table_name).copied().unwrap_or(0);
+        let insert_count = insert_counts_by_table
+            .get(&table_name)
+            .copied()
+            .unwrap_or(0);
         if insert_count == delete_count && insert_count > 0 {
             // UPDATE: count the number of rows updated
             affected_rows += delete_count;

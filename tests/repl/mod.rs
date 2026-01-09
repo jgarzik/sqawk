@@ -89,8 +89,8 @@ fn test_repl_write_toggle() {
     let temp_file_path = temp_dir.path().join("sample.csv");
 
     // Copy sample.csv to the temporary file
-    let original_content = fs::read_to_string("tests/data/sample.csv")
-        .expect("Failed to read sample.csv");
+    let original_content =
+        fs::read_to_string("tests/data/sample.csv").expect("Failed to read sample.csv");
     fs::write(&temp_file_path, &original_content).expect("Failed to write temp file");
 
     // Commands to test the .write toggle

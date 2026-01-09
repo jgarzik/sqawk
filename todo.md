@@ -35,12 +35,19 @@ Support all SQL commands from sqlparser crate that make sense for CSV file colle
 
 ---
 
-## Phase 4: Subqueries
-- [ ] Scalar subqueries (opcodes: Subquery, Once)
-- [ ] IN (subquery) (opcodes: InSubquery)
-- [ ] EXISTS operator (opcodes: Exists, Found)
-- [ ] Correlated subqueries (opcodes: CorrelatedSubquery)
-- [ ] **Phase 4 Validation**: build, test, clippy clean
+## Phase 4: Subqueries (Non-Correlated)
+- [x] Scalar subqueries (compile-time execution with aggregates)
+- [x] IN (subquery) (compile-time value collection)
+- [x] EXISTS operator (compile-time row check)
+- [x] **Phase 4 Validation**: build, test, clippy clean
+
+---
+
+## Phase 4B: Correlated Subqueries
+- [x] Correlated scalar subqueries (nested loop with Null accumulator init, AggStep/AggFinal)
+- [x] Correlated EXISTS (nested loop with early exit)
+- [x] Correlated NOT EXISTS (nested loop with negation)
+- [x] **Phase 4B Validation**: build, test, clippy clean
 
 ---
 

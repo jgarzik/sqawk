@@ -119,9 +119,9 @@ pub enum OpCode {
 
     // Set operations
     Distinct,  // Remove duplicate rows from results
-    Limit,     // Limit results to P1 rows. P2 = offset (rows to skip, already applied). Post-processing opcode.
+    Limit, // Limit results to P1 rows. P2 = offset (rows to skip, already applied). Post-processing opcode.
     Intersect, // Keep only rows that exist in both left and right result sets
-    Except,    // Keep only rows from left that don't exist in right result set
+    Except, // Keep only rows from left that don't exist in right result set
 
     // Join operations
     NullRow,     // Load NULL values into registers P1 through P1+P2-1 (P2 = count)
@@ -136,9 +136,9 @@ pub enum OpCode {
     Once,          // First time: continue. Subsequently: jump to P2. Used for one-time init.
 
     // Subquery result operations
-    AggStep,  // P1 = function type, P2 = value reg, P3 = accumulator reg. Step aggregate.
-    AggFinal, // P1 = accumulator reg, P2 = result reg. Finalize aggregate.
-    AggReset, // P1 = accumulator reg. Reset accumulator to initial state.
+    AggStep,   // P1 = function type, P2 = value reg, P3 = accumulator reg. Step aggregate.
+    AggFinal,  // P1 = accumulator reg, P2 = result reg. Finalize aggregate.
+    AggReset,  // P1 = accumulator reg. Reset accumulator to initial state.
     Exists,    // P1 = flag reg (set to 1 if cursor P2 has rows, else 0)
     NotExists, // P1 = flag reg (set to 1 if cursor P2 has no rows, else 0)
 
@@ -146,11 +146,11 @@ pub enum OpCode {
     DecrJumpZero, // Decrement register P1. If result is zero, jump to P2.
 
     // Sorter operations (ORDER BY)
-    SorterOpen,   // Open a sorter. P1 = sorter ID, P2 = number of columns, P4 = sort key spec
+    SorterOpen, // Open a sorter. P1 = sorter ID, P2 = number of columns, P4 = sort key spec
     SorterInsert, // Insert row into sorter P1. P2 = start register, P3 = column count
-    SorterSort,   // Sort the sorter P1. Must be called before SorterNext.
-    SorterData,   // Copy current sorter P1 row to registers starting at P2. P3 = column count.
-    SorterNext,   // Advance sorter P1. Jump to P2 if more rows, else continue.
+    SorterSort, // Sort the sorter P1. Must be called before SorterNext.
+    SorterData, // Copy current sorter P1 row to registers starting at P2. P3 = column count.
+    SorterNext, // Advance sorter P1. Jump to P2 if more rows, else continue.
 
     // Ephemeral table operations (for ORDER BY results, temp storage)
     // Ephemeral tables use cursor IDs and work with Column/Next/Rewind opcodes

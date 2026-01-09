@@ -14,9 +14,7 @@ use std::collections::HashMap;
 /// Following SQLite's model where Column/Next/Rewind work for ALL cursor types
 enum CursorData<'a> {
     /// Table cursor - borrows reference to table
-    Table {
-        table: &'a Table,
-    },
+    Table { table: &'a Table },
     /// Ephemeral cursor - owns its data
     Ephemeral {
         rows: Vec<Vec<Value>>,
@@ -114,7 +112,9 @@ impl<'a> Cursor<'a> {
                     None
                 }
             }
-            CursorData::Ephemeral { rows, col_count, .. } => {
+            CursorData::Ephemeral {
+                rows, col_count, ..
+            } => {
                 if idx >= *col_count {
                     return None;
                 }
@@ -144,9 +144,9 @@ impl<'a> Cursor<'a> {
                 *sorted = false;
                 Ok(())
             }
-            CursorData::Table { .. } => {
-                Err(SqawkError::VmError("Cannot insert into table cursor".into()))
-            }
+            CursorData::Table { .. } => Err(SqawkError::VmError(
+                "Cannot insert into table cursor".into(),
+            )),
         }
     }
 
@@ -154,7 +154,12 @@ impl<'a> Cursor<'a> {
     /// Returns true if has rows (continue), false if empty (should jump)
     fn sort(&mut self) -> Result<bool, SqawkError> {
         match &mut self.data {
-            CursorData::Ephemeral { rows, sort_keys, sorted, .. } => {
+            CursorData::Ephemeral {
+                rows,
+                sort_keys,
+                sorted,
+                ..
+            } => {
                 if rows.is_empty() {
                     return Ok(false); // Empty - caller should jump
                 }
@@ -178,9 +183,7 @@ impl<'a> Cursor<'a> {
                 self.valid = true;
                 Ok(true) // Has rows - caller continues
             }
-            CursorData::Table { .. } => {
-                Err(SqawkError::VmError("Cannot sort table cursor".into()))
-            }
+            CursorData::Table { .. } => Err(SqawkError::VmError("Cannot sort table cursor".into())),
         }
     }
 
@@ -192,9 +195,9 @@ impl<'a> Cursor<'a> {
                 *sequence += 1;
                 Ok(seq)
             }
-            CursorData::Table { .. } => {
-                Err(SqawkError::VmError("Cannot generate sequence from table cursor".into()))
-            }
+            CursorData::Table { .. } => Err(SqawkError::VmError(
+                "Cannot generate sequence from table cursor".into(),
+            )),
         }
     }
 
@@ -318,7 +321,6 @@ impl Sorter {
         self.position += 1;
         self.position < self.rows.len()
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -343,8 +345,14 @@ pub struct ColumnDef {
 /// Pending modification to a table
 #[derive(Debug, Clone)]
 pub enum TableModification {
-    Insert { table_name: String, row: Vec<Value> },
-    Delete { table_name: String, row_index: usize },
+    Insert {
+        table_name: String,
+        row: Vec<Value>,
+    },
+    Delete {
+        table_name: String,
+        row_index: usize,
+    },
     CreateTable {
         table_name: String,
         columns: Vec<ColumnDef>,
@@ -383,6 +391,10 @@ pub struct VmEngine<'a> {
 
     /// Whether the engine is in verbose mode
     verbose: bool,
+
+    /// Once-flag tracking - maps instruction address to has_executed flag
+    /// Used by the Once opcode to skip repeated initialization
+    once_flags: HashMap<usize, bool>,
 }
 
 impl<'a> VmEngine<'a> {
@@ -402,6 +414,7 @@ impl<'a> VmEngine<'a> {
             transaction_state: TransactionState::None,
             pending_modifications: Vec::new(),
             verbose,
+            once_flags: HashMap::new(),
         }
     }
 
@@ -423,6 +436,7 @@ impl<'a> VmEngine<'a> {
         self.result_row_indices.clear();
         self.cursor_source_order.clear();
         self.pending_modifications.clear();
+        self.once_flags.clear();
 
         // Allocate enough registers for the program
         let max_reg = self
@@ -667,10 +681,8 @@ impl<'a> VmEngine<'a> {
                 }
 
                 // Add to pending modifications
-                self.pending_modifications.push(TableModification::Insert {
-                    table_name,
-                    row,
-                });
+                self.pending_modifications
+                    .push(TableModification::Insert { table_name, row });
 
                 if self.verbose {
                     println!(
@@ -704,7 +716,10 @@ impl<'a> VmEngine<'a> {
                     });
 
                     if self.verbose {
-                        println!("DeleteRow: queued delete of row {} from cursor {}", idx, cursor_idx);
+                        println!(
+                            "DeleteRow: queued delete of row {} from cursor {}",
+                            idx, cursor_idx
+                        );
                     }
                 }
 
@@ -745,8 +760,14 @@ impl<'a> VmEngine<'a> {
                 }
 
                 // Parse optional file path and delimiter
-                let file_path = parts.get(1).filter(|s| !s.is_empty()).map(|s| s.to_string());
-                let delimiter = parts.get(2).filter(|s| !s.is_empty()).map(|s| s.to_string());
+                let file_path = parts
+                    .get(1)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                let delimiter = parts
+                    .get(2)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
 
                 // Add to pending modifications
                 self.pending_modifications
@@ -2119,6 +2140,23 @@ impl<'a> VmEngine<'a> {
                     None
                 };
 
+                // Check if the accumulator register is Null - if so, reset the accumulator
+                // This matches SQLite's behavior where Null initialization signals a fresh start
+                let acc_reg_value = self.get_register(acc_reg)?;
+                if matches!(acc_reg_value, Register::Null) {
+                    // Reset the accumulator for this register
+                    self.accumulators.insert(
+                        acc_reg,
+                        AggAccumulator {
+                            func_type,
+                            count: 0,
+                            value: None,
+                        },
+                    );
+                    // Mark the register as non-Null to indicate accumulator is active
+                    self.registers[acc_reg] = Register::Integer(0);
+                }
+
                 // Get or create the accumulator
                 let acc = self.accumulators.entry(acc_reg).or_insert(AggAccumulator {
                     func_type,
@@ -2239,10 +2277,22 @@ impl<'a> VmEngine<'a> {
                 // Finalize an aggregate and store result
                 // P1 = accumulator register
                 // P2 = result register
+                // P3 = function type (0=COUNT, 1=SUM, 2=AVG, 3=MIN, 4=MAX) - used when no accumulator exists
                 let acc_reg = inst.p1 as usize;
                 let result_reg = inst.p2 as usize;
+                let func_type_hint = inst.p3; // Fallback function type
 
-                let result = if let Some(acc) = self.accumulators.get(&acc_reg) {
+                // First check if the accumulator register is Null - this means no AggStep was called
+                // (the register was initialized to Null and never updated by AggStep)
+                let acc_reg_value = self.get_register(acc_reg)?;
+                let result = if matches!(acc_reg_value, Register::Null) {
+                    // No AggStep was called this iteration - return default based on function type
+                    if func_type_hint == 0 {
+                        Register::Integer(0) // COUNT of no rows is 0
+                    } else {
+                        Register::Null // SUM/AVG/MIN/MAX of no rows is NULL
+                    }
+                } else if let Some(acc) = self.accumulators.get(&acc_reg) {
                     match acc.func_type {
                         0 => {
                             // COUNT - return the count
@@ -2265,9 +2315,7 @@ impl<'a> VmEngine<'a> {
                                     Some(Value::Integer(i)) => {
                                         Register::Float(*i as f64 / acc.count as f64)
                                     }
-                                    Some(Value::Float(f)) => {
-                                        Register::Float(f / acc.count as f64)
-                                    }
+                                    Some(Value::Float(f)) => Register::Float(f / acc.count as f64),
                                     _ => Register::Null,
                                 }
                             }
@@ -2285,8 +2333,13 @@ impl<'a> VmEngine<'a> {
                         _ => Register::Null,
                     }
                 } else {
-                    // No accumulator found - return appropriate default
-                    Register::Null
+                    // No accumulator found - return appropriate default based on function type
+                    // COUNT with no rows returns 0, others return NULL
+                    if func_type_hint == 0 {
+                        Register::Integer(0) // COUNT of no rows is 0
+                    } else {
+                        Register::Null
+                    }
                 };
 
                 self.set_register(result_reg, result)?;
@@ -2312,17 +2365,119 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Continue)
             }
 
-            OpCode::InitCoroutine
-            | OpCode::Yield
-            | OpCode::EndCoroutine
-            | OpCode::Once
-            | OpCode::Exists
-            | OpCode::NotExists => {
-                // These opcodes are used for subqueries but not yet fully implemented
-                Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Opcode {:?} not yet implemented",
-                    inst.opcode
-                )))
+            OpCode::InitCoroutine => {
+                // InitCoroutine P1, P2, P3
+                // P1 = register to store coroutine return/entry address
+                // P2 = address to jump to (skip over coroutine body)
+                // P3 = coroutine entry point (first instruction of coroutine)
+                let return_reg = inst.p1 as usize;
+                let skip_addr = inst.p2 as usize;
+                let entry_point = inst.p3 as usize;
+
+                // Store the entry point in the register - this will be swapped with PC on Yield
+                self.registers[return_reg] = Register::Integer(entry_point as i64);
+
+                // Jump over the coroutine body to continue main execution
+                Ok(ExecuteResult::Jump(skip_addr))
+            }
+
+            OpCode::Yield => {
+                // Yield P1
+                // P1 = register containing coroutine PC (swap with current PC)
+                // Cooperative context switch between main code and coroutine
+                let coro_reg = inst.p1 as usize;
+
+                // Get saved coroutine PC from register
+                let saved_pc = match &self.registers[coro_reg] {
+                    Register::Integer(pc) => *pc as usize,
+                    _ => {
+                        return Err(SqawkError::VmError(
+                            "Yield: register must contain integer PC".into(),
+                        ))
+                    }
+                };
+
+                // Save current PC + 1 (next instruction) into the register
+                // This is where we'll return after EndCoroutine
+                self.registers[coro_reg] = Register::Integer((self.pc + 1) as i64);
+
+                // Jump to the saved coroutine location
+                Ok(ExecuteResult::Jump(saved_pc))
+            }
+
+            OpCode::EndCoroutine => {
+                // EndCoroutine P1
+                // P1 = register containing return address (saved by last Yield)
+                // Jump back to caller, prepare register for next Yield
+                let coro_reg = inst.p1 as usize;
+
+                // Get return address from register
+                let return_addr = match &self.registers[coro_reg] {
+                    Register::Integer(pc) => *pc as usize,
+                    _ => {
+                        return Err(SqawkError::VmError(
+                            "EndCoroutine: register must contain integer return address".into(),
+                        ))
+                    }
+                };
+
+                // Store next instruction (PC + 1) for the next Yield call
+                // This will be the coroutine's resume point
+                self.registers[coro_reg] = Register::Integer((self.pc + 1) as i64);
+
+                // Jump back to caller
+                Ok(ExecuteResult::Jump(return_addr))
+            }
+
+            OpCode::Once => {
+                // Once P1, P2
+                // First time: continue to next instruction
+                // Subsequently: jump to P2
+                // Uses instruction address as unique key for tracking
+                let skip_addr = inst.p2 as usize;
+
+                if self.once_flags.get(&self.pc).copied().unwrap_or(false) {
+                    // Already executed, skip
+                    Ok(ExecuteResult::Jump(skip_addr))
+                } else {
+                    // First time, mark as executed and continue
+                    self.once_flags.insert(self.pc, true);
+                    Ok(ExecuteResult::Continue)
+                }
+            }
+
+            OpCode::Exists => {
+                // Exists P1, P2
+                // P1 = result register (set to 1 if cursor P2 has rows, else 0)
+                // P2 = cursor ID to check
+                let result_reg = inst.p1 as usize;
+                let cursor_idx = inst.p2 as usize;
+
+                let has_rows = if let Some(cursor) = self.cursors.get(&cursor_idx) {
+                    cursor.row_count() > 0
+                } else {
+                    false
+                };
+
+                self.registers[result_reg] = Register::Integer(if has_rows { 1 } else { 0 });
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::NotExists => {
+                // NotExists P1, P2
+                // P1 = result register (set to 1 if cursor P2 has no rows, else 0)
+                // P2 = cursor ID to check
+                let result_reg = inst.p1 as usize;
+                let cursor_idx = inst.p2 as usize;
+
+                let has_rows = if let Some(cursor) = self.cursors.get(&cursor_idx) {
+                    cursor.row_count() > 0
+                } else {
+                    false
+                };
+
+                self.registers[result_reg] = Register::Integer(if has_rows { 0 } else { 1 });
+                Ok(ExecuteResult::Continue)
             }
 
             #[allow(unreachable_patterns)]
