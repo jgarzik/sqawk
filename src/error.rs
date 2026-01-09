@@ -71,21 +71,9 @@ pub enum SqawkError {
     #[error("Unsupported SQL feature: {0}")]
     UnsupportedSqlFeature(String),
 
-    /// Error for type mismatches or conversion failures
-    #[error("Type error: {0}")]
-    TypeError(String),
-
     /// Error for semantically invalid SQL queries
     #[error("Invalid SQL query: {0}")]
     InvalidSqlQuery(String),
-
-    /// Error for division by zero in arithmetic operations
-    #[error("Division by zero")]
-    DivideByZero,
-
-    /// Error for invalid function arguments
-    #[error("Invalid function arguments: {0}")]
-    InvalidFunctionArguments(String),
 
     /// Error in VM execution
     #[error("VM execution error: {0}")]
@@ -111,12 +99,7 @@ impl PartialEq for SqawkError {
             (SqawkError::ColumnNotFound(_), SqawkError::ColumnNotFound(_)) => true,
             (SqawkError::InvalidFileSpec(_), SqawkError::InvalidFileSpec(_)) => true,
             (SqawkError::UnsupportedSqlFeature(_), SqawkError::UnsupportedSqlFeature(_)) => true,
-            (SqawkError::TypeError(_), SqawkError::TypeError(_)) => true,
             (SqawkError::InvalidSqlQuery(_), SqawkError::InvalidSqlQuery(_)) => true,
-            (SqawkError::DivideByZero, SqawkError::DivideByZero) => true,
-            (SqawkError::InvalidFunctionArguments(_), SqawkError::InvalidFunctionArguments(_)) => {
-                true
-            }
             (SqawkError::VmError(_), SqawkError::VmError(_)) => true,
             // If variants are different, they are not equal
             _ => false,

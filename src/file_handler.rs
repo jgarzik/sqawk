@@ -240,55 +240,6 @@ impl FileHandler {
         db.get_table(table_name)
     }
 
-    /// Get a mutable reference to a table by name
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table to retrieve
-    ///
-    /// # Returns
-    /// * `SqawkResult<&mut Table>` - Mutable reference to the requested table
-    pub fn get_table_mut(&mut self, table_name: &str) -> SqawkResult<&mut Table> {
-        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
-        let db = unsafe { &mut *self.database };
-        db.get_table_mut(table_name)
-    }
-
-    /// Add a table to the collection
-    ///
-    /// # Arguments
-    /// * `name` - Name of the table
-    /// * `table` - Table to add
-    ///
-    /// # Returns
-    /// * `SqawkResult<()>` - Result of the operation
-    pub fn add_table(&mut self, name: String, mut table: Table) -> SqawkResult<()> {
-        // Check if the table has a file path before adding and log information
-        if let Some(path) = table.file_path() {
-            if self.config.verbose() {
-                println!("Adding table '{}' with file path: {:?}", name, path);
-            }
-
-            // Make absolute path if necessary (needed for CREATE TABLE with relative paths)
-            if !path.is_absolute() {
-                // Get current directory
-                if let Ok(mut cur_dir) = std::env::current_dir() {
-                    // Join with the relative path
-                    cur_dir.push(path.clone());
-                    if self.config.verbose() {
-                        println!("Converting to absolute path: {:?}", cur_dir);
-                    }
-                    // Update the file path in the table
-                    table.set_file_path(cur_dir);
-                }
-            }
-        } else if self.config.verbose() {
-            println!("Adding table '{}' with NO file path", name);
-        }
-
-        // Add the table to the database
-        self.database_mut().add_table(name, table)
-    }
-
     /// Get all table names
     ///
     /// # Returns

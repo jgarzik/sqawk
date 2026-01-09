@@ -15,7 +15,6 @@ fn test_like_percent_prefix() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE name LIKE 'A%'")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -37,7 +36,6 @@ fn test_like_percent_suffix() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE email LIKE '%@example.com'")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -59,7 +57,6 @@ fn test_like_percent_contains() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM items WHERE description LIKE '%and%'")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -81,7 +78,6 @@ fn test_like_underscore() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM codes WHERE code LIKE 'A_B'")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -104,7 +100,6 @@ fn test_not_like() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE name NOT LIKE 'A%'")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -126,7 +121,6 @@ fn test_ilike_case_insensitive() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM names WHERE name ILIKE 'al%'")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -150,7 +144,6 @@ fn test_like_exact_match() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM records WHERE status LIKE 'active'")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -172,7 +165,6 @@ fn test_like_special_chars() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM files WHERE value LIKE 'test.csv'")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()

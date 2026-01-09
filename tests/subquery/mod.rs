@@ -16,7 +16,6 @@ fn test_scalar_subquery_max() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE age = (SELECT MAX(age) FROM people)")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -37,7 +36,6 @@ fn test_scalar_subquery_min() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE age = (SELECT MIN(age) FROM people)")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -59,7 +57,6 @@ fn test_scalar_subquery_count() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE id = (SELECT COUNT(*) FROM data)")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -85,7 +82,6 @@ fn test_scalar_subquery_sum() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM data2 WHERE value = (SELECT SUM(value) FROM data2 WHERE id <= 3)")
-        .arg("--vm")
         .arg(file_path2.to_str().unwrap());
 
     cmd.assert()
@@ -107,7 +103,6 @@ fn test_scalar_subquery_avg() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM scores WHERE score = (SELECT AVG(score) FROM scores)")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -129,7 +124,6 @@ fn test_scalar_subquery_empty_result() -> Result<(), Box<dyn std::error::Error>>
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE value = (SELECT MAX(value) FROM data WHERE value > 1000)")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     // MAX on empty set is NULL, so no matches expected
@@ -151,7 +145,6 @@ fn test_scalar_subquery_greater_than() -> Result<(), Box<dyn std::error::Error>>
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE age > (SELECT AVG(age) FROM people)")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()

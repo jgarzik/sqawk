@@ -15,7 +15,6 @@ fn test_coalesce_first_non_null() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE COALESCE(nickname, name) = 'Ally'")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -36,7 +35,6 @@ fn test_coalesce_fallback_to_second() -> Result<(), Box<dyn std::error::Error>> 
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM values WHERE COALESCE(primary_val, secondary_val) = 'fallback1'")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     // VM outputs NULL for null values
@@ -58,7 +56,6 @@ fn test_coalesce_with_literal_default() -> Result<(), Box<dyn std::error::Error>
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE COALESCE(val, 'default') = 'default'")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -80,7 +77,6 @@ fn test_nullif_returns_null_when_equal() -> Result<(), Box<dyn std::error::Error
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE NULLIF(name, 'Alice') IS NULL")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -102,7 +98,6 @@ fn test_nullif_returns_value_when_not_equal() -> Result<(), Box<dyn std::error::
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM codes WHERE NULLIF(code, 'A') IS NOT NULL")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -124,7 +119,6 @@ fn test_coalesce_multiple_args() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM multi WHERE COALESCE(a, b, c) = 'third'")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     // VM outputs NULL for null values

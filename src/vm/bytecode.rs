@@ -7,8 +7,51 @@
 //! Each instruction has a specific semantics that controls how data is loaded,
 //! manipulated, and stored during SQL query execution.
 
-use crate::table::Value;
+use crate::table::{DataType, Value};
 use std::fmt;
+
+/// A column in a result schema
+#[derive(Debug, Clone)]
+pub struct ResultColumn {
+    /// Name of the column (may include table prefix like "users.name")
+    pub name: String,
+    /// Data type of the column
+    pub data_type: DataType,
+}
+
+impl ResultColumn {
+    pub fn new(name: String, data_type: DataType) -> Self {
+        Self { name, data_type }
+    }
+}
+
+/// Schema definition for query results
+///
+/// This is built at compile time and carries both column names and types,
+/// allowing the VM to construct properly-typed result tables.
+#[derive(Debug, Clone, Default)]
+pub struct ResultSchema {
+    /// Columns in the result set
+    pub columns: Vec<ResultColumn>,
+}
+
+impl ResultSchema {
+    pub fn new() -> Self {
+        Self {
+            columns: Vec::new(),
+        }
+    }
+
+    /// Add a column to the schema
+    pub fn add_column(&mut self, name: String, data_type: DataType) {
+        self.columns.push(ResultColumn::new(name, data_type));
+    }
+
+    /// Check if schema is empty
+    pub fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+}
 
 /// Opcodes for VM instructions
 ///
@@ -28,15 +71,18 @@ pub enum OpCode {
     Close,     // Close a cursor
 
     // Cursor operations
-    Rewind, // Move cursor to first row
-    Next,   // Move cursor to next row
-    Column, // Read column value into register
+    Rewind,    // Move cursor to first row
+    Next,      // Move cursor to next row
+    Column,    // Read column value into register
+    InsertRow, // Insert row from registers P2..P2+P3 into cursor P1
+    DeleteRow, // Delete current row at cursor P1
 
     // Data manipulation
     Integer,   // Load integer constant
     String,    // Load string constant
     Null,      // Load NULL value
     ResultRow, // Return result row to client
+    Copy,      // Copy register P1 to register P2 (SCopy in SQLite)
 
     // Transaction operations
     Begin, // Begin a transaction - marks the start of a set of changes that can be committed or rolled back
@@ -73,6 +119,7 @@ pub enum OpCode {
 
     // Set operations
     Distinct,  // Remove duplicate rows from results
+    Limit,     // Limit results to P1 rows. P2 = offset (rows to skip, already applied). Post-processing opcode.
     Intersect, // Keep only rows that exist in both left and right result sets
     Except,    // Keep only rows from left that don't exist in right result set
 
@@ -89,10 +136,34 @@ pub enum OpCode {
     Once,          // First time: continue. Subsequently: jump to P2. Used for one-time init.
 
     // Subquery result operations
-    AggStep,   // P1 = function type, P2 = value reg, P3 = accumulator reg. Step aggregate.
-    AggFinal,  // P1 = accumulator reg, P2 = result reg. Finalize aggregate.
+    AggStep,  // P1 = function type, P2 = value reg, P3 = accumulator reg. Step aggregate.
+    AggFinal, // P1 = accumulator reg, P2 = result reg. Finalize aggregate.
+    AggReset, // P1 = accumulator reg. Reset accumulator to initial state.
     Exists,    // P1 = flag reg (set to 1 if cursor P2 has rows, else 0)
     NotExists, // P1 = flag reg (set to 1 if cursor P2 has no rows, else 0)
+
+    // Counter operations (LIMIT/OFFSET)
+    DecrJumpZero, // Decrement register P1. If result is zero, jump to P2.
+
+    // Sorter operations (ORDER BY)
+    SorterOpen,   // Open a sorter. P1 = sorter ID, P2 = number of columns, P4 = sort key spec
+    SorterInsert, // Insert row into sorter P1. P2 = start register, P3 = column count
+    SorterSort,   // Sort the sorter P1. Must be called before SorterNext.
+    SorterData,   // Copy current sorter P1 row to registers starting at P2. P3 = column count.
+    SorterNext,   // Advance sorter P1. Jump to P2 if more rows, else continue.
+
+    // Ephemeral table operations (for ORDER BY results, temp storage)
+    // Ephemeral tables use cursor IDs and work with Column/Next/Rewind opcodes
+    OpenEphemeral, // Open ephemeral cursor P1 with P2 columns. P4 = sort key spec for ordering.
+    IdxInsert,     // Insert into ephemeral cursor P1. P2 = start register, P3 = column count.
+    Sort,          // Sort ephemeral cursor P1. Jump to P2 when empty, else continue.
+    Sequence,      // P1 = ephemeral cursor, P2 = dest register. Generate next sequence number.
+
+    // DDL operations
+    CreateTable, // Create a table. P4 = "table_name:col1:type1,col2:type2,..."
+
+    // String functions
+    StringFunc, // P1 = src reg, P2 = dest reg, P3 = arg2 reg (for SUBSTR/REPLACE), P4 = function name
 }
 
 /// A SQL VM instruction with opcode and parameters
@@ -166,8 +237,9 @@ impl fmt::Display for Instruction {
 /// A program of bytecode instructions
 #[derive(Debug, Clone)]
 pub struct Program {
-    /// The list of instructions
     pub instructions: Vec<Instruction>,
+    /// Schema for the result set (built at compile time)
+    pub result_schema: ResultSchema,
 }
 
 impl Default for Program {
@@ -177,11 +249,16 @@ impl Default for Program {
 }
 
 impl Program {
-    /// Create a new empty program
     pub fn new() -> Self {
         Self {
             instructions: Vec::new(),
+            result_schema: ResultSchema::new(),
         }
+    }
+
+    /// Set the result schema for this program
+    pub fn set_result_schema(&mut self, schema: ResultSchema) {
+        self.result_schema = schema;
     }
 
     /// Add an instruction to the program

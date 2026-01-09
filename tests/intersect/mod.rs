@@ -16,7 +16,6 @@ fn test_intersect_common_rows() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a INTERSECT SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -53,7 +52,6 @@ fn test_intersect_disjoint_tables() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a INTERSECT SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -92,7 +90,6 @@ fn test_intersect_identical_tables() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a INTERSECT SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -117,7 +114,6 @@ fn test_intersect_subset_tables() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a INTERSECT SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -152,7 +148,6 @@ fn test_intersect_removes_duplicates() -> Result<(), Box<dyn std::error::Error>>
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a INTERSECT SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 

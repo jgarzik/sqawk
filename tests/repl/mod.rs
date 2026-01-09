@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -83,17 +84,26 @@ fn test_repl_table_operations() {
 
 #[test]
 fn test_repl_write_toggle() {
+    // Create a temporary directory for this test
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let temp_file_path = temp_dir.path().join("sample.csv");
+
+    // Copy sample.csv to the temporary file
+    let original_content = fs::read_to_string("tests/data/sample.csv")
+        .expect("Failed to read sample.csv");
+    fs::write(&temp_file_path, &original_content).expect("Failed to write temp file");
+
     // Commands to test the .write toggle
     let test_commands =
         ".write\nUPDATE sample SET age = 32 WHERE id = 1;\n.write\nSELECT * FROM sample;\n.exit\n";
 
-    // Start the sqawk process with sample data loaded
+    // Start the sqawk process with temp data loaded
     let mut process = Command::new("cargo")
         .args([
             "run",
             "--bin",
             "sqawk",
-            "tests/data/sample.csv",
+            temp_file_path.to_str().unwrap(),
             "--interactive",
         ])
         .stdin(Stdio::piped())

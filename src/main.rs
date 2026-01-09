@@ -36,7 +36,6 @@ mod error;
 mod file_handler;
 mod repl;
 mod sql_executor;
-mod string_functions;
 mod table;
 mod vm;
 
@@ -76,7 +75,6 @@ fn main() -> Result<()> {
         args.field_separator.clone(), // Field separator for tables
         args.tabledef.clone(),        // Table column definitions
         args.write,                   // Whether to write changes to files
-        args.vm,                      // Whether to use VM execution engine
     );
 
     // Configure diagnostics output if verbose mode is enabled (-v flag)
@@ -134,26 +132,11 @@ fn main() -> Result<()> {
     // Process each SQL statement in the order specified on the command line
     // This allows operations like: UPDATE -> DELETE -> SELECT to see the effects
     for sql in &args.sql {
-        // Log the SQL being executed in verbose mode
-        if config.verbose() {
-            if args.vm {
-                println!("Executing SQL with VM: {sql}");
-            } else {
-                println!("Executing SQL: {sql}");
-            }
-        }
-
         // Execute the SQL statement against the in-memory tables
         // The result may be a table (for SELECT) or None (for UPDATE, DELETE, INSERT)
-        let result = if args.vm {
-            sql_executor
-                .execute_vm(sql)
-                .with_context(|| format!("Failed to execute SQL with VM: {sql}"))?
-        } else {
-            sql_executor
-                .execute(sql)
-                .with_context(|| format!("Failed to execute SQL: {sql}"))?
-        };
+        let result = sql_executor
+            .execute(sql)
+            .with_context(|| format!("Failed to execute SQL: {sql}"))?;
 
         // Step 4: Output results to stdout (for SELECT queries)
         match result {

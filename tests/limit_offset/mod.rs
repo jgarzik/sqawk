@@ -152,35 +152,15 @@ fn test_limit_with_aggregates() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT department, COUNT(*) AS count, AVG(salary) AS avg_salary FROM departments GROUP BY department ORDER BY avg_salary DESC LIMIT 2")
-        .arg(get_departments_file().to_str().unwrap())
-        .arg("-v");
+        .arg(get_departments_file().to_str().unwrap());
 
     // Execute the command and capture its output
     let output = cmd.output()?;
     let success = output.status.success();
-    let stderr = String::from_utf8(output.stderr)?;
     let stdout = String::from_utf8(output.stdout)?;
 
     // Verify the command succeeded
     assert!(success, "Command failed");
-
-    // Verify stderr contains expected messages
-    assert!(
-        stderr.contains("Applying aggregate functions"),
-        "Missing 'Applying aggregate functions' in stderr"
-    );
-    assert!(
-        stderr.contains("Applying GROUP BY"),
-        "Missing 'Applying GROUP BY' in stderr"
-    );
-    assert!(
-        stderr.contains("Applying ORDER BY"),
-        "Missing 'Applying ORDER BY' in stderr"
-    );
-    assert!(
-        stderr.contains("Applying LIMIT/OFFSET"),
-        "Missing 'Applying LIMIT/OFFSET' in stderr"
-    );
 
     // Check output contains header and expected departments
     assert!(

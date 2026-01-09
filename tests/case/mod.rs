@@ -15,7 +15,6 @@ fn test_case_simple_integers() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM records WHERE CASE status WHEN 1 THEN 1 WHEN 2 THEN 0 ELSE 0 END = 1")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -37,7 +36,6 @@ fn test_case_searched_greater_than() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE CASE WHEN value > 50 THEN 1 ELSE 0 END = 1")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -58,7 +56,6 @@ fn test_case_multiple_when_branches() -> Result<(), Box<dyn std::error::Error>> 
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM grades WHERE CASE WHEN grade > 89 THEN 1 WHEN grade > 79 THEN 0 ELSE 0 END = 1")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -79,7 +76,6 @@ fn test_case_with_else() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM accounts WHERE CASE type WHEN 'premium' THEN 0 ELSE 1 END = 1")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -101,7 +97,6 @@ fn test_case_no_when_match_uses_else() -> Result<(), Box<dyn std::error::Error>>
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM codes WHERE CASE code WHEN 'A' THEN 0 WHEN 'B' THEN 0 ELSE 1 END = 1")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -124,7 +119,6 @@ fn test_case_searched_equality() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM items WHERE CASE WHEN status = 'active' THEN 1 ELSE 0 END = 1")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()

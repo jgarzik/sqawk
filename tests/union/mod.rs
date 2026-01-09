@@ -16,7 +16,6 @@ fn test_union_all_combines_all_rows() -> Result<(), Box<dyn std::error::Error>> 
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a UNION ALL SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -48,7 +47,6 @@ fn test_union_removes_duplicates() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a UNION SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -74,7 +72,6 @@ fn test_union_disjoint_tables() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a UNION SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -99,7 +96,6 @@ fn test_union_identical_tables() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a UNION SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -126,7 +122,6 @@ fn test_union_all_identical_tables() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a UNION ALL SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -154,7 +149,6 @@ fn test_union_with_empty_table() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a UNION SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 

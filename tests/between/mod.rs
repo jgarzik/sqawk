@@ -15,7 +15,6 @@ fn test_between_integers() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE age BETWEEN 25 AND 35")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -38,7 +37,6 @@ fn test_between_boundaries() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM numbers WHERE value BETWEEN 20 AND 40")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -61,7 +59,6 @@ fn test_not_between() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM scores WHERE score NOT BETWEEN 60 AND 80")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -85,7 +82,6 @@ fn test_between_no_matches() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE value BETWEEN 100 AND 200")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     // VM mode with no results returns empty output (no header)
@@ -105,7 +101,6 @@ fn test_between_single_match() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM products WHERE price BETWEEN 100 AND 200")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -126,7 +121,6 @@ fn test_between_equal_bounds() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM nums WHERE num BETWEEN 10 AND 10")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()

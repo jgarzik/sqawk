@@ -22,7 +22,6 @@ fn test_in_subquery_basic() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM orders WHERE user_id IN (SELECT id FROM users)")
-        .arg("--vm")
         .arg(orders_path.to_str().unwrap())
         .arg(users_path.to_str().unwrap());
 
@@ -55,7 +54,6 @@ fn test_in_subquery_with_where() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM orders WHERE user_id IN (SELECT id FROM users WHERE active = 1)")
-        .arg("--vm")
         .arg(orders_path.to_str().unwrap())
         .arg(users_path.to_str().unwrap());
 
@@ -86,7 +84,6 @@ fn test_not_in_subquery() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM orders WHERE user_id NOT IN (SELECT id FROM users)")
-        .arg("--vm")
         .arg(orders_path.to_str().unwrap())
         .arg(users_path.to_str().unwrap());
 
@@ -114,7 +111,6 @@ fn test_in_subquery_empty_result() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE value IN (SELECT value FROM empty WHERE value > 1000)")
-        .arg("--vm")
         .arg(data_path.to_str().unwrap())
         .arg(empty_path.to_str().unwrap());
 
@@ -137,7 +133,6 @@ fn test_in_subquery_same_table() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM employees WHERE id IN (SELECT manager_id FROM employees)")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -164,7 +159,6 @@ fn test_in_subquery_strings() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM products WHERE category IN (SELECT name FROM categories WHERE active = 1)")
-        .arg("--vm")
         .arg(products_path.to_str().unwrap())
         .arg(categories_path.to_str().unwrap());
 

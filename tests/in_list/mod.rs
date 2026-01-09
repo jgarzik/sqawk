@@ -15,7 +15,6 @@ fn test_in_list_integers() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE age IN (25, 35, 40)")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -38,7 +37,6 @@ fn test_in_list_strings() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE city IN ('NYC', 'LA')")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -61,7 +59,6 @@ fn test_not_in_list() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM records WHERE status NOT IN ('active', 'archived')")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -83,7 +80,6 @@ fn test_in_list_single_value() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE value IN (20)")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -104,7 +100,6 @@ fn test_in_list_no_matches() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM nums WHERE num IN (100, 200, 300)")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     // VM mode with no results returns empty output
@@ -124,7 +119,6 @@ fn test_in_list_all_match() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM codes WHERE code IN ('A', 'B', 'C')")
-        .arg("--vm")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()

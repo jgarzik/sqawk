@@ -7,16 +7,32 @@
 use super::bytecode::{Instruction, OpCode, Program, Register};
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::{Table, Value};
+use crate::table::{ColumnDefinition, Table, Value};
 use std::collections::HashMap;
 
-/// Table cursor for VM execution
+/// Data backing a cursor - either borrowed table or owned ephemeral data
+/// Following SQLite's model where Column/Next/Rewind work for ALL cursor types
+enum CursorData<'a> {
+    /// Table cursor - borrows reference to table
+    Table {
+        table: &'a Table,
+    },
+    /// Ephemeral cursor - owns its data
+    Ephemeral {
+        rows: Vec<Vec<Value>>,
+        col_count: usize,
+        sort_keys: Vec<(usize, bool)>, // (col_idx, ascending)
+        sorted: bool,
+        sequence: i64,
+    },
+}
+
+/// Unified cursor for VM execution
 ///
-/// The cursor borrows a reference to the table instead of cloning it,
-/// reducing memory usage significantly for large tables.
+/// Works with both table references and ephemeral data.
+/// This follows SQLite's model where Column/Next/Rewind work for any cursor.
 struct Cursor<'a> {
-    /// The table being accessed (borrowed, not owned)
-    table: &'a Table,
+    data: CursorData<'a>,
     /// Current row position (0-based)
     position: usize,
     /// Whether the cursor is at a valid row
@@ -24,30 +40,51 @@ struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
-    /// Create a new cursor for a table
-    fn new(table: &'a Table) -> Self {
+    /// Create cursor from table reference
+    fn from_table(table: &'a Table) -> Self {
         Self {
-            table,
+            data: CursorData::Table { table },
             position: 0,
             valid: false,
         }
     }
 
-    /// Move to the first row
+    /// Create ephemeral cursor
+    fn ephemeral(col_count: usize, sort_keys: Vec<(usize, bool)>) -> Self {
+        Self {
+            data: CursorData::Ephemeral {
+                rows: Vec::new(),
+                col_count,
+                sort_keys,
+                sorted: false,
+                sequence: 0,
+            },
+            position: 0,
+            valid: false,
+        }
+    }
+
+    /// Move to the first row (Rewind opcode)
     fn rewind(&mut self) -> bool {
         self.position = 0;
-        self.valid = self.position < self.table.row_count();
+        self.valid = match &self.data {
+            CursorData::Table { table } => self.position < table.row_count(),
+            CursorData::Ephemeral { rows, .. } => !rows.is_empty(),
+        };
         self.valid
     }
 
-    /// Move to the next row
+    /// Move to the next row (Next opcode)
     fn next(&mut self) -> bool {
         if !self.valid {
             return false;
         }
 
         self.position += 1;
-        self.valid = self.position < self.table.row_count();
+        self.valid = match &self.data {
+            CursorData::Table { table } => self.position < table.row_count(),
+            CursorData::Ephemeral { rows, .. } => self.position < rows.len(),
+        };
         self.valid
     }
 
@@ -60,27 +97,230 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Get a column value at the current position
+    /// Get a column value at the current position (Column opcode)
     fn column(&self, idx: usize) -> Option<Value> {
-        if !self.valid || idx >= self.table.column_count() {
+        if !self.valid {
             return None;
         }
+        match &self.data {
+            CursorData::Table { table } => {
+                if idx >= table.column_count() {
+                    return None;
+                }
+                let rows = table.rows();
+                if self.position < rows.len() {
+                    rows[self.position].get(idx).cloned()
+                } else {
+                    None
+                }
+            }
+            CursorData::Ephemeral { rows, col_count, .. } => {
+                if idx >= *col_count {
+                    return None;
+                }
+                rows.get(self.position)?.get(idx).cloned()
+            }
+        }
+    }
 
-        // Access rows from the table using the rows() method
-        let rows = self.table.rows();
-        if self.position < rows.len() {
-            rows[self.position].get(idx).cloned()
-        } else {
-            None
+    /// Get the table name (only for table cursors)
+    fn table_name(&self) -> &str {
+        match &self.data {
+            CursorData::Table { table } => table.name(),
+            CursorData::Ephemeral { .. } => "<ephemeral>",
+        }
+    }
+
+    /// Get the current row index (alias for current_row_idx)
+    fn current_row_index(&self) -> Option<usize> {
+        self.current_row_idx()
+    }
+
+    /// Insert row into ephemeral cursor (IdxInsert opcode)
+    fn insert_row(&mut self, row: Vec<Value>) -> Result<(), SqawkError> {
+        match &mut self.data {
+            CursorData::Ephemeral { rows, sorted, .. } => {
+                rows.push(row);
+                *sorted = false;
+                Ok(())
+            }
+            CursorData::Table { .. } => {
+                Err(SqawkError::VmError("Cannot insert into table cursor".into()))
+            }
+        }
+    }
+
+    /// Sort ephemeral cursor (Sort opcode)
+    /// Returns true if has rows (continue), false if empty (should jump)
+    fn sort(&mut self) -> Result<bool, SqawkError> {
+        match &mut self.data {
+            CursorData::Ephemeral { rows, sort_keys, sorted, .. } => {
+                if rows.is_empty() {
+                    return Ok(false); // Empty - caller should jump
+                }
+                if !*sorted {
+                    let keys = sort_keys.clone();
+                    rows.sort_by(|a, b| {
+                        for (col_idx, ascending) in &keys {
+                            let cmp = compare_values(
+                                a.get(*col_idx).unwrap_or(&Value::Null),
+                                b.get(*col_idx).unwrap_or(&Value::Null),
+                            );
+                            if cmp != std::cmp::Ordering::Equal {
+                                return if *ascending { cmp } else { cmp.reverse() };
+                            }
+                        }
+                        std::cmp::Ordering::Equal
+                    });
+                    *sorted = true;
+                }
+                self.position = 0;
+                self.valid = true;
+                Ok(true) // Has rows - caller continues
+            }
+            CursorData::Table { .. } => {
+                Err(SqawkError::VmError("Cannot sort table cursor".into()))
+            }
+        }
+    }
+
+    /// Generate next sequence number (Sequence opcode)
+    fn next_sequence(&mut self) -> Result<i64, SqawkError> {
+        match &mut self.data {
+            CursorData::Ephemeral { sequence, .. } => {
+                let seq = *sequence;
+                *sequence += 1;
+                Ok(seq)
+            }
+            CursorData::Table { .. } => {
+                Err(SqawkError::VmError("Cannot generate sequence from table cursor".into()))
+            }
+        }
+    }
+
+    /// Get row count (for debugging/validation)
+    #[allow(dead_code)]
+    fn row_count(&self) -> usize {
+        match &self.data {
+            CursorData::Table { table } => table.row_count(),
+            CursorData::Ephemeral { rows, .. } => rows.len(),
+        }
+    }
+
+    /// Check if this is an ephemeral cursor
+    #[allow(dead_code)]
+    fn is_ephemeral(&self) -> bool {
+        matches!(self.data, CursorData::Ephemeral { .. })
+    }
+
+    /// Get column count
+    fn column_count(&self) -> usize {
+        match &self.data {
+            CursorData::Table { table } => table.column_count(),
+            CursorData::Ephemeral { col_count, .. } => *col_count,
+        }
+    }
+
+    /// Get rows reference (for table cursors, returns table rows; for ephemeral, returns owned rows)
+    fn rows(&self) -> &[Vec<Value>] {
+        match &self.data {
+            CursorData::Table { table } => table.rows(),
+            CursorData::Ephemeral { rows, .. } => rows,
         }
     }
 }
 
-/// Transaction state for the VM engine
-///
-/// This enum tracks the current state of a transaction during VM execution.
-/// It enables proper validation of transaction operations (e.g., preventing
-/// nested transactions or commits without an active transaction).
+/// Compare two Values for ordering
+fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => Ordering::Less,
+        (_, Value::Null) => Ordering::Greater,
+        (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
+        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+        (Value::Integer(a), Value::Float(b)) => {
+            (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal)
+        }
+        (Value::Float(a), Value::Integer(b)) => {
+            a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal)
+        }
+        (Value::String(a), Value::String(b)) => a.cmp(b),
+        (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
+        _ => format!("{:?}", a).cmp(&format!("{:?}", b)),
+    }
+}
+
+/// Sorter for ORDER BY operations
+struct Sorter {
+    rows: Vec<Vec<Value>>,
+    sort_keys: Vec<(usize, bool)>, // (column_index, ascending)
+    position: usize,
+    sorted: bool,
+}
+
+/// Aggregate accumulator for GROUP BY operations
+#[derive(Debug, Clone)]
+struct AggAccumulator {
+    /// Function type: 0=COUNT, 1=SUM, 2=AVG, 3=MIN, 4=MAX
+    func_type: i64,
+    /// Count of values processed (for COUNT and AVG)
+    count: i64,
+    /// Accumulated value (sum for SUM/AVG, min/max for MIN/MAX)
+    value: Option<Value>,
+}
+
+impl Sorter {
+    fn new(_col_count: usize, sort_keys: Vec<(usize, bool)>) -> Self {
+        Self {
+            rows: Vec::new(),
+            sort_keys,
+            position: 0,
+            sorted: false,
+        }
+    }
+
+    fn insert(&mut self, row: Vec<Value>) {
+        self.rows.push(row);
+        self.sorted = false;
+    }
+
+    fn sort(&mut self) {
+        let keys = self.sort_keys.clone();
+        self.rows.sort_by(|a, b| {
+            for (col_idx, ascending) in &keys {
+                if *col_idx >= a.len() || *col_idx >= b.len() {
+                    continue;
+                }
+                let cmp = compare_values(&a[*col_idx], &b[*col_idx]);
+                if cmp != std::cmp::Ordering::Equal {
+                    return if *ascending { cmp } else { cmp.reverse() };
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+        self.sorted = true;
+        self.position = 0;
+    }
+
+    fn current_row(&self) -> Option<&Vec<Value>> {
+        if self.sorted && self.position < self.rows.len() {
+            Some(&self.rows[self.position])
+        } else {
+            None
+        }
+    }
+
+    fn next(&mut self) -> bool {
+        if !self.sorted {
+            return false;
+        }
+        self.position += 1;
+        self.position < self.rows.len()
+    }
+
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum TransactionState {
     /// No active transaction - the default state when no transaction has been started
@@ -93,24 +333,35 @@ enum TransactionState {
     RolledBack,
 }
 
+/// Column definition for CREATE TABLE
+#[derive(Debug, Clone)]
+pub struct ColumnDef {
+    pub name: String,
+    pub data_type: String,
+}
+
+/// Pending modification to a table
+#[derive(Debug, Clone)]
+pub enum TableModification {
+    Insert { table_name: String, row: Vec<Value> },
+    Delete { table_name: String, row_index: usize },
+    CreateTable {
+        table_name: String,
+        columns: Vec<ColumnDef>,
+        file_path: Option<String>,
+        delimiter: Option<String>,
+    },
+}
+
 /// SQL VM engine that executes bytecode
 pub struct VmEngine<'a> {
-    /// The database containing tables
     database: &'a Database,
-
-    /// The program being executed
     program: Program,
-
-    /// Program counter (current instruction address)
     pc: usize,
-
-    /// VM registers
     registers: Vec<Register>,
-
-    /// Table cursors (borrow tables from database)
     cursors: HashMap<usize, Cursor<'a>>,
-
-    /// Result rows from SELECT statements
+    sorters: HashMap<usize, Sorter>,
+    accumulators: HashMap<usize, AggAccumulator>,
     results: Vec<Vec<Value>>,
 
     /// Index-based results (Phase 4C parallel path)
@@ -127,6 +378,9 @@ pub struct VmEngine<'a> {
     /// Tracks the lifecycle of a transaction and enforces proper operation sequencing
     transaction_state: TransactionState,
 
+    /// Pending modifications to be applied after execution
+    pending_modifications: Vec<TableModification>,
+
     /// Whether the engine is in verbose mode
     verbose: bool,
 }
@@ -140,12 +394,21 @@ impl<'a> VmEngine<'a> {
             pc: 0,
             registers: Vec::new(),
             cursors: HashMap::new(),
+            sorters: HashMap::new(),
+            accumulators: HashMap::new(),
             results: Vec::new(),
             result_row_indices: Vec::new(),
             cursor_source_order: Vec::new(),
             transaction_state: TransactionState::None,
+            pending_modifications: Vec::new(),
             verbose,
         }
+    }
+
+    /// Alias for new() - both work with immutable database reference
+    /// Write operations are accumulated and returned via take_modifications()
+    pub fn new_mut(database: &'a Database, verbose: bool) -> Self {
+        Self::new(database, verbose)
     }
 
     /// Initialize the VM with a program to execute
@@ -154,9 +417,12 @@ impl<'a> VmEngine<'a> {
         self.pc = 0;
         self.registers = Vec::new();
         self.cursors.clear();
+        self.sorters.clear();
+        self.accumulators.clear();
         self.results.clear();
         self.result_row_indices.clear();
         self.cursor_source_order.clear();
+        self.pending_modifications.clear();
 
         // Allocate enough registers for the program
         let max_reg = self
@@ -168,6 +434,8 @@ impl<'a> VmEngine<'a> {
             .unwrap_or(10);
 
         // Allocate a few extra registers just in case
+        // Cap max_reg to a reasonable value to avoid overflow (p1/p2/p3 sometimes contain values, not register numbers)
+        let max_reg = max_reg.min(10000);
         self.registers = vec![Register::Null; (max_reg + 5) as usize];
 
         // Reset transaction state
@@ -176,6 +444,11 @@ impl<'a> VmEngine<'a> {
         if self.verbose {
             println!("VM initialized with program:\n{}", self.program);
         }
+    }
+
+    /// Take pending modifications out of the engine
+    pub fn take_modifications(&mut self) -> Vec<TableModification> {
+        std::mem::take(&mut self.pending_modifications)
     }
 
     /// Execute the current program
@@ -255,7 +528,7 @@ impl<'a> VmEngine<'a> {
                 let table = self.database.get_table(&table_name).unwrap();
 
                 // Create a cursor for the table (borrows, no clone)
-                let cursor = Cursor::new(table);
+                let cursor = Cursor::from_table(table);
                 self.cursors.insert(cursor_idx, cursor);
 
                 // Track cursor source order for index-based results (Phase 4C)
@@ -267,10 +540,24 @@ impl<'a> VmEngine<'a> {
             }
 
             OpCode::OpenWrite => {
-                // Not implementing write operations for the MVP
-                Err(SqawkError::UnsupportedSqlFeature(
-                    "Write operations not supported in VM".to_string(),
-                ))
+                // Open a cursor for writing to a table
+                // Note: Actual modifications are queued and applied after execution
+                let cursor_idx = inst.p1 as usize;
+                let table_name = inst.p4.clone().unwrap_or_default();
+
+                // Check if the table exists
+                if !self.database.has_table(&table_name) {
+                    return Err(SqawkError::TableNotFound(table_name));
+                }
+
+                // Get the table from the database
+                let table = self.database.get_table(&table_name).unwrap();
+
+                // Create a cursor for the table
+                let cursor = Cursor::from_table(table);
+                self.cursors.insert(cursor_idx, cursor);
+
+                Ok(ExecuteResult::Continue)
             }
 
             OpCode::Close => {
@@ -354,6 +641,245 @@ impl<'a> VmEngine<'a> {
                         cursor_idx
                     )))
                 }
+            }
+
+            OpCode::InsertRow => {
+                // Insert row from registers P2..P2+P3 into table at cursor P1
+                let cursor_idx = inst.p1 as usize;
+                let start_reg = inst.p2 as usize;
+                let col_count = inst.p3 as usize;
+
+                // Get table name from cursor
+                let table_name = if let Some(cursor) = self.cursors.get(&cursor_idx) {
+                    cursor.table_name().to_string()
+                } else {
+                    return Err(SqawkError::VmError(format!(
+                        "Invalid cursor for InsertRow: {}",
+                        cursor_idx
+                    )));
+                };
+
+                // Collect values from registers
+                let mut row = Vec::with_capacity(col_count);
+                for i in 0..col_count {
+                    let reg_value = self.get_register(start_reg + i)?;
+                    row.push(Value::from(reg_value));
+                }
+
+                // Add to pending modifications
+                self.pending_modifications.push(TableModification::Insert {
+                    table_name,
+                    row,
+                });
+
+                if self.verbose {
+                    println!(
+                        "InsertRow: queued insert of {} columns into cursor {}",
+                        col_count, cursor_idx
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::DeleteRow => {
+                // Delete current row at cursor P1
+                let cursor_idx = inst.p1 as usize;
+
+                // Get table name and current row index from cursor
+                let (table_name, row_idx) = if let Some(cursor) = self.cursors.get(&cursor_idx) {
+                    (cursor.table_name().to_string(), cursor.current_row_index())
+                } else {
+                    return Err(SqawkError::VmError(format!(
+                        "Invalid cursor for DeleteRow: {}",
+                        cursor_idx
+                    )));
+                };
+
+                if let Some(idx) = row_idx {
+                    // Add to pending modifications
+                    self.pending_modifications.push(TableModification::Delete {
+                        table_name,
+                        row_index: idx,
+                    });
+
+                    if self.verbose {
+                        println!("DeleteRow: queued delete of row {} from cursor {}", idx, cursor_idx);
+                    }
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::CreateTable => {
+                // Create a new table from P4 specification
+                // P4 format: "table_name:col1:type1,col2:type2,...|filepath|delimiter"
+                let spec = inst.p4.clone().unwrap_or_default();
+                let parts: Vec<&str> = spec.split('|').collect();
+
+                if parts.is_empty() {
+                    return Err(SqawkError::VmError(
+                        "CreateTable: missing table specification".to_string(),
+                    ));
+                }
+
+                // Parse table name and columns
+                let name_and_cols: Vec<&str> = parts[0].split(':').collect();
+                if name_and_cols.is_empty() {
+                    return Err(SqawkError::VmError(
+                        "CreateTable: missing table name".to_string(),
+                    ));
+                }
+
+                let table_name = name_and_cols[0].to_string();
+
+                // Parse columns (pairs of name:type)
+                let mut columns = Vec::new();
+                let mut i = 1;
+                while i + 1 < name_and_cols.len() {
+                    columns.push(ColumnDef {
+                        name: name_and_cols[i].to_string(),
+                        data_type: name_and_cols[i + 1].to_string(),
+                    });
+                    i += 2;
+                }
+
+                // Parse optional file path and delimiter
+                let file_path = parts.get(1).filter(|s| !s.is_empty()).map(|s| s.to_string());
+                let delimiter = parts.get(2).filter(|s| !s.is_empty()).map(|s| s.to_string());
+
+                // Add to pending modifications
+                self.pending_modifications
+                    .push(TableModification::CreateTable {
+                        table_name: table_name.clone(),
+                        columns,
+                        file_path,
+                        delimiter,
+                    });
+
+                if self.verbose {
+                    println!("CreateTable: queued creation of table '{}'", table_name);
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::StringFunc => {
+                // Execute a string function
+                // P1 = src reg, P2 = dest reg, P3 = arg regs (encoded), P4 = "FUNC_NAME:extra_args"
+                let src_reg = inst.p1 as usize;
+                let dest_reg = inst.p2 as usize;
+                let func_spec = inst.p4.clone().unwrap_or_default();
+                let parts: Vec<&str> = func_spec.split(':').collect();
+                let func_name = parts.first().unwrap_or(&"");
+
+                // Get source value
+                let src_value = self.get_register(src_reg)?;
+                let src_str = match src_value {
+                    Register::String(s) => s,
+                    Register::Integer(i) => i.to_string(),
+                    Register::Float(f) => f.to_string(),
+                    Register::Boolean(b) => b.to_string(),
+                    Register::Null => {
+                        // NULL in, NULL out
+                        self.set_register(dest_reg, Register::Null)?;
+                        return Ok(ExecuteResult::Continue);
+                    }
+                };
+
+                let result = match *func_name {
+                    "UPPER" => src_str.to_uppercase(),
+                    "LOWER" => src_str.to_lowercase(),
+                    "TRIM" => src_str.trim().to_string(),
+                    "LTRIM" => src_str.trim_start().to_string(),
+                    "RTRIM" => src_str.trim_end().to_string(),
+                    "LENGTH" => {
+                        self.set_register(dest_reg, Register::Integer(src_str.len() as i64))?;
+                        return Ok(ExecuteResult::Continue);
+                    }
+                    "SUBSTR" | "SUBSTRING" => {
+                        // P3 contains start register, parts[1] contains length if present
+                        let start_reg = inst.p3 as usize;
+                        let start = match self.get_register(start_reg)? {
+                            Register::Integer(i) => i as usize,
+                            _ => 1,
+                        };
+                        // Adjust for 1-based indexing
+                        let start_idx = if start > 0 { start - 1 } else { 0 };
+
+                        // Check if we have a length register specified in parts[1]
+                        if let Some(len_str) = parts.get(1) {
+                            if let Ok(len_reg) = len_str.parse::<usize>() {
+                                if let Ok(Register::Integer(len)) = self.get_register(len_reg) {
+                                    let len = len as usize;
+                                    src_str.chars().skip(start_idx).take(len).collect()
+                                } else {
+                                    src_str.chars().skip(start_idx).collect()
+                                }
+                            } else {
+                                src_str.chars().skip(start_idx).collect()
+                            }
+                        } else {
+                            src_str.chars().skip(start_idx).collect()
+                        }
+                    }
+                    "REPLACE" => {
+                        // parts[1] = from_reg, parts[2] = to_reg
+                        if parts.len() >= 3 {
+                            if let (Ok(from_reg), Ok(to_reg)) =
+                                (parts[1].parse::<usize>(), parts[2].parse::<usize>())
+                            {
+                                let from_str = match self.get_register(from_reg)? {
+                                    Register::String(s) => s,
+                                    Register::Integer(i) => i.to_string(),
+                                    _ => String::new(),
+                                };
+                                let to_str = match self.get_register(to_reg)? {
+                                    Register::String(s) => s,
+                                    Register::Integer(i) => i.to_string(),
+                                    _ => String::new(),
+                                };
+                                src_str.replace(&from_str, &to_str)
+                            } else {
+                                src_str
+                            }
+                        } else {
+                            src_str
+                        }
+                    }
+                    _ => {
+                        return Err(SqawkError::VmError(format!(
+                            "Unknown string function: {}",
+                            func_name
+                        )));
+                    }
+                };
+
+                self.set_register(dest_reg, Register::String(result))?;
+
+                if self.verbose {
+                    println!(
+                        "StringFunc {}: r[{}] -> r[{}]",
+                        func_name, src_reg, dest_reg
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Copy => {
+                // Copy register P1 to register P2
+                let src_reg = inst.p1 as usize;
+                let dest_reg = inst.p2 as usize;
+
+                let value = self.get_register(src_reg)?;
+                self.set_register(dest_reg, value)?;
+
+                if self.verbose {
+                    println!("Copy: r[{}] -> r[{}]", src_reg, dest_reg);
+                }
+
+                Ok(ExecuteResult::Continue)
             }
 
             OpCode::Integer => {
@@ -1051,6 +1577,37 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Continue)
             }
 
+            OpCode::Limit => {
+                // Limit results to P1 rows, skip first P2 rows (post-processing opcode)
+                // This is used after DISTINCT to apply LIMIT/OFFSET correctly
+                let limit = inst.p1 as usize;
+                let offset = inst.p2 as usize;
+
+                // First apply OFFSET - skip first N rows
+                if offset > 0 && !self.results.is_empty() {
+                    if offset >= self.results.len() {
+                        self.results.clear();
+                    } else {
+                        self.results = self.results.drain(offset..).collect();
+                    }
+                }
+
+                // Then apply LIMIT - truncate to N rows
+                if self.results.len() > limit {
+                    self.results.truncate(limit);
+                }
+
+                if self.verbose {
+                    println!(
+                        "LIMIT: offset {} then truncated to {} rows",
+                        offset,
+                        self.results.len()
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
             OpCode::Intersect => {
                 // Keep only rows that exist in both left and right result sets
                 // P1 contains the register with the count of left-side results (-1 means no marker)
@@ -1245,6 +1802,529 @@ impl<'a> VmEngine<'a> {
                 }
             }
 
+            OpCode::DecrJumpZero => {
+                // Decrement register P1. If result is zero, jump to P2.
+                // Used for LIMIT - when counter hits zero, stop outputting rows.
+                // Note: LIMIT 0 is handled at compile time with a Goto.
+                let reg = inst.p1 as usize;
+                let jump_addr = inst.p2 as usize;
+
+                let current = match self.get_register(reg)? {
+                    Register::Integer(n) => n,
+                    _ => 0,
+                };
+
+                let new_val = current - 1;
+                self.set_register(reg, Register::Integer(new_val))?;
+
+                if self.verbose {
+                    println!(
+                        "DecrJumpZero: r[{}] = {} -> {}, jump if zero to {}",
+                        reg, current, new_val, jump_addr
+                    );
+                }
+
+                if new_val == 0 {
+                    Ok(ExecuteResult::Jump(jump_addr))
+                } else {
+                    Ok(ExecuteResult::Continue)
+                }
+            }
+
+            OpCode::SorterOpen => {
+                // Open a sorter with P1 = sorter ID, P2 = column count, P4 = sort spec
+                let sorter_id = inst.p1 as usize;
+                let col_count = inst.p2 as usize;
+                let sort_spec = inst.p4.clone().unwrap_or_default();
+
+                // Parse sort specification: "col_idx:asc,col_idx:desc,..."
+                let sort_keys: Vec<(usize, bool)> = sort_spec
+                    .split(',')
+                    .filter_map(|spec| {
+                        let parts: Vec<&str> = spec.split(':').collect();
+                        if parts.len() == 2 {
+                            let col_idx = parts[0].parse::<usize>().ok()?;
+                            let ascending = parts[1] != "desc";
+                            Some((col_idx, ascending))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                let sorter = Sorter::new(col_count, sort_keys);
+                self.sorters.insert(sorter_id, sorter);
+
+                if self.verbose {
+                    println!(
+                        "SorterOpen: Created sorter {} with {} columns, spec: {}",
+                        sorter_id, col_count, sort_spec
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::SorterInsert => {
+                // Insert row into sorter P1. P2 = start register, P3 = column count
+                let sorter_id = inst.p1 as usize;
+                let start_reg = inst.p2 as usize;
+                let col_count = inst.p3 as usize;
+
+                // Collect values from registers
+                let mut row = Vec::with_capacity(col_count);
+                for i in 0..col_count {
+                    let reg_idx = start_reg + i;
+                    let value = Value::from(self.get_register(reg_idx)?);
+                    row.push(value);
+                }
+
+                if let Some(sorter) = self.sorters.get_mut(&sorter_id) {
+                    sorter.insert(row);
+                    if self.verbose {
+                        println!("SorterInsert: Added row to sorter {}", sorter_id);
+                    }
+                } else {
+                    return Err(SqawkError::VmError(format!(
+                        "Sorter {} not found",
+                        sorter_id
+                    )));
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::SorterSort => {
+                // Sort the sorter P1
+                let sorter_id = inst.p1 as usize;
+
+                if let Some(sorter) = self.sorters.get_mut(&sorter_id) {
+                    sorter.sort();
+                    if self.verbose {
+                        println!(
+                            "SorterSort: Sorted {} rows in sorter {}",
+                            sorter.rows.len(),
+                            sorter_id
+                        );
+                    }
+                } else {
+                    return Err(SqawkError::VmError(format!(
+                        "Sorter {} not found",
+                        sorter_id
+                    )));
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::SorterData => {
+                // Copy current sorter P1 row to registers starting at P2. P3 = column count
+                let sorter_id = inst.p1 as usize;
+                let start_reg = inst.p2 as usize;
+                let col_count = inst.p3 as usize;
+
+                let (row_data, position) = {
+                    let sorter = self.sorters.get(&sorter_id).ok_or_else(|| {
+                        SqawkError::VmError(format!("Sorter {} not found", sorter_id))
+                    })?;
+                    let row = sorter.current_row().ok_or_else(|| {
+                        SqawkError::VmError(format!("No current row in sorter {}", sorter_id))
+                    })?;
+                    (row.clone(), sorter.position)
+                };
+
+                for (i, value) in row_data.iter().take(col_count).enumerate() {
+                    self.set_register(start_reg + i, Register::from(value.clone()))?;
+                }
+
+                if self.verbose {
+                    println!(
+                        "SorterData: Copied row {} from sorter {} to r[{}..{}]",
+                        position,
+                        sorter_id,
+                        start_reg,
+                        start_reg + col_count - 1
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::SorterNext => {
+                // Advance sorter P1. Jump to P2 if more rows, else continue.
+                let sorter_id = inst.p1 as usize;
+                let jump_addr = inst.p2 as usize;
+
+                if let Some(sorter) = self.sorters.get_mut(&sorter_id) {
+                    if sorter.next() {
+                        if self.verbose {
+                            println!(
+                                "SorterNext: Advanced to row {} in sorter {}, jumping to {}",
+                                sorter.position, sorter_id, jump_addr
+                            );
+                        }
+                        Ok(ExecuteResult::Jump(jump_addr))
+                    } else {
+                        if self.verbose {
+                            println!(
+                                "SorterNext: No more rows in sorter {}, continuing",
+                                sorter_id
+                            );
+                        }
+                        Ok(ExecuteResult::Continue)
+                    }
+                } else {
+                    Err(SqawkError::VmError(format!(
+                        "Sorter {} not found",
+                        sorter_id
+                    )))
+                }
+            }
+
+            OpCode::OpenEphemeral => {
+                // Open ephemeral cursor P1 with P2 columns. P4 = sort key spec.
+                // Uses unified cursor model - Column/Next/Rewind work for ephemeral cursors.
+                let cursor_id = inst.p1 as usize;
+                let col_count = inst.p2 as usize;
+                let sort_spec = inst.p4.clone().unwrap_or_default();
+
+                // Parse sort specification: "col_idx:asc,col_idx:desc,..."
+                let sort_keys: Vec<(usize, bool)> = sort_spec
+                    .split(',')
+                    .filter_map(|spec| {
+                        let parts: Vec<&str> = spec.split(':').collect();
+                        if parts.len() == 2 {
+                            let col_idx = parts[0].parse::<usize>().ok()?;
+                            let ascending = parts[1] != "desc";
+                            Some((col_idx, ascending))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                // Create ephemeral cursor in the unified cursors map
+                let cursor = Cursor::ephemeral(col_count, sort_keys);
+                self.cursors.insert(cursor_id, cursor);
+
+                if self.verbose {
+                    println!(
+                        "OpenEphemeral: Created ephemeral cursor {} with {} columns, spec: {}",
+                        cursor_id, col_count, sort_spec
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::IdxInsert => {
+                // Insert into ephemeral cursor P1. P2 = start register, P3 = column count.
+                let cursor_id = inst.p1 as usize;
+                let start_reg = inst.p2 as usize;
+                let col_count = inst.p3 as usize;
+
+                // Collect values from registers
+                let mut row = Vec::with_capacity(col_count);
+                for i in 0..col_count {
+                    let reg_idx = start_reg + i;
+                    let value = Value::from(self.get_register(reg_idx)?);
+                    row.push(value);
+                }
+
+                if let Some(cursor) = self.cursors.get_mut(&cursor_id) {
+                    cursor.insert_row(row)?;
+                    if self.verbose {
+                        println!("IdxInsert: Added row to cursor {}", cursor_id);
+                    }
+                } else {
+                    return Err(SqawkError::VmError(format!(
+                        "Cursor {} not found",
+                        cursor_id
+                    )));
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Sort => {
+                // Sort ephemeral cursor P1. Jump to P2 if empty, else continue.
+                let cursor_id = inst.p1 as usize;
+                let jump_if_empty = inst.p2 as usize;
+
+                if let Some(cursor) = self.cursors.get_mut(&cursor_id) {
+                    let has_rows = cursor.sort()?;
+                    if has_rows {
+                        if self.verbose {
+                            println!(
+                                "Sort: Sorted {} rows in cursor {}",
+                                cursor.row_count(),
+                                cursor_id
+                            );
+                        }
+                        Ok(ExecuteResult::Continue)
+                    } else {
+                        if self.verbose {
+                            println!(
+                                "Sort: Cursor {} is empty, jumping to {}",
+                                cursor_id, jump_if_empty
+                            );
+                        }
+                        Ok(ExecuteResult::Jump(jump_if_empty))
+                    }
+                } else {
+                    Err(SqawkError::VmError(format!(
+                        "Cursor {} not found",
+                        cursor_id
+                    )))
+                }
+            }
+
+            OpCode::Sequence => {
+                // P1 = ephemeral cursor, P2 = dest register. Generate next sequence number.
+                let cursor_id = inst.p1 as usize;
+                let dest_reg = inst.p2 as usize;
+
+                if let Some(cursor) = self.cursors.get_mut(&cursor_id) {
+                    let seq = cursor.next_sequence()?;
+                    self.set_register(dest_reg, Register::Integer(seq))?;
+                    if self.verbose {
+                        println!(
+                            "Sequence: Generated sequence {} from cursor {} into r[{}]",
+                            seq, cursor_id, dest_reg
+                        );
+                    }
+                } else {
+                    return Err(SqawkError::VmError(format!(
+                        "Cursor {} not found",
+                        cursor_id
+                    )));
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::AggStep => {
+                // Step an aggregate function
+                // P1 = function type (0=COUNT, 1=SUM, 2=AVG, 3=MIN, 4=MAX)
+                // P2 = value register
+                // P3 = accumulator register (used as key for accumulator storage)
+                let func_type = inst.p1;
+                let value_reg = inst.p2 as usize;
+                let acc_reg = inst.p3 as usize;
+
+                // Get the value to accumulate (skip for COUNT(*) where p2=-1)
+                let value = if inst.p2 >= 0 {
+                    Some(Value::from(self.get_register(value_reg)?))
+                } else {
+                    None
+                };
+
+                // Get or create the accumulator
+                let acc = self.accumulators.entry(acc_reg).or_insert(AggAccumulator {
+                    func_type,
+                    count: 0,
+                    value: None,
+                });
+
+                match func_type {
+                    0 => {
+                        // COUNT - count non-NULL values (or all rows if value is None)
+                        if value.is_none() || !matches!(value.as_ref(), Some(Value::Null)) {
+                            acc.count += 1;
+                        }
+                    }
+                    1 => {
+                        // SUM
+                        if let Some(val) = value {
+                            if !matches!(val, Value::Null) {
+                                acc.count += 1;
+                                acc.value = Some(match (&acc.value, &val) {
+                                    (None, v) => v.clone(),
+                                    (Some(Value::Integer(a)), Value::Integer(b)) => {
+                                        Value::Integer(a + b)
+                                    }
+                                    (Some(Value::Float(a)), Value::Float(b)) => Value::Float(a + b),
+                                    (Some(Value::Integer(a)), Value::Float(b)) => {
+                                        Value::Float(*a as f64 + b)
+                                    }
+                                    (Some(Value::Float(a)), Value::Integer(b)) => {
+                                        Value::Float(a + *b as f64)
+                                    }
+                                    (Some(existing), _) => existing.clone(),
+                                });
+                            }
+                        }
+                    }
+                    2 => {
+                        // AVG (accumulate sum, divide in AggFinal)
+                        if let Some(val) = value {
+                            if !matches!(val, Value::Null) {
+                                acc.count += 1;
+                                acc.value = Some(match (&acc.value, &val) {
+                                    (None, v) => v.clone(),
+                                    (Some(Value::Integer(a)), Value::Integer(b)) => {
+                                        Value::Integer(a + b)
+                                    }
+                                    (Some(Value::Float(a)), Value::Float(b)) => Value::Float(a + b),
+                                    (Some(Value::Integer(a)), Value::Float(b)) => {
+                                        Value::Float(*a as f64 + b)
+                                    }
+                                    (Some(Value::Float(a)), Value::Integer(b)) => {
+                                        Value::Float(a + *b as f64)
+                                    }
+                                    (Some(existing), _) => existing.clone(),
+                                });
+                            }
+                        }
+                    }
+                    3 => {
+                        // MIN
+                        if let Some(val) = value {
+                            if !matches!(val, Value::Null) {
+                                acc.count += 1;
+                                acc.value = Some(match &acc.value {
+                                    None => val,
+                                    Some(existing) => {
+                                        if compare_values(&val, existing)
+                                            == std::cmp::Ordering::Less
+                                        {
+                                            val
+                                        } else {
+                                            existing.clone()
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    4 => {
+                        // MAX
+                        if let Some(val) = value {
+                            if !matches!(val, Value::Null) {
+                                acc.count += 1;
+                                acc.value = Some(match &acc.value {
+                                    None => val,
+                                    Some(existing) => {
+                                        if compare_values(&val, existing)
+                                            == std::cmp::Ordering::Greater
+                                        {
+                                            val
+                                        } else {
+                                            existing.clone()
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(SqawkError::VmError(format!(
+                            "Unknown aggregate function type: {}",
+                            func_type
+                        )));
+                    }
+                }
+
+                if self.verbose {
+                    println!(
+                        "AggStep: func={} acc_reg={} count={}",
+                        func_type, acc_reg, acc.count
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::AggFinal => {
+                // Finalize an aggregate and store result
+                // P1 = accumulator register
+                // P2 = result register
+                let acc_reg = inst.p1 as usize;
+                let result_reg = inst.p2 as usize;
+
+                let result = if let Some(acc) = self.accumulators.get(&acc_reg) {
+                    match acc.func_type {
+                        0 => {
+                            // COUNT - return the count
+                            Register::Integer(acc.count)
+                        }
+                        1 => {
+                            // SUM - return the accumulated sum
+                            match &acc.value {
+                                Some(Value::Integer(i)) => Register::Integer(*i),
+                                Some(Value::Float(f)) => Register::Float(*f),
+                                _ => Register::Null,
+                            }
+                        }
+                        2 => {
+                            // AVG - divide sum by count
+                            if acc.count == 0 {
+                                Register::Null
+                            } else {
+                                match &acc.value {
+                                    Some(Value::Integer(i)) => {
+                                        Register::Float(*i as f64 / acc.count as f64)
+                                    }
+                                    Some(Value::Float(f)) => {
+                                        Register::Float(f / acc.count as f64)
+                                    }
+                                    _ => Register::Null,
+                                }
+                            }
+                        }
+                        3 | 4 => {
+                            // MIN/MAX - return the accumulated value
+                            match &acc.value {
+                                Some(Value::Integer(i)) => Register::Integer(*i),
+                                Some(Value::Float(f)) => Register::Float(*f),
+                                Some(Value::String(s)) => Register::String(s.clone()),
+                                Some(Value::Boolean(b)) => Register::Boolean(*b),
+                                _ => Register::Null,
+                            }
+                        }
+                        _ => Register::Null,
+                    }
+                } else {
+                    // No accumulator found - return appropriate default
+                    Register::Null
+                };
+
+                self.set_register(result_reg, result)?;
+
+                if self.verbose {
+                    println!("AggFinal: acc_reg={} result_reg={}", acc_reg, result_reg);
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::AggReset => {
+                // Reset accumulator at register P1
+                let acc_reg = inst.p1 as usize;
+
+                // Remove the accumulator so it will be re-initialized on next AggStep
+                self.accumulators.remove(&acc_reg);
+
+                if self.verbose {
+                    println!("AggReset: cleared accumulator at reg {}", acc_reg);
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::InitCoroutine
+            | OpCode::Yield
+            | OpCode::EndCoroutine
+            | OpCode::Once
+            | OpCode::Exists
+            | OpCode::NotExists => {
+                // These opcodes are used for subqueries but not yet fully implemented
+                Err(SqawkError::UnsupportedSqlFeature(format!(
+                    "Opcode {:?} not yet implemented",
+                    inst.opcode
+                )))
+            }
+
             #[allow(unreachable_patterns)]
             _ => {
                 // This code is unreachable since all opcodes are handled above,
@@ -1260,20 +2340,48 @@ impl<'a> VmEngine<'a> {
     // Removed unused methods get_results, has_results, get_column_names,
     // get_affected_rows, and get_modified_tables
 
-    /// Create a table from the results
+    /// Create a table from the results using the result schema
     pub fn create_result_table(&self) -> SqawkResult<Option<Table>> {
+        let schema = &self.program.result_schema;
+
+        // If we have no results but DO have a schema, create an empty table with headers
+        // This handles SELECT from empty tables
         if self.results.is_empty() {
+            if !schema.is_empty() {
+                // Build column definitions from schema
+                let col_defs: Vec<ColumnDefinition> = schema
+                    .columns
+                    .iter()
+                    .map(|col| ColumnDefinition {
+                        name: col.name.clone(),
+                        data_type: col.data_type,
+                    })
+                    .collect();
+                let table = Table::new_with_schema("result", col_defs, None, None);
+                return Ok(Some(table));
+            }
             return Ok(None);
         }
 
-        // Create a new result table
-        let mut table = Table::new("result", Vec::new(), None);
-
-        // Add columns with dummy names (since we don't have column metadata)
+        // Build column definitions from schema, filling in generic names if schema is incomplete
         let col_count = self.results[0].len();
-        for i in 0..col_count {
-            table.add_column(format!("col{}", i), "UNKNOWN".to_string());
-        }
+        let col_defs: Vec<ColumnDefinition> = (0..col_count)
+            .map(|i| {
+                if i < schema.columns.len() {
+                    ColumnDefinition {
+                        name: schema.columns[i].name.clone(),
+                        data_type: schema.columns[i].data_type,
+                    }
+                } else {
+                    ColumnDefinition {
+                        name: format!("col{}", i),
+                        data_type: crate::table::DataType::Text,
+                    }
+                }
+            })
+            .collect();
+
+        let mut table = Table::new_with_schema("result", col_defs, None, None);
 
         // Add rows
         for row in &self.results {
@@ -1313,8 +2421,7 @@ impl<'a> VmEngine<'a> {
         if self.cursor_source_order.len() == 1 {
             let cursor_id = self.cursor_source_order[0];
             if let Some(cursor) = self.cursors.get(&cursor_id) {
-                let table = cursor.table;
-                let rows = table.rows();
+                let rows = cursor.rows();
 
                 for row_indices in self.result_row_indices.iter() {
                     if let Some(Some(row_idx)) = row_indices.first() {
@@ -1356,7 +2463,10 @@ impl<'a> VmEngine<'a> {
     /// # Returns
     /// The materialized row, or None if indices are invalid
     #[allow(dead_code)]
-    fn materialize_join_row_from_indices(&self, row_idx: usize) -> Option<Vec<crate::table::Value>> {
+    fn materialize_join_row_from_indices(
+        &self,
+        row_idx: usize,
+    ) -> Option<Vec<crate::table::Value>> {
         let indices = self.result_row_indices.get(row_idx)?;
         let mut row = Vec::new();
 
@@ -1366,19 +2476,19 @@ impl<'a> VmEngine<'a> {
                 let source_row_idx = indices.get(cursor_pos).copied().flatten();
 
                 if let Some(row_idx) = source_row_idx {
-                    // Get row from source table
-                    let table_rows = cursor.table.rows();
-                    if let Some(source_row) = table_rows.get(row_idx) {
+                    // Get row from source cursor
+                    let cursor_rows = cursor.rows();
+                    if let Some(source_row) = cursor_rows.get(row_idx) {
                         row.extend(source_row.iter().cloned());
                     } else {
                         // Row index out of bounds - fill with NULLs
-                        for _ in 0..cursor.table.column_count() {
+                        for _ in 0..cursor.column_count() {
                             row.push(crate::table::Value::Null);
                         }
                     }
                 } else {
                     // NULL row (outer join) - fill with NULLs
-                    for _ in 0..cursor.table.column_count() {
+                    for _ in 0..cursor.column_count() {
                         row.push(crate::table::Value::Null);
                     }
                 }

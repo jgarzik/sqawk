@@ -16,7 +16,6 @@ fn test_full_join_with_matches() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a FULL JOIN b ON a.id = b.id")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -40,7 +39,6 @@ fn test_full_join_with_nulls_both_sides() -> Result<(), Box<dyn std::error::Erro
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a FULL JOIN b ON a.id = b.id")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -68,7 +66,6 @@ fn test_full_join_disjoint() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a FULL JOIN b ON a.id = b.id")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -95,7 +92,6 @@ fn test_full_outer_join_syntax() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a FULL OUTER JOIN b ON a.id = b.id")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -118,7 +114,6 @@ fn test_full_join_empty_left() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a FULL JOIN b ON a.id = b.id")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -143,7 +138,6 @@ fn test_full_join_empty_right() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a FULL JOIN b ON a.id = b.id")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 

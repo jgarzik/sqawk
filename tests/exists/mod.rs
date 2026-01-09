@@ -21,7 +21,6 @@ fn test_exists_subquery_has_rows() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders)")
-        .arg("--vm")
         .arg(users_path.to_str().unwrap())
         .arg(orders_path.to_str().unwrap());
 
@@ -50,7 +49,6 @@ fn test_exists_subquery_with_where_match() -> Result<(), Box<dyn std::error::Err
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE amount > 150)")
-        .arg("--vm")
         .arg(users_path.to_str().unwrap())
         .arg(orders_path.to_str().unwrap());
 
@@ -79,7 +77,6 @@ fn test_exists_subquery_with_where_no_match() -> Result<(), Box<dyn std::error::
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE amount > 500)")
-        .arg("--vm")
         .arg(users_path.to_str().unwrap())
         .arg(orders_path.to_str().unwrap());
 
@@ -105,7 +102,6 @@ fn test_not_exists_subquery_has_rows() -> Result<(), Box<dyn std::error::Error>>
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE NOT EXISTS (SELECT 1 FROM orders)")
-        .arg("--vm")
         .arg(users_path.to_str().unwrap())
         .arg(orders_path.to_str().unwrap());
 
@@ -131,7 +127,6 @@ fn test_not_exists_subquery_no_match() -> Result<(), Box<dyn std::error::Error>>
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE NOT EXISTS (SELECT 1 FROM orders WHERE amount > 1000)")
-        .arg("--vm")
         .arg(users_path.to_str().unwrap())
         .arg(orders_path.to_str().unwrap());
 
@@ -159,7 +154,6 @@ fn test_exists_single_row() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE EXISTS (SELECT 1 FROM single)")
-        .arg("--vm")
         .arg(data_path.to_str().unwrap())
         .arg(single_path.to_str().unwrap());
 
@@ -188,7 +182,6 @@ fn test_exists_with_other_conditions() -> Result<(), Box<dyn std::error::Error>>
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE age > 25 AND EXISTS (SELECT 1 FROM orders)")
-        .arg("--vm")
         .arg(users_path.to_str().unwrap())
         .arg(orders_path.to_str().unwrap());
 

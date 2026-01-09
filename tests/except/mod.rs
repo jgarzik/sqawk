@@ -16,7 +16,6 @@ fn test_except_basic() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a EXCEPT SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -56,7 +55,6 @@ fn test_except_disjoint_tables() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a EXCEPT SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -80,7 +78,6 @@ fn test_except_identical_tables() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a EXCEPT SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -109,7 +106,6 @@ fn test_except_subset_as_first() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a EXCEPT SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -134,7 +130,6 @@ fn test_except_subset_as_second() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a EXCEPT SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 
@@ -166,7 +161,6 @@ fn test_except_removes_duplicates() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
         .arg("SELECT * FROM a EXCEPT SELECT * FROM b")
-        .arg("--vm")
         .arg(file_a.to_str().unwrap())
         .arg(file_b.to_str().unwrap());
 

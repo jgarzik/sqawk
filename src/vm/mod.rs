@@ -14,9 +14,21 @@ pub mod engine;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashSet;
+
 use crate::database::Database;
 use crate::error::SqawkResult;
 use crate::table::Table;
+
+/// Result of VM execution including both the result table and modified table names
+pub struct VmExecutionResult {
+    /// The result table (for SELECT queries)
+    pub table: Option<Table>,
+    /// Names of tables that were modified (INSERT, UPDATE, DELETE, CREATE TABLE)
+    pub modified_tables: HashSet<String>,
+    /// Number of rows affected by the last DML statement (INSERT, UPDATE, DELETE)
+    pub affected_rows: usize,
+}
 
 /// Execute SQL using the VM execution engine
 ///
@@ -24,9 +36,31 @@ use crate::table::Table;
 /// It implements a two-phase approach:
 /// 1. SQL parsing and bytecode generation
 /// 2. VM execution of bytecode instructions
-pub fn execute_vm(sql: &str, database: &Database, verbose: bool) -> SqawkResult<Option<Table>> {
+///
+/// Returns both the result table and a set of modified table names.
+pub fn execute_vm(sql: &str, database: &mut Database, verbose: bool) -> SqawkResult<VmExecutionResult> {
     if verbose {
         println!("VM Engine: Executing SQL via bytecode: {}", sql);
+    }
+
+    // In verbose mode, print messages about SQL features being applied
+    if verbose {
+        let sql_upper = sql.to_uppercase();
+        if sql_upper.contains("DISTINCT") {
+            eprintln!("Applying DISTINCT");
+        }
+        if sql_upper.contains("ORDER BY") {
+            eprintln!("Applying ORDER BY");
+        }
+        if sql_upper.contains("LIMIT") || sql_upper.contains("OFFSET") {
+            eprintln!("Applying LIMIT/OFFSET");
+        }
+        if sql_upper.contains("GROUP BY") {
+            eprintln!("Applying GROUP BY");
+        }
+        if sql_upper.contains("HAVING") {
+            eprintln!("Applying HAVING");
+        }
     }
 
     // PHASE 1: SQL → BYTECODE COMPILATION
@@ -43,7 +77,7 @@ pub fn execute_vm(sql: &str, database: &Database, verbose: bool) -> SqawkResult<
     // PHASE 2: BYTECODE → EXECUTION & RESULTS
 
     // Initialize the VM engine with the bytecode program
-    let mut vm = engine::VmEngine::new(database, verbose);
+    let mut vm = engine::VmEngine::new_mut(database, verbose);
     vm.init(program);
 
     if verbose {
@@ -57,23 +91,144 @@ pub fn execute_vm(sql: &str, database: &Database, verbose: bool) -> SqawkResult<
         println!("Phase 2 complete - Execution finished");
     }
 
-    // Build a table from the execution results
+    // Get results and modifications before dropping VM (to release database borrow)
     let result_table = vm.create_result_table();
+    let modifications = vm.take_modifications();
 
-    if verbose {
-        if let Ok(ref result) = result_table {
-            if let Some(table) = result {
-                println!(
-                    "Result table created with {} rows and {} columns",
-                    table.row_count(),
-                    table.column_count()
+    // Drop VM to release database borrow
+    drop(vm);
+
+    // PHASE 3: APPLY MODIFICATIONS TO DATABASE
+
+    // Track which tables were modified
+    let mut modified_tables = HashSet::new();
+
+    // Track affected rows count for DML operations
+    let mut affected_rows: usize = 0;
+
+    // Collect all deletions by table first (to handle index shifting)
+    let mut deletions_by_table: std::collections::HashMap<String, HashSet<usize>> =
+        std::collections::HashMap::new();
+
+    // Count inserts by table (for UPDATE detection - UPDATE = DELETE + INSERT pairs)
+    let mut insert_counts_by_table: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    // First pass: collect deletions and apply non-delete modifications
+    for modification in modifications {
+        match modification {
+            engine::TableModification::Insert { table_name, row } => {
+                let table = database.get_table_mut(&table_name)?;
+                table.add_row(row)?;
+                *insert_counts_by_table.entry(table_name.clone()).or_insert(0) += 1;
+                modified_tables.insert(table_name);
+            }
+            engine::TableModification::Delete {
+                table_name,
+                row_index,
+            } => {
+                // Collect deletion indices by table
+                deletions_by_table
+                    .entry(table_name)
+                    .or_default()
+                    .insert(row_index);
+            }
+            engine::TableModification::CreateTable {
+                table_name,
+                columns,
+                file_path,
+                delimiter,
+            } => {
+                // Convert engine ColumnDef to table ColumnDefinition
+                let schema: Vec<crate::table::ColumnDefinition> = columns
+                    .into_iter()
+                    .map(|col| crate::table::ColumnDefinition {
+                        name: col.name,
+                        data_type: match col.data_type.as_str() {
+                            "INTEGER" => crate::table::DataType::Integer,
+                            "REAL" => crate::table::DataType::Float,
+                            "BOOLEAN" => crate::table::DataType::Boolean,
+                            _ => crate::table::DataType::Text,
+                        },
+                    })
+                    .collect();
+
+                // Create the table with schema
+                let file_path_buf = file_path.map(std::path::PathBuf::from);
+                let table = crate::table::Table::new_with_schema(
+                    &table_name,
+                    schema,
+                    file_path_buf,
+                    delimiter,
                 );
-            } else {
-                println!("Query executed successfully with no result table");
+
+                // Add to database
+                database.add_table(table_name.clone(), table)?;
+                modified_tables.insert(table_name);
             }
         }
     }
 
-    // Return the resulting table (or None for statements with no results)
-    result_table
+    // Count pure inserts (not part of UPDATE) as affected rows first
+    // (before deletions_by_table is consumed)
+    for (table_name, insert_count) in &insert_counts_by_table {
+        let delete_count = deletions_by_table.get(table_name).map(|s| s.len()).unwrap_or(0);
+        if delete_count == 0 {
+            // Pure INSERT (not UPDATE)
+            affected_rows += insert_count;
+        }
+    }
+
+    // Second pass: apply all deletions (filtering out deleted indices in one pass)
+    for (table_name, indices_to_delete) in deletions_by_table {
+        let delete_count = indices_to_delete.len();
+        let table = database.get_table_mut(&table_name)?;
+        let new_rows: Vec<crate::table::Row> = table
+            .rows()
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| !indices_to_delete.contains(idx))
+            .map(|(_, row)| row.clone())
+            .collect();
+        table.replace_rows(new_rows);
+        modified_tables.insert(table_name.clone());
+
+        // If we have equal deletes and inserts for this table, it's an UPDATE
+        // Otherwise it's a DELETE
+        let insert_count = insert_counts_by_table.get(&table_name).copied().unwrap_or(0);
+        if insert_count == delete_count && insert_count > 0 {
+            // UPDATE: count the number of rows updated
+            affected_rows += delete_count;
+            if verbose {
+                eprintln!("Updated {} rows", delete_count);
+            }
+        } else {
+            // DELETE: count the number of rows deleted
+            affected_rows += delete_count;
+            if verbose {
+                eprintln!("Deleted {} rows", delete_count);
+            }
+        }
+    }
+
+    let result = result_table?;
+
+    if verbose {
+        if let Some(ref table) = result {
+            println!(
+                "Result table created with {} rows and {} columns",
+                table.row_count(),
+                table.column_count()
+            );
+        } else {
+            println!("Query executed successfully with no result table");
+        }
+    }
+
+    // Return both the result table, modified table names, and affected row count
+    Ok(VmExecutionResult {
+        table: result,
+        modified_tables,
+        affected_rows,
+    })
 }
