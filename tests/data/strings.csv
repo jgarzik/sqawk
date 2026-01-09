@@ -1,0 +1,6 @@
+id,text,mixed_case,padded_text,email
+1,apple,ApPlE,  trimme  ,john@example.com
+2,banana,BaNaNa,  needs space  ,jane@example.com
+3,cherry,ChErRy,  whitespace  ,bob@test.org
+4,date,DaTe,  extra  ,alice@company.co.uk
+5,elderberry,ElDeRbErRy,  padding  ,admin@website.net

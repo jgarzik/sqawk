@@ -2,7 +2,7 @@
 //!
 //! This file contains tests for the SQL UPDATE statement.
 
-use crate::helpers::{create_temp_dir, prepare_test_file};
+use crate::helpers::{create_custom_csv, create_temp_dir};
 
 use std::fs;
 
@@ -10,7 +10,11 @@ use std::fs;
 fn test_update_with_where() -> Result<(), Box<dyn std::error::Error>> {
     // This test verifies the UPDATE functionality with a WHERE clause
     let temp_dir = create_temp_dir()?;
-    let file_path = prepare_test_file(temp_dir.path())?;
+    let file_path = create_custom_csv(
+        temp_dir.path(),
+        "people.csv",
+        "id,name,age\n1,Alice,32\n2,Bob,25\n3,Charlie,35\n",
+    )?;
 
     // First verify we have initial data
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
@@ -55,7 +59,11 @@ fn test_update_with_where() -> Result<(), Box<dyn std::error::Error>> {
 fn test_update_all_rows() -> Result<(), Box<dyn std::error::Error>> {
     // This test verifies the UPDATE functionality without a WHERE clause (updates all rows)
     let temp_dir = create_temp_dir()?;
-    let file_path = prepare_test_file(temp_dir.path())?;
+    let file_path = create_custom_csv(
+        temp_dir.path(),
+        "people.csv",
+        "id,name,age\n1,Alice,32\n2,Bob,25\n3,Charlie,35\n",
+    )?;
 
     // First verify we have initial data
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
@@ -99,7 +107,11 @@ fn test_update_all_rows() -> Result<(), Box<dyn std::error::Error>> {
 fn test_update_and_write() -> Result<(), Box<dyn std::error::Error>> {
     // This test verifies that UPDATE with --write flag persists changes to the file
     let temp_dir = create_temp_dir()?;
-    let file_path = prepare_test_file(temp_dir.path())?;
+    let file_path = create_custom_csv(
+        temp_dir.path(),
+        "people.csv",
+        "id,name,age\n1,Alice,32\n2,Bob,25\n3,Charlie,35\n",
+    )?;
 
     // Execute UPDATE with --write flag
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;

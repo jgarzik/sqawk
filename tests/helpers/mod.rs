@@ -44,14 +44,9 @@ impl Default for SqawkTestCase {
     }
 }
 
-/// Run a test using a temporary csv file created specifically for this test
+/// Run a test using the standard people.csv static fixture
 pub fn run_test_case(test_case: SqawkTestCase) -> Result<(), Box<dyn std::error::Error>> {
-    // Create a temporary directory for test files
-    let temp_dir = create_temp_dir()?;
-    let test_file = prepare_test_file(temp_dir.path())?;
-
-    // Call the common test function
-    run_test_case_with_file(test_case, test_file)
+    run_test_case_with_static_file(test_case, get_people_file())
 }
 
 /// Run a test using a static test file that already exists in the project
@@ -152,28 +147,69 @@ pub fn create_temp_dir() -> Result<TempDir, Box<dyn std::error::Error>> {
     }
 }
 
-/// Helper function to create a standard test CSV file with people data
-/// This uses a template identical to the static sample.csv test file
-pub fn prepare_test_file(dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let file_path = dir.join("people.csv");
-    let content = "id,name,age\n1,Alice,32\n2,Bob,25\n3,Charlie,35\n";
-    fs::write(&file_path, content)?;
-    Ok(file_path)
+/// Path to the employees.csv fixture (comprehensive test data with salary, department, role)
+pub fn get_employees_file() -> PathBuf {
+    PathBuf::from("tests/data/employees.csv")
 }
 
-/// Helper function to create a test CSV file with people data including category_id
-/// Note: Currently not used, but keeping for potential future tests
-#[allow(dead_code)]
-pub fn prepare_test_file_with_category(dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let file_path = dir.join("people.csv");
-    let content = "id,name,age,category_id\n1,Alice,32,1\n2,Bob,25,2\n3,Charlie,35,1\n";
-    fs::write(&file_path, content)?;
-    Ok(file_path)
+/// Path to the people.csv fixture (simple test data: id, name, age)
+pub fn get_people_file() -> PathBuf {
+    PathBuf::from("tests/data/people.csv")
 }
 
-/// Helper function to get the path to the static sample.csv test file
-pub fn get_static_sample_file() -> PathBuf {
-    PathBuf::from("tests/data/sample.csv")
+/// Path to the departments.csv fixture
+pub fn get_departments_file() -> PathBuf {
+    PathBuf::from("tests/data/departments.csv")
+}
+
+/// Path to the duplicates.csv fixture
+pub fn get_duplicates_file() -> PathBuf {
+    PathBuf::from("tests/data/duplicates.csv")
+}
+
+/// Path to the strings.csv fixture (for string function tests)
+pub fn get_strings_file() -> PathBuf {
+    PathBuf::from("tests/data/strings.csv")
+}
+
+/// Path to set_a.csv fixture (for UNION/EXCEPT/INTERSECT tests)
+pub fn get_set_a_file() -> PathBuf {
+    PathBuf::from("tests/data/set_a.csv")
+}
+
+/// Path to set_b.csv fixture (for UNION/EXCEPT/INTERSECT tests)
+pub fn get_set_b_file() -> PathBuf {
+    PathBuf::from("tests/data/set_b.csv")
+}
+
+/// Path to boundaries.csv fixture (for comparison tests)
+pub fn get_boundaries_file() -> PathBuf {
+    PathBuf::from("tests/data/boundaries.csv")
+}
+
+/// Path to users.csv fixture (for join tests)
+pub fn get_users_file() -> PathBuf {
+    PathBuf::from("tests/data/users.csv")
+}
+
+/// Path to orders.csv fixture (for join tests)
+pub fn get_orders_file() -> PathBuf {
+    PathBuf::from("tests/data/orders.csv")
+}
+
+/// Path to products.csv fixture (for join tests)
+pub fn get_products_file() -> PathBuf {
+    PathBuf::from("tests/data/products.csv")
+}
+
+/// Path to employees.tsv fixture (for delimiter tests)
+pub fn get_employees_tsv_file() -> PathBuf {
+    PathBuf::from("tests/data/employees.tsv")
+}
+
+/// Path to contacts.txt fixture (for colon-delimiter tests)
+pub fn get_contacts_file() -> PathBuf {
+    PathBuf::from("tests/data/contacts.txt")
 }
 
 /// Helper function to create a test CSV file with custom data

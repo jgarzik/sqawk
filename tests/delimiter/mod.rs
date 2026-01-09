@@ -2,52 +2,17 @@
 //!
 //! Tests for different file delimiter options (-F flag) with tab and colon separators.
 
-use crate::helpers::create_temp_dir;
+use crate::helpers::{get_contacts_file, get_employees_tsv_file};
 use assert_cmd::Command;
-use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
-
-// Helper function to create a tab-delimited test file
-fn create_tab_delimited_file() -> Result<(tempfile::TempDir, PathBuf), Box<dyn std::error::Error>> {
-    let temp_dir = create_temp_dir()?;
-    let file_path = temp_dir.path().join("employees.tsv");
-
-    // Create a tab-delimited file for testing
-    let content = "id\tname\tsalary\tdepartment\n1\tAlice\t75000\tEngineering\n2\tBob\t65000\tMarketing\n3\tCharlie\t85000\tEngineering\n4\tDavid\t60000\tSales\n";
-
-    let mut file = fs::File::create(&file_path)?;
-    file.write_all(content.as_bytes())?;
-
-    // Return both the TempDir (to keep it alive) and the file path
-    Ok((temp_dir, file_path))
-}
-
-// Helper function to create a colon-delimited test file
-fn create_colon_delimited_file() -> Result<(tempfile::TempDir, PathBuf), Box<dyn std::error::Error>>
-{
-    let temp_dir = create_temp_dir()?;
-    let file_path = temp_dir.path().join("contacts.txt");
-
-    // Create a colon-delimited file for testing
-    let content = "id:name:email:phone\n1:Alice:alice@example.com:555-1234\n2:Bob:bob@example.com:555-5678\n3:Charlie:charlie@example.com:555-9012\n5:David:david@example.com:555-3456\n10:Eve:eve@example.com:555-7890\n";
-
-    let mut file = fs::File::create(&file_path)?;
-    file.write_all(content.as_bytes())?;
-
-    // Return both the TempDir (to keep it alive) and the file path
-    Ok((temp_dir, file_path))
-}
 
 #[test]
 fn test_tab_delimiter() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a tab-delimited file - keep temp_dir alive for the test duration
-    let (_temp_dir, file_path) = create_tab_delimited_file()?;
+    let file_path = get_employees_tsv_file();
 
     // Run sqawk with tab delimiter
     let mut cmd = Command::cargo_bin("sqawk")?;
     cmd.arg("-s")
-        .arg("SELECT * FROM employees WHERE salary > 70000")
+        .arg("SELECT id, name, salary, department FROM employees WHERE salary > 70000")
         .arg("-F")
         .arg("\t")
         .arg(file_path.to_str().unwrap())
@@ -61,27 +26,34 @@ fn test_tab_delimiter() -> Result<(), Box<dyn std::error::Error>> {
     let stdout = String::from_utf8(output.stdout)?;
 
     // Check that header and desired rows are present
+    // employees.tsv has: id, name, department, salary, age
+    // Rows with salary > 70000: John Smith (75000), Bob Johnson (80000), Alice Williams (85000),
+    //                          David Miller (90000), Frank Wilson (82000), Henry Martin (78000)
     assert!(
         stdout.contains("id,name,salary,department"),
         "Header row should be present"
     );
     assert!(
-        stdout.contains("1,Alice,75000,Engineering"),
-        "Row for Alice should be present (salary > 70000)"
+        stdout.contains("John Smith") && stdout.contains("75000"),
+        "Row for John Smith should be present (salary > 70000)"
     );
     assert!(
-        stdout.contains("3,Charlie,85000,Engineering"),
-        "Row for Charlie should be present (salary > 70000)"
+        stdout.contains("Bob Johnson") && stdout.contains("80000"),
+        "Row for Bob Johnson should be present (salary > 70000)"
+    );
+    assert!(
+        stdout.contains("Alice Williams") && stdout.contains("85000"),
+        "Row for Alice Williams should be present (salary > 70000)"
     );
 
     // Check that we don't see rows with salary <= 70000
     assert!(
-        !stdout.contains("Bob") || !stdout.contains("65000"),
-        "Should not contain Bob with salary 65000 (salary <= 70000)"
+        !stdout.contains("Jane Doe") || !stdout.contains("65000"),
+        "Should not contain Jane Doe with salary 65000 (salary <= 70000)"
     );
     assert!(
-        !stdout.contains("David") || !stdout.contains("60000"),
-        "Should not contain David with salary 60000 (salary <= 70000)"
+        !stdout.contains("Charlie Brown") || !stdout.contains("60000"),
+        "Should not contain Charlie Brown with salary 60000 (salary <= 70000)"
     );
 
     Ok(())
@@ -89,8 +61,7 @@ fn test_tab_delimiter() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_colon_delimiter() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a colon-delimited file - keep temp_dir alive for the test duration
-    let (_temp_dir, file_path) = create_colon_delimited_file()?;
+    let file_path = get_contacts_file();
 
     // Run sqawk with colon delimiter
     let mut cmd = Command::cargo_bin("sqawk")?;
@@ -109,31 +80,33 @@ fn test_colon_delimiter() -> Result<(), Box<dyn std::error::Error>> {
     let stdout = String::from_utf8(output.stdout)?;
 
     // Check that header and desired rows are present
+    // contacts.txt has: id:name:email:phone:city
+    // Rows with id > 5: David Miller (6), Emily Davis (7), Frank Wilson (8), Grace Taylor (9), Henry Martin (10)
     assert!(
         stdout.contains("id,name,email"),
         "Header row should be present"
     );
     assert!(
-        stdout.contains("10,Eve,eve@example.com"),
-        "Row for Eve should be present (id > 5)"
+        stdout.contains("David Miller") && stdout.contains("david.miller@example.com"),
+        "Row for David Miller should be present (id > 5)"
+    );
+    assert!(
+        stdout.contains("Henry Martin") && stdout.contains("henry.martin@example.com"),
+        "Row for Henry Martin should be present (id > 5)"
     );
 
     // Check that we don't see rows with id <= 5
     assert!(
-        !stdout.contains("Alice") || !stdout.contains("alice@example.com"),
-        "Should not contain Alice (id <= 5)"
+        !stdout.contains("John Smith") || !stdout.contains("john.smith@example.com"),
+        "Should not contain John Smith (id <= 5)"
     );
     assert!(
-        !stdout.contains("Bob") || !stdout.contains("bob@example.com"),
-        "Should not contain Bob (id <= 5)"
+        !stdout.contains("Jane Doe") || !stdout.contains("jane.doe@example.com"),
+        "Should not contain Jane Doe (id <= 5)"
     );
     assert!(
-        !stdout.contains("Charlie") || !stdout.contains("charlie@example.com"),
-        "Should not contain Charlie (id <= 5)"
-    );
-    assert!(
-        !stdout.contains("David") || !stdout.contains("david@example.com"),
-        "Should not contain David (id <= 5)"
+        !stdout.contains("Bob Johnson") || !stdout.contains("bob.johnson@example.com"),
+        "Should not contain Bob Johnson (id <= 5)"
     );
 
     Ok(())

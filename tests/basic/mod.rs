@@ -3,12 +3,12 @@
 //! This file contains fundamental end-to-end tests for the sqawk application.
 
 use crate::helpers::{
-    create_custom_csv, create_temp_dir, get_static_sample_file, prepare_test_file, run_test_case,
+    create_custom_csv, create_temp_dir, get_people_file, run_test_case,
     run_test_case_with_static_file, SqawkTestCase,
 };
 
 use predicates::prelude::PredicateBooleanExt;
-use std::fs; // Import trait for .not()
+use std::fs;
 
 #[test]
 fn test_basic_select() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,11 +40,13 @@ fn test_filtered_select() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_insert() -> Result<(), Box<dyn std::error::Error>> {
-    // Removed unused test_case definition
-
-    // We need to verify the file was modified, so we'll use a custom test function
+    // Create temp file for write test
     let temp_dir = create_temp_dir()?;
-    let file_path = prepare_test_file(temp_dir.path())?;
+    let file_path = create_custom_csv(
+        temp_dir.path(),
+        "people.csv",
+        "id,name,age\n1,Alice,32\n2,Bob,25\n3,Charlie,35\n",
+    )?;
 
     // Build the command
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
@@ -102,11 +104,14 @@ fn test_invalid_sql() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_multiple_files() -> Result<(), Box<dyn std::error::Error>> {
-    // This test demonstrates using multiple files with custom data
     let temp_dir = create_temp_dir()?;
 
     // Create people.csv file
-    let people_file = prepare_test_file(temp_dir.path())?;
+    let people_file = create_custom_csv(
+        temp_dir.path(),
+        "people.csv",
+        "id,name,age\n1,Alice,32\n2,Bob,25\n3,Charlie,35\n",
+    )?;
 
     // Create scores.csv file
     let scores_content = "id,score\n1,95\n2,75\n3,85\n";
@@ -160,10 +165,8 @@ fn test_where_less_than() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_static_file_query() -> Result<(), Box<dyn std::error::Error>> {
     // This test demonstrates using the existing static test file
-    // This avoids creating temporary files for simple queries,
-    // improving test performance.
     let test_case = SqawkTestCase {
-        sql: "SELECT * FROM sample WHERE age > 25".to_string(),
+        sql: "SELECT * FROM people WHERE age > 25".to_string(),
         expected_stdout: vec![
             "id,name,age".to_string(),
             "1,Alice,32".to_string(),
@@ -173,16 +176,19 @@ fn test_static_file_query() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    // Use the static sample.csv file
-    run_test_case_with_static_file(test_case, get_static_sample_file())
+    // Use the static people.csv file
+    run_test_case_with_static_file(test_case, get_people_file())
 }
 
 #[test]
 fn test_delete_with_where() -> Result<(), Box<dyn std::error::Error>> {
-    // This test verifies the DELETE functionality with a WHERE clause
-    // We need to verify the file was modified, so we'll use a custom test function
+    // Create temp file for write test
     let temp_dir = create_temp_dir()?;
-    let file_path = prepare_test_file(temp_dir.path())?;
+    let file_path = create_custom_csv(
+        temp_dir.path(),
+        "people.csv",
+        "id,name,age\n1,Alice,32\n2,Bob,25\n3,Charlie,35\n",
+    )?;
 
     // First verify we have 3 rows initially
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
@@ -203,8 +209,7 @@ fn test_delete_with_where() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-s")
         .arg("SELECT * FROM people") // Check result after deletion
         .arg(file_path.to_str().unwrap())
-        .arg("-v") // Verbose mode to see more details
-        ; // Prevent file modifications
+        .arg("-v"); // Verbose mode to see more details
 
     // Verify deletion worked correctly
     cmd.assert()
@@ -226,9 +231,13 @@ fn test_delete_with_where() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_delete_all() -> Result<(), Box<dyn std::error::Error>> {
-    // This test verifies the DELETE functionality without a WHERE clause (deletes all rows)
+    // Create temp file for write test
     let temp_dir = create_temp_dir()?;
-    let file_path = prepare_test_file(temp_dir.path())?;
+    let file_path = create_custom_csv(
+        temp_dir.path(),
+        "people.csv",
+        "id,name,age\n1,Alice,32\n2,Bob,25\n3,Charlie,35\n",
+    )?;
 
     // First verify we have rows initially
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
@@ -248,8 +257,7 @@ fn test_delete_all() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-s")
         .arg("SELECT * FROM people") // Check result after deletion
         .arg(file_path.to_str().unwrap())
-        .arg("-v") // Verbose mode to see more details
-        ; // Prevent file modifications
+        .arg("-v"); // Verbose mode to see more details
 
     // Verify deletion worked correctly - should only show header, no rows
     cmd.assert()
