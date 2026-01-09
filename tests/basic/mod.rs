@@ -74,6 +74,46 @@ fn test_insert() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_insert_select() -> Result<(), Box<dyn std::error::Error>> {
+    // Create temp files - source and target
+    let temp_dir = create_temp_dir()?;
+    let source_path = create_custom_csv(
+        temp_dir.path(),
+        "source.csv",
+        "id,name,age\n1,Alice,32\n2,Bob,25\n3,Charlie,35\n",
+    )?;
+    let target_path = create_custom_csv(temp_dir.path(), "target.csv", "id,name,age\n")?;
+
+    // Test INSERT...SELECT with WHERE
+    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    cmd.arg("-s")
+        .arg("INSERT INTO target SELECT * FROM source WHERE age > 30")
+        .arg("-s")
+        .arg("SELECT * FROM target")
+        .arg("--write")
+        .arg(source_path.to_str().unwrap())
+        .arg(target_path.to_str().unwrap());
+
+    // Check output - should have Alice and Charlie (age > 30)
+    cmd.assert()
+        .success()
+        .stdout(predicates::str::contains("id,name,age"))
+        .stdout(predicates::str::contains("1,Alice,32"))
+        .stdout(predicates::str::contains("3,Charlie,35"));
+
+    // Verify Bob is not in output (age = 25)
+    let output = cmd.output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("2,Bob,25"),
+        "Bob should not be in output: {}",
+        stdout
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_custom_table_name() -> Result<(), Box<dyn std::error::Error>> {
     let test_case = SqawkTestCase {
         sql: "SELECT * FROM custom_table".to_string(),

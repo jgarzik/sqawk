@@ -52,11 +52,11 @@ Support all SQL commands from sqlparser crate that make sense for CSV file colle
 ---
 
 ## Phase 5: VM Completeness for DML
-- [ ] VM INSERT (opcodes: Insert, NewRowid, MakeRecord)
-- [ ] VM UPDATE (opcodes: Update, SetColumn)
-- [ ] VM DELETE (opcodes: Delete, RowSetAdd)
-- [ ] INSERT...SELECT (opcodes: InsertSelect)
-- [ ] **Phase 5 Validation**: build, test, clippy clean
+- [x] VM INSERT (opcodes: OpenWrite, InsertRow)
+- [x] VM UPDATE (opcodes: Column, DeleteRow, InsertRow)
+- [x] VM DELETE (opcodes: OpenRead, DeleteRow)
+- [x] INSERT...SELECT (opcodes: OpenRead, OpenWrite, Column, InsertRow)
+- [x] **Phase 5 Validation**: build, test, clippy clean
 
 ---
 
