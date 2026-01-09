@@ -70,6 +70,11 @@ pub enum OpCode {
 
     // Utility opcodes
     Noop, // No operation
+
+    // Set operations
+    Distinct,  // Remove duplicate rows from results
+    Intersect, // Keep only rows that exist in both left and right result sets
+    Except,    // Keep only rows from left that don't exist in right result set
 }
 
 /// A SQL VM instruction with opcode and parameters

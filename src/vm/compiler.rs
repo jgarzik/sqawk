@@ -6,7 +6,7 @@
 
 use sqlparser::ast::{
     BinaryOperator, DataType, Expr, Function, FunctionArg, FunctionArgExpr, ObjectName, Query,
-    Select, SelectItem, SetExpr, Statement, TableWithJoins, Value,
+    Select, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableWithJoins, Value,
 };
 use sqlparser::dialect::HiveDialect;
 use sqlparser::parser::Parser;
@@ -146,8 +146,128 @@ impl<'a> SqlCompiler<'a> {
     fn compile_query(&mut self, query: &Query) -> SqawkResult<()> {
         match &*query.body {
             SetExpr::Select(select) => self.compile_select(select),
+            SetExpr::SetOperation {
+                op,
+                left,
+                right,
+                set_quantifier,
+                ..
+            } => {
+                let all = *set_quantifier == SetQuantifier::All;
+                self.compile_set_operation(op, left, right, all)
+            }
             _ => Err(SqawkError::UnsupportedSqlFeature(
                 "Only simple SELECT statements are supported".to_string(),
+            )),
+        }
+    }
+
+    /// Compile a set operation (UNION, INTERSECT, EXCEPT)
+    fn compile_set_operation(
+        &mut self,
+        op: &SetOperator,
+        left: &SetExpr,
+        right: &SetExpr,
+        all: bool,
+    ) -> SqawkResult<()> {
+        self.add_comment(&format!(
+            "Set operation: {:?}{}",
+            op,
+            if all { " ALL" } else { "" }
+        ));
+
+        // For INTERSECT and EXCEPT, we need to track where the left results end
+        let left_results_marker = match op {
+            SetOperator::Intersect | SetOperator::Except => {
+                // Use a register to store the count of left-side results
+                let marker_reg = self.allocate_register();
+                Some(marker_reg)
+            }
+            _ => None,
+        };
+
+        // Compile the left side
+        self.compile_set_expr(left)?;
+
+        // For INTERSECT and EXCEPT, record the boundary
+        if let Some(marker_reg) = left_results_marker {
+            // Add a marker instruction that the VM will use to know where left results end
+            // p1=-1 is a special value meaning "use current result count"
+            // p2 is the destination register
+            self.program.add_instruction(Instruction::new(
+                OpCode::Integer,
+                -1, // Special marker: -1 means "current result count"
+                marker_reg,
+                0,
+                None,
+                0,
+                Some("Store current result count".to_string()),
+            ));
+        }
+
+        // Compile the right side
+        self.compile_set_expr(right)?;
+
+        // Add the appropriate set operation opcode
+        match op {
+            SetOperator::Union => {
+                if !all {
+                    // UNION (without ALL) needs to remove duplicates
+                    self.program.add_instruction(Instruction::new(
+                        OpCode::Distinct,
+                        0,
+                        0,
+                        0,
+                        None,
+                        0,
+                        Some("Remove duplicate rows for UNION".to_string()),
+                    ));
+                }
+                // UNION ALL: no additional processing needed, results are already combined
+            }
+            SetOperator::Intersect => {
+                self.program.add_instruction(Instruction::new(
+                    OpCode::Intersect,
+                    left_results_marker.unwrap_or(0),
+                    0,
+                    0,
+                    None,
+                    0,
+                    Some("Keep only rows in both result sets".to_string()),
+                ));
+            }
+            SetOperator::Except => {
+                self.program.add_instruction(Instruction::new(
+                    OpCode::Except,
+                    left_results_marker.unwrap_or(0),
+                    0,
+                    0,
+                    None,
+                    0,
+                    Some("Keep only rows in left but not in right".to_string()),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Compile a set expression (can be a SELECT or nested set operation)
+    fn compile_set_expr(&mut self, expr: &SetExpr) -> SqawkResult<()> {
+        match expr {
+            SetExpr::Select(select) => self.compile_select(select),
+            SetExpr::SetOperation {
+                op,
+                left,
+                right,
+                set_quantifier,
+                ..
+            } => {
+                let all = *set_quantifier == SetQuantifier::All;
+                self.compile_set_operation(op, left, right, all)
+            }
+            _ => Err(SqawkError::UnsupportedSqlFeature(
+                "Unsupported set expression type".to_string(),
             )),
         }
     }

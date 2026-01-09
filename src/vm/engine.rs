@@ -326,7 +326,12 @@ impl<'a> VmEngine<'a> {
 
             OpCode::Integer => {
                 // Load integer constant into register
-                let value = inst.p1;
+                // Special case: p1=-1 means "use current result count as the value"
+                let value = if inst.p1 == -1 {
+                    self.results.len() as i64
+                } else {
+                    inst.p1
+                };
                 let register_idx = inst.p2 as usize;
 
                 if register_idx < self.registers.len() {
@@ -970,6 +975,148 @@ impl<'a> VmEngine<'a> {
             // - IfNeg (jump if negative)
             OpCode::Noop => {
                 // No operation
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Distinct => {
+                // Remove duplicate rows from results
+                // This is used by UNION (without ALL) to deduplicate combined results
+                let mut seen = std::collections::HashSet::new();
+                let mut unique_results = Vec::new();
+
+                for row in &self.results {
+                    // Create a hashable key from the row values
+                    let key: Vec<String> = row.iter().map(|v| format!("{:?}", v)).collect();
+                    let key_str = key.join("|");
+
+                    if seen.insert(key_str) {
+                        unique_results.push(row.clone());
+                    }
+                }
+
+                self.results = unique_results;
+
+                if self.verbose {
+                    println!(
+                        "DISTINCT: {} unique rows after deduplication",
+                        self.results.len()
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Intersect => {
+                // Keep only rows that exist in both left and right result sets
+                // P1 contains the register with the count of left-side results (-1 means no marker)
+                let left_count = if inst.p1 >= 0 {
+                    match self.get_register(inst.p1 as usize)? {
+                        Register::Integer(n) => n as usize,
+                        _ => {
+                            return Err(SqawkError::VmError(
+                                "Invalid left count register for INTERSECT".to_string(),
+                            ))
+                        }
+                    }
+                } else {
+                    // If no marker, assume half the results are from each side (fallback)
+                    self.results.len() / 2
+                };
+
+                // Split results into left and right sets
+                let left_rows: Vec<_> = self.results.iter().take(left_count).cloned().collect();
+                let right_rows: Vec<_> = self.results.iter().skip(left_count).cloned().collect();
+
+                // Create a set of right rows for fast lookup
+                let right_set: std::collections::HashSet<_> = right_rows
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|v| format!("{:?}", v))
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    })
+                    .collect();
+
+                // Keep only left rows that also appear in right
+                let mut intersection = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+
+                for row in &left_rows {
+                    let key: Vec<String> = row.iter().map(|v| format!("{:?}", v)).collect();
+                    let key_str = key.join("|");
+
+                    if right_set.contains(&key_str) && seen.insert(key_str) {
+                        intersection.push(row.clone());
+                    }
+                }
+
+                self.results = intersection;
+
+                if self.verbose {
+                    println!(
+                        "INTERSECT: {} rows in intersection",
+                        self.results.len()
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Except => {
+                // Keep only rows from left that don't exist in right result set
+                // P1 contains the register with the count of left-side results (-1 means no marker)
+                let left_count = if inst.p1 >= 0 {
+                    match self.get_register(inst.p1 as usize)? {
+                        Register::Integer(n) => n as usize,
+                        _ => {
+                            return Err(SqawkError::VmError(
+                                "Invalid left count register for EXCEPT".to_string(),
+                            ))
+                        }
+                    }
+                } else {
+                    // If no marker, assume half the results are from each side (fallback)
+                    self.results.len() / 2
+                };
+
+                // Split results into left and right sets
+                let left_rows: Vec<_> = self.results.iter().take(left_count).cloned().collect();
+                let right_rows: Vec<_> = self.results.iter().skip(left_count).cloned().collect();
+
+                // Create a set of right rows for fast lookup
+                let right_set: std::collections::HashSet<_> = right_rows
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|v| format!("{:?}", v))
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    })
+                    .collect();
+
+                // Keep only left rows that don't appear in right
+                let mut difference = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+
+                for row in &left_rows {
+                    let key: Vec<String> = row.iter().map(|v| format!("{:?}", v)).collect();
+                    let key_str = key.join("|");
+
+                    if !right_set.contains(&key_str) && seen.insert(key_str) {
+                        difference.push(row.clone());
+                    }
+                }
+
+                self.results = difference;
+
+                if self.verbose {
+                    println!(
+                        "EXCEPT: {} rows in difference",
+                        self.results.len()
+                    );
+                }
+
                 Ok(ExecuteResult::Continue)
             }
 

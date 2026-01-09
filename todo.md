@@ -20,10 +20,10 @@ Support all SQL commands from sqlparser crate that make sense for CSV file colle
 ---
 
 ## Phase 2: Set Operations
-- [ ] UNION / UNION ALL (opcodes: Union, UnionAll)
-- [ ] INTERSECT (opcodes: Intersect)
-- [ ] EXCEPT (opcodes: Except)
-- [ ] **Phase 2 Validation**: build, test, clippy clean
+- [x] UNION / UNION ALL (opcodes: Distinct for dedup)
+- [x] INTERSECT (opcodes: Intersect)
+- [x] EXCEPT (opcodes: Except)
+- [x] **Phase 2 Validation**: build, test, clippy clean
 
 ---
 

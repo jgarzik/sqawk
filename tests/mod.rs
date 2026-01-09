@@ -25,6 +25,11 @@ mod in_list; // Tests for IN list operator (VM implementation)
 mod join_on; // Tests for JOIN ON syntax (as opposed to WHERE for joins)
 mod like; // Tests for LIKE/ILIKE pattern matching (VM implementation)
 mod limit_offset; // Tests for LIMIT and OFFSET clauses
+
+// Phase 2: Set Operations (VM implementation)
+mod except; // Tests for EXCEPT set operation
+mod intersect; // Tests for INTERSECT set operation
+mod union; // Tests for UNION/UNION ALL set operations
 mod repl; // Tests for interactive REPL functionality with pre-generated input
 mod string_functions; // Tests for string functions (UPPER, LOWER, TRIM, SUBSTR, REPLACE)
 
