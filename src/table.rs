@@ -948,6 +948,37 @@ impl Table {
         self.modified = true;
     }
 
+    /// Add a new column with a default value for all existing rows
+    pub fn add_column_with_default(
+        &mut self,
+        name: String,
+        data_type: DataType,
+        default_value: Value,
+    ) -> crate::error::SqawkResult<()> {
+        let column = Column {
+            name: name.clone(),
+            data_type,
+        };
+        self.cols.push(column);
+        let new_index = self.cols.len() - 1;
+        self.column_map.insert(name, new_index);
+
+        // Add default value to all existing rows
+        for row in &mut self.rows {
+            row.push(default_value.clone());
+        }
+
+        self.modified = true;
+        Ok(())
+    }
+
+    /// Clear all rows from the table (TRUNCATE TABLE)
+    pub fn clear_rows(&mut self) -> crate::error::SqawkResult<()> {
+        self.rows.clear();
+        self.modified = true;
+        Ok(())
+    }
+
     /// Convert all rows to string representation
     ///
     /// This method converts all table rows to a vector of string vectors,

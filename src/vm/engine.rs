@@ -22,6 +22,7 @@ enum CursorData<'a> {
         sort_keys: Vec<(usize, bool)>, // (col_idx, ascending)
         sorted: bool,
         sequence: i64,
+        name: Option<String>, // Optional name for pending tables
     },
 }
 
@@ -56,6 +57,23 @@ impl<'a> Cursor<'a> {
                 sort_keys,
                 sorted: false,
                 sequence: 0,
+                name: None,
+            },
+            position: 0,
+            valid: false,
+        }
+    }
+
+    /// Create named ephemeral cursor (for pending tables)
+    fn named_ephemeral(col_count: usize, table_name: String) -> Self {
+        Self {
+            data: CursorData::Ephemeral {
+                rows: Vec::new(),
+                col_count,
+                sort_keys: Vec::new(),
+                sorted: false,
+                sequence: 0,
+                name: Some(table_name),
             },
             position: 0,
             valid: false,
@@ -123,11 +141,12 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Get the table name (only for table cursors)
+    /// Get the table name (for table cursors or named ephemeral cursors)
     fn table_name(&self) -> &str {
         match &self.data {
             CursorData::Table { table } => table.name(),
-            CursorData::Ephemeral { .. } => "<ephemeral>",
+            CursorData::Ephemeral { name: Some(n), .. } => n,
+            CursorData::Ephemeral { name: None, .. } => "<ephemeral>",
         }
     }
 
@@ -392,6 +411,17 @@ pub enum TableModification {
         file_path: Option<String>,
         delimiter: Option<String>,
     },
+    DropTable {
+        table_name: String,
+    },
+    AlterTableAddColumn {
+        table_name: String,
+        column_name: String,
+        column_type: String,
+    },
+    Truncate {
+        table_name: String,
+    },
 }
 
 /// SQL VM engine that executes bytecode
@@ -592,17 +622,27 @@ impl<'a> VmEngine<'a> {
                 let cursor_idx = inst.p1 as usize;
                 let table_name = inst.p4.clone().unwrap_or_default();
 
-                // Check if the table exists
-                if !self.database.has_table(&table_name) {
-                    return Err(SqawkError::TableNotFound(table_name));
+                // Check if the table exists in database or pending modifications
+                if self.database.has_table(&table_name) {
+                    // Get the table from the database
+                    let table = self.database.get_table(&table_name).unwrap();
+                    let cursor = Cursor::from_table(table);
+                    self.cursors.insert(cursor_idx, cursor);
+                } else {
+                    // Check if there's a pending CreateTable for this table
+                    let pending_create = self.pending_modifications.iter().find(|m| {
+                        matches!(m, TableModification::CreateTable { table_name: tn, .. } if tn == &table_name)
+                    });
+
+                    if let Some(TableModification::CreateTable { columns, table_name: pending_name, .. }) = pending_create.cloned() {
+                        // Create a named ephemeral cursor with the schema from pending CreateTable
+                        let col_count = columns.len();
+                        let cursor = Cursor::named_ephemeral(col_count, pending_name);
+                        self.cursors.insert(cursor_idx, cursor);
+                    } else {
+                        return Err(SqawkError::TableNotFound(table_name));
+                    }
                 }
-
-                // Get the table from the database
-                let table = self.database.get_table(&table_name).unwrap();
-
-                // Create a cursor for the table
-                let cursor = Cursor::from_table(table);
-                self.cursors.insert(cursor_idx, cursor);
 
                 Ok(ExecuteResult::Continue)
             }
@@ -813,6 +853,104 @@ impl<'a> VmEngine<'a> {
 
                 if self.verbose {
                     println!("CreateTable: queued creation of table '{}'", table_name);
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::DropTable => {
+                // Drop a table
+                // P1 = 1 if IF EXISTS (don't error if table doesn't exist)
+                // P4 = table name
+                let if_exists = inst.p1 != 0;
+                let table_name = inst.p4.clone().unwrap_or_default();
+
+                if table_name.is_empty() {
+                    return Err(SqawkError::VmError(
+                        "DropTable: missing table name".to_string(),
+                    ));
+                }
+
+                // Check if table exists
+                let table_exists = self.database.has_table(&table_name);
+
+                if !table_exists && !if_exists {
+                    return Err(SqawkError::TableNotFound(table_name));
+                }
+
+                // Only queue drop if table exists
+                if table_exists {
+                    self.pending_modifications
+                        .push(TableModification::DropTable {
+                            table_name: table_name.clone(),
+                        });
+
+                    if self.verbose {
+                        println!("DropTable: queued drop of table '{}'", table_name);
+                    }
+                } else if self.verbose {
+                    println!(
+                        "DropTable: table '{}' does not exist (IF EXISTS)",
+                        table_name
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::AlterTableAdd => {
+                // Add a column to a table
+                // P4 = "table_name:column_name:column_type"
+                let spec = inst.p4.clone().unwrap_or_default();
+                let parts: Vec<&str> = spec.split(':').collect();
+
+                if parts.len() < 3 {
+                    return Err(SqawkError::VmError(
+                        "AlterTableAdd: invalid specification, expected table:column:type".to_string(),
+                    ));
+                }
+
+                let table_name = parts[0].to_string();
+                let column_name = parts[1].to_string();
+                let column_type = parts[2].to_string();
+
+                // Add to pending modifications
+                self.pending_modifications
+                    .push(TableModification::AlterTableAddColumn {
+                        table_name: table_name.clone(),
+                        column_name: column_name.clone(),
+                        column_type: column_type.clone(),
+                    });
+
+                if self.verbose {
+                    println!(
+                        "AlterTableAdd: queued add column '{}' ({}) to table '{}'",
+                        column_name, column_type, table_name
+                    );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Truncate => {
+                // Remove all rows from a table
+                // P4 = table name
+                let table_name = inst.p4.clone().unwrap_or_default();
+
+                if table_name.is_empty() {
+                    return Err(SqawkError::VmError(
+                        "Truncate: missing table name".to_string(),
+                    ));
+                }
+
+                // Add to pending modifications
+                self.pending_modifications
+                    .push(TableModification::Truncate {
+                        table_name: table_name.clone(),
+                    });
+
+                if self.verbose {
+                    println!("Truncate: queued truncate of table '{}'", table_name);
                 }
 
                 Ok(ExecuteResult::Continue)

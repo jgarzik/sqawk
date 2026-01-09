@@ -172,6 +172,35 @@ pub fn execute_vm(
                 database.add_table(table_name.clone(), table)?;
                 modified_tables.insert(table_name);
             }
+            engine::TableModification::DropTable { table_name } => {
+                // Remove table from database
+                if !database.remove_table(&table_name) {
+                    return Err(crate::error::SqawkError::TableNotFound(table_name));
+                }
+                // Note: we don't add to modified_tables since the table is gone
+            }
+            engine::TableModification::AlterTableAddColumn {
+                table_name,
+                column_name,
+                column_type,
+            } => {
+                let table = database.get_table_mut(&table_name)?;
+                let data_type = match column_type.as_str() {
+                    "INTEGER" => crate::table::DataType::Integer,
+                    "REAL" => crate::table::DataType::Float,
+                    "BOOLEAN" => crate::table::DataType::Boolean,
+                    _ => crate::table::DataType::Text,
+                };
+                table.add_column_with_default(column_name, data_type, crate::table::Value::Null)?;
+                modified_tables.insert(table_name);
+            }
+            engine::TableModification::Truncate { table_name } => {
+                let table = database.get_table_mut(&table_name)?;
+                let row_count = table.row_count();
+                table.clear_rows()?;
+                affected_rows += row_count;
+                modified_tables.insert(table_name);
+            }
         }
     }
 

@@ -160,7 +160,10 @@ pub enum OpCode {
     Sequence,      // P1 = ephemeral cursor, P2 = dest register. Generate next sequence number.
 
     // DDL operations
-    CreateTable, // Create a table. P4 = "table_name:col1:type1,col2:type2,..."
+    CreateTable,   // Create a table. P4 = "table_name:col1:type1,col2:type2,..."
+    DropTable,     // Drop a table. P4 = table name
+    AlterTableAdd, // Add column to table. P4 = "table_name:col_name:col_type"
+    Truncate,      // Remove all rows from table. P4 = table name
 
     // String functions
     StringFunc, // P1 = src reg, P2 = dest reg, P3 = arg2 reg (for SUBSTR/REPLACE), P4 = function name
