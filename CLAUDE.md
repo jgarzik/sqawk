@@ -41,11 +41,12 @@ Sqawk is an SQL-based CLI tool for processing delimiter-separated files (CSV, TS
 - **`table.rs`**: In-memory table representation with columns, rows, and projection capabilities
 - **`sql_executor.rs`**: SQL parsing (via `sqlparser` crate) and execution against in-memory tables
 
-### Dual Execution Engines
+### SQL Execution (VM-based)
 
-The codebase has two SQL execution paths:
-1. **Direct execution** (default): `SqlExecutor::execute()` - interprets SQL AST directly
-2. **VM execution** (`--vm` flag): `SqlExecutor::execute_vm()` - compiles SQL to bytecode, then executes in a VM (inspired by SQLite's architecture)
+SQL execution uses a bytecode VM inspired by SQLite's architecture:
+1. SQL is parsed via the `sqlparser` crate
+2. The AST is compiled to bytecode (`src/vm/compiler.rs`)
+3. The VM engine executes the bytecode (`src/vm/engine.rs`)
 
 ### VM Module (`src/vm/`)
 
