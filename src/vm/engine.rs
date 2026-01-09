@@ -1329,8 +1329,75 @@ impl<'a> VmEngine<'a> {
             }
         }
 
-        // For multi-table queries (JOINs), just verify the structure is consistent
-        // Full validation would require tracking which columns came from which table
+        // For multi-table queries (JOINs), verify the index structure is consistent
+        if self.cursor_source_order.len() > 1 {
+            // Verify all row_indices entries have the expected number of cursor entries
+            for row_indices in &self.result_row_indices {
+                if row_indices.len() != self.cursor_source_order.len() {
+                    eprintln!(
+                        "JOIN index tracking mismatch: expected {} cursor indices, got {}",
+                        self.cursor_source_order.len(),
+                        row_indices.len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Materialize a JOIN row from tracked indices (Phase 4E)
+    ///
+    /// This method reconstructs a result row by reading values directly from
+    /// source tables using the tracked row indices. This is more memory-efficient
+    /// than storing cloned row data for each result.
+    ///
+    /// # Arguments
+    /// * `row_idx` - Index into result_row_indices
+    ///
+    /// # Returns
+    /// The materialized row, or None if indices are invalid
+    #[allow(dead_code)]
+    fn materialize_join_row_from_indices(&self, row_idx: usize) -> Option<Vec<crate::table::Value>> {
+        let indices = self.result_row_indices.get(row_idx)?;
+        let mut row = Vec::new();
+
+        // For each cursor in source order, get the row and append its columns
+        for (cursor_pos, cursor_id) in self.cursor_source_order.iter().enumerate() {
+            if let Some(cursor) = self.cursors.get(cursor_id) {
+                let source_row_idx = indices.get(cursor_pos).copied().flatten();
+
+                if let Some(row_idx) = source_row_idx {
+                    // Get row from source table
+                    let table_rows = cursor.table.rows();
+                    if let Some(source_row) = table_rows.get(row_idx) {
+                        row.extend(source_row.iter().cloned());
+                    } else {
+                        // Row index out of bounds - fill with NULLs
+                        for _ in 0..cursor.table.column_count() {
+                            row.push(crate::table::Value::Null);
+                        }
+                    }
+                } else {
+                    // NULL row (outer join) - fill with NULLs
+                    for _ in 0..cursor.table.column_count() {
+                        row.push(crate::table::Value::Null);
+                    }
+                }
+            }
+        }
+
+        Some(row)
+    }
+
+    /// Get the number of cursors (tables) involved in the current query
+    #[allow(dead_code)]
+    fn cursor_count(&self) -> usize {
+        self.cursor_source_order.len()
+    }
+
+    /// Check if this is a JOIN query (multiple cursors)
+    #[allow(dead_code)]
+    fn is_join_query(&self) -> bool {
+        self.cursor_source_order.len() > 1
     }
 
     /// Get a register value by index

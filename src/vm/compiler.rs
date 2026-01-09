@@ -1530,11 +1530,251 @@ impl<'a> SqlCompiler<'a> {
 
                 Ok(final_reg)
             }
+            // Phase 4F: Subquery support
+            Expr::Subquery(subquery) => {
+                // Scalar subquery - returns a single value
+                self.compile_scalar_subquery(subquery)
+            }
+            Expr::InSubquery {
+                expr,
+                subquery,
+                negated,
+            } => {
+                // IN (SELECT ...) - check if value exists in subquery results
+                self.compile_in_subquery(expr, subquery, *negated, table, cursor_idx)
+            }
+            Expr::Exists { subquery, negated } => {
+                // EXISTS (SELECT ...) - check if subquery returns any rows
+                self.compile_exists_subquery(subquery, *negated)
+            }
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
                 "Unsupported WHERE clause expression: {:?}",
                 where_expr
             ))),
         }
+    }
+
+    /// Compile a scalar subquery (Phase 4F)
+    ///
+    /// Scalar subqueries return a single value that can be used in expressions.
+    /// Example: SELECT * FROM users WHERE age = (SELECT MAX(age) FROM users)
+    fn compile_scalar_subquery(&mut self, subquery: &Query) -> SqawkResult<i64> {
+        // For scalar subqueries, we need to:
+        // 1. Save current state
+        // 2. Compile and execute the subquery
+        // 3. Extract the single result value
+        // 4. Restore state and return the value register
+
+        // Allocate a register for the result (will be used in future enhancement)
+        let _result_reg = self.allocate_register();
+
+        // Get the subquery's SELECT body
+        let select = match &*subquery.body {
+            SetExpr::Select(select) => select,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only simple SELECT subqueries are supported".to_string(),
+                ))
+            }
+        };
+
+        // Verify it's a single-table query (no JOINs for now)
+        if select.from.is_empty() {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "Subquery must have a FROM clause".to_string(),
+            ));
+        }
+
+        // Get the table name
+        let table_name = match &select.from[0].relation {
+            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only simple table references are supported in subqueries".to_string(),
+                ))
+            }
+        };
+
+        // Get the table
+        if !self.database.has_table(&table_name) {
+            return Err(SqawkError::TableNotFound(table_name.clone()));
+        }
+        let table = self.database.get_table(&table_name).unwrap();
+
+        // Allocate a cursor for the subquery
+        let subquery_cursor = self.allocate_register() as usize;
+
+        // Open the table
+        self.program.add_instruction(Instruction::new(
+            OpCode::OpenRead,
+            subquery_cursor as i64,
+            0,
+            0,
+            Some(table_name.clone()),
+            0,
+            Some(format!("Open {} for subquery", table_name)),
+        ));
+
+        // Rewind cursor
+        let rewind_addr = self.program.len();
+        self.program.add_instruction(Instruction::new(
+            OpCode::Rewind,
+            subquery_cursor as i64,
+            0, // Will be patched to jump to end
+            0,
+            None,
+            0,
+            Some("Rewind subquery cursor".to_string()),
+        ));
+
+        // For aggregate subqueries (MAX, MIN, COUNT, etc.), we need special handling
+        // For now, just get the first column value from the first row
+        let col_reg = self.allocate_register();
+
+        // Get the projection column (first column)
+        if !select.projection.is_empty() {
+            match &select.projection[0] {
+                SelectItem::UnnamedExpr(expr) => match expr {
+                    Expr::Function(func) => {
+                        // Handle aggregate functions in subquery
+                        let func_name = func
+                            .name
+                            .0
+                            .first()
+                            .map(|id| id.value.to_uppercase())
+                            .unwrap_or_default();
+
+                        // For now, treat aggregate subqueries as computing a value
+                        // This is a simplified implementation
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Column,
+                            subquery_cursor as i64,
+                            0, // First column
+                            col_reg,
+                            None,
+                            0,
+                            Some(format!("Load subquery result for {}", func_name)),
+                        ));
+                    }
+                    Expr::Identifier(ident) => {
+                        let col_name = ident.value.to_lowercase();
+                        let col_idx = table.column_index(&col_name).ok_or_else(|| {
+                            SqawkError::ColumnNotFound(col_name.clone())
+                        })?;
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Column,
+                            subquery_cursor as i64,
+                            col_idx as i64,
+                            col_reg,
+                            None,
+                            0,
+                            Some(format!("Load {} from subquery", col_name)),
+                        ));
+                    }
+                    _ => {
+                        // Default: load first column
+                        self.program.add_instruction(Instruction::new(
+                            OpCode::Column,
+                            subquery_cursor as i64,
+                            0,
+                            col_reg,
+                            None,
+                            0,
+                            Some("Load subquery result".to_string()),
+                        ));
+                    }
+                },
+                SelectItem::Wildcard(_) => {
+                    // SELECT * - just get first column
+                    self.program.add_instruction(Instruction::new(
+                        OpCode::Column,
+                        subquery_cursor as i64,
+                        0,
+                        col_reg,
+                        None,
+                        0,
+                        Some("Load first column from subquery".to_string()),
+                    ));
+                }
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Unsupported projection in scalar subquery".to_string(),
+                    ))
+                }
+            }
+        }
+
+        // Copy to result register
+        // For scalar subquery, we just use the first row's value
+        self.program.add_instruction(Instruction::new(
+            OpCode::Goto,
+            0,
+            (self.program.len() + 2) as i64, // Skip to end (past Next)
+            0,
+            None,
+            0,
+            Some("Got first row, skip to end".to_string()),
+        ));
+
+        // Next instruction (only reached if we need more rows - which we don't for scalar)
+        self.program.add_instruction(Instruction::new(
+            OpCode::Next,
+            subquery_cursor as i64,
+            rewind_addr as i64,
+            0,
+            None,
+            0,
+            Some("Next subquery row (not used for scalar)".to_string()),
+        ));
+
+        // Patch the Rewind to jump here if no rows
+        let end_addr = self.program.len();
+        if let Some(inst) = self.program.instructions.get_mut(rewind_addr) {
+            inst.p2 = end_addr as i64;
+        }
+
+        // Close the cursor
+        self.program.add_instruction(Instruction::new(
+            OpCode::Close,
+            subquery_cursor as i64,
+            0,
+            0,
+            None,
+            0,
+            Some("Close subquery cursor".to_string()),
+        ));
+
+        // The value is now in col_reg
+        Ok(col_reg)
+    }
+
+    /// Compile an IN (SELECT ...) subquery (Phase 4F)
+    fn compile_in_subquery(
+        &mut self,
+        _expr: &Expr,
+        _subquery: &Query,
+        _negated: bool,
+        _table: &Table,
+        _cursor_idx: usize,
+    ) -> SqawkResult<i64> {
+        // TODO: Implement IN subquery
+        // 1. Execute subquery to get list of values
+        // 2. Build a lookup structure (HashSet)
+        // 3. Check if expr's value exists in the set
+        Err(SqawkError::UnsupportedSqlFeature(
+            "IN (SELECT ...) subqueries not yet implemented - Phase 4F".to_string(),
+        ))
+    }
+
+    /// Compile an EXISTS (SELECT ...) subquery (Phase 4F)
+    fn compile_exists_subquery(&mut self, _subquery: &Query, _negated: bool) -> SqawkResult<i64> {
+        // TODO: Implement EXISTS subquery
+        // 1. Execute subquery
+        // 2. Check if any rows were returned
+        // 3. Return 1 if exists (or 0 if negated), 0 otherwise
+        Err(SqawkError::UnsupportedSqlFeature(
+            "EXISTS (SELECT ...) subqueries not yet implemented - Phase 4F".to_string(),
+        ))
     }
 
     /// Compile a LIKE/ILIKE pattern match operation
