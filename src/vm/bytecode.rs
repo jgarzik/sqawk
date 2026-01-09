@@ -75,6 +75,12 @@ pub enum OpCode {
     Distinct,  // Remove duplicate rows from results
     Intersect, // Keep only rows that exist in both left and right result sets
     Except,    // Keep only rows from left that don't exist in right result set
+
+    // Join operations
+    NullRow,     // Load NULL values into registers P1 through P1+P2-1 (P2 = count)
+    RewindInner, // Rewind cursor P1, used for inner loop of nested join
+    MarkMatch,   // Set register P1 to 1 to indicate a match was found
+    CheckMatch,  // If register P1 is 0 (no match), jump to P2; reset register to 0
 }
 
 /// A SQL VM instruction with opcode and parameters

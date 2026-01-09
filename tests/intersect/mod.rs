@@ -161,7 +161,10 @@ fn test_intersect_removes_duplicates() -> Result<(), Box<dyn std::error::Error>>
 
     // INTERSECT should deduplicate, so Bob should appear only once
     let bob_count = output_str.matches("2,Bob").count();
-    assert_eq!(bob_count, 1, "Bob should appear only once in INTERSECT result");
+    assert_eq!(
+        bob_count, 1,
+        "Bob should appear only once in INTERSECT result"
+    );
 
     Ok(())
 }

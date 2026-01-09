@@ -28,10 +28,10 @@ Support all SQL commands from sqlparser crate that make sense for CSV file colle
 ---
 
 ## Phase 3: Outer Joins
-- [ ] LEFT OUTER JOIN (opcodes: LeftJoin, NullRow)
-- [ ] RIGHT OUTER JOIN (opcodes: RightJoin)
-- [ ] FULL OUTER JOIN (opcodes: FullJoin)
-- [ ] **Phase 3 Validation**: build, test, clippy clean
+- [x] LEFT OUTER JOIN (opcodes: NullRow, RewindInner, MarkMatch, nested loop join)
+- [x] RIGHT OUTER JOIN (opcodes: similar to LEFT, swap tables)
+- [x] FULL OUTER JOIN (opcodes: combines LEFT and RIGHT logic)
+- [x] **Phase 3 Validation**: build, test, clippy clean
 
 ---
 

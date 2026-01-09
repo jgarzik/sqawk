@@ -1054,10 +1054,7 @@ impl<'a> VmEngine<'a> {
                 self.results = intersection;
 
                 if self.verbose {
-                    println!(
-                        "INTERSECT: {} rows in intersection",
-                        self.results.len()
-                    );
+                    println!("INTERSECT: {} rows in intersection", self.results.len());
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1111,13 +1108,96 @@ impl<'a> VmEngine<'a> {
                 self.results = difference;
 
                 if self.verbose {
+                    println!("EXCEPT: {} rows in difference", self.results.len());
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::NullRow => {
+                // Load NULL values into registers P1 through P1+P2-1
+                // P1: Start register
+                // P2: Number of registers to set to NULL
+                let start_reg = inst.p1 as usize;
+                let count = inst.p2 as usize;
+
+                for i in 0..count {
+                    self.set_register(start_reg + i, Register::Null)?;
+                }
+
+                if self.verbose {
                     println!(
-                        "EXCEPT: {} rows in difference",
-                        self.results.len()
+                        "NullRow: Set registers {} to {} to NULL",
+                        start_reg,
+                        start_reg + count - 1
                     );
                 }
 
                 Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::RewindInner => {
+                // Rewind cursor P1 for inner loop of nested join
+                // P1: Cursor index
+                // P2: Jump address if table is empty
+                let cursor_idx = inst.p1 as usize;
+                let jump_addr = inst.p2 as usize;
+
+                if let Some(cursor) = self.cursors.get_mut(&cursor_idx) {
+                    if cursor.rewind() {
+                        // Cursor has rows, continue
+                        Ok(ExecuteResult::Continue)
+                    } else {
+                        // Table is empty, jump to P2
+                        Ok(ExecuteResult::Jump(jump_addr))
+                    }
+                } else {
+                    Err(SqawkError::VmError(format!(
+                        "Cursor {} not found for RewindInner",
+                        cursor_idx
+                    )))
+                }
+            }
+
+            OpCode::MarkMatch => {
+                // Set register P1 to 1 to indicate a match was found
+                let reg = inst.p1 as usize;
+                self.set_register(reg, Register::Integer(1))?;
+
+                if self.verbose {
+                    println!("MarkMatch: Set r[{}] = 1", reg);
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::CheckMatch => {
+                // If register P1 is 0 (no match), jump to P2
+                // Then reset register P1 to 0 for next iteration
+                let reg = inst.p1 as usize;
+                let jump_addr = inst.p2 as usize;
+
+                let should_jump = match self.get_register(reg)? {
+                    Register::Integer(0) => true,
+                    Register::Integer(_) => false,
+                    Register::Null => true, // Treat NULL as no match
+                    _ => true,              // Default to no match for unexpected types
+                };
+
+                // Reset the match flag for the next iteration
+                self.set_register(reg, Register::Integer(0))?;
+
+                if should_jump {
+                    if self.verbose {
+                        println!("CheckMatch: No match found, jumping to {}", jump_addr);
+                    }
+                    Ok(ExecuteResult::Jump(jump_addr))
+                } else {
+                    if self.verbose {
+                        println!("CheckMatch: Match found, continuing");
+                    }
+                    Ok(ExecuteResult::Continue)
+                }
             }
 
             #[allow(unreachable_patterns)]

@@ -30,6 +30,12 @@ mod limit_offset; // Tests for LIMIT and OFFSET clauses
 mod except; // Tests for EXCEPT set operation
 mod intersect; // Tests for INTERSECT set operation
 mod union; // Tests for UNION/UNION ALL set operations
+
+// Phase 3: Outer Joins (VM implementation)
+mod full_join; // Tests for FULL OUTER JOIN
+mod left_join; // Tests for LEFT OUTER JOIN
+mod right_join; // Tests for RIGHT OUTER JOIN
+
 mod repl; // Tests for interactive REPL functionality with pre-generated input
 mod string_functions; // Tests for string functions (UPPER, LOWER, TRIM, SUBSTR, REPLACE)
 

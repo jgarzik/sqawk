@@ -24,8 +24,14 @@ fn test_except_basic() -> Result<(), Box<dyn std::error::Error>> {
     let output_str = String::from_utf8_lossy(&output);
 
     // EXCEPT should only return Alice (in a but not in b)
-    assert!(output_str.contains("1,Alice"), "Alice should be in EXCEPT result");
-    assert!(!output_str.contains("2,Bob"), "Bob should not be in EXCEPT result");
+    assert!(
+        output_str.contains("1,Alice"),
+        "Alice should be in EXCEPT result"
+    );
+    assert!(
+        !output_str.contains("2,Bob"),
+        "Bob should not be in EXCEPT result"
+    );
     assert!(
         !output_str.contains("3,Charlie"),
         "Charlie should not be in EXCEPT result"
@@ -82,7 +88,10 @@ fn test_except_identical_tables() -> Result<(), Box<dyn std::error::Error>> {
     let output_str = String::from_utf8_lossy(&output);
 
     // EXCEPT of identical tables should return empty result
-    assert!(!output_str.contains("Alice"), "Alice should not be in result");
+    assert!(
+        !output_str.contains("Alice"),
+        "Alice should not be in result"
+    );
     assert!(!output_str.contains("Bob"), "Bob should not be in result");
 
     Ok(())
@@ -134,7 +143,10 @@ fn test_except_subset_as_second() -> Result<(), Box<dyn std::error::Error>> {
 
     // Alice and Charlie should be in result, Bob should not
     assert!(output_str.contains("1,Alice"), "Alice should be in result");
-    assert!(output_str.contains("3,Charlie"), "Charlie should be in result");
+    assert!(
+        output_str.contains("3,Charlie"),
+        "Charlie should be in result"
+    );
     assert!(!output_str.contains("2,Bob"), "Bob should not be in result");
 
     Ok(())
@@ -163,7 +175,10 @@ fn test_except_removes_duplicates() -> Result<(), Box<dyn std::error::Error>> {
 
     // Alice should appear only once (EXCEPT deduplicates)
     let alice_count = output_str.matches("1,Alice").count();
-    assert_eq!(alice_count, 1, "Alice should appear only once in EXCEPT result");
+    assert_eq!(
+        alice_count, 1,
+        "Alice should appear only once in EXCEPT result"
+    );
     assert!(!output_str.contains("2,Bob"), "Bob should not be in result");
 
     Ok(())
