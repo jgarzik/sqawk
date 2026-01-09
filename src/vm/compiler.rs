@@ -4924,7 +4924,539 @@ impl<'a> SqlCompiler<'a> {
         Ok(result_reg)
     }
 
-    /// Compile a function call (COALESCE, NULLIF, etc.)
+    /// Extract function name from a Function AST node
+    fn get_function_name(func: &Function) -> String {
+        func.name
+            .0
+            .iter()
+            .map(|id| id.value.as_str())
+            .collect::<Vec<_>>()
+            .join(".")
+            .to_uppercase()
+    }
+
+    /// Compile COALESCE function - returns first non-NULL argument
+    fn compile_func_coalesce(
+        &mut self,
+        func: &Function,
+        table: &Table,
+        cursor_idx: usize,
+        target_reg: i64,
+    ) -> SqawkResult<()> {
+        if func.args.is_empty() {
+            return Err(SqawkError::InvalidSqlQuery(
+                "COALESCE requires at least one argument".to_string(),
+            ));
+        }
+
+        let mut jump_to_end_addrs = Vec::new();
+
+        for arg in &func.args {
+            let expr = self.extract_function_arg_expr(arg)?;
+            let arg_reg = self.allocate_register();
+            let null_check_reg = self.allocate_register();
+
+            // Compile the argument
+            self.compile_where_operand(&expr, table, cursor_idx, arg_reg)?;
+
+            // Check if it's NULL
+            self.program.add_instruction(Instruction::new(
+                OpCode::IsNull,
+                arg_reg,
+                null_check_reg,
+                0,
+                None,
+                0,
+                Some(format!("r[{}] = (r[{}] IS NULL)", null_check_reg, arg_reg)),
+            ));
+
+            // If NULL (null_check_reg == 1), skip to next argument
+            let skip_addr = self.program.len();
+            self.program.add_instruction(Instruction::new(
+                OpCode::IfZ,
+                null_check_reg,
+                0, // Will be patched to "use this value"
+                0,
+                None,
+                0,
+                Some("if NOT NULL, use this value".to_string()),
+            ));
+
+            // Patch to jump to next iteration (will be set at end of this iteration)
+            let continue_to_next = self.program.len();
+
+            // Add a goto to skip to next arg check (this arg was NULL)
+            self.program.add_instruction(Instruction::new(
+                OpCode::Goto,
+                0,
+                0, // Will be patched to next arg check
+                0,
+                None,
+                0,
+                Some("skip to next arg (this was NULL)".to_string()),
+            ));
+
+            // Patch the IfZ to come here when not NULL
+            let use_value_addr = self.program.len();
+            if let Some(inst) = self.program.instructions.get_mut(skip_addr) {
+                inst.p2 = use_value_addr as i64;
+            }
+
+            // Copy value to target register (value is not NULL)
+            self.program.add_instruction(Instruction::new(
+                OpCode::Cast,
+                arg_reg,
+                target_reg,
+                0,
+                Some("TEXT".to_string()), // Cast to same type as workaround for copy
+                0,
+                Some(format!(
+                    "r[{}] = r[{}] (COALESCE result)",
+                    target_reg, arg_reg
+                )),
+            ));
+
+            // Jump to end (we found a non-NULL value)
+            jump_to_end_addrs.push(self.program.len());
+            self.program.add_instruction(Instruction::new(
+                OpCode::Goto,
+                0,
+                0, // Will be patched to end
+                0,
+                None,
+                0,
+                Some("jump to COALESCE end".to_string()),
+            ));
+
+            // Patch the continue_to_next goto to jump here
+            let next_arg_addr = self.program.len();
+            if let Some(inst) = self.program.instructions.get_mut(continue_to_next) {
+                inst.p2 = next_arg_addr as i64;
+            }
+        }
+
+        // If all args were NULL, result is NULL
+        self.program.add_instruction(Instruction::new(
+            OpCode::Null,
+            0,
+            target_reg,
+            0,
+            None,
+            0,
+            Some(format!(
+                "r[{}] = NULL (all COALESCE args were NULL)",
+                target_reg
+            )),
+        ));
+
+        // Patch all jump-to-end addresses
+        let end_label = self.program.len();
+        for addr in jump_to_end_addrs {
+            if let Some(inst) = self.program.instructions.get_mut(addr) {
+                inst.p2 = end_label as i64;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Compile NULLIF function - returns NULL if both args are equal
+    fn compile_func_nullif(
+        &mut self,
+        func: &Function,
+        table: &Table,
+        cursor_idx: usize,
+        target_reg: i64,
+    ) -> SqawkResult<()> {
+        if func.args.len() != 2 {
+            return Err(SqawkError::InvalidSqlQuery(
+                "NULLIF requires exactly two arguments".to_string(),
+            ));
+        }
+
+        let expr1 = self.extract_function_arg_expr(&func.args[0])?;
+        let expr2 = self.extract_function_arg_expr(&func.args[1])?;
+
+        let reg1 = self.allocate_register();
+        let reg2 = self.allocate_register();
+        let cmp_reg = self.allocate_register();
+
+        // Compile both arguments
+        self.compile_where_operand(&expr1, table, cursor_idx, reg1)?;
+        self.compile_where_operand(&expr2, table, cursor_idx, reg2)?;
+
+        // Compare them
+        self.program.add_instruction(Instruction::new(
+            OpCode::Eq,
+            reg1,
+            reg2,
+            cmp_reg,
+            None,
+            0,
+            Some(format!("r[{}] = (r[{}] == r[{}])", cmp_reg, reg1, reg2)),
+        ));
+
+        // If equal (cmp_reg == 1), return NULL; else return reg1
+        let not_equal_addr = self.program.len();
+        self.program.add_instruction(Instruction::new(
+            OpCode::IfZ,
+            cmp_reg,
+            0, // Will be patched
+            0,
+            None,
+            0,
+            Some("if NOT equal, jump".to_string()),
+        ));
+
+        // Values are equal, set result to NULL
+        self.program.add_instruction(Instruction::new(
+            OpCode::Null,
+            0,
+            target_reg,
+            0,
+            None,
+            0,
+            Some(format!("r[{}] = NULL (values equal)", target_reg)),
+        ));
+
+        let skip_else_addr = self.program.len();
+        self.program.add_instruction(Instruction::new(
+            OpCode::Goto,
+            0,
+            0, // Will be patched
+            0,
+            None,
+            0,
+            Some("skip else branch".to_string()),
+        ));
+
+        // Patch IfZ to jump here (values not equal)
+        let else_addr = self.program.len();
+        if let Some(inst) = self.program.instructions.get_mut(not_equal_addr) {
+            inst.p2 = else_addr as i64;
+        }
+
+        // Values not equal, copy reg1 to target
+        self.program.add_instruction(Instruction::new(
+            OpCode::Cast,
+            reg1,
+            target_reg,
+            0,
+            Some("TEXT".to_string()),
+            0,
+            Some(format!(
+                "r[{}] = r[{}] (values not equal)",
+                target_reg, reg1
+            )),
+        ));
+
+        // Patch skip_else to jump here
+        let end_addr = self.program.len();
+        if let Some(inst) = self.program.instructions.get_mut(skip_else_addr) {
+            inst.p2 = end_addr as i64;
+        }
+
+        Ok(())
+    }
+
+    /// Compile simple string functions (UPPER, LOWER, TRIM, LTRIM, RTRIM, LENGTH)
+    fn compile_func_string_simple(
+        &mut self,
+        func_name: &str,
+        func: &Function,
+        table: &Table,
+        cursor_idx: usize,
+        target_reg: i64,
+    ) -> SqawkResult<()> {
+        if func.args.is_empty() {
+            return Err(SqawkError::InvalidSqlQuery(format!(
+                "{} requires one argument",
+                func_name
+            )));
+        }
+
+        let expr = self.extract_function_arg_expr(&func.args[0])?;
+        let src_reg = self.allocate_register();
+
+        // Compile the argument
+        self.compile_where_operand(&expr, table, cursor_idx, src_reg)?;
+
+        // Emit StringFunc opcode
+        self.program.add_instruction(Instruction::new(
+            OpCode::StringFunc,
+            src_reg,
+            target_reg,
+            0,
+            Some(func_name.to_string()),
+            0,
+            Some(format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg)),
+        ));
+
+        Ok(())
+    }
+
+    /// Compile SUBSTR/SUBSTRING function
+    fn compile_func_substr(
+        &mut self,
+        func: &Function,
+        table: &Table,
+        cursor_idx: usize,
+        target_reg: i64,
+    ) -> SqawkResult<()> {
+        if func.args.len() < 2 {
+            return Err(SqawkError::InvalidSqlQuery(
+                "SUBSTR requires at least two arguments".to_string(),
+            ));
+        }
+
+        let str_expr = self.extract_function_arg_expr(&func.args[0])?;
+        let start_expr = self.extract_function_arg_expr(&func.args[1])?;
+
+        let str_reg = self.allocate_register();
+        let start_reg = self.allocate_register();
+
+        // Compile string and start arguments
+        self.compile_where_operand(&str_expr, table, cursor_idx, str_reg)?;
+        self.compile_where_operand(&start_expr, table, cursor_idx, start_reg)?;
+
+        // Check if we have a length argument
+        let func_spec = if func.args.len() >= 3 {
+            let len_expr = self.extract_function_arg_expr(&func.args[2])?;
+            let len_reg = self.allocate_register();
+            self.compile_where_operand(&len_expr, table, cursor_idx, len_reg)?;
+            format!("SUBSTR:{}", len_reg)
+        } else {
+            "SUBSTR".to_string()
+        };
+
+        // Emit StringFunc opcode
+        self.program.add_instruction(Instruction::new(
+            OpCode::StringFunc,
+            str_reg,
+            target_reg,
+            start_reg,
+            Some(func_spec),
+            0,
+            Some(format!("r[{}] = SUBSTR(...)", target_reg)),
+        ));
+
+        Ok(())
+    }
+
+    /// Compile REPLACE function
+    fn compile_func_replace(
+        &mut self,
+        func: &Function,
+        table: &Table,
+        cursor_idx: usize,
+        target_reg: i64,
+    ) -> SqawkResult<()> {
+        if func.args.len() != 3 {
+            return Err(SqawkError::InvalidSqlQuery(
+                "REPLACE requires three arguments".to_string(),
+            ));
+        }
+
+        let str_expr = self.extract_function_arg_expr(&func.args[0])?;
+        let from_expr = self.extract_function_arg_expr(&func.args[1])?;
+        let to_expr = self.extract_function_arg_expr(&func.args[2])?;
+
+        let str_reg = self.allocate_register();
+        let from_reg = self.allocate_register();
+        let to_reg = self.allocate_register();
+
+        // Compile all three arguments
+        self.compile_where_operand(&str_expr, table, cursor_idx, str_reg)?;
+        self.compile_where_operand(&from_expr, table, cursor_idx, from_reg)?;
+        self.compile_where_operand(&to_expr, table, cursor_idx, to_reg)?;
+
+        // Emit StringFunc opcode with from_reg and to_reg in P4
+        self.program.add_instruction(Instruction::new(
+            OpCode::StringFunc,
+            str_reg,
+            target_reg,
+            0,
+            Some(format!("REPLACE:{}:{}", from_reg, to_reg)),
+            0,
+            Some(format!("r[{}] = REPLACE(...)", target_reg)),
+        ));
+
+        Ok(())
+    }
+
+    /// Compile CONCAT function
+    fn compile_func_concat(
+        &mut self,
+        func: &Function,
+        table: &Table,
+        cursor_idx: usize,
+        target_reg: i64,
+    ) -> SqawkResult<()> {
+        if func.args.len() < 2 {
+            return Err(SqawkError::InvalidSqlQuery(
+                "CONCAT requires at least two arguments".to_string(),
+            ));
+        }
+
+        // Compile first argument to src_reg
+        let first_expr = self.extract_function_arg_expr(&func.args[0])?;
+        let src_reg = self.allocate_register();
+        self.compile_where_operand(&first_expr, table, cursor_idx, src_reg)?;
+
+        // Compile remaining arguments and build P4 spec
+        let mut arg_regs = Vec::new();
+        for arg in func.args.iter().skip(1) {
+            let expr = self.extract_function_arg_expr(arg)?;
+            let reg = self.allocate_register();
+            self.compile_where_operand(&expr, table, cursor_idx, reg)?;
+            arg_regs.push(reg.to_string());
+        }
+
+        // P4 = "CONCAT:reg1:reg2:..."
+        let func_spec = format!("CONCAT:{}", arg_regs.join(":"));
+
+        self.program.add_instruction(Instruction::new(
+            OpCode::StringFunc,
+            src_reg,
+            target_reg,
+            0,
+            Some(func_spec),
+            0,
+            Some(format!("r[{}] = CONCAT(...)", target_reg)),
+        ));
+
+        Ok(())
+    }
+
+    /// Compile LEFT and RIGHT string functions
+    fn compile_func_left_right(
+        &mut self,
+        func_name: &str,
+        func: &Function,
+        table: &Table,
+        cursor_idx: usize,
+        target_reg: i64,
+    ) -> SqawkResult<()> {
+        if func.args.len() != 2 {
+            return Err(SqawkError::InvalidSqlQuery(format!(
+                "{} requires exactly two arguments",
+                func_name
+            )));
+        }
+
+        let str_expr = self.extract_function_arg_expr(&func.args[0])?;
+        let len_expr = self.extract_function_arg_expr(&func.args[1])?;
+
+        let str_reg = self.allocate_register();
+        let len_reg = self.allocate_register();
+
+        self.compile_where_operand(&str_expr, table, cursor_idx, str_reg)?;
+        self.compile_where_operand(&len_expr, table, cursor_idx, len_reg)?;
+
+        self.program.add_instruction(Instruction::new(
+            OpCode::StringFunc,
+            str_reg,
+            target_reg,
+            len_reg,
+            Some(func_name.to_string()),
+            0,
+            Some(format!(
+                "r[{}] = {}(r[{}], r[{}])",
+                target_reg, func_name, str_reg, len_reg
+            )),
+        ));
+
+        Ok(())
+    }
+
+    /// Compile math functions (ABS, ROUND, CEIL, CEILING, FLOOR)
+    fn compile_func_math(
+        &mut self,
+        func_name: &str,
+        func: &Function,
+        table: &Table,
+        cursor_idx: usize,
+        target_reg: i64,
+    ) -> SqawkResult<()> {
+        if func.args.is_empty() {
+            return Err(SqawkError::InvalidSqlQuery(format!(
+                "{} requires one argument",
+                func_name
+            )));
+        }
+
+        let expr = self.extract_function_arg_expr(&func.args[0])?;
+        let src_reg = self.allocate_register();
+
+        // Compile the argument
+        self.compile_where_operand(&expr, table, cursor_idx, src_reg)?;
+
+        // Emit MathFunc opcode
+        self.program.add_instruction(Instruction::new(
+            OpCode::MathFunc,
+            src_reg,
+            target_reg,
+            0,
+            Some(func_name.to_string()),
+            0,
+            Some(format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg)),
+        ));
+
+        Ok(())
+    }
+
+    /// Compile date/time functions with no arguments (NOW, CURRENT_TIMESTAMP, etc.)
+    fn compile_func_datetime_noarg(&mut self, func_name: &str, target_reg: i64) -> SqawkResult<()> {
+        self.program.add_instruction(Instruction::new(
+            OpCode::DateFunc,
+            0, // No source register needed
+            target_reg,
+            0,
+            Some(func_name.to_string()),
+            0,
+            Some(format!("r[{}] = {}()", target_reg, func_name)),
+        ));
+
+        Ok(())
+    }
+
+    /// Compile date/time functions with one argument (DATE, TIME)
+    fn compile_func_datetime(
+        &mut self,
+        func_name: &str,
+        func: &Function,
+        table: &Table,
+        cursor_idx: usize,
+        target_reg: i64,
+    ) -> SqawkResult<()> {
+        if func.args.is_empty() {
+            return Err(SqawkError::InvalidSqlQuery(format!(
+                "{} requires one argument",
+                func_name
+            )));
+        }
+
+        let expr = self.extract_function_arg_expr(&func.args[0])?;
+        let src_reg = self.allocate_register();
+
+        // Compile the argument
+        self.compile_where_operand(&expr, table, cursor_idx, src_reg)?;
+
+        // Emit DateFunc opcode
+        self.program.add_instruction(Instruction::new(
+            OpCode::DateFunc,
+            src_reg,
+            target_reg,
+            0,
+            Some(func_name.to_string()),
+            0,
+            Some(format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg)),
+        ));
+
+        Ok(())
+    }
+
+    /// Compile a function call - dispatches to specialized handlers
     fn compile_function(
         &mut self,
         func: &Function,
@@ -4932,492 +5464,34 @@ impl<'a> SqlCompiler<'a> {
         cursor_idx: usize,
         target_reg: i64,
     ) -> SqawkResult<()> {
-        let func_name = func
-            .name
-            .0
-            .iter()
-            .map(|id| id.value.as_str())
-            .collect::<Vec<_>>()
-            .join(".")
-            .to_uppercase();
+        let func_name = Self::get_function_name(func);
 
         match func_name.as_str() {
-            "COALESCE" => {
-                // COALESCE returns the first non-NULL argument
-                // For each argument: check if NULL, if not NULL store in target and jump to end
-                if func.args.is_empty() {
-                    return Err(SqawkError::InvalidSqlQuery(
-                        "COALESCE requires at least one argument".to_string(),
-                    ));
-                }
-
-                let mut jump_to_end_addrs = Vec::new();
-
-                for arg in &func.args {
-                    let expr = self.extract_function_arg_expr(arg)?;
-                    let arg_reg = self.allocate_register();
-                    let null_check_reg = self.allocate_register();
-
-                    // Compile the argument
-                    self.compile_where_operand(&expr, table, cursor_idx, arg_reg)?;
-
-                    // Check if it's NULL
-                    self.program.add_instruction(Instruction::new(
-                        OpCode::IsNull,
-                        arg_reg,
-                        null_check_reg,
-                        0,
-                        None,
-                        0,
-                        Some(format!("r[{}] = (r[{}] IS NULL)", null_check_reg, arg_reg)),
-                    ));
-
-                    // If NULL (null_check_reg == 1), skip to next argument
-                    let skip_addr = self.program.len();
-                    self.program.add_instruction(Instruction::new(
-                        OpCode::IfZ,
-                        null_check_reg,
-                        0, // Will be patched to "use this value"
-                        0,
-                        None,
-                        0,
-                        Some("if NOT NULL, use this value".to_string()),
-                    ));
-
-                    // Patch to jump to next iteration (will be set at end of this iteration)
-                    let continue_to_next = self.program.len();
-
-                    // Add a goto to skip to next arg check (this arg was NULL)
-                    self.program.add_instruction(Instruction::new(
-                        OpCode::Goto,
-                        0,
-                        0, // Will be patched to next arg check
-                        0,
-                        None,
-                        0,
-                        Some("skip to next arg (this was NULL)".to_string()),
-                    ));
-
-                    // Patch the IfZ to come here when not NULL
-                    let use_value_addr = self.program.len();
-                    if let Some(inst) = self.program.instructions.get_mut(skip_addr) {
-                        inst.p2 = use_value_addr as i64;
-                    }
-
-                    // Copy value to target register (value is not NULL)
-                    // We need to copy arg_reg to target_reg
-                    // Since we don't have a Copy opcode, we'll use a workaround
-                    // Actually, we can just compile the argument directly to target_reg
-                    // But that would duplicate compilation. Let's use Cast as identity.
-                    self.program.add_instruction(Instruction::new(
-                        OpCode::Cast,
-                        arg_reg,
-                        target_reg,
-                        0,
-                        Some("TEXT".to_string()), // Cast to same type as workaround for copy
-                        0,
-                        Some(format!(
-                            "r[{}] = r[{}] (COALESCE result)",
-                            target_reg, arg_reg
-                        )),
-                    ));
-
-                    // Jump to end (we found a non-NULL value)
-                    jump_to_end_addrs.push(self.program.len());
-                    self.program.add_instruction(Instruction::new(
-                        OpCode::Goto,
-                        0,
-                        0, // Will be patched to end
-                        0,
-                        None,
-                        0,
-                        Some("jump to COALESCE end".to_string()),
-                    ));
-
-                    // Patch the continue_to_next goto to jump here
-                    let next_arg_addr = self.program.len();
-                    if let Some(inst) = self.program.instructions.get_mut(continue_to_next) {
-                        inst.p2 = next_arg_addr as i64;
-                    }
-                }
-
-                // If all args were NULL, result is NULL
-                self.program.add_instruction(Instruction::new(
-                    OpCode::Null,
-                    0,
-                    target_reg,
-                    0,
-                    None,
-                    0,
-                    Some(format!(
-                        "r[{}] = NULL (all COALESCE args were NULL)",
-                        target_reg
-                    )),
-                ));
-
-                // Patch all jump-to-end addresses
-                let end_label = self.program.len();
-                for addr in jump_to_end_addrs {
-                    if let Some(inst) = self.program.instructions.get_mut(addr) {
-                        inst.p2 = end_label as i64;
-                    }
-                }
-            }
+            "COALESCE" => self.compile_func_coalesce(func, table, cursor_idx, target_reg),
+            "NULLIF" => self.compile_func_nullif(func, table, cursor_idx, target_reg),
             "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "LENGTH" => {
-                // Single-argument string functions
-                if func.args.is_empty() {
-                    return Err(SqawkError::InvalidSqlQuery(format!(
-                        "{} requires one argument",
-                        func_name
-                    )));
-                }
-
-                let expr = self.extract_function_arg_expr(&func.args[0])?;
-                let src_reg = self.allocate_register();
-
-                // Compile the argument
-                self.compile_where_operand(&expr, table, cursor_idx, src_reg)?;
-
-                // Emit StringFunc opcode
-                self.program.add_instruction(Instruction::new(
-                    OpCode::StringFunc,
-                    src_reg,
-                    target_reg,
-                    0,
-                    Some(func_name.clone()),
-                    0,
-                    Some(format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg)),
-                ));
+                self.compile_func_string_simple(&func_name, func, table, cursor_idx, target_reg)
             }
-            "SUBSTR" | "SUBSTRING" => {
-                // SUBSTR(string, start) or SUBSTR(string, start, length)
-                if func.args.len() < 2 {
-                    return Err(SqawkError::InvalidSqlQuery(
-                        "SUBSTR requires at least two arguments".to_string(),
-                    ));
-                }
-
-                let str_expr = self.extract_function_arg_expr(&func.args[0])?;
-                let start_expr = self.extract_function_arg_expr(&func.args[1])?;
-
-                let str_reg = self.allocate_register();
-                let start_reg = self.allocate_register();
-
-                // Compile string and start arguments
-                self.compile_where_operand(&str_expr, table, cursor_idx, str_reg)?;
-                self.compile_where_operand(&start_expr, table, cursor_idx, start_reg)?;
-
-                // Check if we have a length argument
-                let func_spec = if func.args.len() >= 3 {
-                    let len_expr = self.extract_function_arg_expr(&func.args[2])?;
-                    let len_reg = self.allocate_register();
-                    self.compile_where_operand(&len_expr, table, cursor_idx, len_reg)?;
-                    format!("SUBSTR:{}", len_reg)
-                } else {
-                    "SUBSTR".to_string()
-                };
-
-                // Emit StringFunc opcode
-                self.program.add_instruction(Instruction::new(
-                    OpCode::StringFunc,
-                    str_reg,
-                    target_reg,
-                    start_reg,
-                    Some(func_spec),
-                    0,
-                    Some(format!("r[{}] = SUBSTR(...)", target_reg)),
-                ));
-            }
-            "REPLACE" => {
-                // REPLACE(string, from, to)
-                if func.args.len() != 3 {
-                    return Err(SqawkError::InvalidSqlQuery(
-                        "REPLACE requires three arguments".to_string(),
-                    ));
-                }
-
-                let str_expr = self.extract_function_arg_expr(&func.args[0])?;
-                let from_expr = self.extract_function_arg_expr(&func.args[1])?;
-                let to_expr = self.extract_function_arg_expr(&func.args[2])?;
-
-                let str_reg = self.allocate_register();
-                let from_reg = self.allocate_register();
-                let to_reg = self.allocate_register();
-
-                // Compile all three arguments
-                self.compile_where_operand(&str_expr, table, cursor_idx, str_reg)?;
-                self.compile_where_operand(&from_expr, table, cursor_idx, from_reg)?;
-                self.compile_where_operand(&to_expr, table, cursor_idx, to_reg)?;
-
-                // Emit StringFunc opcode with from_reg and to_reg in P4
-                self.program.add_instruction(Instruction::new(
-                    OpCode::StringFunc,
-                    str_reg,
-                    target_reg,
-                    0,
-                    Some(format!("REPLACE:{}:{}", from_reg, to_reg)),
-                    0,
-                    Some(format!("r[{}] = REPLACE(...)", target_reg)),
-                ));
-            }
-            "CONCAT" => {
-                // CONCAT(str1, str2, ...) - concatenate multiple strings
-                if func.args.len() < 2 {
-                    return Err(SqawkError::InvalidSqlQuery(
-                        "CONCAT requires at least two arguments".to_string(),
-                    ));
-                }
-
-                // Compile first argument to src_reg
-                let first_expr = self.extract_function_arg_expr(&func.args[0])?;
-                let src_reg = self.allocate_register();
-                self.compile_where_operand(&first_expr, table, cursor_idx, src_reg)?;
-
-                // Compile remaining arguments and build P4 spec
-                let mut arg_regs = Vec::new();
-                for arg in func.args.iter().skip(1) {
-                    let expr = self.extract_function_arg_expr(arg)?;
-                    let reg = self.allocate_register();
-                    self.compile_where_operand(&expr, table, cursor_idx, reg)?;
-                    arg_regs.push(reg.to_string());
-                }
-
-                // P4 = "CONCAT:reg1:reg2:..."
-                let func_spec = format!("CONCAT:{}", arg_regs.join(":"));
-
-                self.program.add_instruction(Instruction::new(
-                    OpCode::StringFunc,
-                    src_reg,
-                    target_reg,
-                    0,
-                    Some(func_spec),
-                    0,
-                    Some(format!("r[{}] = CONCAT(...)", target_reg)),
-                ));
-            }
-            "LEFT" => {
-                // LEFT(str, n) - return leftmost n characters
-                if func.args.len() != 2 {
-                    return Err(SqawkError::InvalidSqlQuery(
-                        "LEFT requires exactly two arguments".to_string(),
-                    ));
-                }
-
-                let str_expr = self.extract_function_arg_expr(&func.args[0])?;
-                let len_expr = self.extract_function_arg_expr(&func.args[1])?;
-
-                let str_reg = self.allocate_register();
-                let len_reg = self.allocate_register();
-
-                self.compile_where_operand(&str_expr, table, cursor_idx, str_reg)?;
-                self.compile_where_operand(&len_expr, table, cursor_idx, len_reg)?;
-
-                self.program.add_instruction(Instruction::new(
-                    OpCode::StringFunc,
-                    str_reg,
-                    target_reg,
-                    len_reg,
-                    Some("LEFT".to_string()),
-                    0,
-                    Some(format!(
-                        "r[{}] = LEFT(r[{}], r[{}])",
-                        target_reg, str_reg, len_reg
-                    )),
-                ));
-            }
-            "RIGHT" => {
-                // RIGHT(str, n) - return rightmost n characters
-                if func.args.len() != 2 {
-                    return Err(SqawkError::InvalidSqlQuery(
-                        "RIGHT requires exactly two arguments".to_string(),
-                    ));
-                }
-
-                let str_expr = self.extract_function_arg_expr(&func.args[0])?;
-                let len_expr = self.extract_function_arg_expr(&func.args[1])?;
-
-                let str_reg = self.allocate_register();
-                let len_reg = self.allocate_register();
-
-                self.compile_where_operand(&str_expr, table, cursor_idx, str_reg)?;
-                self.compile_where_operand(&len_expr, table, cursor_idx, len_reg)?;
-
-                self.program.add_instruction(Instruction::new(
-                    OpCode::StringFunc,
-                    str_reg,
-                    target_reg,
-                    len_reg,
-                    Some("RIGHT".to_string()),
-                    0,
-                    Some(format!(
-                        "r[{}] = RIGHT(r[{}], r[{}])",
-                        target_reg, str_reg, len_reg
-                    )),
-                ));
-            }
-            "NULLIF" => {
-                // NULLIF(a, b) returns NULL if a == b, otherwise returns a
-                if func.args.len() != 2 {
-                    return Err(SqawkError::InvalidSqlQuery(
-                        "NULLIF requires exactly two arguments".to_string(),
-                    ));
-                }
-
-                let expr1 = self.extract_function_arg_expr(&func.args[0])?;
-                let expr2 = self.extract_function_arg_expr(&func.args[1])?;
-
-                let reg1 = self.allocate_register();
-                let reg2 = self.allocate_register();
-                let cmp_reg = self.allocate_register();
-
-                // Compile both arguments
-                self.compile_where_operand(&expr1, table, cursor_idx, reg1)?;
-                self.compile_where_operand(&expr2, table, cursor_idx, reg2)?;
-
-                // Compare them
-                self.program.add_instruction(Instruction::new(
-                    OpCode::Eq,
-                    reg1,
-                    reg2,
-                    cmp_reg,
-                    None,
-                    0,
-                    Some(format!("r[{}] = (r[{}] == r[{}])", cmp_reg, reg1, reg2)),
-                ));
-
-                // If equal (cmp_reg == 1), return NULL; else return reg1
-                let not_equal_addr = self.program.len();
-                self.program.add_instruction(Instruction::new(
-                    OpCode::IfZ,
-                    cmp_reg,
-                    0, // Will be patched
-                    0,
-                    None,
-                    0,
-                    Some("if NOT equal, jump".to_string()),
-                ));
-
-                // Values are equal, set result to NULL
-                self.program.add_instruction(Instruction::new(
-                    OpCode::Null,
-                    0,
-                    target_reg,
-                    0,
-                    None,
-                    0,
-                    Some(format!("r[{}] = NULL (values equal)", target_reg)),
-                ));
-
-                let skip_else_addr = self.program.len();
-                self.program.add_instruction(Instruction::new(
-                    OpCode::Goto,
-                    0,
-                    0, // Will be patched
-                    0,
-                    None,
-                    0,
-                    Some("skip else branch".to_string()),
-                ));
-
-                // Patch IfZ to jump here (values not equal)
-                let else_addr = self.program.len();
-                if let Some(inst) = self.program.instructions.get_mut(not_equal_addr) {
-                    inst.p2 = else_addr as i64;
-                }
-
-                // Values not equal, copy reg1 to target
-                self.program.add_instruction(Instruction::new(
-                    OpCode::Cast,
-                    reg1,
-                    target_reg,
-                    0,
-                    Some("TEXT".to_string()),
-                    0,
-                    Some(format!(
-                        "r[{}] = r[{}] (values not equal)",
-                        target_reg, reg1
-                    )),
-                ));
-
-                // Patch skip_else to jump here
-                let end_addr = self.program.len();
-                if let Some(inst) = self.program.instructions.get_mut(skip_else_addr) {
-                    inst.p2 = end_addr as i64;
-                }
+            "SUBSTR" | "SUBSTRING" => self.compile_func_substr(func, table, cursor_idx, target_reg),
+            "REPLACE" => self.compile_func_replace(func, table, cursor_idx, target_reg),
+            "CONCAT" => self.compile_func_concat(func, table, cursor_idx, target_reg),
+            "LEFT" | "RIGHT" => {
+                self.compile_func_left_right(&func_name, func, table, cursor_idx, target_reg)
             }
             "ABS" | "ROUND" | "CEIL" | "CEILING" | "FLOOR" => {
-                // Single-argument math functions
-                if func.args.is_empty() {
-                    return Err(SqawkError::InvalidSqlQuery(format!(
-                        "{} requires one argument",
-                        func_name
-                    )));
-                }
-
-                let expr = self.extract_function_arg_expr(&func.args[0])?;
-                let src_reg = self.allocate_register();
-
-                // Compile the argument
-                self.compile_where_operand(&expr, table, cursor_idx, src_reg)?;
-
-                // Emit MathFunc opcode
-                self.program.add_instruction(Instruction::new(
-                    OpCode::MathFunc,
-                    src_reg,
-                    target_reg,
-                    0,
-                    Some(func_name.clone()),
-                    0,
-                    Some(format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg)),
-                ));
+                self.compile_func_math(&func_name, func, table, cursor_idx, target_reg)
             }
             "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" => {
-                // No-argument date/time functions
-                self.program.add_instruction(Instruction::new(
-                    OpCode::DateFunc,
-                    0, // No source register needed
-                    target_reg,
-                    0,
-                    Some(func_name.clone()),
-                    0,
-                    Some(format!("r[{}] = {}()", target_reg, func_name)),
-                ));
+                self.compile_func_datetime_noarg(&func_name, target_reg)
             }
             "DATE" | "TIME" => {
-                // Single-argument date/time functions
-                if func.args.is_empty() {
-                    return Err(SqawkError::InvalidSqlQuery(format!(
-                        "{} requires one argument",
-                        func_name
-                    )));
-                }
-
-                let expr = self.extract_function_arg_expr(&func.args[0])?;
-                let src_reg = self.allocate_register();
-
-                // Compile the argument
-                self.compile_where_operand(&expr, table, cursor_idx, src_reg)?;
-
-                // Emit DateFunc opcode
-                self.program.add_instruction(Instruction::new(
-                    OpCode::DateFunc,
-                    src_reg,
-                    target_reg,
-                    0,
-                    Some(func_name.clone()),
-                    0,
-                    Some(format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg)),
-                ));
+                self.compile_func_datetime(&func_name, func, table, cursor_idx, target_reg)
             }
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Unsupported function: {}",
-                    func_name
-                )));
-            }
+            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Unsupported function: {}",
+                func_name
+            ))),
         }
-
-        Ok(())
     }
 
     /// Extract expression from a function argument
