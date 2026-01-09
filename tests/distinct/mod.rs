@@ -4,21 +4,8 @@
 //! with WHERE clauses, ORDER BY clauses, and JOINs.
 
 use assert_cmd::Command;
-use std::path::PathBuf;
-// No longer using predicates in our tests
 
-// Helper function to get the path to static test files
-fn get_duplicates_file() -> PathBuf {
-    PathBuf::from("tests/data/duplicates.csv")
-}
-
-fn get_users_file() -> PathBuf {
-    PathBuf::from("tests/data/users.csv")
-}
-
-fn get_orders_file() -> PathBuf {
-    PathBuf::from("tests/data/orders.csv")
-}
+use crate::helpers::{get_duplicates_file, get_orders_file, get_users_file};
 
 #[test]
 fn test_distinct_basic() -> Result<(), Box<dyn std::error::Error>> {

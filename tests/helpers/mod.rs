@@ -172,16 +172,6 @@ pub fn get_strings_file() -> PathBuf {
     PathBuf::from("tests/data/strings.csv")
 }
 
-/// Path to set_a.csv fixture (for UNION/EXCEPT/INTERSECT tests)
-pub fn get_set_a_file() -> PathBuf {
-    PathBuf::from("tests/data/set_a.csv")
-}
-
-/// Path to set_b.csv fixture (for UNION/EXCEPT/INTERSECT tests)
-pub fn get_set_b_file() -> PathBuf {
-    PathBuf::from("tests/data/set_b.csv")
-}
-
 /// Path to boundaries.csv fixture (for comparison tests)
 pub fn get_boundaries_file() -> PathBuf {
     PathBuf::from("tests/data/boundaries.csv")
@@ -210,6 +200,11 @@ pub fn get_employees_tsv_file() -> PathBuf {
 /// Path to contacts.txt fixture (for colon-delimiter tests)
 pub fn get_contacts_file() -> PathBuf {
     PathBuf::from("tests/data/contacts.txt")
+}
+
+/// Path to sample.csv fixture (simple test data: id, name, age)
+pub fn get_sample_file() -> PathBuf {
+    PathBuf::from("tests/data/sample.csv")
 }
 
 /// Helper function to create a test CSV file with custom data

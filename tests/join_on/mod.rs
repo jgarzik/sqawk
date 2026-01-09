@@ -4,20 +4,8 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use std::path::PathBuf;
 
-// Helper functions to get the path to standard test files
-fn get_users_file() -> PathBuf {
-    PathBuf::from("tests/data/users.csv")
-}
-
-fn get_orders_file() -> PathBuf {
-    PathBuf::from("tests/data/orders.csv")
-}
-
-fn get_products_file() -> PathBuf {
-    PathBuf::from("tests/data/products.csv")
-}
+use crate::helpers::{get_orders_file, get_products_file, get_users_file};
 
 #[test]
 fn test_inner_join_on_basic() -> Result<(), Box<dyn std::error::Error>> {

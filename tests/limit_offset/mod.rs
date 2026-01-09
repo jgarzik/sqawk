@@ -4,20 +4,8 @@
 //! including with ORDER BY, aggregate functions, and GROUP BY.
 
 use assert_cmd::Command;
-use std::path::PathBuf;
 
-// Helper function to get the path to static test files
-fn get_sample_file() -> PathBuf {
-    PathBuf::from("tests/data/sample.csv")
-}
-
-fn get_departments_file() -> PathBuf {
-    PathBuf::from("tests/data/departments.csv")
-}
-
-fn get_duplicates_file() -> PathBuf {
-    PathBuf::from("tests/data/duplicates.csv")
-}
+use crate::helpers::{get_departments_file, get_duplicates_file, get_sample_file};
 
 #[test]
 fn test_limit_basic() -> Result<(), Box<dyn std::error::Error>> {

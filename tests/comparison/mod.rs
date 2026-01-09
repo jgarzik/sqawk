@@ -4,23 +4,14 @@
 //! to ensure they work correctly with integer types.
 
 use predicates::prelude::PredicateBooleanExt;
-use std::path::PathBuf;
 
-/// Get path to the static sample test CSV file (for read-only tests)
-fn get_test_data_path() -> PathBuf {
-    PathBuf::from("tests/data/sample.csv")
-}
-
-/// Get path to the static boundaries test CSV file (for read-only tests)
-fn get_boundaries_data_path() -> PathBuf {
-    PathBuf::from("tests/data/boundaries.csv")
-}
+use crate::helpers::{get_boundaries_file, get_sample_file};
 
 // Test cases for each comparison operator
 
 #[test]
 fn test_equals_operator() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = get_test_data_path();
+    let file_path = get_sample_file();
 
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
@@ -38,7 +29,7 @@ fn test_equals_operator() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_not_equals_operator() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = get_test_data_path();
+    let file_path = get_sample_file();
 
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
@@ -58,7 +49,7 @@ fn test_not_equals_operator() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_greater_than_operator() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = get_test_data_path();
+    let file_path = get_sample_file();
 
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
@@ -78,7 +69,7 @@ fn test_greater_than_operator() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_less_than_operator() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = get_test_data_path();
+    let file_path = get_sample_file();
 
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
@@ -98,7 +89,7 @@ fn test_less_than_operator() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_greater_than_or_equal_operator() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = get_test_data_path();
+    let file_path = get_sample_file();
 
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
@@ -118,7 +109,7 @@ fn test_greater_than_or_equal_operator() -> Result<(), Box<dyn std::error::Error
 
 #[test]
 fn test_less_than_or_equal_operator() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = get_test_data_path();
+    let file_path = get_sample_file();
 
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
@@ -138,7 +129,7 @@ fn test_less_than_or_equal_operator() -> Result<(), Box<dyn std::error::Error>> 
 
 #[test]
 fn test_equals_with_no_matches() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = get_test_data_path();
+    let file_path = get_sample_file();
 
     // Using the sample.csv file which has columns: id,name,age
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
@@ -167,7 +158,7 @@ fn test_equals_with_no_matches() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_comparison_boundary_values() -> Result<(), Box<dyn std::error::Error>> {
     // Use the static boundaries.csv file with extreme integer values
-    let file_path = get_boundaries_data_path();
+    let file_path = get_boundaries_file();
 
     // Test with max integer value
     let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
