@@ -4,7 +4,7 @@
 
 use sqlparser::ast::{Expr, Select, SelectItem, Value, WindowType};
 
-use super::bytecode::{Instruction, OpCode, ResultSchema};
+use super::bytecode::{OpCode, ResultSchema};
 use super::compiler::SqlCompiler;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{DataType, Table};
@@ -80,38 +80,28 @@ impl<'a> SqlCompiler<'a> {
         let sort_spec = sort_spec_parts.join(",");
 
         // Open ephemeral cursor for collecting rows
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::OpenEphemeral,
             ephemeral_cursor,
             total_col_count as i64,
             0,
             Some(sort_spec),
-            0,
-            Some("Open ephemeral for window function".to_string()),
-        ));
+            "Open ephemeral for window function",
+        );
 
         // Open source table
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::OpenRead,
             cursor_idx,
             1,
             0,
             Some(table_name.to_string()),
-            0,
-            None,
-        ));
+            "",
+        );
 
         // Rewind source table
         let rewind_addr = self.program.len();
-        self.program.add_instruction(Instruction::new(
-            OpCode::Rewind,
-            cursor_idx,
-            0, // Will be patched
-            0,
-            None,
-            0,
-            None,
-        ));
+        self.emit(OpCode::Rewind, cursor_idx, 0, 0, None, "");
 
         let collect_loop_start = self.program.len();
 
@@ -120,52 +110,48 @@ impl<'a> SqlCompiler<'a> {
 
         // Load all base columns
         for (i, &col_idx) in base_columns.iter().enumerate() {
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Column,
                 cursor_idx,
                 col_idx as i64,
                 start_reg + i as i64,
                 None,
-                0,
-                None,
-            ));
+                "",
+            );
         }
 
         // Apply WHERE filter if present
         if let Some(where_expr) = &select.selection {
             let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfZ,
                 cond_reg,
                 (self.program.len() + 2) as i64,
                 0,
                 None,
-                0,
-                None,
-            ));
+                "",
+            );
         }
 
         // Insert row into ephemeral
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::IdxInsert,
             ephemeral_cursor,
             start_reg,
             total_col_count as i64,
             None,
-            0,
-            None,
-        ));
+            "",
+        );
 
         // Next row in source
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Next,
             cursor_idx,
             collect_loop_start as i64,
             0,
             None,
-            0,
-            None,
-        ));
+            "",
+        );
 
         let after_collect = self.program.len();
 
@@ -175,29 +161,13 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Sort the ephemeral (by partition + order keys)
-        self.program.add_instruction(Instruction::new(
-            OpCode::Sort,
-            ephemeral_cursor,
-            0, // Will jump here if empty
-            0,
-            None,
-            0,
-            None,
-        ));
+        self.emit(OpCode::Sort, ephemeral_cursor, 0, 0, None, "");
 
         let sort_jump_target = self.program.len();
 
         // Rewind ephemeral for output pass
         let output_rewind_addr = self.program.len();
-        self.program.add_instruction(Instruction::new(
-            OpCode::Rewind,
-            ephemeral_cursor,
-            0, // Will be patched
-            0,
-            None,
-            0,
-            None,
-        ));
+        self.emit(OpCode::Rewind, ephemeral_cursor, 0, 0, None, "");
 
         // Allocate registers for output row
         let output_col_count = select.projection.len();
@@ -212,60 +182,47 @@ impl<'a> SqlCompiler<'a> {
         let rows_at_rank_reg = self.allocate_register(); // Number of rows at current rank
 
         // Initialize window state BEFORE the loop
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Integer,
             0,
             row_num_reg,
             0,
             None,
-            0,
-            Some("Initialize row number".to_string()),
-        ));
-        self.program.add_instruction(Instruction::new(
+            "Initialize row number",
+        );
+        self.emit(
             OpCode::Null,
             0,
             prev_partition_reg,
             0,
             None,
-            0,
-            Some("Initialize prev partition key".to_string()),
-        ));
-        self.program.add_instruction(Instruction::new(
-            OpCode::Integer,
-            0,
-            rank_reg,
-            0,
-            None,
-            0,
-            Some("Initialize rank".to_string()),
-        ));
-        self.program.add_instruction(Instruction::new(
+            "Initialize prev partition key",
+        );
+        self.emit(OpCode::Integer, 0, rank_reg, 0, None, "Initialize rank");
+        self.emit(
             OpCode::Null,
             0,
             prev_order_reg,
             0,
             None,
-            0,
-            Some("Initialize prev order key".to_string()),
-        ));
-        self.program.add_instruction(Instruction::new(
+            "Initialize prev order key",
+        );
+        self.emit(
             OpCode::Integer,
             0,
             dense_rank_reg,
             0,
             None,
-            0,
-            Some("Initialize dense rank".to_string()),
-        ));
-        self.program.add_instruction(Instruction::new(
+            "Initialize dense rank",
+        );
+        self.emit(
             OpCode::Integer,
             0,
             rows_at_rank_reg,
             0,
             None,
-            0,
-            Some("Initialize rows at rank".to_string()),
-        ));
+            "Initialize rows at rank",
+        );
 
         // Allocate registers for aggregate window functions (SUM, AVG, COUNT, MIN, MAX)
         let agg_sum_reg = self.allocate_register(); // Running sum
@@ -274,42 +231,38 @@ impl<'a> SqlCompiler<'a> {
         let agg_max_reg = self.allocate_register(); // Running max
 
         // Initialize aggregate state
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Integer,
             0,
             agg_sum_reg,
             0,
             None,
-            0,
-            Some("Initialize aggregate sum".to_string()),
-        ));
-        self.program.add_instruction(Instruction::new(
+            "Initialize aggregate sum",
+        );
+        self.emit(
             OpCode::Integer,
             0,
             agg_count_reg,
             0,
             None,
-            0,
-            Some("Initialize aggregate count".to_string()),
-        ));
-        self.program.add_instruction(Instruction::new(
+            "Initialize aggregate count",
+        );
+        self.emit(
             OpCode::Null,
             0,
             agg_min_reg,
             0,
             None,
-            0,
-            Some("Initialize aggregate min".to_string()),
-        ));
-        self.program.add_instruction(Instruction::new(
+            "Initialize aggregate min",
+        );
+        self.emit(
             OpCode::Null,
             0,
             agg_max_reg,
             0,
             None,
-            0,
-            Some("Initialize aggregate max".to_string()),
-        ));
+            "Initialize aggregate max",
+        );
 
         // Find if we have aggregate window functions and extract their column positions
         let mut agg_col_pos: Option<usize> = None;
@@ -378,15 +331,14 @@ impl<'a> SqlCompiler<'a> {
         } else {
             0
         };
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::WindowAggStep,
             first_func_type,
-            0, // value_reg not used for ROW_NUMBER/RANK
+            0,
             ephemeral_cursor,
             Some(window_spec_base.clone()),
-            0,
-            Some("Update window state for current row".to_string()),
-        ));
+            "Update window state for current row",
+        );
 
         // Compile the output projection
         let mut output_idx = 0;
@@ -450,29 +402,27 @@ impl<'a> SqlCompiler<'a> {
                                 None
                             };
 
-                            self.program.add_instruction(Instruction::new(
+                            self.emit(
                                 OpCode::WindowValue,
-                                row_num_reg, // Use row_num_reg as base for state
+                                row_num_reg,
                                 output_start_reg + output_idx as i64,
                                 func_type,
                                 p4,
-                                0,
-                                Some(format!("Get {} value", func_name)),
-                            ));
+                                &format!("Get {} value", func_name),
+                            );
                         }
                         Expr::Identifier(ident) => {
                             // Regular column reference
                             if let Some(col_idx) = table.column_index(&ident.value) {
                                 if let Some(pos) = base_columns.iter().position(|&c| c == col_idx) {
-                                    self.program.add_instruction(Instruction::new(
+                                    self.emit(
                                         OpCode::Column,
                                         ephemeral_cursor,
                                         pos as i64,
                                         output_start_reg + output_idx as i64,
                                         None,
-                                        0,
-                                        None,
-                                    ));
+                                        "",
+                                    );
                                 }
                             }
                         }
@@ -490,15 +440,14 @@ impl<'a> SqlCompiler<'a> {
                 SelectItem::Wildcard(_) => {
                     // Load all columns
                     for (i, &_col_idx) in base_columns.iter().enumerate() {
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::Column,
                             ephemeral_cursor,
                             i as i64,
                             output_start_reg + output_idx as i64,
                             None,
-                            0,
-                            None,
-                        ));
+                            "",
+                        );
                         output_idx += 1;
                     }
                     continue;
@@ -509,26 +458,24 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Output the row
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::ResultRow,
             output_start_reg,
             output_col_count as i64,
             0,
             None,
-            0,
-            None,
-        ));
+            "",
+        );
 
         // Next row in ephemeral
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Next,
             ephemeral_cursor,
             output_loop_start as i64,
             0,
             None,
-            0,
-            None,
-        ));
+            "",
+        );
 
         let after_output = self.program.len();
 
@@ -543,8 +490,7 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Halt
-        self.program
-            .add_instruction(Instruction::new(OpCode::Halt, 0, 0, 0, None, 0, None));
+        self.emit(OpCode::Halt, 0, 0, 0, None, "");
 
         Ok(())
     }

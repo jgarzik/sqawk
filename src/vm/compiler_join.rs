@@ -7,7 +7,7 @@ use sqlparser::ast::{
     Value,
 };
 
-use super::bytecode::{Instruction, OpCode, ResultSchema};
+use super::bytecode::{OpCode, ResultSchema};
 use super::compiler::{MultiTableProjection, SqlCompiler};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
@@ -149,25 +149,23 @@ impl<'a> SqlCompiler<'a> {
         let right_cursor = 1usize;
 
         // Open both tables
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::OpenRead,
             left_cursor as i64,
             1,
             0,
             Some(left_table_name.clone()),
-            0,
-            Some(format!("Open left table {} for reading", left_table_name)),
-        ));
+            &format!("Open left table {} for reading", left_table_name),
+        );
 
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::OpenRead,
             right_cursor as i64,
             2,
             0,
             Some(right_table_name.clone()),
-            0,
-            Some(format!("Open right table {} for reading", right_table_name)),
-        ));
+            &format!("Open right table {} for reading", right_table_name),
+        );
 
         // Allocate registers for columns - always in left, right order
         let left_start_reg = self.allocate_registers(left_cols.len());
@@ -184,90 +182,51 @@ impl<'a> SqlCompiler<'a> {
         let match_reg = self.allocate_register();
 
         // Initialize match flag to 0
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Integer,
             0,
             match_reg,
             0,
             None,
-            0,
-            Some("Initialize match flag to 0".to_string()),
-        ));
+            "Initialize match flag to 0",
+        );
 
         // Rewind outer cursor
         let outer_loop_end_placeholder = self.program.len();
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Rewind,
             outer_cursor as i64,
             0, // Placeholder - will be patched
             0,
             None,
-            0,
-            Some(format!("Rewind outer cursor ({})", outer_table_name)),
-        ));
+            &format!("Rewind outer cursor ({})", outer_table_name),
+        );
 
         // OUTER LOOP START
         let outer_loop_start = self.program.len();
 
         // Load outer table columns into their registers
-        for (i, col_idx) in outer_cols.iter().enumerate() {
-            self.program.add_instruction(Instruction::new(
-                OpCode::Column,
-                outer_cursor as i64,
-                *col_idx as i64,
-                outer_start_reg + i as i64,
-                None,
-                0,
-                Some(format!(
-                    "r[{}] = outer.col[{}]",
-                    outer_start_reg + i as i64,
-                    col_idx
-                )),
-            ));
-        }
+        self.emit_column_loads(outer_cursor as i64, &outer_cols, outer_start_reg, "outer");
 
         // Reset match flag for this outer iteration
-        self.program.add_instruction(Instruction::new(
-            OpCode::Integer,
-            0,
-            match_reg,
-            0,
-            None,
-            0,
-            Some("Reset match flag".to_string()),
-        ));
+        self.emit(OpCode::Integer, 0, match_reg, 0, None, "Reset match flag");
 
         // Rewind inner cursor
         let inner_loop_end_placeholder = self.program.len();
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::RewindInner,
             inner_cursor as i64,
             0, // Placeholder - will be patched
             0,
             None,
-            0,
-            Some(format!("Rewind inner cursor ({})", inner_table_name)),
-        ));
+            &format!("Rewind inner cursor ({})", inner_table_name),
+        );
 
         // INNER LOOP START
         let inner_loop_start = self.program.len();
 
         // Load inner table columns into their registers
-        for (i, col_idx) in inner_cols.iter().enumerate() {
-            self.program.add_instruction(Instruction::new(
-                OpCode::Column,
-                inner_cursor as i64,
-                *col_idx as i64,
-                inner_start_reg + i as i64,
-                None,
-                0,
-                Some(format!(
-                    "r[{}] = inner.col[{}]",
-                    inner_start_reg + i as i64,
-                    col_idx
-                )),
-            ));
-        }
+        self.emit_column_loads(inner_cursor as i64, &inner_cols, inner_start_reg, "inner");
 
         // Compile join condition
         let condition_reg = self.compile_join_condition(
@@ -280,15 +239,14 @@ impl<'a> SqlCompiler<'a> {
 
         // If ON condition fails, skip to next inner iteration (placeholder - will be patched)
         let skip_on_addr = self.program.len();
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::IfZ,
             condition_reg,
-            0, // Placeholder - will be patched to Next inner
+            0,
             0,
             None,
-            0,
-            Some("Skip if join ON condition false".to_string()),
-        ));
+            "Skip if join ON condition false",
+        );
 
         // Compile WHERE clause filtering if present
         let skip_where_addr = if let Some(where_expr) = where_clause {
@@ -303,53 +261,49 @@ impl<'a> SqlCompiler<'a> {
 
             // If WHERE condition fails, skip to next inner iteration
             let skip_addr = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfZ,
                 where_cond_reg,
-                0, // Placeholder - will be patched to Next inner
+                0,
                 0,
                 None,
-                0,
-                Some("Skip if WHERE condition false".to_string()),
-            ));
+                "Skip if WHERE condition false",
+            );
             Some(skip_addr)
         } else {
             None
         };
 
         // Mark match found
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::MarkMatch,
             match_reg,
             0,
             0,
             None,
-            0,
-            Some("Mark that a match was found".to_string()),
-        ));
+            "Mark that a match was found",
+        );
 
         // Output combined row (matched)
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::ResultRow,
             left_start_reg,
             (left_cols.len() + right_cols.len()) as i64,
             0,
             None,
-            0,
-            Some("Output matched row".to_string()),
-        ));
+            "Output matched row",
+        );
 
         // Next inner
         let next_inner_addr = self.program.len();
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Next,
             inner_cursor as i64,
             inner_loop_start as i64,
             0,
             None,
-            0,
-            Some("Next inner row".to_string()),
-        ));
+            "Next inner row",
+        );
 
         // Patch skip addresses to jump to Next inner
         if let Some(inst) = self.program.instructions.get_mut(skip_on_addr) {
@@ -372,49 +326,45 @@ impl<'a> SqlCompiler<'a> {
             // If no match (zero), continue to NullRow
             // Jump calculation: IfPos (current), NullRow (+1), ResultRow (+2), Next outer (+3)
             // So if match found, skip to +3 (Next outer)
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfPos,
                 match_reg,
-                (self.program.len() + 3) as i64, // Jump to Next outer if match found
+                (self.program.len() + 3) as i64,
                 0,
                 None,
-                0,
-                Some("Skip NULL row if match found".to_string()),
-            ));
+                "Skip NULL row if match found",
+            );
 
             // No match: output NULLs for inner columns
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::NullRow,
                 inner_start_reg,
                 inner_cols.len() as i64,
                 0,
                 None,
-                0,
-                Some("Fill inner columns with NULL".to_string()),
-            ));
+                "Fill inner columns with NULL",
+            );
 
             // Output row with NULLs
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::ResultRow,
                 left_start_reg,
                 (left_cols.len() + right_cols.len()) as i64,
                 0,
                 None,
-                0,
-                Some("Output outer row with NULLs for inner".to_string()),
-            ));
+                "Output outer row with NULLs for inner",
+            );
         }
 
         // Next outer
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Next,
             outer_cursor as i64,
             outer_loop_start as i64,
             0,
             None,
-            0,
-            Some("Next outer row".to_string()),
-        ));
+            "Next outer row",
+        );
 
         // OUTER LOOP END
         let mut outer_loop_end = self.program.len();
@@ -432,76 +382,45 @@ impl<'a> SqlCompiler<'a> {
 
             // Rewind right cursor
             let right_loop_end_placeholder = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Rewind,
                 right_cursor as i64,
-                0, // Placeholder
+                0,
                 0,
                 None,
-                0,
-                Some("Rewind right cursor for second pass".to_string()),
-            ));
+                "Rewind right cursor for second pass",
+            );
 
             let right_loop_start = self.program.len();
 
             // Load right columns
-            for (i, col_idx) in right_cols.iter().enumerate() {
-                self.program.add_instruction(Instruction::new(
-                    OpCode::Column,
-                    right_cursor as i64,
-                    *col_idx as i64,
-                    right_start_reg + i as i64,
-                    None,
-                    0,
-                    Some(format!(
-                        "r[{}] = right.col[{}]",
-                        right_start_reg + i as i64,
-                        col_idx
-                    )),
-                ));
-            }
+            self.emit_column_loads(right_cursor as i64, &right_cols, right_start_reg, "right");
 
             // Reset match flag
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Integer,
                 0,
                 match_reg,
                 0,
                 None,
-                0,
-                Some("Reset match flag for right row".to_string()),
-            ));
+                "Reset match flag for right row",
+            );
 
             // Rewind left cursor to check for matches
             let left_check_end_placeholder = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::RewindInner,
                 left_cursor as i64,
-                0, // Placeholder - will be patched
+                0,
                 0,
                 None,
-                0,
-                Some("Rewind left cursor to check for matches".to_string()),
-            ));
+                "Rewind left cursor to check for matches",
+            );
 
             let left_check_start = self.program.len();
 
             // Load left columns for condition check
-            for (i, col_idx) in left_cols.iter().enumerate() {
-                self.program.add_instruction(Instruction::new(
-                    OpCode::Column,
-                    left_cursor as i64,
-                    *col_idx as i64,
-                    left_start_reg + i as i64,
-                    None,
-                    0,
-                    Some(format!(
-                        "r[{}] = left.col[{}]",
-                        left_start_reg + i as i64,
-                        col_idx
-                    )),
-                ));
-            }
+            self.emit_column_loads(left_cursor as i64, &left_cols, left_start_reg, "left");
 
             // Check join condition
             let condition_reg2 = self.compile_join_condition(
@@ -514,84 +433,77 @@ impl<'a> SqlCompiler<'a> {
 
             // If condition matches, mark it and skip to next right row
             // IfZ skips over MarkMatch if condition is false
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfZ,
                 condition_reg2,
-                (self.program.len() + 2) as i64, // Skip MarkMatch
+                (self.program.len() + 2) as i64,
                 0,
                 None,
-                0,
-                Some("Skip if condition false".to_string()),
-            ));
+                "Skip if condition false",
+            );
 
             // Mark that a match was found
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::MarkMatch,
                 match_reg,
                 0,
                 0,
                 None,
-                0,
-                Some("Mark that right row has a match".to_string()),
-            ));
+                "Mark that right row has a match",
+            );
 
             // Next left (continue checking)
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Next,
                 left_cursor as i64,
                 left_check_start as i64,
                 0,
                 None,
-                0,
-                Some("Next left row".to_string()),
-            ));
+                "Next left row",
+            );
 
             let left_check_end = self.program.len();
 
             // After checking all left rows: if no match, output right row with NULLs for left
             // If match found (IfPos), skip to next right row
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfPos,
                 match_reg,
-                (self.program.len() + 3) as i64, // Skip NullRow and ResultRow
+                (self.program.len() + 3) as i64,
                 0,
                 None,
-                0,
-                Some("Skip if right row had a match".to_string()),
-            ));
+                "Skip if right row had a match",
+            );
 
             // No match: fill left columns with NULL
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::NullRow,
                 left_start_reg,
                 left_cols.len() as i64,
                 0,
                 None,
-                0,
-                Some("Fill left columns with NULL".to_string()),
-            ));
+                "Fill left columns with NULL",
+            );
 
             // Output row with NULLs for left
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::ResultRow,
                 left_start_reg,
                 (left_cols.len() + right_cols.len()) as i64,
                 0,
                 None,
-                0,
-                Some("Output unmatched right row with NULLs".to_string()),
-            ));
+                "Output unmatched right row with NULLs",
+            );
 
             // Next right row
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Next,
                 right_cursor as i64,
                 right_loop_start as i64,
                 0,
                 None,
-                0,
-                Some("Next right row".to_string()),
-            ));
+                "Next right row",
+            );
 
             let right_loop_end = self.program.len();
 
@@ -615,25 +527,22 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Close cursors
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Close,
             left_cursor as i64,
             0,
             0,
             None,
-            0,
-            Some("Close left cursor".to_string()),
-        ));
-
-        self.program.add_instruction(Instruction::new(
+            "Close left cursor",
+        );
+        self.emit(
             OpCode::Close,
             right_cursor as i64,
             0,
             0,
             None,
-            0,
-            Some("Close right cursor".to_string()),
-        ));
+            "Close right cursor",
+        );
 
         // Patch jump addresses for main loop
         if let Some(inst) = self
@@ -732,16 +641,7 @@ impl<'a> SqlCompiler<'a> {
         let left_loop_start = self.program.len();
 
         // Load left table columns
-        for (i, col_idx) in left_cols.iter().enumerate() {
-            self.emit(
-                OpCode::Column,
-                left_cursor as i64,
-                *col_idx as i64,
-                left_start_reg + i as i64,
-                None,
-                &format!("r[{}] = left.col[{}]", left_start_reg + i as i64, col_idx),
-            );
-        }
+        self.emit_column_loads(left_cursor as i64, &left_cols, left_start_reg, "left");
 
         // Rewind right cursor (inner loop)
         let right_loop_end_placeholder = self.program.len();
@@ -758,16 +658,7 @@ impl<'a> SqlCompiler<'a> {
         let right_loop_start = self.program.len();
 
         // Load right table columns
-        for (i, col_idx) in right_cols.iter().enumerate() {
-            self.emit(
-                OpCode::Column,
-                right_cursor as i64,
-                *col_idx as i64,
-                right_start_reg + i as i64,
-                None,
-                &format!("r[{}] = right.col[{}]", right_start_reg + i as i64, col_idx),
-            );
-        }
+        self.emit_column_loads(right_cursor as i64, &right_cols, right_start_reg, "right");
 
         // Output combined row
         self.emit(
@@ -1591,16 +1482,7 @@ impl<'a> SqlCompiler<'a> {
         let left_loop_start = self.program.len();
 
         // Load left table columns
-        for (i, col_idx) in left_cols.iter().enumerate() {
-            self.emit(
-                OpCode::Column,
-                left_cursor as i64,
-                *col_idx as i64,
-                left_start_reg + i as i64,
-                None,
-                &format!("r[{}] = left.col[{}]", left_start_reg + i as i64, col_idx),
-            );
-        }
+        self.emit_column_loads(left_cursor as i64, &left_cols, left_start_reg, "left");
 
         // Rewind right cursor (inner loop)
         let right_loop_end_placeholder = self.program.len();
@@ -1617,16 +1499,7 @@ impl<'a> SqlCompiler<'a> {
         let right_loop_start = self.program.len();
 
         // Load right table columns
-        for (i, col_idx) in right_cols.iter().enumerate() {
-            self.emit(
-                OpCode::Column,
-                right_cursor as i64,
-                *col_idx as i64,
-                right_start_reg + i as i64,
-                None,
-                &format!("r[{}] = right.col[{}]", right_start_reg + i as i64, col_idx),
-            );
-        }
+        self.emit_column_loads(right_cursor as i64, &right_cols, right_start_reg, "right");
 
         // Compile WHERE condition to filter rows
         let skip_output_addr = if let Some(where_expr) = &select.selection {
@@ -2358,15 +2231,14 @@ impl<'a> SqlCompiler<'a> {
 
                 let opcode = Self::binary_op_to_comparison_opcode(op)?;
 
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     opcode,
                     left_reg,
                     right_reg,
                     result_reg,
                     None,
-                    0,
-                    Some("Evaluate join condition".to_string()),
-                ));
+                    "Evaluate join condition",
+                );
 
                 Ok(result_reg)
             }
@@ -2401,29 +2273,27 @@ impl<'a> SqlCompiler<'a> {
                     if table_alias == left_table_name {
                         if let Some(col_idx) = left_table.column_index(&col_name) {
                             let reg = self.allocate_register();
-                            self.program.add_instruction(Instruction::new(
+                            self.emit(
                                 OpCode::Column,
                                 left_cursor as i64,
                                 col_idx as i64,
                                 reg,
                                 None,
-                                0,
-                                Some(format!("Load {}.{} for join", table_alias, col_name)),
-                            ));
+                                &format!("Load {}.{} for join", table_alias, col_name),
+                            );
                             return Ok(reg);
                         }
                     } else if table_alias == right_table_name {
                         if let Some(col_idx) = right_table.column_index(&col_name) {
                             let reg = self.allocate_register();
-                            self.program.add_instruction(Instruction::new(
+                            self.emit(
                                 OpCode::Column,
                                 right_cursor as i64,
                                 col_idx as i64,
                                 reg,
                                 None,
-                                0,
-                                Some(format!("Load {}.{} for join", table_alias, col_name)),
-                            ));
+                                &format!("Load {}.{} for join", table_alias, col_name),
+                            );
                             return Ok(reg);
                         }
                     }
@@ -2445,30 +2315,28 @@ impl<'a> SqlCompiler<'a> {
                 // Try left table first
                 if let Some(col_idx) = left_table.column_index(&col_name) {
                     let reg = self.allocate_register();
-                    self.program.add_instruction(Instruction::new(
+                    self.emit(
                         OpCode::Column,
                         left_cursor as i64,
                         col_idx as i64,
                         reg,
                         None,
-                        0,
-                        Some(format!("Load {} from left for join", col_name)),
-                    ));
+                        &format!("Load {} from left for join", col_name),
+                    );
                     return Ok(reg);
                 }
 
                 // Try right table
                 if let Some(col_idx) = right_table.column_index(&col_name) {
                     let reg = self.allocate_register();
-                    self.program.add_instruction(Instruction::new(
+                    self.emit(
                         OpCode::Column,
                         right_cursor as i64,
                         col_idx as i64,
                         reg,
                         None,
-                        0,
-                        Some(format!("Load {} from right for join", col_name)),
-                    ));
+                        &format!("Load {} from right for join", col_name),
+                    );
                     return Ok(reg);
                 }
 
@@ -2483,27 +2351,18 @@ impl<'a> SqlCompiler<'a> {
                 match val {
                     Value::Number(n, _) => {
                         if let Ok(i) = n.parse::<i64>() {
-                            self.program.add_instruction(Instruction::new(
-                                OpCode::Integer,
-                                i,
-                                reg,
-                                0,
-                                None,
-                                0,
-                                Some("Load literal for join".to_string()),
-                            ));
+                            self.emit(OpCode::Integer, i, reg, 0, None, "Load literal for join");
                         }
                     }
                     Value::SingleQuotedString(s) => {
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::String,
                             0,
                             reg,
                             0,
                             Some(s.clone()),
-                            0,
-                            Some("Load string literal for join".to_string()),
-                        ));
+                            "Load string literal for join",
+                        );
                     }
                     _ => {}
                 }

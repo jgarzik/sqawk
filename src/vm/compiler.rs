@@ -107,6 +107,26 @@ impl<'a> SqlCompiler<'a> {
         ));
     }
 
+    /// Helper to emit Column opcodes for multiple columns
+    pub(crate) fn emit_column_loads(
+        &mut self,
+        cursor: i64,
+        cols: &[usize],
+        start_reg: i64,
+        label: &str,
+    ) {
+        for (i, col_idx) in cols.iter().enumerate() {
+            self.emit(
+                OpCode::Column,
+                cursor,
+                *col_idx as i64,
+                start_reg + i as i64,
+                None,
+                &format!("r[{}] = {}.col[{}]", start_reg + i as i64, label, col_idx),
+            );
+        }
+    }
+
     /// Patch a jump instruction's target address (p2)
     pub(crate) fn patch_jump(&mut self, addr: usize, target: usize) {
         if let Some(inst) = self.program.instructions.get_mut(addr) {
@@ -145,8 +165,7 @@ impl<'a> SqlCompiler<'a> {
     /// Add a comment to the program if verbose mode is enabled
     pub(crate) fn add_comment(&mut self, comment: &str) {
         if self.verbose {
-            let noop = Instruction::new(OpCode::Noop, 0, 0, 0, None, 0, Some(comment.to_string()));
-            self.program.add_instruction(noop);
+            self.emit(OpCode::Noop, 0, 0, 0, None, comment);
         }
     }
 
@@ -173,15 +192,14 @@ impl<'a> SqlCompiler<'a> {
         // Add initial "Init" instruction that will be filled in later
         // with the address of the main program body
         let init_addr = self.program.len();
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Init,
             0,
             0,
             0,
             None,
-            0,
-            Some("Start address will be filled in later".into()),
-        ));
+            "Start address will be filled in later",
+        );
 
         // Compile each statement
         for statement in statements {
@@ -189,15 +207,7 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Add Halt instruction at the end
-        self.program.add_instruction(Instruction::new(
-            OpCode::Halt,
-            0,
-            0,
-            0,
-            None,
-            0,
-            Some("End execution".to_string()),
-        ));
+        self.emit(OpCode::Halt, 0, 0, 0, None, "End execution");
 
         // Go back and update the Init instruction with the correct start address
         // (usually this would point to setup code like transaction start)
@@ -332,15 +342,14 @@ impl<'a> SqlCompiler<'a> {
             // Add a marker instruction that the VM will use to know where left results end
             // p1=-1 is a special value meaning "use current result count"
             // p2 is the destination register
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Integer,
                 -1, // Special marker: -1 means "current result count"
                 marker_reg,
                 0,
                 None,
-                0,
-                Some("Store current result count".to_string()),
-            ));
+                "Store current result count",
+            );
         }
 
         // Compile the right side
@@ -351,39 +360,36 @@ impl<'a> SqlCompiler<'a> {
             SetOperator::Union => {
                 if !all {
                     // UNION (without ALL) needs to remove duplicates
-                    self.program.add_instruction(Instruction::new(
+                    self.emit(
                         OpCode::Distinct,
                         0,
                         0,
                         0,
                         None,
-                        0,
-                        Some("Remove duplicate rows for UNION".to_string()),
-                    ));
+                        "Remove duplicate rows for UNION",
+                    );
                 }
                 // UNION ALL: no additional processing needed, results are already combined
             }
             SetOperator::Intersect => {
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Intersect,
                     left_results_marker.unwrap_or(0),
                     0,
                     0,
                     None,
-                    0,
-                    Some("Keep only rows in both result sets".to_string()),
-                ));
+                    "Keep only rows in both result sets",
+                );
             }
             SetOperator::Except => {
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Except,
                     left_results_marker.unwrap_or(0),
                     0,
                     0,
                     None,
-                    0,
-                    Some("Keep only rows in left but not in right".to_string()),
-                ));
+                    "Keep only rows in left but not in right",
+                );
             }
         }
 
@@ -487,15 +493,7 @@ impl<'a> SqlCompiler<'a> {
 
         // Handle DISTINCT - emit Distinct opcode to deduplicate results
         if select.distinct.is_some() {
-            self.program.add_instruction(Instruction::new(
-                OpCode::Distinct,
-                0,
-                0,
-                0,
-                None,
-                0,
-                Some("Remove duplicate rows".to_string()),
-            ));
+            self.emit(OpCode::Distinct, 0, 0, 0, None, "Remove duplicate rows");
         }
 
         Ok(())
@@ -626,38 +624,35 @@ impl<'a> SqlCompiler<'a> {
         let sort_spec = self.build_sort_spec(&query.order_by, table, columns)?;
 
         // Open sorter
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::SorterOpen,
             sorter_id,
             col_count as i64,
             0,
             Some(sort_spec),
-            0,
-            None,
-        ));
+            "",
+        );
 
         // Open table
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::OpenRead,
             cursor_idx,
             1,
             0,
             Some(table_name.to_string()),
-            0,
-            None,
-        ));
+            "",
+        );
 
         // Rewind - jump past loop if empty
         let rewind_addr = self.program.len();
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Rewind,
             cursor_idx,
             0, // Will be patched
             0,
             None,
-            0,
-            None,
-        ));
+            "",
+        );
 
         let loop_start = self.program.len();
 
@@ -665,52 +660,42 @@ impl<'a> SqlCompiler<'a> {
         let start_reg = self.allocate_registers(col_count);
 
         for (i, col_idx) in columns.iter().enumerate() {
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Column,
                 cursor_idx,
                 *col_idx as i64,
                 start_reg + i as i64,
                 None,
-                0,
-                None,
-            ));
+                "",
+            );
         }
 
         // Compile WHERE clause if present
         if let Some(where_expr) = &select.selection {
             let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
-            self.program.add_instruction(Instruction::new(
+            // Skip SorterInsert, go to Next
+            self.emit(
                 OpCode::IfZ,
                 cond_reg,
-                (self.program.len() + 2) as i64, // Skip SorterInsert, go to Next
+                (self.program.len() + 2) as i64,
                 0,
                 None,
-                0,
-                None,
-            ));
+                "",
+            );
         }
 
         // Insert into sorter
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::SorterInsert,
             sorter_id,
             start_reg,
             col_count as i64,
             None,
-            0,
-            None,
-        ));
+            "",
+        );
 
         // Next row
-        self.program.add_instruction(Instruction::new(
-            OpCode::Next,
-            cursor_idx,
-            loop_start as i64,
-            0,
-            None,
-            0,
-            None,
-        ));
+        self.emit(OpCode::Next, cursor_idx, loop_start as i64, 0, None, "");
 
         let after_scan = self.program.len();
 
@@ -720,15 +705,7 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Sort the sorter
-        self.program.add_instruction(Instruction::new(
-            OpCode::SorterSort,
-            sorter_id,
-            0,
-            0,
-            None,
-            0,
-            None,
-        ));
+        self.emit(OpCode::SorterSort, sorter_id, 0, 0, None, "");
 
         // Handle LIMIT/OFFSET
         // When DISTINCT is present, we apply LIMIT after DISTINCT (as a separate opcode)
@@ -741,15 +718,7 @@ impl<'a> SqlCompiler<'a> {
             let reg = self.allocate_register();
             // Initialize limit counter (add offset to limit since we'll skip offset rows)
             let total = limit_val.unwrap_or(i64::MAX);
-            self.program.add_instruction(Instruction::new(
-                OpCode::Integer,
-                total,
-                reg,
-                0,
-                None,
-                0,
-                None,
-            ));
+            self.emit(OpCode::Integer, total, reg, 0, None, "");
             Some(reg)
         } else {
             None
@@ -759,15 +728,7 @@ impl<'a> SqlCompiler<'a> {
         // When DISTINCT is present, offset is applied after DISTINCT via the Limit opcode
         let offset_reg = if offset_val > 0 && !has_distinct {
             let reg = self.allocate_register();
-            self.program.add_instruction(Instruction::new(
-                OpCode::Integer,
-                offset_val,
-                reg,
-                0,
-                None,
-                0,
-                None,
-            ));
+            self.emit(OpCode::Integer, offset_val, reg, 0, None, "");
             Some(reg)
         } else {
             None
@@ -777,60 +738,55 @@ impl<'a> SqlCompiler<'a> {
         let sorter_loop_start = self.program.len();
 
         // Get row from sorter
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::SorterData,
             sorter_id,
             start_reg,
             col_count as i64,
             None,
-            0,
-            None,
-        ));
+            "",
+        );
 
         // Handle OFFSET - skip first N rows
         if let Some(off_reg) = offset_reg {
             // If offset counter > 0, decrement and skip this row
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfPos,
                 off_reg,
                 (self.program.len() + 2) as i64, // Jump to decrement and next (DecrJumpZero)
                 0,
                 None,
-                0,
-                None,
-            ));
+                "",
+            );
             // Offset exhausted, continue to output
             let output_addr = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Goto,
                 0,
                 0, // Will be patched to ResultRow
                 0,
                 None,
-                0,
-                None,
-            ));
+                "",
+            );
             // Decrement offset and go to next
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::DecrJumpZero,
                 off_reg,
                 (self.program.len() + 1) as i64, // Continue to SorterNext
                 0,
                 None,
-                0,
-                None,
-            ));
+                "",
+            );
             // Skip offset depends on whether there's a LIMIT instruction after ResultRow
             let skip_offset = if limit_reg.is_some() { 3 } else { 2 };
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Goto,
                 0,
                 (self.program.len() + skip_offset) as i64, // Skip to SorterNext
                 0,
                 None,
-                0,
-                None,
-            ));
+                "",
+            );
             // Patch the Goto to ResultRow
             let result_row_addr = self.program.len() as i64;
             if let Some(inst) = self.program.instructions.get_mut(output_addr) {
@@ -839,80 +795,53 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Output result row
-        self.program.add_instruction(Instruction::new(
-            OpCode::ResultRow,
-            start_reg,
-            col_count as i64,
-            0,
-            None,
-            0,
-            None,
-        ));
+        self.emit(OpCode::ResultRow, start_reg, col_count as i64, 0, None, "");
 
         // Handle LIMIT
         if let Some(lim_reg) = limit_reg {
             // DecrJumpZero exits when limit reached
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::DecrJumpZero,
                 lim_reg,
                 (self.program.len() + 2) as i64, // Jump past SorterNext to end
                 0,
                 None,
-                0,
-                None,
-            ));
+                "",
+            );
         }
 
         // Next sorted row
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::SorterNext,
             sorter_id,
             sorter_loop_start as i64,
             0,
             None,
-            0,
-            None,
-        ));
+            "",
+        );
 
         // Close cursor
-        self.program.add_instruction(Instruction::new(
-            OpCode::Close,
-            cursor_idx,
-            0,
-            0,
-            None,
-            0,
-            None,
-        ));
+        self.emit(OpCode::Close, cursor_idx, 0, 0, None, "");
 
         // Handle DISTINCT - emit Distinct opcode to deduplicate results
         if select.distinct.is_some() {
-            self.program.add_instruction(Instruction::new(
-                OpCode::Distinct,
-                0,
-                0,
-                0,
-                None,
-                0,
-                Some("Remove duplicate rows".to_string()),
-            ));
+            self.emit(OpCode::Distinct, 0, 0, 0, None, "Remove duplicate rows");
 
             // For DISTINCT queries, apply LIMIT/OFFSET after DISTINCT
             // OFFSET was NOT applied during sorter output when DISTINCT is present
             if limit_val.is_some() || offset_val > 0 {
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Limit,
                     limit_val.unwrap_or(i64::MAX),
                     offset_val,
                     0,
                     None,
-                    0,
-                    Some(format!(
+                    &format!(
                         "Limit {} offset {}",
                         limit_val.unwrap_or(i64::MAX),
                         offset_val
-                    )),
-                ));
+                    ),
+                );
             }
         }
 
@@ -934,28 +863,19 @@ impl<'a> SqlCompiler<'a> {
         let (limit_val, offset_val) = self.extract_limit_offset(query)?;
 
         // Open table
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::OpenRead,
             cursor_idx,
             1,
             0,
             Some(table_name.to_string()),
-            0,
-            None,
-        ));
+            "",
+        );
 
         // Initialize limit counter
         let limit_reg = if let Some(limit) = limit_val {
             let reg = self.allocate_register();
-            self.program.add_instruction(Instruction::new(
-                OpCode::Integer,
-                limit,
-                reg,
-                0,
-                None,
-                0,
-                None,
-            ));
+            self.emit(OpCode::Integer, limit, reg, 0, None, "");
             Some(reg)
         } else {
             None
@@ -964,15 +884,14 @@ impl<'a> SqlCompiler<'a> {
         // LIMIT 0 optimization: skip the entire loop if limit is 0 at compile time
         let limit_zero_jump = if limit_val == Some(0) {
             let addr = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Goto,
                 0,
                 0, // Will be patched to after loop
                 0,
                 None,
-                0,
-                Some("LIMIT 0: skip loop".to_string()),
-            ));
+                "LIMIT 0: skip loop",
+            );
             Some(addr)
         } else {
             None
@@ -981,15 +900,7 @@ impl<'a> SqlCompiler<'a> {
         // Initialize offset counter
         let offset_reg = if offset_val > 0 {
             let reg = self.allocate_register();
-            self.program.add_instruction(Instruction::new(
-                OpCode::Integer,
-                offset_val,
-                reg,
-                0,
-                None,
-                0,
-                None,
-            ));
+            self.emit(OpCode::Integer, offset_val, reg, 0, None, "");
             Some(reg)
         } else {
             None
@@ -997,15 +908,14 @@ impl<'a> SqlCompiler<'a> {
 
         // Rewind
         let rewind_addr = self.program.len();
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Rewind,
             cursor_idx,
             0, // Will be patched
             0,
             None,
-            0,
-            None,
-        ));
+            "",
+        );
 
         let loop_start = self.program.len();
 
@@ -1013,71 +923,59 @@ impl<'a> SqlCompiler<'a> {
         let start_reg = self.allocate_registers(col_count);
 
         for (i, col_idx) in columns.iter().enumerate() {
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Column,
                 cursor_idx,
                 *col_idx as i64,
                 start_reg + i as i64,
                 None,
-                0,
-                None,
-            ));
+                "",
+            );
         }
 
         // WHERE clause
         if let Some(where_expr) = &select.selection {
             let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfZ,
                 cond_reg,
                 (self.program.len() + 2) as i64,
                 0,
                 None,
-                0,
-                None,
-            ));
+                "",
+            );
         }
 
         // Handle OFFSET - skip first N matching rows
         // Pattern: IfPos offset, skip -> output -> skip: DecrJumpZero -> Next
         let offset_ifpos_addr = if let Some(off_reg) = offset_reg {
             let addr = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfPos,
                 off_reg,
                 0, // Will patch to DecrJumpZero (skip block)
                 0,
                 None,
-                0,
-                None,
-            ));
+                "",
+            );
             Some(addr)
         } else {
             None
         };
 
         // Output row
-        self.program.add_instruction(Instruction::new(
-            OpCode::ResultRow,
-            start_reg,
-            col_count as i64,
-            0,
-            None,
-            0,
-            None,
-        ));
+        self.emit(OpCode::ResultRow, start_reg, col_count as i64, 0, None, "");
 
         // Handle LIMIT
         let after_limit = if let Some(lim_reg) = limit_reg {
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::DecrJumpZero,
                 lim_reg,
                 0, // Will be patched to after loop
                 0,
                 None,
-                0,
-                None,
-            ));
+                "",
+            );
             Some(self.program.len() - 1)
         } else {
             None
@@ -1086,15 +984,14 @@ impl<'a> SqlCompiler<'a> {
         // Goto past offset decrement (skip block) to Next
         let goto_next_addr = if offset_reg.is_some() {
             let addr = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Goto,
                 0,
                 0, // Will patch to Next
                 0,
                 None,
-                0,
-                None,
-            ));
+                "",
+            );
             Some(addr)
         } else {
             None
@@ -1103,15 +1000,14 @@ impl<'a> SqlCompiler<'a> {
         // Offset skip block: decrement offset counter then fall through to Next
         let offset_decr_addr = if let Some(off_reg) = offset_reg {
             let addr = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::DecrJumpZero,
                 off_reg,
                 (self.program.len() + 1) as i64, // Always fall through to Next
                 0,
                 None,
-                0,
-                None,
-            ));
+                "",
+            );
             Some(addr)
         } else {
             None
@@ -1119,15 +1015,7 @@ impl<'a> SqlCompiler<'a> {
 
         // Next row
         let next_addr = self.program.len();
-        self.program.add_instruction(Instruction::new(
-            OpCode::Next,
-            cursor_idx,
-            loop_start as i64,
-            0,
-            None,
-            0,
-            None,
-        ));
+        self.emit(OpCode::Next, cursor_idx, loop_start as i64, 0, None, "");
 
         let after_loop = self.program.len();
 
@@ -1162,15 +1050,7 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Close cursor
-        self.program.add_instruction(Instruction::new(
-            OpCode::Close,
-            cursor_idx,
-            0,
-            0,
-            None,
-            0,
-            None,
-        ));
+        self.emit(OpCode::Close, cursor_idx, 0, 0, None, "");
 
         Ok(())
     }
@@ -1300,28 +1180,26 @@ impl<'a> SqlCompiler<'a> {
             for (i, &src_reg) in result_regs.iter().enumerate() {
                 let dest_reg = start_reg + i as i64;
                 if src_reg != dest_reg {
-                    self.program.add_instruction(Instruction::new(
+                    self.emit(
                         OpCode::Copy,
                         src_reg,
                         dest_reg,
                         0,
                         None,
-                        0,
-                        Some(format!("Copy r[{}] -> r[{}]", src_reg, dest_reg)),
-                    ));
+                        &format!("Copy r[{}] -> r[{}]", src_reg, dest_reg),
+                    );
                 }
             }
 
             // Output the result row from contiguous registers
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::ResultRow,
                 start_reg,                // First register
                 result_regs.len() as i64, // Number of columns
                 0,
                 None,
-                0,
-                Some("Output literal result row".to_string()),
-            ));
+                "Output literal result row",
+            );
         }
 
         Ok(())
@@ -1362,26 +1240,24 @@ impl<'a> SqlCompiler<'a> {
                     sqlparser::ast::Value::Number(num, _) => {
                         // Try to parse as integer first
                         if let Ok(int_val) = num.parse::<i64>() {
-                            self.program.add_instruction(Instruction::new(
+                            self.emit(
                                 OpCode::Integer,
                                 int_val,    // Value
                                 result_reg, // Target register
                                 0,
                                 None,
-                                0,
-                                Some(format!("r[{}] = {}", result_reg, int_val)),
-                            ));
+                                &format!("r[{}] = {}", result_reg, int_val),
+                            );
                         } else if let Ok(float_val) = num.parse::<f64>() {
                             // For floats, use String opcode and rely on runtime conversion
-                            self.program.add_instruction(Instruction::new(
+                            self.emit(
                                 OpCode::String,
                                 0,
                                 result_reg,
                                 0,
                                 Some(float_val.to_string()),
-                                0,
-                                Some(format!("r[{}] = {} (float)", result_reg, float_val)),
-                            ));
+                                &format!("r[{}] = {} (float)", result_reg, float_val),
+                            );
                         } else {
                             return Err(SqawkError::UnsupportedSqlFeature(format!(
                                 "Invalid numeric literal: {}",
@@ -1390,26 +1266,24 @@ impl<'a> SqlCompiler<'a> {
                         }
                     }
                     sqlparser::ast::Value::SingleQuotedString(s) => {
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::String,
                             0,
                             result_reg,
                             0,
                             Some(s.clone()),
-                            0,
-                            Some(format!("r[{}] = '{}'", result_reg, s)),
-                        ));
+                            &format!("r[{}] = '{}'", result_reg, s),
+                        );
                     }
                     sqlparser::ast::Value::Null => {
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::Null,
                             0,
                             result_reg,
                             0,
                             None,
-                            0,
-                            Some(format!("r[{}] = NULL", result_reg)),
-                        ));
+                            &format!("r[{}] = NULL", result_reg),
+                        );
                     }
                     _ => {
                         return Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -1427,37 +1301,34 @@ impl<'a> SqlCompiler<'a> {
                         let inner_reg = self.compile_expr(expr)?;
                         // Negate using 0 - value (avoids Integer -1 special case)
                         let zero_reg = self.allocate_register();
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::Integer,
                             0,
                             zero_reg,
                             0,
                             None,
-                            0,
-                            Some(format!("r[{}] = 0", zero_reg)),
-                        ));
-                        self.program.add_instruction(Instruction::new(
+                            &format!("r[{}] = 0", zero_reg),
+                        );
+                        self.emit(
                             OpCode::Subtract,
                             zero_reg,
                             inner_reg,
                             result_reg,
                             None,
-                            0,
-                            Some(format!("r[{}] = -r[{}]", result_reg, inner_reg)),
-                        ));
+                            &format!("r[{}] = -r[{}]", result_reg, inner_reg),
+                        );
                     }
                     sqlparser::ast::UnaryOperator::Plus => {
                         // Unary plus is a no-op, just compile the inner expression
                         let inner_reg = self.compile_expr(expr)?;
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::Copy,
                             inner_reg,
                             result_reg,
                             0,
                             None,
-                            0,
-                            Some(format!("r[{}] = +r[{}]", result_reg, inner_reg)),
-                        ));
+                            &format!("r[{}] = +r[{}]", result_reg, inner_reg),
+                        );
                     }
                     _ => {
                         return Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -1486,18 +1357,17 @@ impl<'a> SqlCompiler<'a> {
                     }
                 };
 
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     opcode,
                     left_reg,
                     right_reg,
                     result_reg,
                     None,
-                    0,
-                    Some(format!(
+                    &format!(
                         "r[{}] = r[{}] {:?} r[{}]",
                         result_reg, left_reg, op, right_reg
-                    )),
-                ));
+                    ),
+                );
             }
             sqlparser::ast::Expr::Function(func) => {
                 // Handle function calls (ABS, ROUND, etc.)
@@ -1520,27 +1390,25 @@ impl<'a> SqlCompiler<'a> {
                         }
                         let arg_expr = self.extract_function_arg_expr(&func.args[0])?;
                         let src_reg = self.compile_expr(&arg_expr)?;
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::MathFunc,
                             src_reg,
                             result_reg,
                             0,
                             Some(func_name.clone()),
-                            0,
-                            Some(format!("r[{}] = {}(r[{}])", result_reg, func_name, src_reg)),
-                        ));
+                            &format!("r[{}] = {}(r[{}])", result_reg, func_name, src_reg),
+                        );
                     }
                     "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" => {
                         // No-argument date/time functions
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::DateFunc,
                             0, // No source register needed
                             result_reg,
                             0,
                             Some(func_name.clone()),
-                            0,
-                            Some(format!("r[{}] = {}()", result_reg, func_name)),
-                        ));
+                            &format!("r[{}] = {}()", result_reg, func_name),
+                        );
                     }
                     "DATE" | "TIME" => {
                         // Single-argument date/time functions
@@ -1552,15 +1420,14 @@ impl<'a> SqlCompiler<'a> {
                         }
                         let arg_expr = self.extract_function_arg_expr(&func.args[0])?;
                         let src_reg = self.compile_expr(&arg_expr)?;
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::DateFunc,
                             src_reg,
                             result_reg,
                             0,
                             Some(func_name.clone()),
-                            0,
-                            Some(format!("r[{}] = {}(r[{}])", result_reg, func_name, src_reg)),
-                        ));
+                            &format!("r[{}] = {}(r[{}])", result_reg, func_name, src_reg),
+                        );
                     }
                     _ => {
                         return Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -1573,28 +1440,26 @@ impl<'a> SqlCompiler<'a> {
             sqlparser::ast::Expr::Ceil { expr, .. } => {
                 // CEIL is a special expression type in sqlparser
                 let src_reg = self.compile_expr(expr)?;
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::MathFunc,
                     src_reg,
                     result_reg,
                     0,
                     Some("CEIL".to_string()),
-                    0,
-                    Some(format!("r[{}] = CEIL(r[{}])", result_reg, src_reg)),
-                ));
+                    &format!("r[{}] = CEIL(r[{}])", result_reg, src_reg),
+                );
             }
             sqlparser::ast::Expr::Floor { expr, .. } => {
                 // FLOOR is a special expression type in sqlparser
                 let src_reg = self.compile_expr(expr)?;
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::MathFunc,
                     src_reg,
                     result_reg,
                     0,
                     Some("FLOOR".to_string()),
-                    0,
-                    Some(format!("r[{}] = FLOOR(r[{}])", result_reg, src_reg)),
-                ));
+                    &format!("r[{}] = FLOOR(r[{}])", result_reg, src_reg),
+                );
             }
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -1674,28 +1539,26 @@ impl<'a> SqlCompiler<'a> {
         // Use a simple counter for now, since we don't have get_table_id
         let table_id = 1i64; // Just assign a default ID
 
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::OpenRead,
             cursor_idx as i64,
             table_id,
             0,
             Some(table_name.clone()),
-            0,
-            Some(format!("Open table {} for reading", table_name)),
-        ));
+            &format!("Open table {} for reading", table_name),
+        );
 
         // Set up the loop to scan the table
         // Store the rewind address to patch later with correct exit point
         let rewind_addr = self.program.len();
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Rewind,
             cursor_idx as i64,
             0, // Placeholder - will be patched with actual exit address
             0,
             None,
-            0,
-            Some("Position cursor at first row".to_string()),
-        ));
+            "Position cursor at first row",
+        );
 
         // Loop body start address
         let loop_addr = self.program.len();
@@ -1721,25 +1584,23 @@ impl<'a> SqlCompiler<'a> {
                             if col_idx > 0 {
                                 let extra_reg = self.allocate_register();
                                 result_regs.push(extra_reg);
-                                self.program.add_instruction(Instruction::new(
+                                self.emit(
                                     OpCode::Column,
                                     cursor_idx as i64,
                                     col_idx as i64,
                                     extra_reg,
                                     None,
-                                    0,
-                                    Some(format!("r[{}] = column {}", extra_reg, col_idx)),
-                                ));
+                                    &format!("r[{}] = column {}", extra_reg, col_idx),
+                                );
                             } else {
-                                self.program.add_instruction(Instruction::new(
+                                self.emit(
                                     OpCode::Column,
                                     cursor_idx as i64,
                                     0,
                                     value_reg,
                                     None,
-                                    0,
-                                    Some(format!("r[{}] = column 0", value_reg)),
-                                ));
+                                    &format!("r[{}] = column 0", value_reg),
+                                );
                             }
                         }
                     }
@@ -1754,15 +1615,14 @@ impl<'a> SqlCompiler<'a> {
                                 // Compile TRIM expression
                                 let src_reg = self.allocate_register();
                                 self.compile_where_operand(trim_expr, table, cursor_idx, src_reg)?;
-                                self.program.add_instruction(Instruction::new(
+                                self.emit(
                                     OpCode::StringFunc,
                                     src_reg,
                                     value_reg,
                                     0,
                                     Some("TRIM".to_string()),
-                                    0,
-                                    Some(format!("r[{}] = TRIM(r[{}])", value_reg, src_reg)),
-                                ));
+                                    &format!("r[{}] = TRIM(r[{}])", value_reg, src_reg),
+                                );
                             }
                             Expr::Substring {
                                 expr: sub_expr,
@@ -1781,15 +1641,14 @@ impl<'a> SqlCompiler<'a> {
                                         from_expr, table, cursor_idx, start_reg,
                                     )?;
                                 } else {
-                                    self.program.add_instruction(Instruction::new(
+                                    self.emit(
                                         OpCode::Integer,
                                         1,
                                         start_reg,
                                         0,
                                         None,
-                                        0,
-                                        Some(format!("r[{}] = 1 (default start)", start_reg)),
-                                    ));
+                                        &format!("r[{}] = 1 (default start)", start_reg),
+                                    );
                                 }
 
                                 // Check if we have a length
@@ -1803,30 +1662,28 @@ impl<'a> SqlCompiler<'a> {
                                     "SUBSTR".to_string()
                                 };
 
-                                self.program.add_instruction(Instruction::new(
+                                self.emit(
                                     OpCode::StringFunc,
                                     src_reg,
                                     value_reg,
                                     start_reg,
                                     Some(func_spec),
-                                    0,
-                                    Some(format!("r[{}] = SUBSTR(...)", value_reg)),
-                                ));
+                                    &format!("r[{}] = SUBSTR(...)", value_reg),
+                                );
                             }
                             Expr::Identifier(ident) => {
                                 let col_name = ident.value.to_lowercase();
                                 let col_idx = table
                                     .column_index(&col_name)
                                     .ok_or_else(|| SqawkError::ColumnNotFound(col_name.clone()))?;
-                                self.program.add_instruction(Instruction::new(
+                                self.emit(
                                     OpCode::Column,
                                     cursor_idx as i64,
                                     col_idx as i64,
                                     value_reg,
                                     None,
-                                    0,
-                                    Some(format!("r[{}] = column {}", value_reg, col_idx)),
-                                ));
+                                    &format!("r[{}] = column {}", value_reg, col_idx),
+                                );
                             }
                             Expr::CompoundIdentifier(parts) => {
                                 let col_name = parts
@@ -1836,15 +1693,14 @@ impl<'a> SqlCompiler<'a> {
                                 let col_idx = table
                                     .column_index(&col_name)
                                     .ok_or_else(|| SqawkError::ColumnNotFound(col_name.clone()))?;
-                                self.program.add_instruction(Instruction::new(
+                                self.emit(
                                     OpCode::Column,
                                     cursor_idx as i64,
                                     col_idx as i64,
                                     value_reg,
                                     None,
-                                    0,
-                                    Some(format!("r[{}] = column {}", value_reg, col_idx)),
-                                ));
+                                    &format!("r[{}] = column {}", value_reg, col_idx),
+                                );
                             }
                             Expr::BinaryOp { left, op, right } => {
                                 // Handle arithmetic binary operators
@@ -1868,18 +1724,17 @@ impl<'a> SqlCompiler<'a> {
                                     }
                                 };
 
-                                self.program.add_instruction(Instruction::new(
+                                self.emit(
                                     opcode,
                                     left_reg,
                                     right_reg,
                                     value_reg,
                                     None,
-                                    0,
-                                    Some(format!(
+                                    &format!(
                                         "r[{}] = r[{}] {:?} r[{}]",
                                         value_reg, left_reg, op, right_reg
-                                    )),
-                                ));
+                                    ),
+                                );
                             }
                             Expr::UnaryOp { op, expr: inner } => {
                                 // Handle unary operators (e.g., -value)
@@ -1891,24 +1746,22 @@ impl<'a> SqlCompiler<'a> {
                                         )?;
                                         // Negate using 0 - value (avoids Integer -1 special case)
                                         let zero_reg = self.allocate_register();
-                                        self.program.add_instruction(Instruction::new(
+                                        self.emit(
                                             OpCode::Integer,
                                             0,
                                             zero_reg,
                                             0,
                                             None,
-                                            0,
-                                            Some(format!("r[{}] = 0", zero_reg)),
-                                        ));
-                                        self.program.add_instruction(Instruction::new(
+                                            &format!("r[{}] = 0", zero_reg),
+                                        );
+                                        self.emit(
                                             OpCode::Subtract,
                                             zero_reg,
                                             inner_reg,
                                             value_reg,
                                             None,
-                                            0,
-                                            Some(format!("r[{}] = -r[{}]", value_reg, inner_reg)),
-                                        ));
+                                            &format!("r[{}] = -r[{}]", value_reg, inner_reg),
+                                        );
                                     }
                                     sqlparser::ast::UnaryOperator::Plus => {
                                         self.compile_where_operand(
@@ -1926,28 +1779,26 @@ impl<'a> SqlCompiler<'a> {
                             Expr::Ceil { expr: inner, .. } => {
                                 let src_reg = self.allocate_register();
                                 self.compile_where_operand(inner, table, cursor_idx, src_reg)?;
-                                self.program.add_instruction(Instruction::new(
+                                self.emit(
                                     OpCode::MathFunc,
                                     src_reg,
                                     value_reg,
                                     0,
                                     Some("CEIL".to_string()),
-                                    0,
-                                    Some(format!("r[{}] = CEIL(r[{}])", value_reg, src_reg)),
-                                ));
+                                    &format!("r[{}] = CEIL(r[{}])", value_reg, src_reg),
+                                );
                             }
                             Expr::Floor { expr: inner, .. } => {
                                 let src_reg = self.allocate_register();
                                 self.compile_where_operand(inner, table, cursor_idx, src_reg)?;
-                                self.program.add_instruction(Instruction::new(
+                                self.emit(
                                     OpCode::MathFunc,
                                     src_reg,
                                     value_reg,
                                     0,
                                     Some("FLOOR".to_string()),
-                                    0,
-                                    Some(format!("r[{}] = FLOOR(r[{}])", value_reg, src_reg)),
-                                ));
+                                    &format!("r[{}] = FLOOR(r[{}])", value_reg, src_reg),
+                                );
                             }
                             _ => {
                                 return Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -1962,25 +1813,23 @@ impl<'a> SqlCompiler<'a> {
                             if col_idx > 0 {
                                 let extra_reg = self.allocate_register();
                                 result_regs.push(extra_reg);
-                                self.program.add_instruction(Instruction::new(
+                                self.emit(
                                     OpCode::Column,
                                     cursor_idx as i64,
                                     col_idx as i64,
                                     extra_reg,
                                     None,
-                                    0,
-                                    Some(format!("r[{}] = column {}", extra_reg, col_idx)),
-                                ));
+                                    &format!("r[{}] = column {}", extra_reg, col_idx),
+                                );
                             } else {
-                                self.program.add_instruction(Instruction::new(
+                                self.emit(
                                     OpCode::Column,
                                     cursor_idx as i64,
                                     0,
                                     value_reg,
                                     None,
-                                    0,
-                                    Some(format!("r[{}] = column 0", value_reg)),
-                                ));
+                                    &format!("r[{}] = column 0", value_reg),
+                                );
                             }
                         }
                     }
@@ -1993,15 +1842,14 @@ impl<'a> SqlCompiler<'a> {
                 let value_reg = self.allocate_register();
                 result_regs.push(value_reg);
 
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Column,
                     cursor_idx as i64,
                     *col_idx as i64,
                     value_reg,
                     None,
-                    0,
-                    Some(format!("r[{}] = column {} value", value_reg, col_idx)),
-                ));
+                    &format!("r[{}] = column {} value", value_reg, col_idx),
+                );
             }
         }
 
@@ -2014,51 +1862,40 @@ impl<'a> SqlCompiler<'a> {
             let skip_addr = self.compile_where_condition(where_expr, table, cursor_idx)?;
 
             // If WHERE condition failed, jump to Next instruction to skip this row
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfZ,
                 skip_addr,                       // Register containing condition result
                 (self.program.len() + 2) as i64, // Jump to Next instruction
                 0,
                 None,
-                0,
-                Some("Skip row if WHERE condition is false".to_string()),
-            ));
+                "Skip row if WHERE condition is false",
+            );
         }
 
         // Output the result row (only reached if WHERE condition passes)
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::ResultRow,
             result_regs[0],           // First register in result
             result_regs.len() as i64, // Number of columns
             0,
             None,
-            0,
-            Some("Output result row".to_string()),
-        ));
+            "Output result row",
+        );
 
         // Move to next row and continue loop
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Next,
             cursor_idx as i64,
             loop_addr as i64, // Jump back to start of loop for next row
             0,
             None,
-            0,
-            Some("Move to next row or exit loop".to_string()),
-        ));
+            "Move to next row or exit loop",
+        );
 
         // Close the table cursor
         // First, get the close instruction address (this is where Rewind should jump on empty table)
         let close_addr = self.program.len();
-        self.program.add_instruction(Instruction::new(
-            OpCode::Close,
-            cursor_idx as i64,
-            0,
-            0,
-            None,
-            0,
-            Some("Close cursor".to_string()),
-        ));
+        self.emit(OpCode::Close, cursor_idx as i64, 0, 0, None, "Close cursor");
 
         // Patch the Rewind instruction to jump to Close on empty table
         if let Some(rewind_inst) = self.program.instructions.get_mut(rewind_addr) {
@@ -2448,15 +2285,14 @@ impl<'a> SqlCompiler<'a> {
 
                 self.compile_where_operand(expr, table, cursor_idx, expr_reg)?;
 
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::IsNull,
                     expr_reg,
                     result_reg,
                     0,
                     None,
-                    0,
-                    Some(format!("r[{}] = (r[{}] IS NULL)", result_reg, expr_reg)),
-                ));
+                    &format!("r[{}] = (r[{}] IS NULL)", result_reg, expr_reg),
+                );
 
                 Ok(result_reg)
             }
@@ -2468,66 +2304,61 @@ impl<'a> SqlCompiler<'a> {
                 self.compile_where_operand(expr, table, cursor_idx, expr_reg)?;
 
                 // First check IS NULL
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::IsNull,
                     expr_reg,
                     result_reg,
                     0,
                     None,
-                    0,
-                    Some(format!("r[{}] = (r[{}] IS NULL)", result_reg, expr_reg)),
-                ));
+                    &format!("r[{}] = (r[{}] IS NULL)", result_reg, expr_reg),
+                );
 
                 // Then negate the result (if is_null is 1, set to 0; if 0, set to 1)
                 // We can do this with: result = 1 - result
                 let one_reg = self.allocate_register();
                 let final_reg = self.allocate_register();
 
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Integer,
                     1,
                     one_reg,
                     0,
                     None,
-                    0,
-                    Some(format!("r[{}] = 1", one_reg)),
-                ));
+                    &format!("r[{}] = 1", one_reg),
+                );
 
                 // Subtract using: if result is 0, final = 1; if result is 1, final = 0
                 // We need a subtraction operation, but we don't have one yet
                 // Alternative: use IfZ to branch
                 let is_null_label = self.program.len();
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::IfZ,
                     result_reg,
                     0, // Will be patched
                     0,
                     None,
-                    0,
-                    Some("if IS NULL result is 0 (not null), jump".to_string()),
-                ));
+                    "if IS NULL result is 0 (not null), jump",
+                );
 
                 // result_reg was 1 (is null), so set final to 0
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Integer,
                     0,
                     final_reg,
                     0,
                     None,
-                    0,
-                    Some(format!("r[{}] = 0 (was null)", final_reg)),
-                ));
+                    &format!("r[{}] = 0 (was null)", final_reg),
+                );
 
                 let skip_else_addr = self.program.len();
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Goto,
                     0,
                     0, // Will be patched
                     0,
                     None,
-                    0,
-                    Some("skip else branch".to_string()),
-                ));
+                    "skip else branch",
+                );
 
                 // Patch the IfZ to jump here when result was 0 (not null)
                 let not_null_label = self.program.len();
@@ -2536,15 +2367,14 @@ impl<'a> SqlCompiler<'a> {
                 }
 
                 // result_reg was 0 (not null), so set final to 1
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Integer,
                     1,
                     final_reg,
                     0,
                     None,
-                    0,
-                    Some(format!("r[{}] = 1 (was not null)", final_reg)),
-                ));
+                    &format!("r[{}] = 1 (was not null)", final_reg),
+                );
 
                 // Patch skip_else to jump here
                 let end_label = self.program.len();
@@ -2640,70 +2470,64 @@ impl<'a> SqlCompiler<'a> {
     fn emit_value_literal(&mut self, reg: i64, value: &TableValue) -> SqawkResult<()> {
         match value {
             TableValue::Integer(i) => {
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Integer,
                     *i,
                     reg,
                     0,
                     None,
-                    0,
-                    Some(format!("r[{}] = {} (subquery result)", reg, i)),
-                ));
+                    &format!("r[{}] = {} (subquery result)", reg, i),
+                );
             }
             TableValue::Float(f) => {
                 // Store float as string and use String opcode, then cast
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::String,
                     0,
                     reg,
                     0,
                     Some(f.to_string()),
-                    0,
-                    Some(format!("r[{}] = {} (subquery result)", reg, f)),
-                ));
+                    &format!("r[{}] = {} (subquery result)", reg, f),
+                );
                 // Cast to float
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Cast,
                     reg,
                     reg,
                     0,
                     Some("REAL".to_string()),
-                    0,
-                    Some(format!("Cast r[{}] to REAL", reg)),
-                ));
+                    &format!("Cast r[{}] to REAL", reg),
+                );
             }
             TableValue::String(s) => {
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::String,
                     0,
                     reg,
                     0,
                     Some(s.clone()),
-                    0,
-                    Some(format!("r[{}] = '{}' (subquery result)", reg, s)),
-                ));
+                    &format!("r[{}] = '{}' (subquery result)", reg, s),
+                );
             }
             TableValue::Boolean(b) => {
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Integer,
                     if *b { 1 } else { 0 },
                     reg,
                     0,
                     None,
-                    0,
-                    Some(format!("r[{}] = {} (subquery result)", reg, b)),
-                ));
+                    &format!("r[{}] = {} (subquery result)", reg, b),
+                );
             }
             TableValue::Null => {
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Null,
                     0,
                     reg,
                     0,
                     None,
-                    0,
-                    Some(format!("r[{}] = NULL (subquery result)", reg)),
-                ));
+                    &format!("r[{}] = NULL (subquery result)", reg),
+                );
             }
         }
         Ok(())
@@ -3214,19 +3038,18 @@ impl<'a> SqlCompiler<'a> {
         // If subquery returns no values, handle specially
         if subquery_values.is_empty() {
             let result_reg = self.allocate_register();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Integer,
                 if negated { 1 } else { 0 },
                 result_reg,
                 0,
                 None,
-                0,
-                Some(format!(
+                &format!(
                     "r[{}] = {} (empty IN subquery)",
                     result_reg,
                     if negated { 1 } else { 0 }
-                )),
-            ));
+                ),
+            );
             return Ok(result_reg);
         }
 
@@ -3239,15 +3062,14 @@ impl<'a> SqlCompiler<'a> {
         self.compile_where_operand(expr, table, cursor_idx, expr_reg)?;
 
         // Initialize result to 0 (false, not found)
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Integer,
             0,
             result_reg,
             0,
             None,
-            0,
-            Some(format!("r[{}] = 0 (IN subquery initial)", result_reg)),
-        ));
+            &format!("r[{}] = 0 (IN subquery initial)", result_reg),
+        );
 
         // Track jump addresses that need to be patched to skip to end when match found
         let mut jump_to_end_addrs = Vec::new();
@@ -3260,53 +3082,46 @@ impl<'a> SqlCompiler<'a> {
             self.emit_value_literal(item_reg, value)?;
 
             // Compare expr == item
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Eq,
                 expr_reg,
                 item_reg,
                 temp_reg,
                 None,
-                0,
-                Some(format!(
-                    "r[{}] = (r[{}] == r[{}])",
-                    temp_reg, expr_reg, item_reg
-                )),
-            ));
+                &format!("r[{}] = (r[{}] == r[{}])", temp_reg, expr_reg, item_reg),
+            );
 
             // If match found (temp_reg != 0), set result to 1 and jump to end
             let skip_set_addr = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfZ,
                 temp_reg,
                 0, // Will be patched to skip the next instructions
                 0,
                 None,
-                0,
-                Some("if no match, skip to next item".to_string()),
-            ));
+                "if no match, skip to next item",
+            );
 
             // Set result to 1 (found)
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Integer,
                 1,
                 result_reg,
                 0,
                 None,
-                0,
-                Some(format!("r[{}] = 1 (found in subquery)", result_reg)),
-            ));
+                &format!("r[{}] = 1 (found in subquery)", result_reg),
+            );
 
             // Jump to end (skip remaining comparisons)
             jump_to_end_addrs.push(self.program.len());
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Goto,
                 0,
                 0, // Will be patched to end
                 0,
                 None,
-                0,
-                Some("skip to end".to_string()),
-            ));
+                "skip to end",
+            );
 
             // Patch the skip address to continue to next comparison
             let continue_addr = self.program.len();
@@ -3328,27 +3143,22 @@ impl<'a> SqlCompiler<'a> {
         // Handle negation: if NOT IN, invert the result
         if negated {
             let zero_reg = self.allocate_register();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Integer,
                 0,
                 zero_reg,
                 0,
                 None,
-                0,
-                Some(format!("r[{}] = 0 for NOT IN", zero_reg)),
-            ));
-            self.program.add_instruction(Instruction::new(
+                &format!("r[{}] = 0 for NOT IN", zero_reg),
+            );
+            self.emit(
                 OpCode::Eq,
                 result_reg,
                 zero_reg,
                 result_reg,
                 None,
-                0,
-                Some(format!(
-                    "r[{}] = (r[{}] == 0) for NOT IN",
-                    result_reg, result_reg
-                )),
-            ));
+                &format!("r[{}] = (r[{}] == 0) for NOT IN", result_reg, result_reg),
+            );
         }
 
         Ok(result_reg)
@@ -3430,20 +3240,19 @@ impl<'a> SqlCompiler<'a> {
 
         // Emit the result
         let exists = if negated { !has_rows } else { has_rows };
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Integer,
             if exists { 1 } else { 0 },
             result_reg,
             0,
             None,
-            0,
-            Some(format!(
+            &format!(
                 "r[{}] = {} ({}EXISTS result)",
                 result_reg,
                 if exists { 1 } else { 0 },
                 if negated { "NOT " } else { "" }
-            )),
-        ));
+            ),
+        );
 
         Ok(result_reg)
     }
@@ -3738,41 +3547,35 @@ impl<'a> SqlCompiler<'a> {
         let sub_cursor_idx = outer_cursor_idx + 100;
 
         // Initialize result to 0 (not found)
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Integer,
             0,
             result_reg,
             0,
             None,
-            0,
-            Some(format!("r[{}] = 0 (EXISTS init)", result_reg)),
-        ));
+            &format!("r[{}] = 0 (EXISTS init)", result_reg),
+        );
 
         // Open the subquery table
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::OpenRead,
             sub_cursor_idx as i64,
             0,
             0,
             Some(subquery_table_name.clone()),
-            0,
-            Some(format!(
-                "Open {} for correlated EXISTS",
-                subquery_table_name
-            )),
-        ));
+            &format!("Open {} for correlated EXISTS", subquery_table_name),
+        );
 
         // Rewind to first row (jump to done if empty)
         let rewind_addr = self.program.len();
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Rewind,
             sub_cursor_idx as i64,
             0, // Will be patched to done_addr
             0,
             None,
-            0,
-            Some("Rewind subquery cursor".to_string()),
-        ));
+            "Rewind subquery cursor",
+        );
 
         let loop_start = self.program.len();
 
@@ -3795,38 +3598,35 @@ impl<'a> SqlCompiler<'a> {
 
             // If condition is false (0), jump to next row
             let skip_match_addr = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfZ,
                 cmp_reg,
                 0, // Will be patched to next_row
                 0,
                 None,
-                0,
-                Some("Skip if WHERE condition false".to_string()),
-            ));
+                "Skip if WHERE condition false",
+            );
 
             // Match found! Set result to 1
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Integer,
                 1,
                 result_reg,
                 0,
                 None,
-                0,
-                Some(format!("r[{}] = 1 (EXISTS match found)", result_reg)),
-            ));
+                &format!("r[{}] = 1 (EXISTS match found)", result_reg),
+            );
 
             // Jump to done (exit early)
             let goto_done_addr = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Goto,
                 0,
                 0, // Will be patched to done_addr
                 0,
                 None,
-                0,
-                Some("Exit early on match".to_string()),
-            ));
+                "Exit early on match",
+            );
 
             // Patch skip_match to jump here
             let next_row_addr = self.program.len();
@@ -3835,15 +3635,14 @@ impl<'a> SqlCompiler<'a> {
             }
 
             // Next row
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Next,
                 sub_cursor_idx as i64,
                 loop_start as i64,
                 0,
                 None,
-                0,
-                Some("Next subquery row".to_string()),
-            ));
+                "Next subquery row",
+            );
 
             // Done label
             let done_addr = self.program.len();
@@ -3859,15 +3658,14 @@ impl<'a> SqlCompiler<'a> {
             }
         } else {
             // No WHERE clause - if table has any rows, EXISTS is true
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Integer,
                 1,
                 result_reg,
                 0,
                 None,
-                0,
-                Some(format!("r[{}] = 1 (EXISTS: table has rows)", result_reg)),
-            ));
+                &format!("r[{}] = 1 (EXISTS: table has rows)", result_reg),
+            );
 
             // Done
             let done_addr = self.program.len();
@@ -3877,52 +3675,48 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Close the subquery cursor
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Close,
             sub_cursor_idx as i64,
             0,
             0,
             None,
-            0,
-            Some("Close subquery cursor".to_string()),
-        ));
+            "Close subquery cursor",
+        );
 
         // Handle NOT EXISTS: flip the result
         if negated {
             // result = (result == 0) ? 1 : 0
             // Use branching: if result is 0, set to 1; else set to 0
             let skip_zero_addr = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfZ,
                 result_reg,
                 0, // Will be patched
                 0,
                 None,
-                0,
-                Some(format!("if r[{}] == 0, jump to set 1", result_reg)),
-            ));
+                &format!("if r[{}] == 0, jump to set 1", result_reg),
+            );
 
             // result was non-zero (EXISTS found rows), so NOT EXISTS = 0
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Integer,
                 0,
                 result_reg,
                 0,
                 None,
-                0,
-                Some(format!("r[{}] = 0 (NOT EXISTS false)", result_reg)),
-            ));
+                &format!("r[{}] = 0 (NOT EXISTS false)", result_reg),
+            );
 
             let goto_end_addr = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Goto,
                 0,
                 0, // Will be patched
                 0,
                 None,
-                0,
-                Some("skip to end".to_string()),
-            ));
+                "skip to end",
+            );
 
             // result was zero (EXISTS found no rows), so NOT EXISTS = 1
             let set_one_addr = self.program.len();
@@ -3930,15 +3724,14 @@ impl<'a> SqlCompiler<'a> {
                 inst.p2 = set_one_addr as i64;
             }
 
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Integer,
                 1,
                 result_reg,
                 0,
                 None,
-                0,
-                Some(format!("r[{}] = 1 (NOT EXISTS true)", result_reg)),
-            ));
+                &format!("r[{}] = 1 (NOT EXISTS true)", result_reg),
+            );
 
             // Patch goto to end
             let end_addr = self.program.len();
@@ -3990,49 +3783,45 @@ impl<'a> SqlCompiler<'a> {
                         // AND: result = left AND right
                         // If left is 0, result is 0; else result is right
                         let skip_addr = self.program.len();
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::IfZ,
                             left_reg,
                             0, // Will patch to set result=0
                             0,
                             None,
-                            0,
-                            Some("AND: skip if left is false".to_string()),
-                        ));
+                            "AND: skip if left is false",
+                        );
                         // Left is true, result = right
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::Copy,
                             right_reg,
                             result_reg,
                             0,
                             None,
-                            0,
-                            Some(format!("r[{}] = r[{}] (AND right)", result_reg, right_reg)),
-                        ));
+                            &format!("r[{}] = r[{}] (AND right)", result_reg, right_reg),
+                        );
                         let goto_end_addr = self.program.len();
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::Goto,
                             0,
                             0, // Will patch to end
                             0,
                             None,
-                            0,
-                            None,
-                        ));
+                            "",
+                        );
                         // Left is false, result = 0
                         let false_addr = self.program.len();
                         if let Some(inst) = self.program.instructions.get_mut(skip_addr) {
                             inst.p2 = false_addr as i64;
                         }
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::Integer,
                             0,
                             result_reg,
                             0,
                             None,
-                            0,
-                            Some(format!("r[{}] = 0 (AND false)", result_reg)),
-                        ));
+                            &format!("r[{}] = 0 (AND false)", result_reg),
+                        );
                         let end_addr = self.program.len();
                         if let Some(inst) = self.program.instructions.get_mut(goto_end_addr) {
                             inst.p2 = end_addr as i64;
@@ -4071,18 +3860,17 @@ impl<'a> SqlCompiler<'a> {
                         // Emit comparison
                         let cmp_opcode = Self::binary_op_to_comparison_opcode(op)?;
 
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             cmp_opcode,
                             left_reg,
                             right_reg,
                             result_reg,
                             None,
-                            0,
-                            Some(format!(
+                            &format!(
                                 "r[{}] = r[{}] {:?} r[{}]",
                                 result_reg, left_reg, op, right_reg
-                            )),
-                        ));
+                            ),
+                        );
                         Ok(())
                     }
                     _ => Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -4117,15 +3905,14 @@ impl<'a> SqlCompiler<'a> {
                 let col_idx = subquery_table
                     .column_index(&col_name)
                     .ok_or(SqawkError::ColumnNotFound(col_name.clone()))?;
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Column,
                     sub_cursor_idx as i64,
                     col_idx as i64,
                     dest_reg,
                     None,
-                    0,
-                    Some(format!("r[{}] = subquery.{}", dest_reg, col_name)),
-                ));
+                    &format!("r[{}] = subquery.{}", dest_reg, col_name),
+                );
                 Ok(())
             }
             Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
@@ -4143,29 +3930,27 @@ impl<'a> SqlCompiler<'a> {
                     let col_idx = outer_table
                         .column_index(&col_name)
                         .ok_or(SqawkError::ColumnNotFound(col_name.clone()))?;
-                    self.program.add_instruction(Instruction::new(
+                    self.emit(
                         OpCode::Column,
                         outer_cursor_idx as i64,
                         col_idx as i64,
                         dest_reg,
                         None,
-                        0,
-                        Some(format!("r[{}] = outer.{}", dest_reg, col_name)),
-                    ));
+                        &format!("r[{}] = outer.{}", dest_reg, col_name),
+                    );
                 } else {
                     // Load from subquery table
                     let col_idx = subquery_table
                         .column_index(&col_name)
                         .ok_or(SqawkError::ColumnNotFound(col_name.clone()))?;
-                    self.program.add_instruction(Instruction::new(
+                    self.emit(
                         OpCode::Column,
                         sub_cursor_idx as i64,
                         col_idx as i64,
                         dest_reg,
                         None,
-                        0,
-                        Some(format!("r[{}] = subquery.{}", dest_reg, col_name)),
-                    ));
+                        &format!("r[{}] = subquery.{}", dest_reg, col_name),
+                    );
                 }
                 Ok(())
             }
@@ -4173,46 +3958,42 @@ impl<'a> SqlCompiler<'a> {
                 match v {
                     Value::Number(n, _) => {
                         if let Ok(i) = n.parse::<i64>() {
-                            self.program.add_instruction(Instruction::new(
+                            self.emit(
                                 OpCode::Integer,
                                 i,
                                 dest_reg,
                                 0,
                                 None,
-                                0,
-                                Some(format!("r[{}] = {}", dest_reg, i)),
-                            ));
+                                &format!("r[{}] = {}", dest_reg, i),
+                            );
                         } else if let Ok(f) = n.parse::<f64>() {
-                            self.program.add_instruction(Instruction::new(
+                            self.emit(
                                 OpCode::String,
                                 0,
                                 dest_reg,
                                 0,
                                 Some(f.to_string()),
-                                0,
-                                Some(format!("r[{}] = {}", dest_reg, f)),
-                            ));
-                            self.program.add_instruction(Instruction::new(
+                                &format!("r[{}] = {}", dest_reg, f),
+                            );
+                            self.emit(
                                 OpCode::Cast,
                                 dest_reg,
                                 dest_reg,
                                 0,
                                 Some("REAL".to_string()),
-                                0,
-                                None,
-                            ));
+                                "",
+                            );
                         }
                     }
                     Value::SingleQuotedString(s) => {
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::String,
                             0,
                             dest_reg,
                             0,
                             Some(s.clone()),
-                            0,
-                            Some(format!("r[{}] = '{}'", dest_reg, s)),
-                        ));
+                            &format!("r[{}] = '{}'", dest_reg, s),
+                        );
                     }
                     _ => {
                         return Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -4305,18 +4086,14 @@ impl<'a> SqlCompiler<'a> {
 
         // Initialize accumulator with Null (like SQLite does)
         // AggStep/AggFinal will treat Null as "no data yet"
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Null,
             0,
             acc_reg,
             acc_reg, // P3=P2 means just set one register
             None,
-            0,
-            Some(format!(
-                "r[{}]=NULL; Init {} accumulator",
-                acc_reg, agg_func_name
-            )),
-        ));
+            &format!("r[{}]=NULL; Init {} accumulator", acc_reg, agg_func_name),
+        );
 
         // Validate aggregate function is supported
         match agg_func_name.as_str() {
@@ -4330,30 +4107,25 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Open the subquery table
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::OpenRead,
             sub_cursor_idx as i64,
             0,
             0,
             Some(subquery_table_name.clone()),
-            0,
-            Some(format!(
-                "Open {} for correlated scalar",
-                subquery_table_name
-            )),
-        ));
+            &format!("Open {} for correlated scalar", subquery_table_name),
+        );
 
         // Rewind to first row
         let rewind_addr = self.program.len();
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Rewind,
             sub_cursor_idx as i64,
             0, // Will be patched to done_addr
             0,
             None,
-            0,
-            Some("Rewind subquery cursor".to_string()),
-        ));
+            "Rewind subquery cursor",
+        );
 
         let loop_start = self.program.len();
 
@@ -4376,33 +4148,31 @@ impl<'a> SqlCompiler<'a> {
         // If WHERE fails, skip to next row
         let skip_agg_addr = if has_where {
             let addr = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfZ,
                 cmp_reg,
                 0, // Will be patched
                 0,
                 None,
-                0,
-                Some("Skip if WHERE false".to_string()),
-            ));
+                "Skip if WHERE false",
+            );
             Some(addr)
         } else {
             None
         };
 
         // Load the value for aggregation
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Column,
             sub_cursor_idx as i64,
             agg_col_idx as i64,
             val_reg,
             None,
-            0,
-            Some(format!("r[{}] = subquery column for agg", val_reg)),
-        ));
+            &format!("r[{}] = subquery column for agg", val_reg),
+        );
 
         // Update accumulator based on aggregate type
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::AggStep,
             match agg_func_name.as_str() {
                 "COUNT" => 0,
@@ -4415,12 +4185,11 @@ impl<'a> SqlCompiler<'a> {
             val_reg,
             acc_reg,
             None,
-            0,
-            Some(format!(
+            &format!(
                 "Aggregate step: {} r[{}] -> r[{}]",
                 agg_func_name, val_reg, acc_reg
-            )),
-        ));
+            ),
+        );
 
         // Next row
         let next_row_addr = self.program.len();
@@ -4430,15 +4199,14 @@ impl<'a> SqlCompiler<'a> {
             }
         }
 
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Next,
             sub_cursor_idx as i64,
             loop_start as i64,
             0,
             None,
-            0,
-            Some("Next subquery row".to_string()),
-        ));
+            "Next subquery row",
+        );
 
         // Done - finalize aggregate
         let done_addr = self.program.len();
@@ -4456,29 +4224,24 @@ impl<'a> SqlCompiler<'a> {
             "MAX" => 4,
             _ => 0,
         };
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::AggFinal,
             acc_reg,
             result_reg,
             func_type,
             None,
-            0,
-            Some(format!(
-                "r[{}] = final {} result",
-                result_reg, agg_func_name
-            )),
-        ));
+            &format!("r[{}] = final {} result", result_reg, agg_func_name),
+        );
 
         // Close the subquery cursor
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Close,
             sub_cursor_idx as i64,
             0,
             0,
             None,
-            0,
-            Some("Close subquery cursor".to_string()),
-        ));
+            "Close subquery cursor",
+        );
 
         Ok(())
     }
@@ -4515,21 +4278,20 @@ impl<'a> SqlCompiler<'a> {
         // P2 encodes: bit 0 = negated, bit 1 = case_insensitive
         let flags = (if negated { 1 } else { 0 }) | (if case_insensitive { 2 } else { 0 });
 
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Like,
             value_reg,
             flags,
             result_reg,
             Some(pattern_str.clone()),
-            0,
-            Some(format!(
+            &format!(
                 "r[{}] = r[{}] {}LIKE '{}'",
                 result_reg,
                 value_reg,
                 if negated { "NOT " } else { "" },
                 pattern_str
-            )),
-        ));
+            ),
+        );
 
         Ok(result_reg)
     }
@@ -4564,69 +4326,58 @@ impl<'a> SqlCompiler<'a> {
         self.compile_where_operand(high, table, cursor_idx, high_reg)?;
 
         // Compare expr >= low (result in temp_reg)
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Ge,
             expr_reg,
             low_reg,
             temp_reg,
             None,
-            0,
-            Some(format!(
-                "r[{}] = r[{}] >= r[{}]",
-                temp_reg, expr_reg, low_reg
-            )),
-        ));
+            &format!("r[{}] = r[{}] >= r[{}]", temp_reg, expr_reg, low_reg),
+        );
 
         // If expr < low, result is false (0)
         // Jump past the second comparison if first is false
         let jump_to_false = self.program.len();
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::IfZ,
             temp_reg,
             0, // Will be patched
             0,
             None,
-            0,
-            Some("if first comparison false, skip to result".to_string()),
-        ));
+            "if first comparison false, skip to result",
+        );
 
         // Compare expr <= high (result in result_reg)
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Le,
             expr_reg,
             high_reg,
             result_reg,
             None,
-            0,
-            Some(format!(
-                "r[{}] = r[{}] <= r[{}]",
-                result_reg, expr_reg, high_reg
-            )),
-        ));
+            &format!("r[{}] = r[{}] <= r[{}]", result_reg, expr_reg, high_reg),
+        );
 
         // Jump past the "set to false" instruction
         let jump_to_end = self.program.len();
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Goto,
             0,
             0, // Will be patched
             0,
             None,
-            0,
-            Some("skip false assignment".to_string()),
-        ));
+            "skip false assignment",
+        );
 
         // Set result to 0 (false) - this is where we jump if first comparison fails
         let false_label = self.program.len();
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Integer,
             0,
             result_reg,
             0,
             None,
-            0,
-            Some(format!("r[{}] = 0 (BETWEEN false)", result_reg)),
-        ));
+            &format!("r[{}] = 0 (BETWEEN false)", result_reg),
+        );
 
         let end_label = self.program.len();
 
@@ -4642,27 +4393,25 @@ impl<'a> SqlCompiler<'a> {
         // NOT BETWEEN is true when BETWEEN is false (result == 0)
         if negated {
             let zero_reg = self.allocate_register();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Integer,
                 0,
                 zero_reg,
                 0,
                 None,
-                0,
-                Some(format!("r[{}] = 0 for NOT BETWEEN", zero_reg)),
-            ));
-            self.program.add_instruction(Instruction::new(
+                &format!("r[{}] = 0 for NOT BETWEEN", zero_reg),
+            );
+            self.emit(
                 OpCode::Eq,
                 result_reg,
                 zero_reg,
                 result_reg,
                 None,
-                0,
-                Some(format!(
+                &format!(
                     "r[{}] = (r[{}] == 0) for NOT BETWEEN",
                     result_reg, result_reg
-                )),
-            ));
+                ),
+            );
         }
 
         Ok(result_reg)
@@ -4682,19 +4431,18 @@ impl<'a> SqlCompiler<'a> {
         if list.is_empty() {
             // Empty list: IN () is always false, NOT IN () is always true
             let result_reg = self.allocate_register();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Integer,
                 if negated { 1 } else { 0 },
                 result_reg,
                 0,
                 None,
-                0,
-                Some(format!(
+                &format!(
                     "r[{}] = {} (empty IN list)",
                     result_reg,
                     if negated { 1 } else { 0 }
-                )),
-            ));
+                ),
+            );
             return Ok(result_reg);
         }
 
@@ -4707,15 +4455,14 @@ impl<'a> SqlCompiler<'a> {
         self.compile_where_operand(expr, table, cursor_idx, expr_reg)?;
 
         // Initialize result to 0 (false, not found in list)
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Integer,
             0,
             result_reg,
             0,
             None,
-            0,
-            Some(format!("r[{}] = 0 (IN list initial)", result_reg)),
-        ));
+            &format!("r[{}] = 0 (IN list initial)", result_reg),
+        );
 
         // Track jump addresses that need to be patched to skip to end when match found
         let mut jump_to_end_addrs = Vec::new();
@@ -4728,54 +4475,47 @@ impl<'a> SqlCompiler<'a> {
             self.compile_where_operand(item, table, cursor_idx, item_reg)?;
 
             // Compare expr == item
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Eq,
                 expr_reg,
                 item_reg,
                 temp_reg,
                 None,
-                0,
-                Some(format!(
-                    "r[{}] = (r[{}] == r[{}])",
-                    temp_reg, expr_reg, item_reg
-                )),
-            ));
+                &format!("r[{}] = (r[{}] == r[{}])", temp_reg, expr_reg, item_reg),
+            );
 
             // If match found (temp_reg != 0), set result to 1 and jump to end
             // We use IfZ to skip setting result if no match
             let skip_set_addr = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfZ,
                 temp_reg,
                 0, // Will be patched to skip the next instructions
                 0,
                 None,
-                0,
-                Some("if no match, skip to next item".to_string()),
-            ));
+                "if no match, skip to next item",
+            );
 
             // Set result to 1 (found)
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Integer,
                 1,
                 result_reg,
                 0,
                 None,
-                0,
-                Some(format!("r[{}] = 1 (found in list)", result_reg)),
-            ));
+                &format!("r[{}] = 1 (found in list)", result_reg),
+            );
 
             // Jump to end (skip remaining comparisons)
             jump_to_end_addrs.push(self.program.len());
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Goto,
                 0,
                 0, // Will be patched to end
                 0,
                 None,
-                0,
-                Some("skip to end".to_string()),
-            ));
+                "skip to end",
+            );
 
             // Patch the skip address to continue to next comparison
             let continue_addr = self.program.len();
@@ -4797,27 +4537,22 @@ impl<'a> SqlCompiler<'a> {
         // Handle negation: if NOT IN, invert the result
         if negated {
             let zero_reg = self.allocate_register();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Integer,
                 0,
                 zero_reg,
                 0,
                 None,
-                0,
-                Some(format!("r[{}] = 0 for NOT IN", zero_reg)),
-            ));
-            self.program.add_instruction(Instruction::new(
+                &format!("r[{}] = 0 for NOT IN", zero_reg),
+            );
+            self.emit(
                 OpCode::Eq,
                 result_reg,
                 zero_reg,
                 result_reg,
                 None,
-                0,
-                Some(format!(
-                    "r[{}] = (r[{}] == 0) for NOT IN",
-                    result_reg, result_reg
-                )),
-            ));
+                &format!("r[{}] = (r[{}] == 0) for NOT IN", result_reg, result_reg),
+            );
         }
 
         Ok(result_reg)
@@ -4867,18 +4602,17 @@ impl<'a> SqlCompiler<'a> {
             if let Some(op_reg) = operand_reg {
                 // Simple CASE: compare operand with condition value
                 self.compile_where_operand(condition, table, cursor_idx, cond_reg)?;
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Eq,
                     op_reg,
                     cond_reg,
                     temp_reg,
                     None,
-                    0,
-                    Some(format!(
+                    &format!(
                         "r[{}] = (r[{}] == r[{}]) for CASE",
                         temp_reg, op_reg, cond_reg
-                    )),
-                ));
+                    ),
+                );
             } else {
                 // Searched CASE: evaluate condition directly
                 // For now, we only support simple boolean conditions
@@ -4888,30 +4622,28 @@ impl<'a> SqlCompiler<'a> {
 
             // If condition is false (temp_reg == 0), skip to next branch
             let skip_addr = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfZ,
                 temp_reg,
                 0, // Will be patched
                 0,
                 None,
-                0,
-                Some("if WHEN condition false, try next".to_string()),
-            ));
+                "if WHEN condition false, try next",
+            );
 
             // Condition is true - compile the result value into result_reg
             self.compile_where_operand(result_expr, table, cursor_idx, result_reg)?;
 
             // Jump to end
             jump_to_end_addrs.push(self.program.len());
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Goto,
                 0,
                 0, // Will be patched to end
                 0,
                 None,
-                0,
-                Some("jump to CASE end".to_string()),
-            ));
+                "jump to CASE end",
+            );
 
             // Patch skip address to continue to next WHEN
             let next_addr = self.program.len();
@@ -4925,15 +4657,14 @@ impl<'a> SqlCompiler<'a> {
             self.compile_where_operand(else_expr, table, cursor_idx, result_reg)?;
         } else {
             // No ELSE - result is NULL
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Null,
                 0,
                 result_reg,
                 0,
                 None,
-                0,
-                Some(format!("r[{}] = NULL (no ELSE in CASE)", result_reg)),
-            ));
+                &format!("r[{}] = NULL (no ELSE in CASE)", result_reg),
+            );
         }
 
         // End label
@@ -4985,41 +4716,38 @@ impl<'a> SqlCompiler<'a> {
             self.compile_where_operand(&expr, table, cursor_idx, arg_reg)?;
 
             // Check if it's NULL
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IsNull,
                 arg_reg,
                 null_check_reg,
                 0,
                 None,
-                0,
-                Some(format!("r[{}] = (r[{}] IS NULL)", null_check_reg, arg_reg)),
-            ));
+                &format!("r[{}] = (r[{}] IS NULL)", null_check_reg, arg_reg),
+            );
 
             // If NULL (null_check_reg == 1), skip to next argument
             let skip_addr = self.program.len();
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::IfZ,
                 null_check_reg,
                 0, // Will be patched to "use this value"
                 0,
                 None,
-                0,
-                Some("if NOT NULL, use this value".to_string()),
-            ));
+                "if NOT NULL, use this value",
+            );
 
             // Patch to jump to next iteration (will be set at end of this iteration)
             let continue_to_next = self.program.len();
 
             // Add a goto to skip to next arg check (this arg was NULL)
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Goto,
                 0,
                 0, // Will be patched to next arg check
                 0,
                 None,
-                0,
-                Some("skip to next arg (this was NULL)".to_string()),
-            ));
+                "skip to next arg (this was NULL)",
+            );
 
             // Patch the IfZ to come here when not NULL
             let use_value_addr = self.program.len();
@@ -5028,30 +4756,26 @@ impl<'a> SqlCompiler<'a> {
             }
 
             // Copy value to target register (value is not NULL)
-            self.program.add_instruction(Instruction::new(
+            // Cast to same type as workaround for copy
+            self.emit(
                 OpCode::Cast,
                 arg_reg,
                 target_reg,
                 0,
-                Some("TEXT".to_string()), // Cast to same type as workaround for copy
-                0,
-                Some(format!(
-                    "r[{}] = r[{}] (COALESCE result)",
-                    target_reg, arg_reg
-                )),
-            ));
+                Some("TEXT".to_string()),
+                &format!("r[{}] = r[{}] (COALESCE result)", target_reg, arg_reg),
+            );
 
             // Jump to end (we found a non-NULL value)
             jump_to_end_addrs.push(self.program.len());
-            self.program.add_instruction(Instruction::new(
+            self.emit(
                 OpCode::Goto,
                 0,
                 0, // Will be patched to end
                 0,
                 None,
-                0,
-                Some("jump to COALESCE end".to_string()),
-            ));
+                "jump to COALESCE end",
+            );
 
             // Patch the continue_to_next goto to jump here
             let next_arg_addr = self.program.len();
@@ -5061,18 +4785,14 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // If all args were NULL, result is NULL
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Null,
             0,
             target_reg,
             0,
             None,
-            0,
-            Some(format!(
-                "r[{}] = NULL (all COALESCE args were NULL)",
-                target_reg
-            )),
-        ));
+            &format!("r[{}] = NULL (all COALESCE args were NULL)", target_reg),
+        );
 
         // Patch all jump-to-end addresses
         let end_label = self.program.len();
@@ -5111,49 +4831,45 @@ impl<'a> SqlCompiler<'a> {
         self.compile_where_operand(&expr2, table, cursor_idx, reg2)?;
 
         // Compare them
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Eq,
             reg1,
             reg2,
             cmp_reg,
             None,
-            0,
-            Some(format!("r[{}] = (r[{}] == r[{}])", cmp_reg, reg1, reg2)),
-        ));
+            &format!("r[{}] = (r[{}] == r[{}])", cmp_reg, reg1, reg2),
+        );
 
         // If equal (cmp_reg == 1), return NULL; else return reg1
         let not_equal_addr = self.program.len();
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::IfZ,
             cmp_reg,
             0, // Will be patched
             0,
             None,
-            0,
-            Some("if NOT equal, jump".to_string()),
-        ));
+            "if NOT equal, jump",
+        );
 
         // Values are equal, set result to NULL
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Null,
             0,
             target_reg,
             0,
             None,
-            0,
-            Some(format!("r[{}] = NULL (values equal)", target_reg)),
-        ));
+            &format!("r[{}] = NULL (values equal)", target_reg),
+        );
 
         let skip_else_addr = self.program.len();
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Goto,
             0,
             0, // Will be patched
             0,
             None,
-            0,
-            Some("skip else branch".to_string()),
-        ));
+            "skip else branch",
+        );
 
         // Patch IfZ to jump here (values not equal)
         let else_addr = self.program.len();
@@ -5162,18 +4878,14 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Values not equal, copy reg1 to target
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::Cast,
             reg1,
             target_reg,
             0,
             Some("TEXT".to_string()),
-            0,
-            Some(format!(
-                "r[{}] = r[{}] (values not equal)",
-                target_reg, reg1
-            )),
-        ));
+            &format!("r[{}] = r[{}] (values not equal)", target_reg, reg1),
+        );
 
         // Patch skip_else to jump here
         let end_addr = self.program.len();
@@ -5207,15 +4919,14 @@ impl<'a> SqlCompiler<'a> {
         self.compile_where_operand(&expr, table, cursor_idx, src_reg)?;
 
         // Emit StringFunc opcode
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::StringFunc,
             src_reg,
             target_reg,
             0,
             Some(func_name.to_string()),
-            0,
-            Some(format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg)),
-        ));
+            &format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg),
+        );
 
         Ok(())
     }
@@ -5255,15 +4966,14 @@ impl<'a> SqlCompiler<'a> {
         };
 
         // Emit StringFunc opcode
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::StringFunc,
             str_reg,
             target_reg,
             start_reg,
             Some(func_spec),
-            0,
-            Some(format!("r[{}] = SUBSTR(...)", target_reg)),
-        ));
+            &format!("r[{}] = SUBSTR(...)", target_reg),
+        );
 
         Ok(())
     }
@@ -5296,15 +5006,14 @@ impl<'a> SqlCompiler<'a> {
         self.compile_where_operand(&to_expr, table, cursor_idx, to_reg)?;
 
         // Emit StringFunc opcode with from_reg and to_reg in P4
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::StringFunc,
             str_reg,
             target_reg,
             0,
             Some(format!("REPLACE:{}:{}", from_reg, to_reg)),
-            0,
-            Some(format!("r[{}] = REPLACE(...)", target_reg)),
-        ));
+            &format!("r[{}] = REPLACE(...)", target_reg),
+        );
 
         Ok(())
     }
@@ -5340,15 +5049,14 @@ impl<'a> SqlCompiler<'a> {
         // P4 = "CONCAT:reg1:reg2:..."
         let func_spec = format!("CONCAT:{}", arg_regs.join(":"));
 
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::StringFunc,
             src_reg,
             target_reg,
             0,
             Some(func_spec),
-            0,
-            Some(format!("r[{}] = CONCAT(...)", target_reg)),
-        ));
+            &format!("r[{}] = CONCAT(...)", target_reg),
+        );
 
         Ok(())
     }
@@ -5378,18 +5086,17 @@ impl<'a> SqlCompiler<'a> {
         self.compile_where_operand(&str_expr, table, cursor_idx, str_reg)?;
         self.compile_where_operand(&len_expr, table, cursor_idx, len_reg)?;
 
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::StringFunc,
             str_reg,
             target_reg,
             len_reg,
             Some(func_name.to_string()),
-            0,
-            Some(format!(
+            &format!(
                 "r[{}] = {}(r[{}], r[{}])",
                 target_reg, func_name, str_reg, len_reg
-            )),
-        ));
+            ),
+        );
 
         Ok(())
     }
@@ -5417,30 +5124,28 @@ impl<'a> SqlCompiler<'a> {
         self.compile_where_operand(&expr, table, cursor_idx, src_reg)?;
 
         // Emit MathFunc opcode
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::MathFunc,
             src_reg,
             target_reg,
             0,
             Some(func_name.to_string()),
-            0,
-            Some(format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg)),
-        ));
+            &format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg),
+        );
 
         Ok(())
     }
 
     /// Compile date/time functions with no arguments (NOW, CURRENT_TIMESTAMP, etc.)
     fn compile_func_datetime_noarg(&mut self, func_name: &str, target_reg: i64) -> SqawkResult<()> {
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::DateFunc,
             0, // No source register needed
             target_reg,
             0,
             Some(func_name.to_string()),
-            0,
-            Some(format!("r[{}] = {}()", target_reg, func_name)),
-        ));
+            &format!("r[{}] = {}()", target_reg, func_name),
+        );
 
         Ok(())
     }
@@ -5468,15 +5173,14 @@ impl<'a> SqlCompiler<'a> {
         self.compile_where_operand(&expr, table, cursor_idx, src_reg)?;
 
         // Emit DateFunc opcode
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             OpCode::DateFunc,
             src_reg,
             target_reg,
             0,
             Some(func_name.to_string()),
-            0,
-            Some(format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg)),
-        ));
+            &format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg),
+        );
 
         Ok(())
     }
@@ -5551,65 +5255,60 @@ impl<'a> SqlCompiler<'a> {
 
                 // If left is false, skip right evaluation and return 0
                 let skip_to_false = self.program.len();
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::IfZ,
                     left_result,
                     0, // Will be patched
                     0,
                     None,
-                    0,
-                    Some("if left is false, skip to false".to_string()),
-                ));
+                    "if left is false, skip to false",
+                );
 
                 // Compile right condition
                 let right_result = self.compile_where_condition(right, table, cursor_idx)?;
 
                 // Result is right_result (if we got here, left was true)
                 let result_reg = self.allocate_register();
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Integer,
                     0,
                     result_reg,
                     0,
                     None,
-                    0,
-                    Some(format!("r[{}] = 0 (default AND result)", result_reg)),
-                ));
+                    &format!("r[{}] = 0 (default AND result)", result_reg),
+                );
 
                 // If right is false, skip setting result to 1
                 let skip_to_end = self.program.len();
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::IfZ,
                     right_result,
                     0, // Will be patched to skip to end
                     0,
                     None,
-                    0,
-                    Some("if right is false, skip to end".to_string()),
-                ));
+                    "if right is false, skip to end",
+                );
 
                 // Both are true, set result to 1
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Integer,
                     1,
                     result_reg,
                     0,
                     None,
-                    0,
-                    Some(format!("r[{}] = 1 (AND true)", result_reg)),
-                ));
+                    &format!("r[{}] = 1 (AND true)", result_reg),
+                );
 
                 // Jump to end
                 let goto_end = self.program.len();
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Goto,
                     0,
                     0, // Will be patched
                     0,
                     None,
-                    0,
-                    Some("goto end".to_string()),
-                ));
+                    "goto end",
+                );
 
                 // False label (left was false)
                 let false_label = self.program.len();
@@ -5635,53 +5334,49 @@ impl<'a> SqlCompiler<'a> {
                 let result_reg = self.allocate_register();
 
                 // Initialize result to 0
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Integer,
                     0,
                     result_reg,
                     0,
                     None,
-                    0,
-                    Some(format!("r[{}] = 0 (default OR result)", result_reg)),
-                ));
+                    &format!("r[{}] = 0 (default OR result)", result_reg),
+                );
 
                 // Compile left condition
                 let left_result = self.compile_where_condition(left, table, cursor_idx)?;
 
                 // If left is true, set result to 1 and skip right
                 let skip_if_left_true = self.program.len();
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::IfZ,
                     left_result,
                     0, // Will be patched to check right
                     0,
                     None,
-                    0,
-                    Some("if left is false, check right".to_string()),
-                ));
+                    "if left is false, check right",
+                );
 
                 // Left is true, set result to 1
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Integer,
                     1,
                     result_reg,
                     0,
                     None,
-                    0,
-                    Some(format!("r[{}] = 1 (OR left true)", result_reg)),
-                ));
+                    &format!("r[{}] = 1 (OR left true)", result_reg),
+                );
 
                 // Jump to end
                 let goto_end = self.program.len();
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Goto,
                     0,
                     0, // Will be patched
                     0,
                     None,
-                    0,
-                    Some("goto end".to_string()),
-                ));
+                    "goto end",
+                );
 
                 // Check right label
                 let check_right_label = self.program.len();
@@ -5694,26 +5389,24 @@ impl<'a> SqlCompiler<'a> {
 
                 // If right is false, skip setting result to 1
                 let skip_to_end = self.program.len();
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::IfZ,
                     right_result,
                     0, // Will be patched to skip to end
                     0,
                     None,
-                    0,
-                    Some("if right is false, skip to end".to_string()),
-                ));
+                    "if right is false, skip to end",
+                );
 
                 // Right is true, set result to 1
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Integer,
                     1,
                     result_reg,
                     0,
                     None,
-                    0,
-                    Some(format!("r[{}] = 1 (OR right true)", result_reg)),
-                ));
+                    &format!("r[{}] = 1 (OR right true)", result_reg),
+                );
 
                 // End label
                 let end_label = self.program.len();
@@ -5744,18 +5437,17 @@ impl<'a> SqlCompiler<'a> {
         // Generate comparison instruction based on operator
         let opcode = Self::binary_op_to_comparison_opcode(op)?;
 
-        self.program.add_instruction(Instruction::new(
+        self.emit(
             opcode,
             left_reg,
             right_reg,
             result_reg,
             None,
-            0,
-            Some(format!(
+            &format!(
                 "r[{}] = r[{}] {:?} r[{}]",
                 result_reg, left_reg, op, right_reg
-            )),
-        ));
+            ),
+        );
 
         Ok(result_reg)
     }
@@ -5774,44 +5466,41 @@ impl<'a> SqlCompiler<'a> {
                 let column_name = &ident.value;
                 let column_idx = self.find_column_index(table, column_name)?;
 
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Column,
                     cursor_idx as i64,
                     column_idx as i64,
                     target_reg,
                     None,
-                    0,
-                    Some(format!(
+                    &format!(
                         "r[{}] = column {} ({})",
                         target_reg, column_idx, column_name
-                    )),
-                ));
+                    ),
+                );
             }
             Expr::Value(value) => {
                 // This is a literal value
                 match value {
                     Value::Number(num, _) => {
                         if let Ok(int_val) = num.parse::<i64>() {
-                            self.program.add_instruction(Instruction::new(
+                            self.emit(
                                 OpCode::Integer,
                                 int_val,
                                 target_reg,
                                 0,
                                 None,
-                                0,
-                                Some(format!("r[{}] = {}", target_reg, int_val)),
-                            ));
+                                &format!("r[{}] = {}", target_reg, int_val),
+                            );
                         } else if let Ok(float_val) = num.parse::<f64>() {
                             // Store float as string for runtime conversion
-                            self.program.add_instruction(Instruction::new(
+                            self.emit(
                                 OpCode::String,
                                 0,
                                 target_reg,
                                 0,
                                 Some(float_val.to_string()),
-                                0,
-                                Some(format!("r[{}] = {} (float)", target_reg, float_val)),
-                            ));
+                                &format!("r[{}] = {} (float)", target_reg, float_val),
+                            );
                         } else {
                             return Err(SqawkError::UnsupportedSqlFeature(format!(
                                 "Invalid numeric literal in WHERE: {}",
@@ -5820,26 +5509,24 @@ impl<'a> SqlCompiler<'a> {
                         }
                     }
                     Value::SingleQuotedString(s) => {
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::String,
                             0,
                             target_reg,
                             0,
                             Some(s.clone()),
-                            0,
-                            Some(format!("r[{}] = '{}'", target_reg, s)),
-                        ));
+                            &format!("r[{}] = '{}'", target_reg, s),
+                        );
                     }
                     Value::Null => {
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::Null,
                             0,
                             target_reg,
                             0,
                             None,
-                            0,
-                            Some(format!("r[{}] = NULL", target_reg)),
-                        ));
+                            &format!("r[{}] = NULL", target_reg),
+                        );
                     }
                     _ => {
                         return Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -5896,18 +5583,17 @@ impl<'a> SqlCompiler<'a> {
                     }
                 };
 
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     opcode,
                     left_reg,
                     right_reg,
                     target_reg,
                     None,
-                    0,
-                    Some(format!(
+                    &format!(
                         "r[{}] = (r[{}] {:?} r[{}])",
                         target_reg, left_reg, op, right_reg
-                    )),
-                ));
+                    ),
+                );
             }
             Expr::Cast {
                 expr, data_type, ..
@@ -5920,18 +5606,14 @@ impl<'a> SqlCompiler<'a> {
                 let type_name = self.sql_data_type_to_string(data_type);
 
                 // Emit Cast instruction
-                self.program.add_instruction(Instruction::new(
+                self.emit(
                     OpCode::Cast,
                     src_reg,
                     target_reg,
                     0,
                     Some(type_name.clone()),
-                    0,
-                    Some(format!(
-                        "r[{}] = CAST(r[{}] AS {})",
-                        target_reg, src_reg, type_name
-                    )),
-                ));
+                    &format!("r[{}] = CAST(r[{}] AS {})", target_reg, src_reg, type_name),
+                );
             }
             Expr::Function(func) => {
                 // Handle COALESCE and NULLIF functions
@@ -5963,20 +5645,19 @@ impl<'a> SqlCompiler<'a> {
                 if outer_refs.is_empty() {
                     // Non-correlated: Evaluate at compile time and emit 1 or 0
                     let exists_result = self.evaluate_exists_subquery(subquery, *negated)?;
-                    self.program.add_instruction(Instruction::new(
+                    self.emit(
                         OpCode::Integer,
                         if exists_result { 1 } else { 0 },
                         target_reg,
                         0,
                         None,
-                        0,
-                        Some(format!(
+                        &format!(
                             "r[{}] = {} ({}EXISTS result)",
                             target_reg,
                             if exists_result { 1 } else { 0 },
                             if *negated { "NOT " } else { "" }
-                        )),
-                    ));
+                        ),
+                    );
                 } else {
                     // Correlated: emit runtime execution bytecode
                     self.compile_correlated_exists_subquery(
@@ -5999,34 +5680,32 @@ impl<'a> SqlCompiler<'a> {
                 let subquery_values = self.evaluate_in_subquery_values(subquery)?;
                 if subquery_values.is_empty() {
                     // Empty subquery: IN is false, NOT IN is true
-                    self.program.add_instruction(Instruction::new(
+                    self.emit(
                         OpCode::Integer,
                         if *negated { 1 } else { 0 },
                         target_reg,
                         0,
                         None,
-                        0,
-                        Some(format!(
+                        &format!(
                             "r[{}] = {} (empty IN subquery)",
                             target_reg,
                             if *negated { 1 } else { 0 }
-                        )),
-                    ));
+                        ),
+                    );
                 } else {
                     // Get the expression value
                     let expr_reg = self.allocate_register();
                     self.compile_where_operand(inner_expr, table, cursor_idx, expr_reg)?;
 
                     // Initialize result
-                    self.program.add_instruction(Instruction::new(
+                    self.emit(
                         OpCode::Integer,
                         0,
                         target_reg,
                         0,
                         None,
-                        0,
-                        Some(format!("r[{}] = 0 (IN subquery initial)", target_reg)),
-                    ));
+                        &format!("r[{}] = 0 (IN subquery initial)", target_reg),
+                    );
 
                     let temp_reg = self.allocate_register();
                     let mut jump_to_end_addrs = Vec::new();
@@ -6035,50 +5714,29 @@ impl<'a> SqlCompiler<'a> {
                         let item_reg = self.allocate_register();
                         self.emit_value_literal(item_reg, value)?;
 
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::Eq,
                             expr_reg,
                             item_reg,
                             temp_reg,
                             None,
-                            0,
-                            Some(format!(
-                                "r[{}] = (r[{}] == r[{}])",
-                                temp_reg, expr_reg, item_reg
-                            )),
-                        ));
+                            &format!("r[{}] = (r[{}] == r[{}])", temp_reg, expr_reg, item_reg),
+                        );
 
                         let skip_set_addr = self.program.len();
-                        self.program.add_instruction(Instruction::new(
-                            OpCode::IfZ,
-                            temp_reg,
-                            0,
-                            0,
-                            None,
-                            0,
-                            Some("if no match, skip".to_string()),
-                        ));
+                        self.emit(OpCode::IfZ, temp_reg, 0, 0, None, "if no match, skip");
 
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::Integer,
                             1,
                             target_reg,
                             0,
                             None,
-                            0,
-                            Some(format!("r[{}] = 1 (found)", target_reg)),
-                        ));
+                            &format!("r[{}] = 1 (found)", target_reg),
+                        );
 
                         jump_to_end_addrs.push(self.program.len());
-                        self.program.add_instruction(Instruction::new(
-                            OpCode::Goto,
-                            0,
-                            0,
-                            0,
-                            None,
-                            0,
-                            Some("skip to end".to_string()),
-                        ));
+                        self.emit(OpCode::Goto, 0, 0, 0, None, "skip to end");
 
                         let continue_addr = self.program.len();
                         if let Some(inst) = self.program.instructions.get_mut(skip_set_addr) {
@@ -6095,27 +5753,22 @@ impl<'a> SqlCompiler<'a> {
 
                     if *negated {
                         let zero_reg = self.allocate_register();
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::Integer,
                             0,
                             zero_reg,
                             0,
                             None,
-                            0,
-                            Some(format!("r[{}] = 0 for NOT IN", zero_reg)),
-                        ));
-                        self.program.add_instruction(Instruction::new(
+                            &format!("r[{}] = 0 for NOT IN", zero_reg),
+                        );
+                        self.emit(
                             OpCode::Eq,
                             target_reg,
                             zero_reg,
                             target_reg,
                             None,
-                            0,
-                            Some(format!(
-                                "r[{}] = (r[{}] == 0) for NOT IN",
-                                target_reg, target_reg
-                            )),
-                        ));
+                            &format!("r[{}] = (r[{}] == 0) for NOT IN", target_reg, target_reg),
+                        );
                     }
                 }
             }
@@ -6126,24 +5779,22 @@ impl<'a> SqlCompiler<'a> {
                         let inner_reg = self.allocate_register();
                         self.compile_where_operand(inner, table, cursor_idx, inner_reg)?;
                         let zero_reg = self.allocate_register();
-                        self.program.add_instruction(Instruction::new(
+                        self.emit(
                             OpCode::Integer,
                             0,
                             zero_reg,
                             0,
                             None,
-                            0,
-                            Some(format!("r[{}] = 0", zero_reg)),
-                        ));
-                        self.program.add_instruction(Instruction::new(
+                            &format!("r[{}] = 0", zero_reg),
+                        );
+                        self.emit(
                             OpCode::Subtract,
                             zero_reg,
                             inner_reg,
                             target_reg,
                             None,
-                            0,
-                            Some(format!("r[{}] = -r[{}]", target_reg, inner_reg)),
-                        ));
+                            &format!("r[{}] = -r[{}]", target_reg, inner_reg),
+                        );
                     }
                     UnaryOperator::Plus => {
                         // Unary plus is a no-op, just compile the inner expression
