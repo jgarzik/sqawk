@@ -105,9 +105,9 @@ fn test_compile_select_with_where_string() {
 
     // Verify we have Eq comparison and String instruction
     let eq_found = instructions.iter().any(|inst| inst.opcode == OpCode::Eq);
-    let string_found = instructions.iter().any(|inst| {
-        inst.opcode == OpCode::String && inst.p4.as_deref() == Some("Alice")
-    });
+    let string_found = instructions
+        .iter()
+        .any(|inst| inst.opcode == OpCode::String && inst.p4.as_deref() == Some("Alice"));
 
     assert!(eq_found, "Expected Eq comparison instruction");
     assert!(

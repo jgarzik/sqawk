@@ -154,8 +154,14 @@ impl<'a> SqlCompiler<'a> {
         let result_reg = self.allocate_register();
 
         // Start with 0 (false)
-        self.emit(OpCode::Integer, 0, result_reg, 0, None,
-            &format!("r[{}] = 0 (AND init)", result_reg));
+        self.emit(
+            OpCode::Integer,
+            0,
+            result_reg,
+            0,
+            None,
+            &format!("r[{}] = 0 (AND init)", result_reg),
+        );
 
         // If left is 0, skip to end (result stays 0)
         let skip_addr1 = self.program.len();
@@ -166,8 +172,14 @@ impl<'a> SqlCompiler<'a> {
         self.emit(OpCode::IfZ, right_reg, 0, 0, None, "Skip if right is false");
 
         // Both true, set result to 1
-        self.emit(OpCode::Integer, 1, result_reg, 0, None,
-            &format!("r[{}] = 1 (AND true)", result_reg));
+        self.emit(
+            OpCode::Integer,
+            1,
+            result_reg,
+            0,
+            None,
+            &format!("r[{}] = 1 (AND true)", result_reg),
+        );
 
         // Patch skip addresses to end
         let end_addr = self.program.len();
@@ -183,8 +195,14 @@ impl<'a> SqlCompiler<'a> {
         let result_reg = self.allocate_register();
 
         // Start with 1 (optimistic - assume true)
-        self.emit(OpCode::Integer, 1, result_reg, 0, None,
-            &format!("r[{}] = 1 (OR init)", result_reg));
+        self.emit(
+            OpCode::Integer,
+            1,
+            result_reg,
+            0,
+            None,
+            &format!("r[{}] = 1 (OR init)", result_reg),
+        );
 
         // If left is non-zero, skip to end (result stays 1)
         let skip_addr1 = self.program.len();
@@ -192,11 +210,24 @@ impl<'a> SqlCompiler<'a> {
 
         // If right is non-zero, skip to end (result stays 1)
         let skip_addr2 = self.program.len();
-        self.emit(OpCode::IfPos, right_reg, 0, 0, None, "Skip if right is true");
+        self.emit(
+            OpCode::IfPos,
+            right_reg,
+            0,
+            0,
+            None,
+            "Skip if right is true",
+        );
 
         // Both false, set result to 0
-        self.emit(OpCode::Integer, 0, result_reg, 0, None,
-            &format!("r[{}] = 0 (OR false)", result_reg));
+        self.emit(
+            OpCode::Integer,
+            0,
+            result_reg,
+            0,
+            None,
+            &format!("r[{}] = 0 (OR false)", result_reg),
+        );
 
         // Patch skip addresses to end
         let end_addr = self.program.len();
@@ -216,8 +247,17 @@ impl<'a> SqlCompiler<'a> {
         let result_reg = self.allocate_register();
         let opcode = Self::binary_op_to_comparison_opcode(op)?;
 
-        self.emit(opcode, left_reg, right_reg, result_reg, None,
-            &format!("r[{}] = (r[{}] {:?} r[{}])", result_reg, left_reg, op, right_reg));
+        self.emit(
+            opcode,
+            left_reg,
+            right_reg,
+            result_reg,
+            None,
+            &format!(
+                "r[{}] = (r[{}] {:?} r[{}])",
+                result_reg, left_reg, op, right_reg
+            ),
+        );
 
         Ok(result_reg)
     }
@@ -259,7 +299,10 @@ impl<'a> SqlCompiler<'a> {
         for (i, name) in table_names.iter().enumerate() {
             if table_name.eq_ignore_ascii_case(name) {
                 let columns = tables[i].columns();
-                if let Some(col_idx) = columns.iter().position(|c| c.eq_ignore_ascii_case(col_name)) {
+                if let Some(col_idx) = columns
+                    .iter()
+                    .position(|c| c.eq_ignore_ascii_case(col_name))
+                {
                     return Ok((i, col_idx));
                 } else {
                     return Err(SqawkError::ColumnNotFound(col_name.to_string()));
@@ -281,10 +324,7 @@ impl<'a> SqlCompiler<'a> {
         for (i, table) in tables.iter().enumerate() {
             let cols: Vec<usize> = (0..table.column_count()).collect();
             for meta in table.column_metadata() {
-                schema.add_column(
-                    format!("{}.{}", table_names[i], meta.name),
-                    meta.data_type,
-                );
+                schema.add_column(format!("{}.{}", table_names[i], meta.name), meta.data_type);
             }
             table_cols.push(cols);
         }

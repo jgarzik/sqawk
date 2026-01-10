@@ -998,9 +998,13 @@ impl<'a> SqlCompiler<'a> {
                 }
             };
 
-            let (tbl_idx, col_idx) = Self::find_column_in_tables(&tbl_name, &col_name, tables, &name_refs)?;
+            let (tbl_idx, col_idx) =
+                Self::find_column_in_tables(&tbl_name, &col_name, tables, &name_refs)?;
             output_cols.push((tbl_idx, col_idx));
-            schema.add_column(output_name, tables[tbl_idx].column_metadata()[col_idx].data_type);
+            schema.add_column(
+                output_name,
+                tables[tbl_idx].column_metadata()[col_idx].data_type,
+            );
         }
 
         Ok((vec![Vec::new(); num_tables], output_cols, schema, false))
@@ -1895,13 +1899,17 @@ impl<'a> SqlCompiler<'a> {
                 }
             };
 
-            let (tbl_idx, col_idx) = Self::find_column_in_tables(&tbl_name, &col_name, &tables, &table_names)?;
+            let (tbl_idx, col_idx) =
+                Self::find_column_in_tables(&tbl_name, &col_name, &tables, &table_names)?;
             if tbl_idx == 0 {
                 left_cols.push(col_idx);
             } else {
                 right_cols.push(col_idx);
             }
-            schema.add_column(output_name, tables[tbl_idx].column_metadata()[col_idx].data_type);
+            schema.add_column(
+                output_name,
+                tables[tbl_idx].column_metadata()[col_idx].data_type,
+            );
         }
 
         Ok((left_cols, right_cols, schema))
@@ -1948,10 +1956,18 @@ impl<'a> SqlCompiler<'a> {
         match expr {
             Expr::BinaryOp { left, op, right } => {
                 let left_reg = self.compile_join_operand(
-                    left, left_table, right_table, left_cursor, right_cursor,
+                    left,
+                    left_table,
+                    right_table,
+                    left_cursor,
+                    right_cursor,
                 )?;
                 let right_reg = self.compile_join_operand(
-                    right, left_table, right_table, left_cursor, right_cursor,
+                    right,
+                    left_table,
+                    right_table,
+                    left_cursor,
+                    right_cursor,
                 )?;
                 self.emit_comparison(op, left_reg, right_reg)
             }

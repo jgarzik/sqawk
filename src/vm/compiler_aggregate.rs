@@ -595,10 +595,18 @@ impl<'a> SqlCompiler<'a> {
         match having_expr {
             Expr::BinaryOp { left, op, right } => {
                 let left_reg = self.compile_having_operand(
-                    left, group_col_indices, agg_info, result_start_reg, group_key_reg,
+                    left,
+                    group_col_indices,
+                    agg_info,
+                    result_start_reg,
+                    group_key_reg,
                 )?;
                 let right_reg = self.compile_having_operand(
-                    right, group_col_indices, agg_info, result_start_reg, group_key_reg,
+                    right,
+                    group_col_indices,
+                    agg_info,
+                    result_start_reg,
+                    group_key_reg,
                 )?;
                 self.emit_comparison(op, left_reg, right_reg)
             }

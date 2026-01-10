@@ -1996,7 +1996,9 @@ impl<'a> VmEngine<'a> {
                 // 2. Allow for multiple savepoints with different names
                 // 3. Support rolling back to any specific savepoint
                 // 4. Properly handle nested savepoints in a hierarchical manner
-                let savepoint_name = inst.p4.as_deref()
+                let savepoint_name = inst
+                    .p4
+                    .as_deref()
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| format!("sp_{}", inst.p1));
 
@@ -2022,7 +2024,9 @@ impl<'a> VmEngine<'a> {
                 // 2. Make all changes permanent up to that point
                 // 3. Remove this savepoint and any subsequent nested savepoints
                 // 4. Maintain the active transaction state for further operations
-                let savepoint_name = inst.p4.as_deref()
+                let savepoint_name = inst
+                    .p4
+                    .as_deref()
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| format!("sp_{}", inst.p1));
 
