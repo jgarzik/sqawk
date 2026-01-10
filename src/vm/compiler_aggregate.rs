@@ -134,7 +134,7 @@ impl<'a> SqlCompiler<'a> {
         match expr {
             Expr::Function(func) => {
                 let name = func.name.to_string().to_uppercase();
-                let func_type = self.get_agg_func_type(&name);
+                let func_type = Self::agg_func_type(&name);
 
                 // Check for COUNT(*)
                 if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) = func.args.first() {
@@ -236,7 +236,7 @@ impl<'a> SqlCompiler<'a> {
                     if let Expr::Function(func) = expr {
                         let name = func.name.to_string().to_uppercase();
                         if matches!(name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX") {
-                            let func_type = self.get_agg_func_type(&name);
+                            let func_type = Self::agg_func_type(&name);
                             if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
                                 func.args.first()
                             {
@@ -640,7 +640,7 @@ impl<'a> SqlCompiler<'a> {
             Expr::Function(func) => {
                 // Find the aggregate function in agg_info and return its result register
                 let name = func.name.to_string().to_uppercase();
-                let func_type = self.get_agg_func_type(&name);
+                let func_type = Self::agg_func_type(&name);
 
                 // Find matching aggregate in agg_info by function type
                 for (i, (agg_func_type, _)) in agg_info.iter().enumerate() {

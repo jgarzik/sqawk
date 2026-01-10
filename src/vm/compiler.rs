@@ -13,7 +13,9 @@ use sqlparser::dialect::HiveDialect;
 use sqlparser::parser::Parser;
 use std::collections::HashMap;
 
-use super::bytecode::{Instruction, OpCode, Program, ResultSchema};
+use super::bytecode::{
+    Instruction, OpCode, Program, ResultSchema, AGG_AVG, AGG_COUNT, AGG_MAX, AGG_MIN, AGG_SUM,
+};
 use crate::aggregate::AggregateFunction;
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
@@ -124,6 +126,18 @@ impl<'a> SqlCompiler<'a> {
                 None,
                 &format!("r[{}] = {}.col[{}]", start_reg + i as i64, label, col_idx),
             );
+        }
+    }
+
+    /// Convert aggregate function name to type code
+    pub(crate) fn agg_func_type(name: &str) -> i64 {
+        match name {
+            "COUNT" => AGG_COUNT,
+            "SUM" => AGG_SUM,
+            "AVG" => AGG_AVG,
+            "MIN" => AGG_MIN,
+            "MAX" => AGG_MAX,
+            _ => AGG_COUNT, // Default to COUNT
         }
     }
 
@@ -4174,14 +4188,7 @@ impl<'a> SqlCompiler<'a> {
         // Update accumulator based on aggregate type
         self.emit(
             OpCode::AggStep,
-            match agg_func_name.as_str() {
-                "COUNT" => 0,
-                "SUM" => 1,
-                "AVG" => 2,
-                "MIN" => 3,
-                "MAX" => 4,
-                _ => 0,
-            },
+            Self::agg_func_type(agg_func_name.as_str()),
             val_reg,
             acc_reg,
             None,
@@ -4216,19 +4223,11 @@ impl<'a> SqlCompiler<'a> {
 
         // Finalize aggregate into result_reg
         // P3 = function type hint for when no AggStep was called (register still Null)
-        let func_type = match agg_func_name.as_str() {
-            "COUNT" => 0,
-            "SUM" => 1,
-            "AVG" => 2,
-            "MIN" => 3,
-            "MAX" => 4,
-            _ => 0,
-        };
         self.emit(
             OpCode::AggFinal,
             acc_reg,
             result_reg,
-            func_type,
+            Self::agg_func_type(agg_func_name.as_str()),
             None,
             &format!("r[{}] = final {} result", result_reg, agg_func_name),
         );
@@ -6141,18 +6140,6 @@ impl<'a> SqlCompiler<'a> {
                 matches!(name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX")
             }
             _ => false,
-        }
-    }
-
-    /// Get the aggregate function type code for an aggregate function name
-    pub(crate) fn get_agg_func_type(&self, name: &str) -> i64 {
-        match name.to_uppercase().as_str() {
-            "COUNT" => 0,
-            "SUM" => 1,
-            "AVG" => 2,
-            "MIN" => 3,
-            "MAX" => 4,
-            _ => 0,
         }
     }
 

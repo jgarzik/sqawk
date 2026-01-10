@@ -10,6 +10,18 @@
 use crate::table::{DataType, Value};
 use std::fmt;
 
+// Aggregate function type constants for AggStep/AggFinal opcodes
+/// COUNT aggregate function type
+pub const AGG_COUNT: i64 = 0;
+/// SUM aggregate function type
+pub const AGG_SUM: i64 = 1;
+/// AVG aggregate function type
+pub const AGG_AVG: i64 = 2;
+/// MIN aggregate function type
+pub const AGG_MIN: i64 = 3;
+/// MAX aggregate function type
+pub const AGG_MAX: i64 = 4;
+
 /// A column in a result schema
 #[derive(Debug, Clone)]
 pub struct ResultColumn {
