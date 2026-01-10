@@ -1074,142 +1074,18 @@ impl<'a> SqlCompiler<'a> {
             Expr::BinaryOp { left, op, right } => {
                 match op {
                     BinaryOperator::And => {
-                        // Compile left and right conditions
                         let left_reg =
                             self.compile_multi_table_condition(left, tables, table_names)?;
                         let right_reg =
                             self.compile_multi_table_condition(right, tables, table_names)?;
-
-                        // AND: both must be true (non-zero)
-                        // Use IfZ to implement: result = left && right
-                        let result_reg = self.allocate_register();
-
-                        // Start with 0
-                        self.emit(
-                            OpCode::Integer,
-                            0,
-                            result_reg,
-                            0,
-                            None,
-                            &format!("r[{}] = 0 (AND init)", result_reg),
-                        );
-
-                        // If left is 0, skip to end (result stays 0)
-                        let skip_addr = self.program.len();
-                        self.emit(
-                            OpCode::IfZ,
-                            left_reg,
-                            0, // Will patch
-                            0,
-                            None,
-                            "Skip if left is false",
-                        );
-
-                        // If right is 0, skip to end (result stays 0)
-                        let skip_addr2 = self.program.len();
-                        self.emit(
-                            OpCode::IfZ,
-                            right_reg,
-                            0, // Will patch
-                            0,
-                            None,
-                            "Skip if right is false",
-                        );
-
-                        // Both true, set result to 1
-                        self.emit(
-                            OpCode::Integer,
-                            1,
-                            result_reg,
-                            0,
-                            None,
-                            &format!("r[{}] = 1 (AND true)", result_reg),
-                        );
-
-                        // Patch skip addresses
-                        let end_addr = self.program.len();
-                        if let Some(inst) = self.program.instructions.get_mut(skip_addr) {
-                            inst.p2 = end_addr as i64;
-                        }
-                        if let Some(inst) = self.program.instructions.get_mut(skip_addr2) {
-                            inst.p2 = end_addr as i64;
-                        }
-
-                        Ok(result_reg)
+                        Ok(self.emit_and(left_reg, right_reg))
                     }
                     BinaryOperator::Or => {
-                        // Compile left and right conditions
                         let left_reg =
                             self.compile_multi_table_condition(left, tables, table_names)?;
                         let right_reg =
                             self.compile_multi_table_condition(right, tables, table_names)?;
-
-                        // OR: either must be true
-                        let result_reg = self.allocate_register();
-
-                        // Start with 1 (optimistic)
-                        self.emit(
-                            OpCode::Integer,
-                            1,
-                            result_reg,
-                            0,
-                            None,
-                            &format!("r[{}] = 1 (OR init)", result_reg),
-                        );
-
-                        // If left is non-zero, skip to end (result stays 1)
-                        let one_reg = self.allocate_register();
-                        self.emit(OpCode::Integer, 1, one_reg, 0, None, "temp = 1");
-                        let check_reg = self.allocate_register();
-                        self.emit(
-                            OpCode::Ge,
-                            left_reg,
-                            one_reg,
-                            check_reg,
-                            None,
-                            &format!("r[{}] = (left >= 1)", check_reg),
-                        );
-                        let skip_addr = self.program.len();
-                        self.emit(
-                            OpCode::IfPos,
-                            left_reg,
-                            0, // Will patch to end
-                            0,
-                            None,
-                            "Skip if left is true",
-                        );
-
-                        // Left was false, check right
-                        let skip_addr2 = self.program.len();
-                        self.emit(
-                            OpCode::IfPos,
-                            right_reg,
-                            0, // Will patch to end
-                            0,
-                            None,
-                            "Skip if right is true",
-                        );
-
-                        // Both false, set result to 0
-                        self.emit(
-                            OpCode::Integer,
-                            0,
-                            result_reg,
-                            0,
-                            None,
-                            &format!("r[{}] = 0 (OR false)", result_reg),
-                        );
-
-                        // Patch skip addresses
-                        let end_addr = self.program.len();
-                        if let Some(inst) = self.program.instructions.get_mut(skip_addr) {
-                            inst.p2 = end_addr as i64;
-                        }
-                        if let Some(inst) = self.program.instructions.get_mut(skip_addr2) {
-                            inst.p2 = end_addr as i64;
-                        }
-
-                        Ok(result_reg)
+                        Ok(self.emit_or(left_reg, right_reg))
                     }
                     // Comparison operators
                     BinaryOperator::Eq
@@ -1220,26 +1096,9 @@ impl<'a> SqlCompiler<'a> {
                     | BinaryOperator::GtEq => {
                         let left_reg = self.allocate_register();
                         let right_reg = self.allocate_register();
-
                         self.compile_multi_table_operand(left, tables, table_names, left_reg)?;
                         self.compile_multi_table_operand(right, tables, table_names, right_reg)?;
-
-                        let result_reg = self.allocate_register();
-                        let opcode = Self::binary_op_to_comparison_opcode(op)?;
-
-                        self.emit(
-                            opcode,
-                            left_reg,
-                            right_reg,
-                            result_reg,
-                            None,
-                            &format!(
-                                "r[{}] = (r[{}] {:?} r[{}])",
-                                result_reg, left_reg, op, right_reg
-                            ),
-                        );
-
-                        Ok(result_reg)
+                        self.emit_comparison(op, left_reg, right_reg)
                     }
                     _ => Err(SqawkError::UnsupportedSqlFeature(format!(
                         "Unsupported binary operator in multi-table WHERE: {:?}",
@@ -1957,21 +1816,7 @@ impl<'a> SqlCompiler<'a> {
                     self.compile_multi_join_operand(left, table_names, table_start_regs)?;
                 let right_reg =
                     self.compile_multi_join_operand(right, table_names, table_start_regs)?;
-
-                let result_reg = self.allocate_register();
-
-                let opcode = Self::binary_op_to_comparison_opcode(op)?;
-
-                self.emit(
-                    opcode,
-                    left_reg,
-                    right_reg,
-                    result_reg,
-                    None,
-                    "Evaluate join condition",
-                );
-
-                Ok(result_reg)
+                self.emit_comparison(op, left_reg, right_reg)
             }
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
                 "Unsupported multi-join condition: {:?}",
@@ -2213,34 +2058,12 @@ impl<'a> SqlCompiler<'a> {
         match expr {
             Expr::BinaryOp { left, op, right } => {
                 let left_reg = self.compile_join_operand(
-                    left,
-                    left_table,
-                    right_table,
-                    left_cursor,
-                    right_cursor,
+                    left, left_table, right_table, left_cursor, right_cursor,
                 )?;
                 let right_reg = self.compile_join_operand(
-                    right,
-                    left_table,
-                    right_table,
-                    left_cursor,
-                    right_cursor,
+                    right, left_table, right_table, left_cursor, right_cursor,
                 )?;
-
-                let result_reg = self.allocate_register();
-
-                let opcode = Self::binary_op_to_comparison_opcode(op)?;
-
-                self.emit(
-                    opcode,
-                    left_reg,
-                    right_reg,
-                    result_reg,
-                    None,
-                    "Evaluate join condition",
-                );
-
-                Ok(result_reg)
+                self.emit_comparison(op, left_reg, right_reg)
             }
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
                 "Unsupported join condition expression: {:?}",

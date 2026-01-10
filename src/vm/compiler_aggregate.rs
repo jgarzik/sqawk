@@ -594,31 +594,13 @@ impl<'a> SqlCompiler<'a> {
     ) -> SqawkResult<i64> {
         match having_expr {
             Expr::BinaryOp { left, op, right } => {
-                // Compile left operand
                 let left_reg = self.compile_having_operand(
-                    left,
-                    group_col_indices,
-                    agg_info,
-                    result_start_reg,
-                    group_key_reg,
+                    left, group_col_indices, agg_info, result_start_reg, group_key_reg,
                 )?;
-
-                // Compile right operand
                 let right_reg = self.compile_having_operand(
-                    right,
-                    group_col_indices,
-                    agg_info,
-                    result_start_reg,
-                    group_key_reg,
+                    right, group_col_indices, agg_info, result_start_reg, group_key_reg,
                 )?;
-
-                // Emit comparison
-                let result_reg = self.allocate_register();
-                let opcode = Self::binary_op_to_comparison_opcode(op)?;
-
-                self.emit(opcode, left_reg, right_reg, result_reg, None, "");
-
-                Ok(result_reg)
+                self.emit_comparison(op, left_reg, right_reg)
             }
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
                 "Unsupported HAVING expression: {:?}",

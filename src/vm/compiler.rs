@@ -148,6 +148,80 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
+    /// Emit AND logic: result = left_reg && right_reg
+    /// Returns the register containing the result (1 if both true, 0 otherwise)
+    pub(crate) fn emit_and(&mut self, left_reg: i64, right_reg: i64) -> i64 {
+        let result_reg = self.allocate_register();
+
+        // Start with 0 (false)
+        self.emit(OpCode::Integer, 0, result_reg, 0, None,
+            &format!("r[{}] = 0 (AND init)", result_reg));
+
+        // If left is 0, skip to end (result stays 0)
+        let skip_addr1 = self.program.len();
+        self.emit(OpCode::IfZ, left_reg, 0, 0, None, "Skip if left is false");
+
+        // If right is 0, skip to end (result stays 0)
+        let skip_addr2 = self.program.len();
+        self.emit(OpCode::IfZ, right_reg, 0, 0, None, "Skip if right is false");
+
+        // Both true, set result to 1
+        self.emit(OpCode::Integer, 1, result_reg, 0, None,
+            &format!("r[{}] = 1 (AND true)", result_reg));
+
+        // Patch skip addresses to end
+        let end_addr = self.program.len();
+        self.patch_jump(skip_addr1, end_addr);
+        self.patch_jump(skip_addr2, end_addr);
+
+        result_reg
+    }
+
+    /// Emit OR logic: result = left_reg || right_reg
+    /// Returns the register containing the result (1 if either true, 0 otherwise)
+    pub(crate) fn emit_or(&mut self, left_reg: i64, right_reg: i64) -> i64 {
+        let result_reg = self.allocate_register();
+
+        // Start with 1 (optimistic - assume true)
+        self.emit(OpCode::Integer, 1, result_reg, 0, None,
+            &format!("r[{}] = 1 (OR init)", result_reg));
+
+        // If left is non-zero, skip to end (result stays 1)
+        let skip_addr1 = self.program.len();
+        self.emit(OpCode::IfPos, left_reg, 0, 0, None, "Skip if left is true");
+
+        // If right is non-zero, skip to end (result stays 1)
+        let skip_addr2 = self.program.len();
+        self.emit(OpCode::IfPos, right_reg, 0, 0, None, "Skip if right is true");
+
+        // Both false, set result to 0
+        self.emit(OpCode::Integer, 0, result_reg, 0, None,
+            &format!("r[{}] = 0 (OR false)", result_reg));
+
+        // Patch skip addresses to end
+        let end_addr = self.program.len();
+        self.patch_jump(skip_addr1, end_addr);
+        self.patch_jump(skip_addr2, end_addr);
+
+        result_reg
+    }
+
+    /// Emit a comparison operation and return the result register
+    pub(crate) fn emit_comparison(
+        &mut self,
+        op: &BinaryOperator,
+        left_reg: i64,
+        right_reg: i64,
+    ) -> SqawkResult<i64> {
+        let result_reg = self.allocate_register();
+        let opcode = Self::binary_op_to_comparison_opcode(op)?;
+
+        self.emit(opcode, left_reg, right_reg, result_reg, None,
+            &format!("r[{}] = (r[{}] {:?} r[{}])", result_reg, left_reg, op, right_reg));
+
+        Ok(result_reg)
+    }
+
     /// Convert a comparison binary operator to the corresponding OpCode
     pub(crate) fn binary_op_to_comparison_opcode(op: &BinaryOperator) -> SqawkResult<OpCode> {
         match op {
