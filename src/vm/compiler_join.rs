@@ -101,8 +101,8 @@ impl<'a> SqlCompiler<'a> {
         }
         self.add_comment(&format!("{} JOIN {} ON ...", join_type, right_table_name));
 
-        let left_table = self.database.get_table(&left_table_name).unwrap();
-        let right_table = self.database.get_table(&right_table_name).unwrap();
+        let left_table = self.database.get_table(&left_table_name)?;
+        let right_table = self.database.get_table(&right_table_name)?;
 
         // Determine which columns to output based on projection
         let (left_cols, right_cols, schema) = self.resolve_join_projection(
@@ -170,14 +170,8 @@ impl<'a> SqlCompiler<'a> {
         ));
 
         // Allocate registers for columns - always in left, right order
-        let left_start_reg = self.allocate_register();
-        for _ in 1..left_cols.len() {
-            self.allocate_register();
-        }
-        let right_start_reg = self.allocate_register();
-        for _ in 1..right_cols.len() {
-            self.allocate_register();
-        }
+        let left_start_reg = self.allocate_registers(left_cols.len());
+        let right_start_reg = self.allocate_registers(right_cols.len());
 
         // For RIGHT JOIN, outer/inner start regs are swapped
         let (outer_start_reg, inner_start_reg) = if join_type == "RIGHT" {
@@ -682,8 +676,8 @@ impl<'a> SqlCompiler<'a> {
             left_table_name, right_table_name
         ));
 
-        let left_table = self.database.get_table(left_table_name).unwrap();
-        let right_table = self.database.get_table(right_table_name).unwrap();
+        let left_table = self.database.get_table(left_table_name)?;
+        let right_table = self.database.get_table(right_table_name)?;
 
         // Determine which columns to output based on projection
         let (left_cols, right_cols, schema) = self.resolve_join_projection(
@@ -720,14 +714,8 @@ impl<'a> SqlCompiler<'a> {
         );
 
         // Allocate registers for columns
-        let left_start_reg = self.allocate_register();
-        for _ in 1..left_cols.len() {
-            self.allocate_register();
-        }
-        let right_start_reg = self.allocate_register();
-        for _ in 1..right_cols.len() {
-            self.allocate_register();
-        }
+        let left_start_reg = self.allocate_registers(left_cols.len());
+        let right_start_reg = self.allocate_registers(right_cols.len());
 
         // Rewind left cursor (outer loop)
         let left_loop_end_placeholder = self.program.len();
@@ -882,8 +870,8 @@ impl<'a> SqlCompiler<'a> {
         // Get references to all tables
         let tables: Vec<&Table> = table_names
             .iter()
-            .map(|name| self.database.get_table(name).unwrap())
-            .collect();
+            .map(|name| self.database.get_table(name))
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Resolve projection for all tables - determine which columns to output
         let (table_col_indices, output_col_refs, schema, is_wildcard) =
@@ -913,11 +901,8 @@ impl<'a> SqlCompiler<'a> {
         let mut table_start_regs: Vec<i64> = Vec::with_capacity(num_tables);
         if is_wildcard {
             for cols in &table_col_indices {
-                let start_reg = self.allocate_register();
+                let start_reg = self.allocate_registers(cols.len().max(1));
                 table_start_regs.push(start_reg);
-                for _ in 1..cols.len().max(1) {
-                    self.allocate_register();
-                }
             }
         }
 
@@ -1003,10 +988,7 @@ impl<'a> SqlCompiler<'a> {
             );
         } else {
             // For explicit projection, load columns in SELECT order into output registers
-            let output_start_reg = self.allocate_register();
-            for _ in 1..output_col_refs.len() {
-                self.allocate_register();
-            }
+            let output_start_reg = self.allocate_registers(output_col_refs.len());
 
             // Load each column in SELECT order
             for (out_i, (tbl_idx, col_idx)) in output_col_refs.iter().enumerate() {
@@ -1352,15 +1334,7 @@ impl<'a> SqlCompiler<'a> {
                         self.compile_multi_table_operand(right, tables, table_names, right_reg)?;
 
                         let result_reg = self.allocate_register();
-                        let opcode = match op {
-                            BinaryOperator::Eq => OpCode::Eq,
-                            BinaryOperator::NotEq => OpCode::Ne,
-                            BinaryOperator::Lt => OpCode::Lt,
-                            BinaryOperator::LtEq => OpCode::Le,
-                            BinaryOperator::Gt => OpCode::Gt,
-                            BinaryOperator::GtEq => OpCode::Ge,
-                            _ => unreachable!(),
-                        };
+                        let opcode = Self::binary_op_to_comparison_opcode(op)?;
 
                         self.emit(
                             opcode,
@@ -1518,8 +1492,8 @@ impl<'a> SqlCompiler<'a> {
             return Err(SqawkError::TableNotFound(right_table_name));
         }
 
-        let left_table = self.database.get_table(&left_table_name).unwrap();
-        let right_table = self.database.get_table(&right_table_name).unwrap();
+        let left_table = self.database.get_table(&left_table_name)?;
+        let right_table = self.database.get_table(&right_table_name)?;
 
         // Determine which columns to output based on projection
         let (left_cols, right_cols, schema) = self.resolve_join_projection(
@@ -1599,14 +1573,8 @@ impl<'a> SqlCompiler<'a> {
         };
 
         // Allocate registers for columns
-        let left_start_reg = self.allocate_register();
-        for _ in 1..left_cols.len() {
-            self.allocate_register();
-        }
-        let right_start_reg = self.allocate_register();
-        for _ in 1..right_cols.len() {
-            self.allocate_register();
-        }
+        let left_start_reg = self.allocate_registers(left_cols.len());
+        let right_start_reg = self.allocate_registers(right_cols.len());
 
         // Rewind left cursor (outer loop)
         let left_loop_end_placeholder = self.program.len();
@@ -1887,8 +1855,8 @@ impl<'a> SqlCompiler<'a> {
         // Get table references for projection resolution
         let tables: Vec<&Table> = table_names
             .iter()
-            .map(|name| self.database.get_table(name).unwrap())
-            .collect();
+            .map(|name| self.database.get_table(name))
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Resolve projection to determine output columns
         let (_table_col_indices, output_col_refs, schema, is_wildcard) =
@@ -1914,10 +1882,7 @@ impl<'a> SqlCompiler<'a> {
         // Allocate registers for all table columns (needed for JOIN condition evaluation)
         let mut table_start_regs = Vec::new();
         for count in &col_counts {
-            let start_reg = self.allocate_register();
-            for _ in 1..*count {
-                self.allocate_register();
-            }
+            let start_reg = self.allocate_registers(*count);
             table_start_regs.push(start_reg);
         }
 
@@ -2021,10 +1986,7 @@ impl<'a> SqlCompiler<'a> {
             );
         } else {
             // Explicit projection - load columns in SELECT order into output registers
-            let output_start_reg = self.allocate_register();
-            for _ in 1..output_col_refs.len() {
-                self.allocate_register();
-            }
+            let output_start_reg = self.allocate_registers(output_col_refs.len());
 
             // Load each column in SELECT order
             for (out_i, (tbl_idx, col_idx)) in output_col_refs.iter().enumerate() {
@@ -2125,20 +2087,7 @@ impl<'a> SqlCompiler<'a> {
 
                 let result_reg = self.allocate_register();
 
-                let opcode = match op {
-                    BinaryOperator::Eq => OpCode::Eq,
-                    BinaryOperator::NotEq => OpCode::Ne,
-                    BinaryOperator::Lt => OpCode::Lt,
-                    BinaryOperator::LtEq => OpCode::Le,
-                    BinaryOperator::Gt => OpCode::Gt,
-                    BinaryOperator::GtEq => OpCode::Ge,
-                    _ => {
-                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                            "Unsupported multi-join operator: {:?}",
-                            op
-                        )))
-                    }
-                };
+                let opcode = Self::binary_op_to_comparison_opcode(op)?;
 
                 self.emit(
                     opcode,
@@ -2174,7 +2123,7 @@ impl<'a> SqlCompiler<'a> {
                     // Find which table this refers to
                     for (i, name) in table_names.iter().enumerate() {
                         if name.to_lowercase() == table_alias {
-                            let table = self.database.get_table(name).unwrap();
+                            let table = self.database.get_table(name)?;
                             if let Some(col_idx) = table.column_index(&col_name) {
                                 // The column value should already be loaded in register
                                 let reg = table_start_regs[i] + col_idx as i64;
@@ -2192,7 +2141,7 @@ impl<'a> SqlCompiler<'a> {
                 // Unqualified column name - search all tables
                 let col_name = ident.value.to_lowercase();
                 for (i, name) in table_names.iter().enumerate() {
-                    let table = self.database.get_table(name).unwrap();
+                    let table = self.database.get_table(name)?;
                     if let Some(col_idx) = table.column_index(&col_name) {
                         let reg = table_start_regs[i] + col_idx as i64;
                         return Ok(reg);
@@ -2407,20 +2356,7 @@ impl<'a> SqlCompiler<'a> {
 
                 let result_reg = self.allocate_register();
 
-                let opcode = match op {
-                    BinaryOperator::Eq => OpCode::Eq,
-                    BinaryOperator::NotEq => OpCode::Ne,
-                    BinaryOperator::Lt => OpCode::Lt,
-                    BinaryOperator::LtEq => OpCode::Le,
-                    BinaryOperator::Gt => OpCode::Gt,
-                    BinaryOperator::GtEq => OpCode::Ge,
-                    _ => {
-                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                            "Unsupported join operator: {:?}",
-                            op
-                        )))
-                    }
-                };
+                let opcode = Self::binary_op_to_comparison_opcode(op)?;
 
                 self.program.add_instruction(Instruction::new(
                     opcode,

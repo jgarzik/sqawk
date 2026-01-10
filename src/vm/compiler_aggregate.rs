@@ -2,7 +2,7 @@
 //!
 //! This module extends SqlCompiler with aggregate and GROUP BY compilation methods.
 
-use sqlparser::ast::{BinaryOperator, Expr, FunctionArg, FunctionArgExpr, Select, SelectItem};
+use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Select, SelectItem};
 
 use super::bytecode::{Instruction, OpCode, ResultSchema};
 use super::compiler::SqlCompiler;
@@ -121,10 +121,7 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Finalize aggregates and output result
-        let result_start_reg = self.allocate_register();
-        for _ in 1..acc_regs.len() {
-            self.allocate_register();
-        }
+        let result_start_reg = self.allocate_registers(acc_regs.len());
 
         for (i, (acc_reg, _)) in acc_regs.iter().enumerate() {
             self.program.add_instruction(Instruction::new(
@@ -348,10 +345,7 @@ impl<'a> SqlCompiler<'a> {
         let loop_start = self.program.len();
 
         // Allocate registers for row data
-        let row_start_reg = self.allocate_register();
-        for _ in 1..total_cols {
-            self.allocate_register();
-        }
+        let row_start_reg = self.allocate_registers(total_cols);
 
         // Load GROUP BY columns
         for (i, &col_idx) in group_col_indices.iter().enumerate() {
@@ -437,16 +431,10 @@ impl<'a> SqlCompiler<'a> {
         // For each group, accumulate aggregates and output when group changes
 
         // Allocate registers for current group key
-        let group_key_reg = self.allocate_register();
-        for _ in 1..group_col_indices.len() {
-            self.allocate_register();
-        }
+        let group_key_reg = self.allocate_registers(group_col_indices.len());
 
         // Allocate accumulator registers
-        let acc_base_reg = self.allocate_register();
-        for _ in 1..agg_info.len() {
-            self.allocate_register();
-        }
+        let acc_base_reg = self.allocate_registers(agg_info.len());
 
         // Initialize group key with NULL (first group detection)
         for i in 0..group_col_indices.len() {
@@ -474,10 +462,7 @@ impl<'a> SqlCompiler<'a> {
         ));
 
         // Allocate result registers upfront
-        let result_start_reg = self.allocate_register();
-        for _ in 1..(group_col_indices.len() + agg_info.len()) {
-            self.allocate_register();
-        }
+        let result_start_reg = self.allocate_registers(group_col_indices.len() + agg_info.len());
 
         // Start group iteration
         let sorter_loop_start = self.program.len();
@@ -793,20 +778,7 @@ impl<'a> SqlCompiler<'a> {
 
                 // Emit comparison
                 let result_reg = self.allocate_register();
-                let opcode = match op {
-                    BinaryOperator::Gt => OpCode::Gt,
-                    BinaryOperator::GtEq => OpCode::Ge,
-                    BinaryOperator::Lt => OpCode::Lt,
-                    BinaryOperator::LtEq => OpCode::Le,
-                    BinaryOperator::Eq => OpCode::Eq,
-                    BinaryOperator::NotEq => OpCode::Ne,
-                    _ => {
-                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                            "Unsupported HAVING operator: {:?}",
-                            op
-                        )))
-                    }
-                };
+                let opcode = Self::binary_op_to_comparison_opcode(op)?;
 
                 self.program.add_instruction(Instruction::new(
                     opcode, left_reg, right_reg, result_reg, None, 0, None,

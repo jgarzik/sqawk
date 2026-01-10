@@ -72,6 +72,15 @@ impl<'a> SqlCompiler<'a> {
         reg
     }
 
+    /// Allocate multiple consecutive registers and return the starting index
+    pub(crate) fn allocate_registers(&mut self, count: usize) -> i64 {
+        let start = self.allocate_register();
+        for _ in 1..count {
+            self.allocate_register();
+        }
+        start
+    }
+
     /// Reset the register counter (used between statements)
     fn reset_registers(&mut self) {
         self.register_counter = 0;
@@ -96,6 +105,39 @@ impl<'a> SqlCompiler<'a> {
             0,
             Some(comment.to_string()),
         ));
+    }
+
+    /// Patch a jump instruction's target address (p2)
+    pub(crate) fn patch_jump(&mut self, addr: usize, target: usize) {
+        if let Some(inst) = self.program.instructions.get_mut(addr) {
+            inst.p2 = target as i64;
+        }
+    }
+
+    /// Convert a comparison binary operator to the corresponding OpCode
+    pub(crate) fn binary_op_to_comparison_opcode(op: &BinaryOperator) -> SqawkResult<OpCode> {
+        match op {
+            BinaryOperator::Eq => Ok(OpCode::Eq),
+            BinaryOperator::NotEq => Ok(OpCode::Ne),
+            BinaryOperator::Lt => Ok(OpCode::Lt),
+            BinaryOperator::LtEq => Ok(OpCode::Le),
+            BinaryOperator::Gt => Ok(OpCode::Gt),
+            BinaryOperator::GtEq => Ok(OpCode::Ge),
+            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Unsupported comparison operator: {:?}",
+                op
+            ))),
+        }
+    }
+
+    /// Convert SQL type to internal type string
+    pub(crate) fn sql_type_to_internal(data_type: &str) -> &'static str {
+        match data_type.to_uppercase().as_str() {
+            "INTEGER" | "INT" => "INTEGER",
+            "REAL" | "FLOAT" | "DOUBLE" => "REAL",
+            "BOOLEAN" | "BOOL" => "BOOLEAN",
+            _ => "TEXT",
+        }
     }
 
     // Removed unused add_halt method
@@ -620,10 +662,7 @@ impl<'a> SqlCompiler<'a> {
         let loop_start = self.program.len();
 
         // Load columns into registers
-        let start_reg = self.allocate_register();
-        for _ in 1..col_count {
-            self.allocate_register();
-        }
+        let start_reg = self.allocate_registers(col_count);
 
         for (i, col_idx) in columns.iter().enumerate() {
             self.program.add_instruction(Instruction::new(
@@ -971,10 +1010,7 @@ impl<'a> SqlCompiler<'a> {
         let loop_start = self.program.len();
 
         // Load columns
-        let start_reg = self.allocate_register();
-        for _ in 1..col_count {
-            self.allocate_register();
-        }
+        let start_reg = self.allocate_registers(col_count);
 
         for (i, col_idx) in columns.iter().enumerate() {
             self.program.add_instruction(Instruction::new(
@@ -1258,10 +1294,7 @@ impl<'a> SqlCompiler<'a> {
         if !result_regs.is_empty() {
             // ResultRow requires contiguous registers, but compile_expr may have
             // allocated non-contiguous registers. Copy results to contiguous block.
-            let start_reg = self.allocate_register();
-            for _ in 1..result_regs.len() {
-                self.allocate_register();
-            }
+            let start_reg = self.allocate_registers(result_regs.len());
 
             // Copy each result to the contiguous block
             for (i, &src_reg) in result_regs.iter().enumerate() {
@@ -4036,15 +4069,7 @@ impl<'a> SqlCompiler<'a> {
                         )?;
 
                         // Emit comparison
-                        let cmp_opcode = match op {
-                            BinaryOperator::Eq => OpCode::Eq,
-                            BinaryOperator::NotEq => OpCode::Ne,
-                            BinaryOperator::Lt => OpCode::Lt,
-                            BinaryOperator::LtEq => OpCode::Le,
-                            BinaryOperator::Gt => OpCode::Gt,
-                            BinaryOperator::GtEq => OpCode::Ge,
-                            _ => unreachable!(),
-                        };
+                        let cmp_opcode = Self::binary_op_to_comparison_opcode(op)?;
 
                         self.program.add_instruction(Instruction::new(
                             cmp_opcode,
@@ -5717,20 +5742,7 @@ impl<'a> SqlCompiler<'a> {
         self.compile_where_operand(right, table, cursor_idx, right_reg)?;
 
         // Generate comparison instruction based on operator
-        let opcode = match op {
-            BinaryOperator::Gt => OpCode::Gt,
-            BinaryOperator::Lt => OpCode::Lt,
-            BinaryOperator::GtEq => OpCode::Ge,
-            BinaryOperator::LtEq => OpCode::Le,
-            BinaryOperator::Eq => OpCode::Eq,
-            BinaryOperator::NotEq => OpCode::Ne,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Unsupported comparison operator: {:?}",
-                    op
-                )));
-            }
-        };
+        let opcode = Self::binary_op_to_comparison_opcode(op)?;
 
         self.program.add_instruction(Instruction::new(
             opcode,

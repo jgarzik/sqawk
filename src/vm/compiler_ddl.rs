@@ -33,12 +33,7 @@ impl<'a> SqlCompiler<'a> {
             ));
         }
 
-        let table_name = names[0]
-            .0
-            .iter()
-            .map(|i| i.value.clone())
-            .collect::<Vec<_>>()
-            .join(".");
+        let table_name = self.get_table_name(&names[0])?;
 
         // Generate Init
         let init_addr = self.program.len();
@@ -62,7 +57,7 @@ impl<'a> SqlCompiler<'a> {
         self.emit(OpCode::Halt, 0, 0, 0, None, "End DROP TABLE");
 
         // Patch init
-        self.program.instructions[init_addr].p2 = (init_addr + 1) as i64;
+        self.patch_jump(init_addr, init_addr + 1);
 
         Ok(())
     }
@@ -73,12 +68,7 @@ impl<'a> SqlCompiler<'a> {
         name: &ObjectName,
         operation: &AlterTableOperation,
     ) -> SqawkResult<()> {
-        let table_name = name
-            .0
-            .iter()
-            .map(|i| i.value.clone())
-            .collect::<Vec<_>>()
-            .join(".");
+        let table_name = self.get_table_name(name)?;
 
         // Generate Init
         let init_addr = self.program.len();
@@ -88,12 +78,7 @@ impl<'a> SqlCompiler<'a> {
         match operation {
             AlterTableOperation::AddColumn { column_def, .. } => {
                 let col_name = column_def.name.value.clone();
-                let col_type = match column_def.data_type.to_string().to_uppercase().as_str() {
-                    "INTEGER" | "INT" => "INTEGER",
-                    "REAL" | "FLOAT" | "DOUBLE" => "REAL",
-                    "BOOLEAN" | "BOOL" => "BOOLEAN",
-                    _ => "TEXT",
-                };
+                let col_type = Self::sql_type_to_internal(&column_def.data_type.to_string());
 
                 let spec = format!("{}:{}:{}", table_name, col_name, col_type);
 
@@ -118,19 +103,14 @@ impl<'a> SqlCompiler<'a> {
         self.emit(OpCode::Halt, 0, 0, 0, None, "End ALTER TABLE");
 
         // Patch init
-        self.program.instructions[init_addr].p2 = (init_addr + 1) as i64;
+        self.patch_jump(init_addr, init_addr + 1);
 
         Ok(())
     }
 
     /// Compile a TRUNCATE TABLE statement
     pub(crate) fn compile_truncate(&mut self, name: &ObjectName) -> SqawkResult<()> {
-        let table_name = name
-            .0
-            .iter()
-            .map(|i| i.value.clone())
-            .collect::<Vec<_>>()
-            .join(".");
+        let table_name = self.get_table_name(name)?;
 
         // Generate Init
         let init_addr = self.program.len();
@@ -149,7 +129,7 @@ impl<'a> SqlCompiler<'a> {
         self.emit(OpCode::Halt, 0, 0, 0, None, "End TRUNCATE TABLE");
 
         // Patch init
-        self.program.instructions[init_addr].p2 = (init_addr + 1) as i64;
+        self.patch_jump(init_addr, init_addr + 1);
 
         Ok(())
     }
@@ -160,12 +140,7 @@ impl<'a> SqlCompiler<'a> {
         name: &ObjectName,
         query: &sqlparser::ast::Query,
     ) -> SqawkResult<()> {
-        let table_name = name
-            .0
-            .iter()
-            .map(|i| i.value.clone())
-            .collect::<Vec<_>>()
-            .join(".");
+        let table_name = self.get_table_name(name)?;
 
         // First, compile the SELECT query to get the result schema
         // We need to figure out the column types from the SELECT
@@ -319,11 +294,8 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Allocate registers for columns
-        let start_reg = self.allocate_register();
         let col_count = col_specs.len();
-        for _ in 1..col_count {
-            self.allocate_register();
-        }
+        let start_reg = self.allocate_registers(col_count);
 
         // Load columns from source based on projection
         let mut reg_idx = 0;
@@ -399,13 +371,13 @@ impl<'a> SqlCompiler<'a> {
 
         // Patch the skip-insert jump to point to Next
         if let Some(addr) = skip_insert_addr {
-            self.program.instructions[addr].p2 = next_addr as i64;
+            self.patch_jump(addr, next_addr);
         }
 
         let after_loop = self.program.len();
 
         // Patch rewind
-        self.program.instructions[rewind_addr].p2 = after_loop as i64;
+        self.patch_jump(rewind_addr, after_loop);
 
         // Close cursors
         self.emit(OpCode::Close, cursor_idx, 0, 0, None, "Close new table");
@@ -422,7 +394,7 @@ impl<'a> SqlCompiler<'a> {
         self.emit(OpCode::Halt, 0, 0, 0, None, "End CREATE TABLE AS SELECT");
 
         // Patch init
-        self.program.instructions[init_addr].p2 = (init_addr + 1) as i64;
+        self.patch_jump(init_addr, init_addr + 1);
 
         Ok(())
     }
@@ -437,12 +409,7 @@ impl<'a> SqlCompiler<'a> {
         with_options: &[sqlparser::ast::SqlOption],
     ) -> SqawkResult<()> {
         // Extract table name
-        let table_name = name
-            .0
-            .iter()
-            .map(|i| i.value.clone())
-            .collect::<Vec<_>>()
-            .join(".");
+        let table_name = self.get_table_name(name)?;
 
         // Build column specification: "table_name:col1:type1:col2:type2:..."
         let mut spec = table_name.clone();
@@ -450,13 +417,7 @@ impl<'a> SqlCompiler<'a> {
             spec.push(':');
             spec.push_str(&col.name.value);
             spec.push(':');
-            // Convert SQL type to simple string
-            let type_str = match col.data_type.to_string().to_uppercase().as_str() {
-                "INTEGER" | "INT" => "INTEGER",
-                "REAL" | "FLOAT" | "DOUBLE" => "REAL",
-                "BOOLEAN" | "BOOL" => "BOOLEAN",
-                _ => "TEXT",
-            };
+            let type_str = Self::sql_type_to_internal(&col.data_type.to_string());
             spec.push_str(type_str);
         }
 
@@ -504,7 +465,7 @@ impl<'a> SqlCompiler<'a> {
         self.emit(OpCode::Halt, 0, 0, 0, None, "End CREATE TABLE");
 
         // Patch init
-        self.program.instructions[init_addr].p2 = (init_addr + 1) as i64;
+        self.patch_jump(init_addr, init_addr + 1);
 
         Ok(())
     }

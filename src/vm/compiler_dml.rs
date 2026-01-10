@@ -17,12 +17,7 @@ impl<'a> SqlCompiler<'a> {
         source: &sqlparser::ast::Query,
     ) -> SqawkResult<()> {
         // Get table name as string
-        let table_name_str = table_name
-            .0
-            .iter()
-            .map(|i| i.value.clone())
-            .collect::<Vec<_>>()
-            .join(".");
+        let table_name_str = self.get_table_name(table_name)?;
 
         // Get table info
         let table = self.database.get_table(&table_name_str)?;
@@ -106,7 +101,7 @@ impl<'a> SqlCompiler<'a> {
                 self.emit(OpCode::Halt, 0, 0, 0, None, "End INSERT");
 
                 // Patch init to jump past itself
-                self.program.instructions[init_addr].p2 = (init_addr + 1) as i64;
+                self.patch_jump(init_addr, init_addr + 1);
 
                 // Update register counter
                 self.register_counter = (base_reg + column_count) as i64;
@@ -296,7 +291,7 @@ impl<'a> SqlCompiler<'a> {
 
         // Patch skip if present
         if let Some(addr) = skip_addr {
-            self.program.instructions[addr].p2 = self.program.len() as i64;
+            self.patch_jump(addr, self.program.len());
         }
 
         // Next row
@@ -311,7 +306,7 @@ impl<'a> SqlCompiler<'a> {
 
         // Patch rewind
         let end_addr = self.program.len();
-        self.program.instructions[rewind_addr].p2 = end_addr as i64;
+        self.patch_jump(rewind_addr, end_addr);
 
         // Close cursors and halt
         self.emit(OpCode::Close, 0, 0, 0, None, "Close source cursor");
@@ -319,7 +314,7 @@ impl<'a> SqlCompiler<'a> {
         self.emit(OpCode::Halt, 0, 0, 0, None, "End INSERT...SELECT");
 
         // Patch init
-        self.program.instructions[init_addr].p2 = (init_addr + 1) as i64;
+        self.patch_jump(init_addr, init_addr + 1);
 
         Ok(())
     }
@@ -339,12 +334,7 @@ impl<'a> SqlCompiler<'a> {
         // Get table name
         let table_with_joins = &from[0];
         let table_name = match &table_with_joins.relation {
-            TableFactor::Table { name, .. } => name
-                .0
-                .iter()
-                .map(|i| i.value.clone())
-                .collect::<Vec<_>>()
-                .join("."),
+            TableFactor::Table { name, .. } => self.get_table_name(name)?,
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(
                     "Only simple table references are supported in DELETE".to_string(),
@@ -412,7 +402,7 @@ impl<'a> SqlCompiler<'a> {
 
             // Patch skip to jump to Next
             let next_addr = self.program.len();
-            self.program.instructions[skip_addr].p2 = next_addr as i64;
+            self.patch_jump(skip_addr, next_addr);
         } else {
             // No WHERE clause - delete all rows
             self.emit(
@@ -437,14 +427,14 @@ impl<'a> SqlCompiler<'a> {
 
         // Patch Rewind to jump here if table is empty
         let end_addr = self.program.len();
-        self.program.instructions[rewind_addr].p2 = end_addr as i64;
+        self.patch_jump(rewind_addr, end_addr);
 
         // Close and halt
         self.emit(OpCode::Close, 0, 0, 0, None, "Close cursor");
         self.emit(OpCode::Halt, 0, 0, 0, None, "End DELETE");
 
         // Patch init
-        self.program.instructions[init_addr].p2 = (init_addr + 1) as i64;
+        self.patch_jump(init_addr, init_addr + 1);
 
         Ok(())
     }
@@ -458,12 +448,7 @@ impl<'a> SqlCompiler<'a> {
     ) -> SqawkResult<()> {
         // Get table name
         let table_name = match &table.relation {
-            TableFactor::Table { name, .. } => name
-                .0
-                .iter()
-                .map(|i| i.value.clone())
-                .collect::<Vec<_>>()
-                .join("."),
+            TableFactor::Table { name, .. } => self.get_table_name(name)?,
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(
                     "Only simple table references are supported in UPDATE".to_string(),
@@ -576,7 +561,7 @@ impl<'a> SqlCompiler<'a> {
 
         // Patch skip if present
         if let Some(addr) = skip_addr {
-            self.program.instructions[addr].p2 = self.program.len() as i64;
+            self.patch_jump(addr, self.program.len());
         }
 
         // Next row
@@ -591,14 +576,14 @@ impl<'a> SqlCompiler<'a> {
 
         // Patch Rewind to jump here if table is empty
         let end_addr = self.program.len();
-        self.program.instructions[rewind_addr].p2 = end_addr as i64;
+        self.patch_jump(rewind_addr, end_addr);
 
         // Close and halt
         self.emit(OpCode::Close, 0, 0, 0, None, "Close cursor");
         self.emit(OpCode::Halt, 0, 0, 0, None, "End UPDATE");
 
         // Patch init
-        self.program.instructions[init_addr].p2 = (init_addr + 1) as i64;
+        self.patch_jump(init_addr, init_addr + 1);
 
         Ok(())
     }

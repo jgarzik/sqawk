@@ -116,10 +116,7 @@ impl<'a> SqlCompiler<'a> {
         let collect_loop_start = self.program.len();
 
         // Allocate registers for base columns
-        let start_reg = self.allocate_register();
-        for _ in 1..total_col_count {
-            self.allocate_register();
-        }
+        let start_reg = self.allocate_registers(total_col_count);
 
         // Load all base columns
         for (i, &col_idx) in base_columns.iter().enumerate() {
@@ -203,11 +200,8 @@ impl<'a> SqlCompiler<'a> {
         ));
 
         // Allocate registers for output row
-        let output_start_reg = self.allocate_register();
         let output_col_count = select.projection.len();
-        for _ in 1..output_col_count {
-            self.allocate_register();
-        }
+        let output_start_reg = self.allocate_registers(output_col_count);
 
         // Allocate registers for window state
         let row_num_reg = self.allocate_register(); // Current row number in partition
