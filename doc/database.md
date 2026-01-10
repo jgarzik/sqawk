@@ -147,27 +147,27 @@ For larger datasets, consider:
 
 ## Join Implementation
 
-The database engine includes support for combining data from multiple tables through joins:
+The database engine supports combining data from multiple tables through SQL-standard join operations.
 
-### Join Engine Design
+### Supported Join Types
 
-- **Cross Join Implementation**: Creates a Cartesian product of all rows
-- **Filter-Based Joins**: Uses WHERE conditions for relationship-based filtering
-- **Multi-table Support**: Handles joining multiple tables in sequence
+- **INNER JOIN**: Returns rows when there is a match in both tables
+- **LEFT OUTER JOIN**: Returns all rows from the left table, with matched rows from the right (or NULLs)
+- **RIGHT OUTER JOIN**: Returns all rows from the right table, with matched rows from the left (or NULLs)
+- **FULL OUTER JOIN**: Returns all rows from both tables, with NULLs where no match exists
+- **CROSS JOIN**: Returns the Cartesian product of both tables
 
-### Column Naming Strategy
+### Join Syntax
 
-To maintain clarity when working with multiple tables:
-
-- **Qualified Naming**: Columns are prefixed with their table names
-- **Consistent Referencing**: A consistent naming convention is applied in multi-table operations
-- **Qualified References**: Column references include table qualifiers in conditions
+- **ON constraints**: Supported for specifying join conditions (`JOIN t2 ON t1.id = t2.id`)
+- **USING constraints**: Not supported
+- **Multi-table joins**: Supports chaining 3+ tables in a single query
 
 ### Technical Implementation
 
-- The join operation first creates a cross product, then applies filters
-- Tables are processed in the order specified
-- The column naming system ensures disambiguation in result sets
+- Joins are compiled to VM bytecode for efficient execution
+- Nested loop algorithm with appropriate NULL handling for outer joins
+- Column references use table qualifiers for disambiguation in result sets
 - Type coercion rules are applied consistently in join conditions
 
 ## Current System Limitations
@@ -175,7 +175,6 @@ To maintain clarity when working with multiple tables:
 The database engine has several architectural limitations:
 
 - **No Index Structure**: All operations perform full table scans
-- **Limited Join Capabilities**: Advanced join syntax not implemented
 - **No Transaction Support**: Operations are applied immediately with no rollback capability
 - **Schema Flexibility**: Types are inferred rather than enforced
 - **No Constraints System**: Referential integrity not enforced
