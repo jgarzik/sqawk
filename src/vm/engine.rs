@@ -595,16 +595,16 @@ impl<'a> VmEngine<'a> {
             OpCode::OpenRead => {
                 // Open a cursor for reading a table
                 let cursor_idx = inst.p1 as usize;
-                let table_name = inst.p4.clone().unwrap_or_default();
+                let table_name = inst.p4.as_deref().unwrap_or("");
 
                 // Check if the table exists
-                if !self.database.has_table(&table_name) {
-                    return Err(SqawkError::TableNotFound(table_name));
+                if !self.database.has_table(table_name) {
+                    return Err(SqawkError::TableNotFound(table_name.to_string()));
                 }
 
                 // Get the table from the database (safe to unwrap since we checked it exists)
                 // Note: We now borrow the table instead of cloning it (Phase 4B optimization)
-                let table = self.database.get_table(&table_name).unwrap();
+                let table = self.database.get_table(table_name).unwrap();
 
                 // Create a cursor for the table (borrows, no clone)
                 let cursor = Cursor::from_table(table);
@@ -622,18 +622,18 @@ impl<'a> VmEngine<'a> {
                 // Open a cursor for writing to a table
                 // Note: Actual modifications are queued and applied after execution
                 let cursor_idx = inst.p1 as usize;
-                let table_name = inst.p4.clone().unwrap_or_default();
+                let table_name = inst.p4.as_deref().unwrap_or("");
 
                 // Check if the table exists in database or pending modifications
-                if self.database.has_table(&table_name) {
+                if self.database.has_table(table_name) {
                     // Get the table from the database
-                    let table = self.database.get_table(&table_name).unwrap();
+                    let table = self.database.get_table(table_name).unwrap();
                     let cursor = Cursor::from_table(table);
                     self.cursors.insert(cursor_idx, cursor);
                 } else {
                     // Check if there's a pending CreateTable for this table
                     let pending_create = self.pending_modifications.iter().find(|m| {
-                        matches!(m, TableModification::CreateTable { table_name: tn, .. } if tn == &table_name)
+                        matches!(m, TableModification::CreateTable { table_name: tn, .. } if tn == table_name)
                     });
 
                     if let Some(TableModification::CreateTable {
@@ -647,7 +647,7 @@ impl<'a> VmEngine<'a> {
                         let cursor = Cursor::named_ephemeral(col_count, pending_name);
                         self.cursors.insert(cursor_idx, cursor);
                     } else {
-                        return Err(SqawkError::TableNotFound(table_name));
+                        return Err(SqawkError::TableNotFound(table_name.to_string()));
                     }
                 }
 
@@ -870,7 +870,7 @@ impl<'a> VmEngine<'a> {
                 // P1 = 1 if IF EXISTS (don't error if table doesn't exist)
                 // P4 = table name
                 let if_exists = inst.p1 != 0;
-                let table_name = inst.p4.clone().unwrap_or_default();
+                let table_name = inst.p4.as_deref().unwrap_or("");
 
                 if table_name.is_empty() {
                     return Err(SqawkError::VmError(
@@ -879,17 +879,17 @@ impl<'a> VmEngine<'a> {
                 }
 
                 // Check if table exists
-                let table_exists = self.database.has_table(&table_name);
+                let table_exists = self.database.has_table(table_name);
 
                 if !table_exists && !if_exists {
-                    return Err(SqawkError::TableNotFound(table_name));
+                    return Err(SqawkError::TableNotFound(table_name.to_string()));
                 }
 
                 // Only queue drop if table exists
                 if table_exists {
                     self.pending_modifications
                         .push(TableModification::DropTable {
-                            table_name: table_name.clone(),
+                            table_name: table_name.to_string(),
                         });
 
                     if self.verbose {
@@ -908,7 +908,7 @@ impl<'a> VmEngine<'a> {
             OpCode::AlterTableAdd => {
                 // Add a column to a table
                 // P4 = "table_name:column_name:column_type"
-                let spec = inst.p4.clone().unwrap_or_default();
+                let spec = inst.p4.as_deref().unwrap_or("");
                 let parts: Vec<&str> = spec.split(':').collect();
 
                 if parts.len() < 3 {
@@ -943,7 +943,7 @@ impl<'a> VmEngine<'a> {
             OpCode::Truncate => {
                 // Remove all rows from a table
                 // P4 = table name
-                let table_name = inst.p4.clone().unwrap_or_default();
+                let table_name = inst.p4.as_deref().unwrap_or("");
 
                 if table_name.is_empty() {
                     return Err(SqawkError::VmError(
@@ -954,7 +954,7 @@ impl<'a> VmEngine<'a> {
                 // Add to pending modifications
                 self.pending_modifications
                     .push(TableModification::Truncate {
-                        table_name: table_name.clone(),
+                        table_name: table_name.to_string(),
                     });
 
                 if self.verbose {
@@ -1112,7 +1112,7 @@ impl<'a> VmEngine<'a> {
                 // P1 = src reg, P2 = dest reg, P4 = function name (ABS, ROUND, CEIL, FLOOR)
                 let src_reg = inst.p1 as usize;
                 let dest_reg = inst.p2 as usize;
-                let func_name = inst.p4.clone().unwrap_or_default();
+                let func_name = inst.p4.as_deref().unwrap_or("");
 
                 // Get source value as a number
                 let src_value = self.get_register(src_reg)?;
@@ -1134,7 +1134,7 @@ impl<'a> VmEngine<'a> {
                     }
                 };
 
-                let result = match func_name.as_str() {
+                let result = match func_name {
                     "ABS" => num.abs(),
                     "ROUND" => num.round(),
                     "CEIL" | "CEILING" => num.ceil(),
@@ -1173,9 +1173,9 @@ impl<'a> VmEngine<'a> {
                 // P1 = src reg (optional, for DATE/TIME), P2 = dest reg, P4 = function name
                 let src_reg = inst.p1 as usize;
                 let dest_reg = inst.p2 as usize;
-                let func_name = inst.p4.clone().unwrap_or_default();
+                let func_name = inst.p4.as_deref().unwrap_or("");
 
-                let result = match func_name.as_str() {
+                let result = match func_name {
                     "NOW" | "CURRENT_TIMESTAMP" => {
                         // Return current date and time in ISO 8601 format
                         use std::time::SystemTime;
@@ -1854,7 +1854,7 @@ impl<'a> VmEngine<'a> {
             OpCode::String => {
                 // Load string constant into register
                 let register_idx = inst.p2 as usize;
-                let string_value = inst.p4.clone().unwrap_or_default();
+                let string_value = inst.p4.as_deref().unwrap_or("").to_string();
 
                 if register_idx < self.registers.len() {
                     self.registers[register_idx] = Register::String(string_value);
@@ -1996,7 +1996,9 @@ impl<'a> VmEngine<'a> {
                 // 2. Allow for multiple savepoints with different names
                 // 3. Support rolling back to any specific savepoint
                 // 4. Properly handle nested savepoints in a hierarchical manner
-                let savepoint_name = inst.p4.clone().unwrap_or_else(|| format!("sp_{}", inst.p1));
+                let savepoint_name = inst.p4.as_deref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("sp_{}", inst.p1));
 
                 if self.verbose {
                     println!("SAVEPOINT {}", savepoint_name);
@@ -2020,7 +2022,9 @@ impl<'a> VmEngine<'a> {
                 // 2. Make all changes permanent up to that point
                 // 3. Remove this savepoint and any subsequent nested savepoints
                 // 4. Maintain the active transaction state for further operations
-                let savepoint_name = inst.p4.clone().unwrap_or_else(|| format!("sp_{}", inst.p1));
+                let savepoint_name = inst.p4.as_deref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("sp_{}", inst.p1));
 
                 if self.verbose {
                     println!("RELEASE SAVEPOINT {}", savepoint_name);
@@ -2213,7 +2217,7 @@ impl<'a> VmEngine<'a> {
 
                 let src_reg = inst.p1 as usize;
                 let dest_reg = inst.p2 as usize;
-                let target_type = inst.p4.clone().unwrap_or_else(|| "TEXT".to_string());
+                let target_type = inst.p4.as_deref().unwrap_or("TEXT");
 
                 let src_value = self.get_register(src_reg)?;
 

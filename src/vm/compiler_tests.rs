@@ -106,7 +106,7 @@ fn test_compile_select_with_where_string() {
     // Verify we have Eq comparison and String instruction
     let eq_found = instructions.iter().any(|inst| inst.opcode == OpCode::Eq);
     let string_found = instructions.iter().any(|inst| {
-        inst.opcode == OpCode::String && inst.p4.as_ref().map_or(false, |s| s == "Alice")
+        inst.opcode == OpCode::String && inst.p4.as_deref() == Some("Alice")
     });
 
     assert!(eq_found, "Expected Eq comparison instruction");
@@ -251,7 +251,7 @@ fn test_like_pattern_compilation() {
     // Verify we have Like instruction with the correct pattern
     let like_found = instructions
         .iter()
-        .any(|inst| inst.opcode == OpCode::Like && inst.p4.as_ref().map_or(false, |s| s == "A%"));
+        .any(|inst| inst.opcode == OpCode::Like && inst.p4.as_deref() == Some("A%"));
 
     assert!(like_found, "Expected Like instruction with pattern 'A%'");
 }
@@ -324,7 +324,7 @@ fn test_cast_compilation() {
     // Verify we have Cast instruction with TEXT type
     let cast_found = instructions
         .iter()
-        .any(|inst| inst.opcode == OpCode::Cast && inst.p4.as_ref().map_or(false, |s| s == "TEXT"));
+        .any(|inst| inst.opcode == OpCode::Cast && inst.p4.as_deref() == Some("TEXT"));
 
     assert!(cast_found, "Expected Cast instruction with TEXT type");
 }

@@ -9,6 +9,7 @@
 
 use crate::table::{DataType, Value};
 use std::fmt;
+use std::rc::Rc;
 
 // Aggregate function type constants for AggStep/AggFinal opcodes
 /// COUNT aggregate function type
@@ -214,15 +215,17 @@ pub struct Instruction {
     pub p3: i64,
 
     /// P4 parameter (typically a string parameter)
-    pub p4: Option<String>,
+    /// Uses Rc<str> for O(1) clone in execution loop
+    pub p4: Option<Rc<str>>,
 
-    // Removed unused p5 parameter
     /// Comment describing the instruction
-    pub comment: Option<String>,
+    /// Uses Rc<str> for O(1) clone in execution loop
+    pub comment: Option<Rc<str>>,
 }
 
 impl Instruction {
     /// Create a new instruction with the given opcode and parameters
+    /// Converts String to Rc<str> for O(1) clone in execution loop
     pub fn new(
         opcode: OpCode,
         p1: i64,
@@ -237,8 +240,8 @@ impl Instruction {
             p1,
             p2,
             p3,
-            p4,
-            comment,
+            p4: p4.map(Rc::from),
+            comment: comment.map(Rc::from),
         }
     }
 }

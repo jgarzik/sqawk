@@ -346,7 +346,7 @@ impl<'a> SqlCompiler<'a> {
         let transaction_addr = init_addr + 1;
         if let Some(instruction) = self.program.instructions.get_mut(init_addr) {
             instruction.p2 = transaction_addr as i64;
-            instruction.comment = Some(format!("Start at {}", transaction_addr));
+            instruction.comment = Some(format!("Start at {}", transaction_addr).into());
         }
 
         Ok(self.program.clone())
