@@ -599,6 +599,25 @@ impl<'a> SqlCompiler<'a> {
                 if self.verbose {
                     eprintln!("Processing multiple tables in FROM clause as CROSS JOINs");
                 }
+
+                // Check for GROUP BY or aggregates - requires specialized handling
+                let has_group_by = !select.group_by.is_empty();
+                let has_aggregates = self.has_aggregates(&select.projection);
+
+                if has_group_by || has_aggregates {
+                    // Create a temporary query to pass to compile_implicit_join_with_group_by
+                    let query = Query {
+                        with: None,
+                        body: Box::new(SetExpr::Select(Box::new(select.clone()))),
+                        order_by: vec![],
+                        limit: None,
+                        offset: None,
+                        fetch: None,
+                        locks: vec![],
+                    };
+                    return self.compile_implicit_join_with_group_by(select, &query);
+                }
+
                 return self.compile_implicit_join(select);
             }
 
@@ -686,11 +705,21 @@ impl<'a> SqlCompiler<'a> {
 
         // Check for implicit join (comma-separated tables in FROM)
         if select.from.len() > 1 {
-            // Multiple tables in FROM clause - use implicit join with LIMIT support
+            // Multiple tables in FROM clause
             if self.verbose {
                 eprintln!("Processing multiple tables in FROM clause as CROSS JOINs");
             }
-            return self.compile_implicit_join_with_limit(select, query);
+
+            // Check for GROUP BY or aggregates - requires specialized handling
+            let has_group_by = !select.group_by.is_empty();
+            let has_aggregates = self.has_aggregates(&select.projection);
+
+            if has_group_by || has_aggregates {
+                // Multi-table query with GROUP BY or aggregates
+                return self.compile_implicit_join_with_group_by(select, query);
+            }
+
+            return self.compile_implicit_join_with_query(select, query);
         }
 
         let table_with_joins = &select.from[0];

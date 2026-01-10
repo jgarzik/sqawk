@@ -21,6 +21,7 @@ csv = "1.2"
 anyhow = "1.0"
 thiserror = "1.0"
 regex = "1.9"
+rand = { version = "0.8", features = ["std_rng"] }
 
 rustyline = "15.0.0"
 
@@ -35,3 +36,7 @@ lto = true
 [[bin]]
 name = "sqawk"
 path = "src/main.rs"
+
+[[bin]]
+name = "tsq"
+path = "src/tsq.rs"

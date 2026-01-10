@@ -3,9 +3,18 @@
 //! This module extends SqlCompiler with JOIN compilation methods.
 
 use sqlparser::ast::{
-    BinaryOperator, Expr, JoinConstraint, JoinOperator, Query, Select, SelectItem, TableWithJoins,
-    Value,
+    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, JoinConstraint, JoinOperator, Query,
+    Select, SelectItem, TableWithJoins, Value,
 };
+
+/// Represents an item in a multi-table aggregate projection
+#[derive(Clone, Debug)]
+enum MultiTableProjectionItem {
+    /// A column reference: (table_idx, col_idx)
+    Column(usize, usize),
+    /// An aggregate: (func_type, optional column ref for the aggregate argument)
+    Aggregate(i64, Option<(usize, usize)>),
+}
 
 use super::bytecode::{OpCode, ResultSchema};
 use super::compiler::{MultiTableProjection, SqlCompiler};
@@ -730,10 +739,803 @@ impl<'a> SqlCompiler<'a> {
         Ok(())
     }
 
+    /// Compile an implicit join with aggregates only (no GROUP BY)
+    /// This is a simpler pattern that doesn't require sorting
+    fn compile_implicit_join_aggregate_only(
+        &mut self,
+        select: &Select,
+        table_names: &[String],
+        table_refs: &[String],
+        tables: &[&Table],
+        projection_items: &[MultiTableProjectionItem],
+    ) -> SqawkResult<()> {
+        let num_tables = tables.len();
+        self.add_comment("Multi-table aggregate (no GROUP BY)");
+
+        // Open all tables
+        for (i, table_name) in table_names.iter().enumerate() {
+            self.emit(
+                OpCode::OpenRead,
+                i as i64,
+                (i + 1) as i64,
+                0,
+                Some(table_name.to_string()),
+                &format!("Open table {}", table_name),
+            );
+        }
+
+        // Allocate accumulator registers for each aggregate
+        let num_aggs = projection_items
+            .iter()
+            .filter(|i| matches!(i, MultiTableProjectionItem::Aggregate(_, _)))
+            .count();
+        let acc_base_reg = self.allocate_registers(num_aggs.max(1));
+
+        // Create nested loops for the join
+        let mut loop_end_placeholders: Vec<usize> = Vec::with_capacity(num_tables);
+        let mut loop_starts: Vec<usize> = Vec::with_capacity(num_tables);
+
+        for i in 0..num_tables {
+            let rewind_opcode = if i == 0 {
+                OpCode::Rewind
+            } else {
+                OpCode::RewindInner
+            };
+
+            let loop_end_placeholder = self.program.len();
+            loop_end_placeholders.push(loop_end_placeholder);
+            self.emit(
+                rewind_opcode,
+                i as i64,
+                0,
+                0,
+                None,
+                &format!("Rewind cursor {}", i),
+            );
+
+            let loop_start = self.program.len();
+            loop_starts.push(loop_start);
+        }
+
+        // Compile WHERE condition
+        let skip_output_addr = if let Some(where_expr) = &select.selection {
+            let condition_reg =
+                self.compile_multi_table_condition(where_expr, tables, table_refs)?;
+            let skip_addr = self.program.len();
+            self.emit(
+                OpCode::IfZ,
+                condition_reg,
+                0,
+                0,
+                None,
+                "Skip if WHERE false",
+            );
+            Some(skip_addr)
+        } else {
+            None
+        };
+
+        // Step aggregates for this matching row
+        let mut agg_idx = 0;
+        for item in projection_items {
+            if let MultiTableProjectionItem::Aggregate(func_type, col_ref) = item {
+                let val_reg = if let Some((tbl_idx, col_idx)) = col_ref {
+                    let r = self.allocate_register();
+                    self.emit(
+                        OpCode::Column,
+                        *tbl_idx as i64,
+                        *col_idx as i64,
+                        r,
+                        None,
+                        "Load aggregate source",
+                    );
+                    r
+                } else {
+                    // COUNT(*) - use 1
+                    let r = self.allocate_register();
+                    self.emit(OpCode::Integer, 1, r, 0, None, "COUNT(*) = 1");
+                    r
+                };
+
+                self.emit(
+                    OpCode::AggStep,
+                    *func_type,
+                    val_reg,
+                    acc_base_reg + agg_idx as i64,
+                    None,
+                    "",
+                );
+                agg_idx += 1;
+            }
+        }
+
+        // Patch skip address for WHERE
+        let innermost_next_addr = self.program.len();
+        if let Some(skip_addr) = skip_output_addr {
+            if let Some(inst) = self.program.instructions.get_mut(skip_addr) {
+                inst.p2 = innermost_next_addr as i64;
+            }
+        }
+
+        // Close loops (innermost first)
+        let mut loop_ends: Vec<usize> = Vec::with_capacity(num_tables);
+        for i in (0..num_tables).rev() {
+            self.emit(
+                OpCode::Next,
+                i as i64,
+                loop_starts[i] as i64,
+                0,
+                None,
+                &format!("Next {}", i),
+            );
+            loop_ends.push(self.program.len());
+        }
+        loop_ends.reverse();
+
+        // Close tables
+        for i in 0..num_tables {
+            self.emit(
+                OpCode::Close,
+                i as i64,
+                0,
+                0,
+                None,
+                &format!("Close cursor {}", i),
+            );
+        }
+
+        // Patch loop end placeholders
+        for (i, placeholder) in loop_end_placeholders.iter().enumerate() {
+            if let Some(inst) = self.program.instructions.get_mut(*placeholder) {
+                inst.p2 = loop_ends[i] as i64;
+            }
+        }
+
+        // Finalize aggregates and output single result row
+        let result_reg = self.allocate_registers(projection_items.len());
+        agg_idx = 0;
+        for (i, item) in projection_items.iter().enumerate() {
+            match item {
+                MultiTableProjectionItem::Column(_, _) => {
+                    // This shouldn't happen in aggregate-only queries
+                    // but handle it anyway with NULL
+                    self.emit(OpCode::Null, 0, result_reg + i as i64, 0, None, "");
+                }
+                MultiTableProjectionItem::Aggregate(_, _) => {
+                    self.emit(
+                        OpCode::AggFinal,
+                        acc_base_reg + agg_idx as i64,
+                        result_reg + i as i64,
+                        0,
+                        None,
+                        "",
+                    );
+                    agg_idx += 1;
+                }
+            }
+        }
+
+        // Output the single result row
+        self.emit(
+            OpCode::ResultRow,
+            result_reg,
+            projection_items.len() as i64,
+            0,
+            None,
+            "Output aggregate result",
+        );
+
+        Ok(())
+    }
+
+    /// Compile an implicit join with GROUP BY or aggregates
+    pub(crate) fn compile_implicit_join_with_group_by(
+        &mut self,
+        select: &Select,
+        query: &Query,
+    ) -> SqawkResult<()> {
+        let num_tables = select.from.len();
+
+        // Collect table names and aliases
+        let mut table_names: Vec<String> = Vec::with_capacity(num_tables);
+        let mut table_refs: Vec<String> = Vec::with_capacity(num_tables);
+        for from_item in &select.from {
+            let (table_name, table_alias) = match &from_item.relation {
+                sqlparser::ast::TableFactor::Table { name, alias, .. } => {
+                    let tname = self.get_table_name(name)?;
+                    let talias = alias.as_ref().map(|a| a.name.value.clone());
+                    (tname, talias)
+                }
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Only simple table references supported".into(),
+                    ))
+                }
+            };
+            if !self.database.has_table(&table_name) {
+                return Err(SqawkError::TableNotFound(table_name));
+            }
+            table_refs.push(table_alias.unwrap_or_else(|| table_name.clone()));
+            table_names.push(table_name);
+        }
+
+        let tables: Vec<&Table> = table_names
+            .iter()
+            .map(|name| self.database.get_table(name))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Determine GROUP BY column references
+        let mut group_col_refs: Vec<(usize, usize)> = Vec::new(); // (table_idx, col_idx)
+        for expr in select.group_by.iter() {
+            let (tbl_idx, col_idx) = self.resolve_multi_table_column(expr, &tables, &table_refs)?;
+            group_col_refs.push((tbl_idx, col_idx));
+        }
+
+        // Analyze projection for aggregates and column references
+        let mut projection_items: Vec<MultiTableProjectionItem> = Vec::new();
+        for item in &select.projection {
+            let expr = match item {
+                SelectItem::UnnamedExpr(e) => e,
+                SelectItem::ExprWithAlias { expr: e, .. } => e,
+                SelectItem::Wildcard(_) => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "SELECT * not supported with GROUP BY in multi-table queries".into(),
+                    ))
+                }
+                _ => continue,
+            };
+
+            match expr {
+                Expr::Function(func) => {
+                    let name = func.name.to_string().to_uppercase();
+                    if matches!(name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX") {
+                        let func_type = Self::agg_func_type(&name);
+                        let col_ref = if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
+                            func.args.first()
+                        {
+                            None // COUNT(*)
+                        } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr))) =
+                            func.args.first()
+                        {
+                            let (tbl_idx, col_idx) =
+                                self.resolve_multi_table_column(arg_expr, &tables, &table_refs)?;
+                            Some((tbl_idx, col_idx))
+                        } else {
+                            None
+                        };
+                        projection_items
+                            .push(MultiTableProjectionItem::Aggregate(func_type, col_ref));
+                    } else {
+                        return Err(SqawkError::UnsupportedSqlFeature(format!(
+                            "Function {} not supported in multi-table GROUP BY",
+                            name
+                        )));
+                    }
+                }
+                Expr::CompoundIdentifier(_) | Expr::Identifier(_) => {
+                    let (tbl_idx, col_idx) =
+                        self.resolve_multi_table_column(expr, &tables, &table_refs)?;
+                    projection_items.push(MultiTableProjectionItem::Column(tbl_idx, col_idx));
+                }
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(format!(
+                        "Unsupported expression in GROUP BY projection: {:?}",
+                        expr
+                    )));
+                }
+            }
+        }
+
+        // Build result schema
+        let schema = self.build_multi_table_agg_schema(&select.projection, &tables, &table_refs);
+        self.program.set_result_schema(schema);
+
+        // Handle the no-GROUP-BY case (aggregate only) - simpler pattern without sorter
+        if group_col_refs.is_empty() {
+            return self.compile_implicit_join_aggregate_only(
+                select,
+                &table_names,
+                &table_refs,
+                &tables,
+                &projection_items,
+            );
+        }
+
+        // Calculate columns needed in sorter: group columns + aggregate source columns
+        let agg_source_cols: Vec<(usize, usize)> = projection_items
+            .iter()
+            .filter_map(|item| {
+                if let MultiTableProjectionItem::Aggregate(_, Some(col_ref)) = item {
+                    Some(*col_ref)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let total_sorter_cols = group_col_refs.len() + agg_source_cols.len() + 1; // +1 for row count
+
+        // Open sorter
+        let sorter_id = 0i64;
+        let sort_spec: String = (0..group_col_refs.len())
+            .map(|i| format!("{}:asc", i))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        self.emit(
+            OpCode::SorterOpen,
+            sorter_id,
+            total_sorter_cols as i64,
+            0,
+            Some(sort_spec),
+            "Open sorter for GROUP BY",
+        );
+
+        // Open all tables
+        for (i, table_name) in table_names.iter().enumerate() {
+            self.emit(
+                OpCode::OpenRead,
+                i as i64,
+                (i + 1) as i64,
+                0,
+                Some(table_name.to_string()),
+                &format!("Open table {}", table_name),
+            );
+        }
+
+        // Allocate registers for sorter row
+        let sorter_row_reg = self.allocate_registers(total_sorter_cols);
+
+        // Create nested loops
+        let mut loop_end_placeholders: Vec<usize> = Vec::with_capacity(num_tables);
+        let mut loop_starts: Vec<usize> = Vec::with_capacity(num_tables);
+
+        for i in 0..num_tables {
+            let rewind_opcode = if i == 0 {
+                OpCode::Rewind
+            } else {
+                OpCode::RewindInner
+            };
+
+            let loop_end_placeholder = self.program.len();
+            loop_end_placeholders.push(loop_end_placeholder);
+            self.emit(
+                rewind_opcode,
+                i as i64,
+                0,
+                0,
+                None,
+                &format!("Rewind cursor {}", i),
+            );
+
+            let loop_start = self.program.len();
+            loop_starts.push(loop_start);
+        }
+
+        // Compile WHERE condition
+        let skip_output_addr = if let Some(where_expr) = &select.selection {
+            let condition_reg =
+                self.compile_multi_table_condition(where_expr, &tables, &table_refs)?;
+            let skip_addr = self.program.len();
+            self.emit(
+                OpCode::IfZ,
+                condition_reg,
+                0,
+                0,
+                None,
+                "Skip if WHERE false",
+            );
+            Some(skip_addr)
+        } else {
+            None
+        };
+
+        // Load group columns into sorter row registers
+        for (i, (tbl_idx, col_idx)) in group_col_refs.iter().enumerate() {
+            self.emit(
+                OpCode::Column,
+                *tbl_idx as i64,
+                *col_idx as i64,
+                sorter_row_reg + i as i64,
+                None,
+                &format!("Load GROUP BY col {} from table {}", col_idx, tbl_idx),
+            );
+        }
+
+        // Load aggregate source columns
+        for (i, (tbl_idx, col_idx)) in agg_source_cols.iter().enumerate() {
+            self.emit(
+                OpCode::Column,
+                *tbl_idx as i64,
+                *col_idx as i64,
+                sorter_row_reg + group_col_refs.len() as i64 + i as i64,
+                None,
+                &format!("Load agg source col {} from table {}", col_idx, tbl_idx),
+            );
+        }
+
+        // Set row count to 1
+        self.emit(
+            OpCode::Integer,
+            1,
+            sorter_row_reg + (total_sorter_cols - 1) as i64,
+            0,
+            None,
+            "Row count = 1",
+        );
+
+        // Insert into sorter
+        self.emit(
+            OpCode::SorterInsert,
+            sorter_id,
+            sorter_row_reg,
+            total_sorter_cols as i64,
+            None,
+            "Insert into sorter",
+        );
+
+        // Patch skip address
+        let innermost_next_addr = self.program.len();
+        if let Some(skip_addr) = skip_output_addr {
+            if let Some(inst) = self.program.instructions.get_mut(skip_addr) {
+                inst.p2 = innermost_next_addr as i64;
+            }
+        }
+
+        // Close loops (innermost first)
+        let mut loop_ends: Vec<usize> = Vec::with_capacity(num_tables);
+        for i in (0..num_tables).rev() {
+            self.emit(
+                OpCode::Next,
+                i as i64,
+                loop_starts[i] as i64,
+                0,
+                None,
+                &format!("Next {}", i),
+            );
+            loop_ends.push(self.program.len());
+        }
+        loop_ends.reverse();
+
+        // Close tables
+        for i in 0..num_tables {
+            self.emit(
+                OpCode::Close,
+                i as i64,
+                0,
+                0,
+                None,
+                &format!("Close cursor {}", i),
+            );
+        }
+
+        // Patch loop end placeholders
+        for (i, placeholder) in loop_end_placeholders.iter().enumerate() {
+            if let Some(inst) = self.program.instructions.get_mut(*placeholder) {
+                inst.p2 = loop_ends[i] as i64;
+            }
+        }
+
+        // Sort the sorter
+        self.emit(OpCode::SorterSort, sorter_id, 0, 0, None, "Sort");
+
+        // Allocate registers for reading sorter data
+        let row_data_reg = self.allocate_registers(total_sorter_cols);
+
+        // Allocate accumulators for aggregates
+        let num_aggs = projection_items
+            .iter()
+            .filter(|i| matches!(i, MultiTableProjectionItem::Aggregate(_, _)))
+            .count();
+        let acc_base_reg = self.allocate_registers(num_aggs.max(1));
+
+        // Allocate registers for current and previous group key
+        let group_key_reg = self.allocate_registers(group_col_refs.len().max(1));
+
+        // Initialize group key with NULL (first group detection)
+        for i in 0..group_col_refs.len() {
+            self.emit(
+                OpCode::Null,
+                0,
+                group_key_reg + i as i64,
+                0,
+                None,
+                "Init group key NULL",
+            );
+        }
+
+        // Flag to indicate we've seen at least one row
+        let first_row_reg = self.allocate_register();
+        self.emit(OpCode::Integer, 1, first_row_reg, 0, None, "first_row = 1");
+
+        // Allocate result registers
+        let result_reg = self.allocate_registers(projection_items.len());
+
+        // Start sorter iteration
+        let sorter_loop_start = self.program.len();
+
+        // Get row from sorter using SorterData
+        self.emit(
+            OpCode::SorterData,
+            sorter_id,
+            row_data_reg,
+            total_sorter_cols as i64,
+            None,
+            "Load sorter row",
+        );
+
+        // Check if first row - if so, skip group change check
+        let first_row_jump_addr = self.program.len();
+        self.emit(
+            OpCode::IfPos,
+            first_row_reg,
+            0,
+            0,
+            None,
+            "Skip compare if first row",
+        );
+
+        // Compare first group column with saved group key
+        let cmp_reg = self.allocate_register();
+        self.emit(
+            OpCode::Ne,
+            row_data_reg,
+            group_key_reg,
+            cmp_reg,
+            None,
+            "Compare group key",
+        );
+
+        // If group NOT changed (cmp_reg is 0), skip output and go to step aggregates
+        let skip_output_addr = self.program.len();
+        self.emit(
+            OpCode::IfZ,
+            cmp_reg,
+            0,
+            0,
+            None,
+            "Skip output if same group",
+        );
+
+        // Group changed - output previous group
+        // Build result from group key and aggregates
+        let mut agg_idx = 0;
+        for (i, item) in projection_items.iter().enumerate() {
+            match item {
+                MultiTableProjectionItem::Column(_, _) => {
+                    // Find the position in group_col_refs
+                    let group_idx = group_col_refs
+                        .iter()
+                        .position(|g| {
+                            if let MultiTableProjectionItem::Column(t, c) = item {
+                                g.0 == *t && g.1 == *c
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(0);
+                    self.emit(
+                        OpCode::Copy,
+                        group_key_reg + group_idx as i64,
+                        result_reg + i as i64,
+                        0,
+                        None,
+                        "",
+                    );
+                }
+                MultiTableProjectionItem::Aggregate(_, _) => {
+                    self.emit(
+                        OpCode::AggFinal,
+                        acc_base_reg + agg_idx as i64,
+                        result_reg + i as i64,
+                        0,
+                        None,
+                        "",
+                    );
+                    agg_idx += 1;
+                }
+            }
+        }
+
+        // Output result row
+        self.emit(
+            OpCode::ResultRow,
+            result_reg,
+            projection_items.len() as i64,
+            0,
+            None,
+            "Output group",
+        );
+
+        // Reset accumulators for new group
+        for i in 0..num_aggs {
+            self.emit(
+                OpCode::AggReset,
+                acc_base_reg + i as i64,
+                0,
+                0,
+                None,
+                "Reset accumulator",
+            );
+        }
+
+        // === Update group key section (first row jumps here) ===
+        let update_group_key_addr = self.program.len();
+
+        // Patch first row jump
+        if let Some(inst) = self.program.instructions.get_mut(first_row_jump_addr) {
+            inst.p2 = update_group_key_addr as i64;
+        }
+
+        // Initialize/update group key from current row
+        for i in 0..group_col_refs.len() {
+            self.emit(
+                OpCode::Copy,
+                row_data_reg + i as i64,
+                group_key_reg + i as i64,
+                0,
+                None,
+                "",
+            );
+        }
+
+        // Clear first row flag
+        self.emit(OpCode::Integer, 0, first_row_reg, 0, None, "first_row = 0");
+
+        // === Step aggregates section (skip output jumps here) ===
+        let step_agg_addr = self.program.len();
+
+        // Patch skip output jump
+        if let Some(inst) = self.program.instructions.get_mut(skip_output_addr) {
+            inst.p2 = step_agg_addr as i64;
+        }
+
+        // Step aggregates for current row
+        agg_idx = 0;
+        for item in &projection_items {
+            if let MultiTableProjectionItem::Aggregate(func_type, col_ref) = item {
+                let val_reg = if let Some((agg_src_idx, _)) = agg_source_cols
+                    .iter()
+                    .enumerate()
+                    .find(|(_, c)| Some(*c) == col_ref.as_ref())
+                {
+                    // Value is in row_data_reg at offset group_col_refs.len() + agg_src_idx
+                    row_data_reg + group_col_refs.len() as i64 + agg_src_idx as i64
+                } else {
+                    // COUNT(*) - use 1
+                    let r = self.allocate_register();
+                    self.emit(OpCode::Integer, 1, r, 0, None, "COUNT(*) = 1");
+                    r
+                };
+
+                self.emit(
+                    OpCode::AggStep,
+                    *func_type,
+                    val_reg,
+                    acc_base_reg + agg_idx as i64,
+                    None,
+                    "",
+                );
+                agg_idx += 1;
+            }
+        }
+
+        // Next sorted row
+        self.emit(
+            OpCode::SorterNext,
+            sorter_id,
+            sorter_loop_start as i64,
+            0,
+            None,
+            "Next sorter row",
+        );
+
+        // Output final group (if first_row_reg is 0, we have data)
+        // Skip if first_row_reg is still 1 (no data)
+        let skip_final_addr = self.program.len();
+        self.emit(
+            OpCode::IfPos,
+            first_row_reg,
+            0,
+            0,
+            None,
+            "Skip final if no data",
+        );
+
+        // Build final result
+        agg_idx = 0;
+        for (i, item) in projection_items.iter().enumerate() {
+            match item {
+                MultiTableProjectionItem::Column(_, _) => {
+                    let group_idx = group_col_refs
+                        .iter()
+                        .position(|g| {
+                            if let MultiTableProjectionItem::Column(t, c) = item {
+                                g.0 == *t && g.1 == *c
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(0);
+                    self.emit(
+                        OpCode::Copy,
+                        group_key_reg + group_idx as i64,
+                        result_reg + i as i64,
+                        0,
+                        None,
+                        "",
+                    );
+                }
+                MultiTableProjectionItem::Aggregate(_, _) => {
+                    self.emit(
+                        OpCode::AggFinal,
+                        acc_base_reg + agg_idx as i64,
+                        result_reg + i as i64,
+                        0,
+                        None,
+                        "",
+                    );
+                    agg_idx += 1;
+                }
+            }
+        }
+
+        // Output final result row
+        self.emit(
+            OpCode::ResultRow,
+            result_reg,
+            projection_items.len() as i64,
+            0,
+            None,
+            "Output final group",
+        );
+
+        // Patch skip final
+        let end_addr = self.program.len();
+        if let Some(inst) = self.program.instructions.get_mut(skip_final_addr) {
+            inst.p2 = end_addr as i64;
+        }
+
+        // Handle LIMIT/OFFSET from query (not implemented yet for GROUP BY)
+        let _ = query;
+
+        Ok(())
+    }
+
     /// Compile an implicit join (comma-separated tables in FROM with WHERE filter)
     /// e.g., SELECT * FROM users, orders WHERE users.id = orders.user_id
     /// Supports 2 or more tables with nested loop joins
+    /// Compile an implicit join with optional LIMIT/OFFSET support
+    pub(crate) fn compile_implicit_join_with_query(
+        &mut self,
+        select: &Select,
+        query: &Query,
+    ) -> SqawkResult<()> {
+        // Extract LIMIT/OFFSET
+        let (limit_val, offset_val) = self.extract_limit_offset(query)?;
+
+        // Handle LIMIT 0 optimization
+        if limit_val == Some(0) {
+            // LIMIT 0: output empty result
+            if let Ok(schema) = self.build_implicit_join_schema(select) {
+                self.program.set_result_schema(schema);
+            }
+            return Ok(());
+        }
+
+        self.compile_implicit_join_core(select, limit_val, offset_val)
+    }
+
     pub(crate) fn compile_implicit_join(&mut self, select: &Select) -> SqawkResult<()> {
+        self.compile_implicit_join_core(select, None, 0)
+    }
+
+    fn compile_implicit_join_core(
+        &mut self,
+        select: &Select,
+        limit_val: Option<i64>,
+        offset_val: i64,
+    ) -> SqawkResult<()> {
         let num_tables = select.from.len();
         if num_tables < 2 {
             return Err(SqawkError::UnsupportedSqlFeature(
@@ -741,11 +1543,18 @@ impl<'a> SqlCompiler<'a> {
             ));
         }
 
-        // Collect all table names
+        // Collect all table names and aliases
+        // table_names: actual table names for database lookups
+        // table_refs: aliases (if provided) or table names - used for column resolution
         let mut table_names: Vec<String> = Vec::with_capacity(num_tables);
+        let mut table_refs: Vec<String> = Vec::with_capacity(num_tables);
         for from_item in &select.from {
-            let table_name = match &from_item.relation {
-                sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
+            let (table_name, table_alias) = match &from_item.relation {
+                sqlparser::ast::TableFactor::Table { name, alias, .. } => {
+                    let tname = self.get_table_name(name)?;
+                    let talias = alias.as_ref().map(|a| a.name.value.clone());
+                    (tname, talias)
+                }
                 _ => {
                     return Err(SqawkError::UnsupportedSqlFeature(
                         "Only simple table references supported in implicit join".into(),
@@ -755,6 +1564,8 @@ impl<'a> SqlCompiler<'a> {
             if !self.database.has_table(&table_name) {
                 return Err(SqawkError::TableNotFound(table_name));
             }
+            // Use alias for column resolution if provided, otherwise use table name
+            table_refs.push(table_alias.unwrap_or_else(|| table_name.clone()));
             table_names.push(table_name);
         }
 
@@ -765,8 +1576,9 @@ impl<'a> SqlCompiler<'a> {
             .collect::<Result<Vec<_>, _>>()?;
 
         // Resolve projection for all tables - determine which columns to output
+        // Use table_refs (aliases) for column resolution
         let (table_col_indices, output_col_refs, schema, is_wildcard) =
-            self.resolve_multi_table_projection(&select.projection, &tables, &table_names)?;
+            self.resolve_multi_table_projection(&select.projection, &tables, &table_refs)?;
 
         // Set result schema
         self.program.set_result_schema(schema);
@@ -782,6 +1594,38 @@ impl<'a> SqlCompiler<'a> {
                 &format!("Open table {} for reading", table_name),
             );
         }
+
+        // Set up LIMIT counter register if needed
+        let limit_reg = if let Some(limit) = limit_val {
+            let reg = self.allocate_register();
+            self.emit(
+                OpCode::Integer,
+                limit,
+                reg,
+                0,
+                None,
+                &format!("r[{}] = {} (LIMIT counter)", reg, limit),
+            );
+            Some(reg)
+        } else {
+            None
+        };
+
+        // Set up OFFSET counter register if needed
+        let offset_reg = if offset_val > 0 {
+            let reg = self.allocate_register();
+            self.emit(
+                OpCode::Integer,
+                offset_val,
+                reg,
+                0,
+                None,
+                &format!("r[{}] = {} (OFFSET counter)", reg, offset_val),
+            );
+            Some(reg)
+        } else {
+            None
+        };
 
         // Track loop start/end placeholders for patching
         let mut loop_end_placeholders: Vec<usize> = Vec::with_capacity(num_tables);
@@ -847,8 +1691,9 @@ impl<'a> SqlCompiler<'a> {
                 eprintln!("WHERE comparison: {:?}", where_expr);
             }
             // Use compile_multi_table_condition to handle table.column references
+            // Use table_refs (aliases) for column resolution
             let condition_reg =
-                self.compile_multi_table_condition(where_expr, &tables, &table_names)?;
+                self.compile_multi_table_condition(where_expr, &tables, &table_refs)?;
 
             // Jump to next iteration if condition is false (0)
             let skip_addr = self.program.len();
@@ -865,7 +1710,23 @@ impl<'a> SqlCompiler<'a> {
             None
         };
 
-        // Output combined row (only if WHERE passed)
+        // Handle OFFSET - skip rows until offset is exhausted
+        let offset_skip_addr = if let Some(off_reg) = offset_reg {
+            let addr = self.program.len();
+            self.emit(
+                OpCode::DecrJumpZero,
+                off_reg,
+                0, // Placeholder - will jump to Next
+                0,
+                None,
+                "Decrement OFFSET counter, skip if not yet at offset",
+            );
+            Some(addr)
+        } else {
+            None
+        };
+
+        // Output combined row (only if WHERE passed and OFFSET exhausted)
         if is_wildcard {
             // For SELECT *, columns are already in consecutive registers
             let total_cols: usize = table_col_indices.iter().map(|c| c.len()).sum();
@@ -908,8 +1769,31 @@ impl<'a> SqlCompiler<'a> {
             );
         }
 
+        // Handle LIMIT - decrement counter and jump to end if exhausted
+        let limit_done_addr = if let Some(lim_reg) = limit_reg {
+            let addr = self.program.len();
+            self.emit(
+                OpCode::DecrJumpZero,
+                lim_reg,
+                0, // Placeholder - will jump to Close cursors
+                0,
+                None,
+                "Decrement LIMIT counter, jump to end if done",
+            );
+            Some(addr)
+        } else {
+            None
+        };
+
         // Patch skip address to jump to innermost Next instruction
         let innermost_next_addr = self.program.len();
+
+        // Patch OFFSET skip address to jump to innermost Next
+        if let Some(off_addr) = offset_skip_addr {
+            if let Some(inst) = self.program.instructions.get_mut(off_addr) {
+                inst.p2 = innermost_next_addr as i64;
+            }
+        }
         if let Some(skip_addr) = skip_output_addr {
             if let Some(inst) = self.program.instructions.get_mut(skip_addr) {
                 inst.p2 = innermost_next_addr as i64;
@@ -932,7 +1816,8 @@ impl<'a> SqlCompiler<'a> {
         }
         loop_ends.reverse(); // Restore to table order for patching
 
-        // Close all cursors
+        // Close all cursors - this is where LIMIT jumps to when done
+        let close_cursors_addr = self.program.len();
         for i in 0..num_tables {
             self.emit(
                 OpCode::Close,
@@ -951,7 +1836,46 @@ impl<'a> SqlCompiler<'a> {
             }
         }
 
+        // Patch LIMIT done address to jump to Close cursors
+        if let Some(lim_addr) = limit_done_addr {
+            if let Some(inst) = self.program.instructions.get_mut(lim_addr) {
+                inst.p2 = close_cursors_addr as i64;
+            }
+        }
+
         Ok(())
+    }
+
+    /// Build schema for implicit join without executing (for LIMIT 0 optimization)
+    fn build_implicit_join_schema(&self, select: &Select) -> SqawkResult<ResultSchema> {
+        let mut table_names: Vec<String> = Vec::new();
+        let mut table_refs: Vec<String> = Vec::new();
+
+        for from_item in &select.from {
+            let (table_name, table_alias) = match &from_item.relation {
+                sqlparser::ast::TableFactor::Table { name, alias, .. } => {
+                    let tname = self.get_table_name(name)?;
+                    let talias = alias.as_ref().map(|a| a.name.value.clone());
+                    (tname, talias)
+                }
+                _ => continue,
+            };
+            table_refs.push(table_alias.unwrap_or_else(|| table_name.clone()));
+            table_names.push(table_name);
+        }
+
+        let tables: Vec<&Table> = table_names
+            .iter()
+            .filter_map(|name| self.database.get_table(name).ok())
+            .collect();
+
+        if tables.is_empty() {
+            return Ok(ResultSchema::new());
+        }
+
+        let (_, _, schema, _) =
+            self.resolve_multi_table_projection(&select.projection, &tables, &table_refs)?;
+        Ok(schema)
     }
 
     /// Resolve projection for multiple tables
@@ -1148,331 +2072,6 @@ impl<'a> SqlCompiler<'a> {
             ))),
         }
     }
-
-    /// Compile an implicit join with LIMIT/OFFSET support
-    pub(crate) fn compile_implicit_join_with_limit(
-        &mut self,
-        select: &Select,
-        query: &Query,
-    ) -> SqawkResult<()> {
-        // For now, only support 2 tables
-        if select.from.len() != 2 {
-            return Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Implicit joins with {} tables and LIMIT not yet supported (max 2)",
-                select.from.len()
-            )));
-        }
-
-        // Get table names
-        let left_table_name = match &select.from[0].relation {
-            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple table references supported in implicit join".into(),
-                ))
-            }
-        };
-
-        let right_table_name = match &select.from[1].relation {
-            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple table references supported in implicit join".into(),
-                ))
-            }
-        };
-
-        if !self.database.has_table(&left_table_name) {
-            return Err(SqawkError::TableNotFound(left_table_name));
-        }
-        if !self.database.has_table(&right_table_name) {
-            return Err(SqawkError::TableNotFound(right_table_name));
-        }
-
-        let left_table = self.database.get_table(&left_table_name)?;
-        let right_table = self.database.get_table(&right_table_name)?;
-
-        // Determine which columns to output based on projection
-        let (left_cols, right_cols, schema) = self.resolve_join_projection(
-            &select.projection,
-            left_table,
-            right_table,
-            &left_table_name,
-            &right_table_name,
-        )?;
-
-        // Set result schema
-        self.program.set_result_schema(schema);
-
-        // Extract LIMIT/OFFSET values
-        let (limit_val, offset_val) = self.extract_limit_offset(query)?;
-
-        let left_cursor = 0usize;
-        let right_cursor = 1usize;
-
-        // Open both tables
-        self.emit(
-            OpCode::OpenRead,
-            left_cursor as i64,
-            1,
-            0,
-            Some(left_table_name.to_string()),
-            &format!("Open left table {} for reading", left_table_name),
-        );
-
-        self.emit(
-            OpCode::OpenRead,
-            right_cursor as i64,
-            2,
-            0,
-            Some(right_table_name.to_string()),
-            &format!("Open right table {} for reading", right_table_name),
-        );
-
-        // Set up LIMIT counter register if needed
-        let limit_reg = if let Some(limit) = limit_val {
-            if limit == 0 {
-                // LIMIT 0 optimization: skip entire loop
-                let halt_addr = self.program.len();
-                self.emit(OpCode::Goto, 0, 0, 0, None, "LIMIT 0: skip to end");
-                // We'll patch this to jump to Halt
-                Some((0i64, Some(halt_addr))) // Special marker for LIMIT 0
-            } else {
-                let reg = self.allocate_register();
-                self.emit(
-                    OpCode::Integer,
-                    limit,
-                    reg,
-                    0,
-                    None,
-                    &format!("r[{}] = {} (LIMIT counter)", reg, limit),
-                );
-                Some((reg, None))
-            }
-        } else {
-            None
-        };
-
-        // Set up OFFSET counter register if needed
-        let offset_reg = if offset_val > 0 {
-            let reg = self.allocate_register();
-            self.emit(
-                OpCode::Integer,
-                offset_val,
-                reg,
-                0,
-                None,
-                &format!("r[{}] = {} (OFFSET counter)", reg, offset_val),
-            );
-            Some(reg)
-        } else {
-            None
-        };
-
-        // Allocate registers for columns
-        let left_start_reg = self.allocate_registers(left_cols.len());
-        let right_start_reg = self.allocate_registers(right_cols.len());
-
-        // Rewind left cursor (outer loop)
-        let left_loop_end_placeholder = self.program.len();
-        self.emit(
-            OpCode::Rewind,
-            left_cursor as i64,
-            0, // Placeholder - will be patched
-            0,
-            None,
-            "Rewind left cursor (outer loop)",
-        );
-
-        // OUTER LOOP START
-        let left_loop_start = self.program.len();
-
-        // Load left table columns
-        self.emit_column_loads(left_cursor as i64, &left_cols, left_start_reg, "left");
-
-        // Rewind right cursor (inner loop)
-        let right_loop_end_placeholder = self.program.len();
-        self.emit(
-            OpCode::RewindInner,
-            right_cursor as i64,
-            0, // Placeholder - will be patched
-            0,
-            None,
-            "Rewind right cursor (inner loop)",
-        );
-
-        // INNER LOOP START
-        let right_loop_start = self.program.len();
-
-        // Load right table columns
-        self.emit_column_loads(right_cursor as i64, &right_cols, right_start_reg, "right");
-
-        // Compile WHERE condition to filter rows
-        let skip_output_addr = if let Some(where_expr) = &select.selection {
-            if self.verbose {
-                eprintln!("WHERE comparison: {:?}", where_expr);
-            }
-            // Use compile_join_condition to handle table.column references
-            let condition_reg = self.compile_join_condition(
-                where_expr,
-                left_table,
-                right_table,
-                left_cursor,
-                right_cursor,
-            )?;
-
-            // Jump to next iteration if condition is false (0)
-            let skip_addr = self.program.len();
-            self.emit(
-                OpCode::IfZ,
-                condition_reg,
-                0, // Placeholder - will be patched
-                0,
-                None,
-                "Skip row if WHERE condition is false",
-            );
-            Some(skip_addr)
-        } else {
-            None
-        };
-
-        // Handle OFFSET - skip rows until offset is exhausted
-        let offset_skip_addr = if let Some(off_reg) = offset_reg {
-            let addr = self.program.len();
-            self.emit(
-                OpCode::DecrJumpZero,
-                off_reg,
-                0, // Placeholder - will jump to Next
-                0,
-                None,
-                "Decrement OFFSET counter, skip if not yet at offset",
-            );
-            // If offset counter > 0, skip to Next right
-            Some(addr)
-        } else {
-            None
-        };
-
-        // Output combined row (only if WHERE passed and OFFSET exhausted)
-        self.emit(
-            OpCode::ResultRow,
-            left_start_reg,
-            (left_cols.len() + right_cols.len()) as i64,
-            0,
-            None,
-            "Output implicit join row",
-        );
-
-        // Handle LIMIT - decrement counter and exit loop if exhausted
-        let limit_exit_addr = if let Some((lim_reg, limit_0_addr)) = limit_reg {
-            if limit_0_addr.is_some() {
-                // LIMIT 0 case - no decrement needed
-                None
-            } else {
-                let addr = self.program.len();
-                self.emit(
-                    OpCode::DecrJumpZero,
-                    lim_reg,
-                    0, // Placeholder - will jump to loop end
-                    0,
-                    None,
-                    "Decrement LIMIT counter, exit if zero",
-                );
-                Some(addr)
-            }
-        } else {
-            None
-        };
-
-        // Patch skip address to jump to Next instruction
-        let next_right_addr = self.program.len();
-        if let Some(skip_addr) = skip_output_addr {
-            if let Some(inst) = self.program.instructions.get_mut(skip_addr) {
-                inst.p2 = next_right_addr as i64;
-            }
-        }
-        // Patch offset skip to also jump to Next
-        if let Some(off_addr) = offset_skip_addr {
-            if let Some(inst) = self.program.instructions.get_mut(off_addr) {
-                inst.p2 = next_right_addr as i64;
-            }
-        }
-
-        // Next right (inner)
-        self.emit(
-            OpCode::Next,
-            right_cursor as i64,
-            right_loop_start as i64,
-            0,
-            None,
-            "Next right row",
-        );
-
-        // INNER LOOP END
-        let right_loop_end = self.program.len();
-
-        // Next left (outer)
-        self.emit(
-            OpCode::Next,
-            left_cursor as i64,
-            left_loop_start as i64,
-            0,
-            None,
-            "Next left row",
-        );
-
-        // OUTER LOOP END
-        let left_loop_end = self.program.len();
-
-        // Close cursors
-        self.emit(
-            OpCode::Close,
-            left_cursor as i64,
-            0,
-            0,
-            None,
-            "Close left cursor",
-        );
-
-        self.emit(
-            OpCode::Close,
-            right_cursor as i64,
-            0,
-            0,
-            None,
-            "Close right cursor",
-        );
-
-        // Patch jump addresses
-        if let Some(inst) = self.program.instructions.get_mut(left_loop_end_placeholder) {
-            inst.p2 = left_loop_end as i64;
-        }
-        if let Some(inst) = self
-            .program
-            .instructions
-            .get_mut(right_loop_end_placeholder)
-        {
-            inst.p2 = right_loop_end as i64;
-        }
-
-        // Patch LIMIT exit to jump past loops
-        if let Some(lim_addr) = limit_exit_addr {
-            if let Some(inst) = self.program.instructions.get_mut(lim_addr) {
-                inst.p2 = left_loop_end as i64;
-            }
-        }
-
-        // Patch LIMIT 0 Goto to jump to after Close
-        if let Some((_, Some(limit_0_addr))) = limit_reg {
-            let halt_pos = self.program.len();
-            if let Some(inst) = self.program.instructions.get_mut(limit_0_addr) {
-                inst.p2 = halt_pos as i64;
-            }
-        }
-
-        Ok(())
-    }
-
     /// Compile a multi-table JOIN (3+ tables)
     pub(crate) fn compile_multi_join(
         &mut self,
@@ -1480,9 +2079,16 @@ impl<'a> SqlCompiler<'a> {
         projection: &[SelectItem],
         where_clause: &Option<Expr>,
     ) -> SqawkResult<()> {
-        // Collect all table names
-        let first_table_name = match &table_with_joins.relation {
-            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
+        // Collect all table names and aliases
+        let (first_table_name, first_table_ref) = match &table_with_joins.relation {
+            sqlparser::ast::TableFactor::Table { name, alias, .. } => {
+                let tname = self.get_table_name(name)?;
+                let tref = alias
+                    .as_ref()
+                    .map(|a| a.name.value.clone())
+                    .unwrap_or_else(|| tname.clone());
+                (tname, tref)
+            }
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(
                     "Only simple table scans supported in multi-join".into(),
@@ -1491,11 +2097,19 @@ impl<'a> SqlCompiler<'a> {
         };
 
         let mut table_names = vec![first_table_name];
+        let mut table_refs = vec![first_table_ref];
         let mut join_conditions: Vec<&Expr> = Vec::new();
 
         for join in &table_with_joins.joins {
-            let table_name = match &join.relation {
-                sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
+            let (table_name, table_ref) = match &join.relation {
+                sqlparser::ast::TableFactor::Table { name, alias, .. } => {
+                    let tname = self.get_table_name(name)?;
+                    let tref = alias
+                        .as_ref()
+                        .map(|a| a.name.value.clone())
+                        .unwrap_or_else(|| tname.clone());
+                    (tname, tref)
+                }
                 _ => {
                     return Err(SqawkError::UnsupportedSqlFeature(
                         "Only simple table scans supported in multi-join".into(),
@@ -1516,6 +2130,7 @@ impl<'a> SqlCompiler<'a> {
             }
 
             table_names.push(table_name);
+            table_refs.push(table_ref);
         }
 
         let num_tables = table_names.len();
@@ -1538,8 +2153,9 @@ impl<'a> SqlCompiler<'a> {
             .collect::<Result<Vec<_>, _>>()?;
 
         // Resolve projection to determine output columns
+        // Use table_refs (aliases) for column resolution
         let (_table_col_indices, output_col_refs, schema, is_wildcard) =
-            self.resolve_multi_table_projection(projection, &tables, &table_names)?;
+            self.resolve_multi_table_projection(projection, &tables, &table_refs)?;
 
         self.program.set_result_schema(schema);
 
@@ -1614,8 +2230,9 @@ impl<'a> SqlCompiler<'a> {
         let mut skip_to_next_placeholders: Vec<usize> = Vec::new();
 
         for (i, cond) in join_conditions.iter().enumerate() {
+            // Use table_refs (aliases) for column resolution
             let cond_reg =
-                self.compile_multi_join_condition(cond, &table_names, &table_start_regs)?;
+                self.compile_multi_join_condition(cond, &table_refs, &table_start_regs)?;
 
             // If condition fails, skip to next innermost iteration (placeholder)
             let skip_addr = self.program.len();
@@ -1635,8 +2252,8 @@ impl<'a> SqlCompiler<'a> {
             if self.verbose {
                 eprintln!("Compiling WHERE clause for multi-join: {:?}", where_expr);
             }
-            let where_reg =
-                self.compile_multi_table_condition(where_expr, &tables, &table_names)?;
+            // Use table_refs (aliases) for column resolution
+            let where_reg = self.compile_multi_table_condition(where_expr, &tables, &table_refs)?;
 
             // If WHERE fails, skip to next innermost iteration (placeholder)
             let skip_addr = self.program.len();
@@ -1952,22 +2569,51 @@ impl<'a> SqlCompiler<'a> {
         left_cursor: usize,
         right_cursor: usize,
     ) -> SqawkResult<i64> {
+        // Use table names as references (no aliases)
+        let left_ref = left_table.name().to_string();
+        let right_ref = right_table.name().to_string();
+        self.compile_join_condition_with_refs(
+            expr,
+            left_table,
+            right_table,
+            left_cursor,
+            right_cursor,
+            &left_ref,
+            &right_ref,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_join_condition_with_refs(
+        &mut self,
+        expr: &Expr,
+        left_table: &Table,
+        right_table: &Table,
+        left_cursor: usize,
+        right_cursor: usize,
+        left_ref: &str,
+        right_ref: &str,
+    ) -> SqawkResult<i64> {
         // Handle a.col = b.col style conditions
         match expr {
             Expr::BinaryOp { left, op, right } => {
-                let left_reg = self.compile_join_operand(
+                let left_reg = self.compile_join_operand_with_refs(
                     left,
                     left_table,
                     right_table,
                     left_cursor,
                     right_cursor,
+                    left_ref,
+                    right_ref,
                 )?;
-                let right_reg = self.compile_join_operand(
+                let right_reg = self.compile_join_operand_with_refs(
                     right,
                     left_table,
                     right_table,
                     left_cursor,
                     right_cursor,
+                    left_ref,
+                    right_ref,
                 )?;
                 self.emit_comparison(op, left_reg, right_reg)
             }
@@ -1978,14 +2624,17 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// Compile a join operand (typically a column reference)
-    fn compile_join_operand(
+    /// Compile a join operand with explicit table references (aliases or names)
+    #[allow(clippy::too_many_arguments)]
+    fn compile_join_operand_with_refs(
         &mut self,
         expr: &Expr,
         left_table: &Table,
         right_table: &Table,
         left_cursor: usize,
         right_cursor: usize,
+        left_ref: &str,
+        right_ref: &str,
     ) -> SqawkResult<i64> {
         match expr {
             Expr::CompoundIdentifier(parts) => {
@@ -1995,11 +2644,11 @@ impl<'a> SqlCompiler<'a> {
                     let col_name = parts[1].value.to_lowercase();
 
                     // Try to find column in left or right table
-                    // First check if table alias matches
-                    let left_table_name = left_table.name().to_lowercase();
-                    let right_table_name = right_table.name().to_lowercase();
+                    // Check against table references (which may be aliases)
+                    let left_ref_lower = left_ref.to_lowercase();
+                    let right_ref_lower = right_ref.to_lowercase();
 
-                    if table_alias == left_table_name {
+                    if table_alias == left_ref_lower {
                         if let Some(col_idx) = left_table.column_index(&col_name) {
                             let reg = self.allocate_register();
                             self.emit(
@@ -2012,7 +2661,7 @@ impl<'a> SqlCompiler<'a> {
                             );
                             return Ok(reg);
                         }
-                    } else if table_alias == right_table_name {
+                    } else if table_alias == right_ref_lower {
                         if let Some(col_idx) = right_table.column_index(&col_name) {
                             let reg = self.allocate_register();
                             self.emit(
@@ -2101,6 +2750,124 @@ impl<'a> SqlCompiler<'a> {
                 "Unsupported join operand: {:?}",
                 expr
             ))),
+        }
+    }
+
+    /// Resolve a column expression to (table_idx, col_idx) for multi-table queries
+    fn resolve_multi_table_column(
+        &self,
+        expr: &Expr,
+        tables: &[&Table],
+        table_refs: &[String],
+    ) -> SqawkResult<(usize, usize)> {
+        match expr {
+            Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                let table_ref = &parts[0].value;
+                let col_name = &parts[1].value;
+
+                // Find the table by reference (alias or name)
+                let tbl_idx = table_refs
+                    .iter()
+                    .position(|r| r.eq_ignore_ascii_case(table_ref))
+                    .ok_or_else(|| SqawkError::TableNotFound(table_ref.clone()))?;
+
+                // Find the column in that table
+                let col_idx = tables[tbl_idx]
+                    .column_index(col_name)
+                    .ok_or_else(|| SqawkError::ColumnNotFound(col_name.clone()))?;
+
+                Ok((tbl_idx, col_idx))
+            }
+            Expr::Identifier(ident) => {
+                // Unqualified column - search all tables
+                let col_name = &ident.value;
+                for (tbl_idx, table) in tables.iter().enumerate() {
+                    if let Some(col_idx) = table.column_index(col_name) {
+                        return Ok((tbl_idx, col_idx));
+                    }
+                }
+                Err(SqawkError::ColumnNotFound(col_name.clone()))
+            }
+            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Unsupported column expression in multi-table query: {:?}",
+                expr
+            ))),
+        }
+    }
+
+    /// Build result schema for a multi-table aggregate query
+    fn build_multi_table_agg_schema(
+        &self,
+        projection: &[SelectItem],
+        tables: &[&Table],
+        table_refs: &[String],
+    ) -> ResultSchema {
+        let mut schema = ResultSchema::new();
+
+        for item in projection {
+            let (name, data_type) = match item {
+                SelectItem::UnnamedExpr(expr) => {
+                    self.get_multi_table_expr_schema(expr, tables, table_refs)
+                }
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    let (_, dt) = self.get_multi_table_expr_schema(expr, tables, table_refs);
+                    (alias.value.clone(), dt)
+                }
+                _ => ("?".to_string(), crate::table::DataType::Text),
+            };
+            schema.add_column(name, data_type);
+        }
+
+        schema
+    }
+
+    /// Get schema info for a single expression in a multi-table context
+    fn get_multi_table_expr_schema(
+        &self,
+        expr: &Expr,
+        tables: &[&Table],
+        table_refs: &[String],
+    ) -> (String, crate::table::DataType) {
+        match expr {
+            Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                let table_ref = &parts[0].value;
+                let col_name = &parts[1].value;
+
+                if let Some(tbl_idx) = table_refs
+                    .iter()
+                    .position(|r| r.eq_ignore_ascii_case(table_ref))
+                {
+                    if let Some(col_idx) = tables[tbl_idx].column_index(col_name) {
+                        let meta = &tables[tbl_idx].column_metadata()[col_idx];
+                        return (format!("{}.{}", table_ref, col_name), meta.data_type);
+                    }
+                }
+                (
+                    format!("{}.{}", table_ref, col_name),
+                    crate::table::DataType::Text,
+                )
+            }
+            Expr::Identifier(ident) => {
+                let col_name = &ident.value;
+                for table in tables.iter() {
+                    if let Some(col_idx) = table.column_index(col_name) {
+                        let meta = &table.column_metadata()[col_idx];
+                        return (col_name.clone(), meta.data_type);
+                    }
+                }
+                (col_name.clone(), crate::table::DataType::Text)
+            }
+            Expr::Function(func) => {
+                let func_name = func.name.to_string().to_uppercase();
+                // Aggregates typically return numeric types
+                let data_type = match func_name.as_str() {
+                    "COUNT" => crate::table::DataType::Integer,
+                    "SUM" | "AVG" => crate::table::DataType::Float,
+                    _ => crate::table::DataType::Text,
+                };
+                (func_name, data_type)
+            }
+            _ => ("expr".to_string(), crate::table::DataType::Text),
         }
     }
 }
