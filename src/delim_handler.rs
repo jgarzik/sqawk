@@ -18,6 +18,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
+use crate::capacity::{generate_alpha_columns, is_likely_data_row};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{Table, Value};
 
@@ -140,10 +141,13 @@ impl DelimHandler {
             )));
         };
 
+        // has_headers is true by default - first row is column names
+        let has_headers = true;
+
         // Create a CSV reader with custom delimiter
         // Also add support for comment lines (starting with #) for system files like /etc/passwd
         let mut csv_reader = csv::ReaderBuilder::new()
-            .has_headers(true)
+            .has_headers(has_headers)
             .delimiter(delimiter_byte)
             .comment(Some(b'#')) // Support for comment lines starting with #
             .flexible(true) // Allow for variable number of fields
@@ -152,44 +156,19 @@ impl DelimHandler {
         // If custom column names are provided, use them
         // Otherwise detect/generate headers based on file content
         let headers = if let Some(columns) = custom_columns {
-            // Use the provided custom column names
+            // Use the provided custom column names (first row will be treated as data)
             columns
         } else {
             // No custom column names, generate or detect from file
             match csv_reader.headers().map_err(SqawkError::CsvError) {
                 Ok(header_row) => {
-                    // Check if the first row looks like data rather than headers
-                    // This helps with system files like /etc/passwd that don't have headers
-                    let is_likely_data = header_row.iter().any(|field| {
-                        // Common indicators that a field is data, not a header
-                        field.starts_with('/') || // Path
-                        field == "*" ||           // Password placeholder
-                        field == "root" ||        // Common username
-                        field == "nobody" ||      // Common username
-                        field.parse::<i32>().is_ok() // Numeric ID
-                    });
-
-                    if is_likely_data {
-                        // Generate alphabetical column names (a, b, c, etc.)
-                        (0..header_row.len())
-                            .map(|i| {
-                                // Convert number to alphabetical column name (a, b, ..., z, aa, ab, ...)
-                                let mut name = String::new();
-                                let mut n = i;
-                                loop {
-                                    name.insert(0, (b'a' + (n % 26) as u8) as char);
-                                    n /= 26;
-                                    if n == 0 {
-                                        break;
-                                    }
-                                    n -= 1; // Adjust for the shift from 0-based to 1-based
-                                }
-                                name
-                            })
-                            .collect::<Vec<_>>()
+                    let fields: Vec<&str> = header_row.iter().collect();
+                    if is_likely_data_row(&fields) {
+                        // First row is data, generate a,b,c column names
+                        generate_alpha_columns(fields.len())
                     } else {
                         // Use the headers as they are
-                        header_row.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+                        fields.iter().map(|s| s.to_string()).collect()
                     }
                 }
                 Err(_) => {
@@ -198,23 +177,7 @@ impl DelimHandler {
                     let first_record = record_iter.into_iter().next();
 
                     if let Some(Ok(record)) = first_record {
-                        // Generate alphabetical column names (a, b, c, etc.)
-                        (0..record.len())
-                            .map(|i| {
-                                // Convert number to alphabetical column name (a, b, ..., z, aa, ab, ...)
-                                let mut name = String::new();
-                                let mut n = i;
-                                loop {
-                                    name.insert(0, (b'a' + (n % 26) as u8) as char);
-                                    n /= 26;
-                                    if n == 0 {
-                                        break;
-                                    }
-                                    n -= 1; // Adjust for the shift from 0-based to 1-based
-                                }
-                                name
-                            })
-                            .collect::<Vec<_>>()
+                        generate_alpha_columns(record.len())
                     } else {
                         // Fallback to a minimal set if we can't determine field count
                         vec!["a".to_string()]

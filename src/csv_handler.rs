@@ -111,9 +111,12 @@ impl CsvHandler {
         let file = File::open(&file_path)?;
         let reader = BufReader::new(file);
 
+        // has_headers is true by default - first row is column names
+        let has_headers = true;
+
         // Create a CSV reader with enhanced options
         let mut csv_reader = csv::ReaderBuilder::new()
-            .has_headers(true)
+            .has_headers(has_headers)
             .comment(Some(b'#')) // Support comment lines starting with #
             // Enable flexible mode only if error recovery is requested
             .flexible(true) // Always use flexible mode to allow for skipping errors
@@ -121,7 +124,7 @@ impl CsvHandler {
 
         // Get headers or use custom column names if provided
         let headers = if let Some(columns) = custom_columns {
-            // Use the provided custom column names
+            // Use the provided custom column names (first row will be data)
             columns
         } else {
             // Use column names from the CSV header row

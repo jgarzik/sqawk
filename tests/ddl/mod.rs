@@ -1,8 +1,10 @@
 //! Tests for DDL (Data Definition Language) operations
 //!
-//! This file contains tests for DROP TABLE, ALTER TABLE, TRUNCATE, and CREATE TABLE AS SELECT.
+//! This file contains tests for DROP TABLE, ALTER TABLE, TRUNCATE, CREATE TABLE AS SELECT,
+//! and CREATE TABLE with LOCATION clause.
 
 use crate::helpers::{create_custom_csv, create_temp_dir};
+use std::fs;
 
 #[test]
 fn test_drop_table_basic() -> Result<(), Box<dyn std::error::Error>> {
@@ -279,6 +281,137 @@ fn test_create_table_verbose() -> Result<(), Box<dyn std::error::Error>> {
     cmd.assert()
         .success()
         .stdout(predicates::str::contains("CreateTable"));
+
+    Ok(())
+}
+
+// =============================================================================
+// CREATE TABLE with LOCATION tests
+// =============================================================================
+
+#[test]
+fn test_create_table_with_location_creates_empty_table() -> Result<(), Box<dyn std::error::Error>> {
+    // Test CREATE TABLE with LOCATION creates an empty table with specified schema
+    let temp_dir = create_temp_dir()?;
+    let output_file = temp_dir.path().join("output.csv");
+
+    let dummy_file = create_custom_csv(temp_dir.path(), "dummy.csv", "x\n1\n")?;
+
+    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    cmd.arg("-s")
+        .arg(format!(
+            "CREATE TABLE mydata (id INT, name TEXT, value INT) LOCATION '{}'",
+            output_file.to_str().unwrap()
+        ))
+        .arg("-s")
+        .arg("SELECT * FROM mydata")
+        .arg(dummy_file.to_str().unwrap());
+
+    // Table exists but is empty (only header row in output)
+    cmd.assert()
+        .success()
+        .stdout(predicates::str::contains("id,name,value"));
+
+    Ok(())
+}
+
+#[test]
+fn test_create_table_with_location_insert_and_write() -> Result<(), Box<dyn std::error::Error>> {
+    // Test INSERT into table with LOCATION, then write back
+    let temp_dir = create_temp_dir()?;
+    let output_file = temp_dir.path().join("output.csv");
+
+    let dummy_file = create_custom_csv(temp_dir.path(), "dummy.csv", "x\n1\n")?;
+
+    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    cmd.arg("-s")
+        .arg(format!(
+            "CREATE TABLE mydata (id INT, name TEXT) LOCATION '{}'",
+            output_file.to_str().unwrap()
+        ))
+        .arg("-s")
+        .arg("INSERT INTO mydata VALUES (1, 'Alice'), (2, 'Bob')")
+        .arg("-s")
+        .arg("SELECT * FROM mydata")
+        .arg("--write")
+        .arg(dummy_file.to_str().unwrap());
+
+    cmd.assert()
+        .success()
+        .stdout(predicates::str::contains("Alice"))
+        .stdout(predicates::str::contains("Bob"));
+
+    // Verify the file was created with the data
+    let contents = fs::read_to_string(&output_file)?;
+    assert!(contents.contains("Alice"), "File should contain Alice");
+    assert!(contents.contains("Bob"), "File should contain Bob");
+
+    Ok(())
+}
+
+#[test]
+fn test_create_table_with_location_and_delimiter() -> Result<(), Box<dyn std::error::Error>> {
+    // Test CREATE TABLE with LOCATION and custom tab delimiter
+    let temp_dir = create_temp_dir()?;
+    let output_file = temp_dir.path().join("output.tsv");
+
+    let dummy_file = create_custom_csv(temp_dir.path(), "dummy.csv", "x\n1\n")?;
+
+    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    cmd.arg("-s")
+        .arg(format!(
+            "CREATE TABLE mydata (id INT, name TEXT) LOCATION '{}' STORED AS TEXTFILE WITH (DELIMITER='\t')",
+            output_file.to_str().unwrap()
+        ))
+        .arg("-s")
+        .arg("INSERT INTO mydata VALUES (1, 'Alice')")
+        .arg("--write")
+        .arg(dummy_file.to_str().unwrap());
+
+    cmd.assert().success();
+
+    // Verify the file was created with tab delimiter
+    let contents = fs::read_to_string(&output_file)?;
+    assert!(contents.contains('\t'), "File should use tab delimiter");
+    assert!(contents.contains("Alice"), "File should contain Alice");
+
+    Ok(())
+}
+
+#[test]
+fn test_create_table_with_location_multiple_operations() -> Result<(), Box<dyn std::error::Error>> {
+    // Test CREATE TABLE with LOCATION followed by INSERT, UPDATE, SELECT
+    let temp_dir = create_temp_dir()?;
+    let output_file = temp_dir.path().join("output.csv");
+
+    let dummy_file = create_custom_csv(temp_dir.path(), "dummy.csv", "x\n1\n")?;
+
+    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    cmd.arg("-s")
+        .arg(format!(
+            "CREATE TABLE mydata (id INT, name TEXT, value INT) LOCATION '{}'",
+            output_file.to_str().unwrap()
+        ))
+        .arg("-s")
+        .arg("INSERT INTO mydata VALUES (1, 'Alice', 100), (2, 'Bob', 200)")
+        .arg("-s")
+        .arg("UPDATE mydata SET value = 999 WHERE name = 'Alice'")
+        .arg("-s")
+        .arg("SELECT name, value FROM mydata WHERE value > 500")
+        .arg("--write")
+        .arg(dummy_file.to_str().unwrap());
+
+    cmd.assert()
+        .success()
+        .stdout(predicates::str::contains("Alice"))
+        .stdout(predicates::str::contains("999"));
+
+    // Verify the file contains the updated data
+    let contents = fs::read_to_string(&output_file)?;
+    assert!(
+        contents.contains("999"),
+        "File should contain updated value"
+    );
 
     Ok(())
 }

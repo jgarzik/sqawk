@@ -89,3 +89,48 @@ pub fn estimate_row_count(file_size: usize) -> usize {
     let estimate = file_size / ESTIMATED_BYTES_PER_ROW;
     estimate.clamp(MIN_ESTIMATED_ROW_CAPACITY, MAX_ESTIMATED_ROW_CAPACITY)
 }
+
+// =============================================================================
+// Headerless File Detection
+// =============================================================================
+
+/// Check if a line is a comment (starts with #).
+#[inline]
+pub fn is_comment_line(line: &[u8]) -> bool {
+    line.starts_with(b"#")
+}
+
+/// Check if a field looks like data rather than a header name.
+/// Used to auto-detect headerless files like /etc/passwd.
+#[inline]
+pub fn is_data_field(field: &str) -> bool {
+    field.starts_with('/') ||      // Path
+    field == "*" ||                // Password placeholder
+    field == "root" ||             // Common username
+    field == "nobody" ||           // Common username
+    field.parse::<i32>().is_ok() // Numeric ID
+}
+
+/// Check if a row of fields looks like data rather than headers.
+pub fn is_likely_data_row<S: AsRef<str>>(fields: &[S]) -> bool {
+    fields.iter().any(|f| is_data_field(f.as_ref()))
+}
+
+/// Generate alphabetical column names (a, b, c, ..., z, aa, ab, ...).
+pub fn generate_alpha_columns(count: usize) -> Vec<String> {
+    (0..count)
+        .map(|i| {
+            let mut name = String::new();
+            let mut n = i;
+            loop {
+                name.insert(0, (b'a' + (n % 26) as u8) as char);
+                n /= 26;
+                if n == 0 {
+                    break;
+                }
+                n -= 1;
+            }
+            name
+        })
+        .collect()
+}

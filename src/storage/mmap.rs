@@ -10,7 +10,10 @@ use std::path::Path;
 
 use memmap2::Mmap;
 
-use crate::capacity::{estimate_row_count, DEFAULT_ROW_CAPACITY};
+use crate::capacity::{
+    estimate_row_count, generate_alpha_columns, is_comment_line, is_likely_data_row,
+    DEFAULT_ROW_CAPACITY,
+};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{Row, Value};
 
@@ -51,6 +54,18 @@ impl MmapStorage {
     /// * `Ok(MmapStorage)` if the file was successfully opened and parsed
     /// * `Err` if the file couldn't be opened or parsed
     pub fn open<P: AsRef<Path>>(path: P, delimiter: u8) -> SqawkResult<Self> {
+        Self::open_with_columns(path, delimiter, None)
+    }
+
+    /// Open with predefined column names (for --tabledef support)
+    ///
+    /// When predefined columns are provided, the first row is treated as data,
+    /// not headers.
+    pub fn open_with_columns<P: AsRef<Path>>(
+        path: P,
+        delimiter: u8,
+        predefined_columns: Option<Vec<String>>,
+    ) -> SqawkResult<Self> {
         let file = File::open(path.as_ref()).map_err(SqawkError::IoError)?;
 
         // Safety: We're only reading the file, and the Mmap will be kept alive
@@ -71,7 +86,7 @@ impl MmapStorage {
         }
 
         // Parse the CSV structure
-        let (columns, rows) = Self::parse_csv(&mmap, delimiter)?;
+        let (columns, rows) = Self::parse_csv(&mmap, delimiter, predefined_columns)?;
 
         Ok(Self {
             mmap,
@@ -82,11 +97,20 @@ impl MmapStorage {
 
     /// Parse CSV data from memory-mapped region
     ///
+    /// # Arguments
+    /// * `data` - Memory-mapped file data
+    /// * `delimiter` - Field delimiter byte
+    /// * `predefined_columns` - If Some, use these as column names and treat first row as data
+    ///
     /// # Safety
     /// This function creates Value::String with Cow::Borrowed references that
     /// point into the mmap'd memory. The caller must ensure the returned rows
     /// do not outlive the mmap.
-    fn parse_csv(data: &Mmap, delimiter: u8) -> SqawkResult<(Vec<String>, Vec<Row>)> {
+    fn parse_csv(
+        data: &Mmap,
+        delimiter: u8,
+        predefined_columns: Option<Vec<String>>,
+    ) -> SqawkResult<(Vec<String>, Vec<Row>)> {
         if data.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
@@ -122,24 +146,38 @@ impl MmapStorage {
             }
         }
 
+        // Filter out comment lines (starting with #)
+        lines.retain(|line| !is_comment_line(line));
+
         if lines.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
 
-        // Parse header row (first line) - these are owned strings for column names
-        let header_line = lines[0];
-        let columns: Vec<String> = Self::split_fields(header_line, delimiter)
-            .iter()
-            .map(|field| {
-                // Column names are always owned (we need them as keys)
-                String::from_utf8_lossy(field).into_owned()
-            })
-            .collect();
+        // Determine columns and where data rows start
+        let (columns, data_start) = if let Some(cols) = predefined_columns {
+            // Use predefined columns, all lines are data
+            (cols, 0)
+        } else {
+            // Parse first row and check if it looks like data or headers
+            let header_line = lines[0];
+            let fields: Vec<String> = Self::split_fields(header_line, delimiter)
+                .iter()
+                .map(|field| String::from_utf8_lossy(field).into_owned())
+                .collect();
+
+            if is_likely_data_row(&fields) {
+                // First row is data, generate a,b,c column names
+                (generate_alpha_columns(fields.len()), 0)
+            } else {
+                // First row is headers
+                (fields, 1)
+            }
+        };
 
         // Parse data rows
-        let mut rows = Vec::with_capacity(lines.len() - 1);
+        let mut rows = Vec::with_capacity(lines.len() - data_start);
 
-        for line in lines.iter().skip(1) {
+        for line in lines.iter().skip(data_start) {
             let fields = Self::split_fields(line, delimiter);
             let mut row = Vec::with_capacity(columns.len());
 

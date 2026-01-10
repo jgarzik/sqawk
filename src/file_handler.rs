@@ -119,19 +119,24 @@ impl FileHandler {
         let file_path_str = file_path.to_string_lossy().to_string();
 
         // First, check if the table already exists in the database
-        // This could happen if it was defined through CLI table definitions
-        let existing_schema;
+        // This could happen if it was defined through CLI table definitions (--tabledef)
+        let predefined_columns: Option<Vec<String>>;
         {
             // Create a temporary scope for the database borrow
             let db = self.database_mut();
-            existing_schema = db.has_table(&table_name);
+            predefined_columns = if db.has_table(&table_name) {
+                // Get the predefined column names to use instead of auto-detected ones
+                db.get_table(&table_name).ok().map(|t| t.columns().to_vec())
+            } else {
+                None
+            };
         }
 
         // Show verbose output if needed
         let verbose = self.config.verbose();
-        if existing_schema && verbose {
+        if predefined_columns.is_some() && verbose {
             println!(
-                "Table '{}' already exists in database, loading data into existing schema",
+                "Table '{}' has predefined schema, using those column names",
                 table_name
             );
         }
@@ -143,12 +148,14 @@ impl FileHandler {
         // No need for custom columns logic here anymore
 
         // Determine delimiter for this file
-        let delimiter_str = match format {
-            FileFormat::Csv => ",".to_string(),
-            FileFormat::Delimited => self
-                .config
-                .field_separator()
-                .unwrap_or_else(|| "\t".to_string()),
+        // If -F flag is provided, always use it (overrides format detection)
+        let delimiter_str = if let Some(sep) = self.config.field_separator() {
+            sep
+        } else {
+            match format {
+                FileFormat::Csv => ",".to_string(),
+                FileFormat::Delimited => "\t".to_string(),
+            }
         };
         let delimiter_byte = delimiter_str.as_bytes()[0];
 
@@ -156,7 +163,12 @@ impl FileHandler {
         // Only use mmap if the file exists and is a regular file
         let table = if file_path.is_file() {
             // Use memory-mapped storage for zero-copy access
-            match MmapStorage::open(&file_path, delimiter_byte) {
+            // Pass predefined columns so mmap treats first row as data when appropriate
+            match MmapStorage::open_with_columns(
+                &file_path,
+                delimiter_byte,
+                predefined_columns.clone(),
+            ) {
                 Ok(mmap_storage) => {
                     if verbose {
                         println!("Using mmap storage for table '{}'", table_name);
@@ -178,12 +190,12 @@ impl FileHandler {
                             table_name, e
                         );
                     }
-                    self.load_file_regular(file_spec, &format)?
+                    self.load_file_regular(file_spec, &format, &predefined_columns)?
                 }
             }
         } else {
             // Stdin or other non-file source - use regular loading
-            self.load_file_regular(file_spec, &format)?
+            self.load_file_regular(file_spec, &format, &predefined_columns)?
         };
 
         // Now that we have the table, we can update the database without borrowing conflicts
@@ -191,12 +203,15 @@ impl FileHandler {
             // Create a new scope for database operations
             let db = self.database_mut();
 
-            // Handle existing schema if needed
-            if existing_schema {
-                // For now, we'll replace it - in the future we might want to handle this
-                // more gracefully with schema validation and merging
+            // Handle existing schema if needed (from --tabledef)
+            if predefined_columns.is_some() {
+                // Remove the placeholder table created by --tabledef
+                // We're replacing it with the actual table containing data
                 if verbose {
-                    println!("Replacing existing table '{}' with loaded data", table_name);
+                    println!(
+                        "Replacing predefined schema for '{}' with loaded data",
+                        table_name
+                    );
                 }
                 db.remove_table(&table_name);
             }
@@ -211,11 +226,17 @@ impl FileHandler {
     /// Load a file using the regular (non-mmap) method
     ///
     /// This is the fallback method used when mmap is not available or fails.
-    fn load_file_regular(&self, file_spec: &str, format: &FileFormat) -> SqawkResult<Table> {
+    fn load_file_regular(
+        &self,
+        file_spec: &str,
+        format: &FileFormat,
+        predefined_columns: &Option<Vec<String>>,
+    ) -> SqawkResult<Table> {
         match format {
             FileFormat::Csv => {
                 // Load the table from the CSV file
-                self.csv_handler.load_csv(file_spec, None, None)
+                self.csv_handler
+                    .load_csv(file_spec, predefined_columns.clone(), None)
             }
             FileFormat::Delimited => {
                 let delimiter = self
@@ -223,7 +244,7 @@ impl FileHandler {
                     .field_separator()
                     .unwrap_or_else(|| "\t".to_string());
                 self.delim_handler
-                    .load_delimited(file_spec, &delimiter, None)
+                    .load_delimited(file_spec, &delimiter, predefined_columns.clone())
             }
         }
     }
