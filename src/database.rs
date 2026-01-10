@@ -8,6 +8,7 @@
 //! - Storing all tables with their names
 //! - Providing a unified interface for table operations
 
+use crate::capacity::DEFAULT_TABLE_CAPACITY;
 use crate::config::AppConfig;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
@@ -46,7 +47,7 @@ impl Database {
     /// Create a new, empty database
     pub fn new() -> Self {
         Database {
-            tables: HashMap::new(),
+            tables: HashMap::with_capacity(DEFAULT_TABLE_CAPACITY),
         }
     }
 

@@ -17,6 +17,7 @@ use super::bytecode::{
     Instruction, OpCode, Program, ResultSchema, AGG_AVG, AGG_COUNT, AGG_MAX, AGG_MIN, AGG_SUM,
 };
 use crate::aggregate::AggregateFunction;
+use crate::capacity::DEFAULT_CURSOR_CAPACITY;
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{DataType, Table, Value as TableValue};
@@ -59,7 +60,7 @@ impl<'a> SqlCompiler<'a> {
     pub fn new(database: &'a Database, verbose: bool) -> Self {
         SqlCompiler {
             database,
-            table_map: HashMap::new(),
+            table_map: HashMap::with_capacity(DEFAULT_CURSOR_CAPACITY),
             program: Program::new(),
             register_counter: 0,
             verbose,
@@ -3273,7 +3274,7 @@ impl<'a> SqlCompiler<'a> {
         );
 
         // Track jump addresses that need to be patched to skip to end when match found
-        let mut jump_to_end_addrs = Vec::new();
+        let mut jump_to_end_addrs = Vec::with_capacity(subquery_values.len());
 
         // Compare against each value from the subquery
         for value in &subquery_values {
@@ -5224,7 +5225,7 @@ impl<'a> SqlCompiler<'a> {
         self.compile_where_operand(&first_expr, table, cursor_idx, src_reg)?;
 
         // Compile remaining arguments and build P4 spec
-        let mut arg_regs = Vec::new();
+        let mut arg_regs = Vec::with_capacity(func.args.len().saturating_sub(1));
         for arg in func.args.iter().skip(1) {
             let expr = self.extract_function_arg_expr(arg)?;
             let reg = self.allocate_register();

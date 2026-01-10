@@ -7,6 +7,11 @@
 use super::bytecode::{
     Instruction, OpCode, Program, Register, AGG_AVG, AGG_COUNT, AGG_MAX, AGG_MIN, AGG_SUM,
 };
+use crate::capacity::{
+    DEFAULT_ACCUMULATOR_CAPACITY, DEFAULT_CURSOR_CAPACITY, DEFAULT_MODIFICATIONS_CAPACITY,
+    DEFAULT_REGISTER_CAPACITY, DEFAULT_RESULT_CAPACITY, DEFAULT_SORTER_CAPACITY,
+    DEFAULT_SORTER_ROWS_CAPACITY, DEFAULT_SORT_KEYS_CAPACITY,
+};
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{ColumnDefinition, Table, Value};
@@ -54,7 +59,7 @@ impl<'a> Cursor<'a> {
     fn ephemeral(col_count: usize, sort_keys: Vec<(usize, bool)>) -> Self {
         Self {
             data: CursorData::Ephemeral {
-                rows: Vec::new(),
+                rows: Vec::with_capacity(DEFAULT_SORTER_ROWS_CAPACITY),
                 col_count,
                 sort_keys,
                 sorted: false,
@@ -70,9 +75,9 @@ impl<'a> Cursor<'a> {
     fn named_ephemeral(col_count: usize, table_name: String) -> Self {
         Self {
             data: CursorData::Ephemeral {
-                rows: Vec::new(),
+                rows: Vec::with_capacity(DEFAULT_SORTER_ROWS_CAPACITY),
                 col_count,
-                sort_keys: Vec::new(),
+                sort_keys: Vec::with_capacity(DEFAULT_SORT_KEYS_CAPACITY),
                 sorted: false,
                 sequence: 0,
                 name: Some(table_name),
@@ -330,7 +335,7 @@ struct AggAccumulator {
 impl Sorter {
     fn new(_col_count: usize, sort_keys: Vec<(usize, bool)>) -> Self {
         Self {
-            rows: Vec::new(),
+            rows: Vec::with_capacity(DEFAULT_SORTER_ROWS_CAPACITY),
             sort_keys,
             position: 0,
             sorted: false,
@@ -469,17 +474,17 @@ impl<'a> VmEngine<'a> {
             database,
             program: Program::new(),
             pc: 0,
-            registers: Vec::new(),
-            cursors: HashMap::new(),
-            sorters: HashMap::new(),
-            accumulators: HashMap::new(),
-            results: Vec::new(),
-            result_row_indices: Vec::new(),
-            cursor_source_order: Vec::new(),
+            registers: Vec::with_capacity(DEFAULT_REGISTER_CAPACITY),
+            cursors: HashMap::with_capacity(DEFAULT_CURSOR_CAPACITY),
+            sorters: HashMap::with_capacity(DEFAULT_SORTER_CAPACITY),
+            accumulators: HashMap::with_capacity(DEFAULT_ACCUMULATOR_CAPACITY),
+            results: Vec::with_capacity(DEFAULT_RESULT_CAPACITY),
+            result_row_indices: Vec::with_capacity(DEFAULT_RESULT_CAPACITY),
+            cursor_source_order: Vec::with_capacity(DEFAULT_CURSOR_CAPACITY),
             transaction_state: TransactionState::None,
-            pending_modifications: Vec::new(),
+            pending_modifications: Vec::with_capacity(DEFAULT_MODIFICATIONS_CAPACITY),
             verbose,
-            once_flags: HashMap::new(),
+            once_flags: HashMap::with_capacity(DEFAULT_CURSOR_CAPACITY),
         }
     }
 
@@ -493,7 +498,7 @@ impl<'a> VmEngine<'a> {
     pub fn init(&mut self, program: Program) {
         self.program = program;
         self.pc = 0;
-        self.registers = Vec::new();
+        self.registers = Vec::with_capacity(DEFAULT_REGISTER_CAPACITY);
         self.cursors.clear();
         self.sorters.clear();
         self.accumulators.clear();
@@ -829,7 +834,8 @@ impl<'a> VmEngine<'a> {
                 let table_name = name_and_cols[0].to_string();
 
                 // Parse columns (pairs of name:type)
-                let mut columns = Vec::new();
+                let col_count = (name_and_cols.len() - 1) / 2;
+                let mut columns = Vec::with_capacity(col_count);
                 let mut i = 1;
                 while i + 1 < name_and_cols.len() {
                     columns.push(ColumnDef {
@@ -1684,7 +1690,8 @@ impl<'a> VmEngine<'a> {
                         let mut cursor_id = 1usize;
                         let mut col_pos = 0usize;
                         let mut offset = 1i64;
-                        let mut partition_cols: Vec<usize> = Vec::new();
+                        let mut partition_cols: Vec<usize> =
+                            Vec::with_capacity(DEFAULT_SORT_KEYS_CAPACITY);
 
                         for part in p4.split(':') {
                             if let Some(val) = part.strip_prefix("cursor=") {
@@ -2297,8 +2304,8 @@ impl<'a> VmEngine<'a> {
             OpCode::Distinct => {
                 // Remove duplicate rows from results
                 // This is used by UNION (without ALL) to deduplicate combined results
-                let mut seen = std::collections::HashSet::new();
-                let mut unique_results = Vec::new();
+                let mut seen = std::collections::HashSet::with_capacity(self.results.len());
+                let mut unique_results = Vec::with_capacity(self.results.len());
 
                 for row in &self.results {
                     // Create a hashable key from the row values
@@ -2386,8 +2393,8 @@ impl<'a> VmEngine<'a> {
                     .collect();
 
                 // Keep only left rows that also appear in right
-                let mut intersection = Vec::new();
-                let mut seen = std::collections::HashSet::new();
+                let mut intersection = Vec::with_capacity(left_rows.len());
+                let mut seen = std::collections::HashSet::with_capacity(left_rows.len());
 
                 for row in &left_rows {
                     let key: Vec<String> = row.iter().map(|v| format!("{:?}", v)).collect();
@@ -2440,8 +2447,8 @@ impl<'a> VmEngine<'a> {
                     .collect();
 
                 // Keep only left rows that don't appear in right
-                let mut difference = Vec::new();
-                let mut seen = std::collections::HashSet::new();
+                let mut difference = Vec::with_capacity(left_rows.len());
+                let mut seen = std::collections::HashSet::with_capacity(left_rows.len());
 
                 for row in &left_rows {
                     let key: Vec<String> = row.iter().map(|v| format!("{:?}", v)).collect();
@@ -3347,7 +3354,14 @@ impl<'a> VmEngine<'a> {
         row_idx: usize,
     ) -> Option<Vec<crate::table::Value>> {
         let indices = self.result_row_indices.get(row_idx)?;
-        let mut row = Vec::new();
+        // Estimate total column count from all cursors
+        let total_cols: usize = self
+            .cursor_source_order
+            .iter()
+            .filter_map(|id| self.cursors.get(id))
+            .map(|c| c.column_count())
+            .sum();
+        let mut row = Vec::with_capacity(total_cols);
 
         // For each cursor in source order, get the row and append its columns
         for (cursor_pos, cursor_id) in self.cursor_source_order.iter().enumerate() {

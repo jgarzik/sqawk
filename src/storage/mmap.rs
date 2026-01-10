@@ -10,6 +10,7 @@ use std::path::Path;
 
 use memmap2::Mmap;
 
+use crate::capacity::{estimate_row_count, DEFAULT_ROW_CAPACITY};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{Row, Value};
 
@@ -90,8 +91,9 @@ impl MmapStorage {
             return Ok((Vec::new(), Vec::new()));
         }
 
-        // Find line boundaries
-        let mut lines: Vec<&[u8]> = Vec::new();
+        // Find line boundaries - estimate capacity from file size
+        let estimated_lines = estimate_row_count(data.len());
+        let mut lines: Vec<&[u8]> = Vec::with_capacity(estimated_lines);
         let mut start = 0;
 
         for (i, &byte) in data.iter().enumerate() {
@@ -162,7 +164,7 @@ impl MmapStorage {
 
     /// Split a line into fields by delimiter
     fn split_fields(line: &[u8], delimiter: u8) -> Vec<&[u8]> {
-        let mut fields = Vec::new();
+        let mut fields = Vec::with_capacity(DEFAULT_ROW_CAPACITY);
         let mut start = 0;
         let mut in_quotes = false;
 

@@ -14,6 +14,7 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
+use crate::capacity::DEFAULT_TABLE_CAPACITY;
 use crate::config::AppConfig;
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
@@ -51,7 +52,7 @@ impl<'a> SqlExecutor<'a> {
         SqlExecutor {
             database,
             file_handler,
-            modified_tables: HashSet::new(),
+            modified_tables: HashSet::with_capacity(DEFAULT_TABLE_CAPACITY),
             config: config.clone(),
             affected_rows: 0,
         }

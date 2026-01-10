@@ -7,6 +7,7 @@
 //! Each instruction has a specific semantics that controls how data is loaded,
 //! manipulated, and stored during SQL query execution.
 
+use crate::capacity::{DEFAULT_COLUMN_CAPACITY, DEFAULT_INSTRUCTION_CAPACITY};
 use crate::table::{DataType, Value};
 use std::fmt;
 use std::rc::Rc;
@@ -51,7 +52,7 @@ pub struct ResultSchema {
 impl ResultSchema {
     pub fn new() -> Self {
         Self {
-            columns: Vec::new(),
+            columns: Vec::with_capacity(DEFAULT_COLUMN_CAPACITY),
         }
     }
 
@@ -286,7 +287,7 @@ impl Default for Program {
 impl Program {
     pub fn new() -> Self {
         Self {
-            instructions: Vec::new(),
+            instructions: Vec::with_capacity(DEFAULT_INSTRUCTION_CAPACITY),
             result_schema: ResultSchema::new(),
         }
     }

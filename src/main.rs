@@ -27,6 +27,7 @@
 //! 5. Save modified tables back to disk if requested
 
 mod aggregate;
+mod capacity;
 mod cli;
 mod config;
 mod csv_handler;

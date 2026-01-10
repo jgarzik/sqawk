@@ -23,6 +23,7 @@ mod tests;
 
 use std::collections::HashSet;
 
+use crate::capacity::DEFAULT_TABLE_CAPACITY;
 use crate::database::Database;
 use crate::error::SqawkResult;
 use crate::table::Table;
@@ -112,7 +113,7 @@ pub fn execute_vm(
     // PHASE 3: APPLY MODIFICATIONS TO DATABASE
 
     // Track which tables were modified
-    let mut modified_tables = HashSet::new();
+    let mut modified_tables = HashSet::with_capacity(DEFAULT_TABLE_CAPACITY);
 
     // Track affected rows count for DML operations
     let mut affected_rows: usize = 0;
