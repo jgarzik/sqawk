@@ -369,11 +369,17 @@ mod bytecode_tests {
 
         // Add some test rows
         table
-            .add_row(vec![Value::Integer(1), Value::String("Alice".to_string())])
+            .add_row(vec![
+                Value::Integer(1),
+                Value::String("Alice".to_string().into()),
+            ])
             .expect("Failed to add row");
 
         table
-            .add_row(vec![Value::Integer(2), Value::String("Bob".to_string())])
+            .add_row(vec![
+                Value::Integer(2),
+                Value::String("Bob".to_string().into()),
+            ])
             .expect("Failed to add row");
 
         // Add the table to the database
@@ -486,7 +492,7 @@ mod bytecode_tests {
         );
         assert_eq!(
             rows[0][1],
-            Value::String("Alice".to_string()),
+            Value::String("Alice".to_string().into()),
             "First row, second column should be 'Alice'"
         );
 
@@ -498,7 +504,7 @@ mod bytecode_tests {
         );
         assert_eq!(
             rows[1][1],
-            Value::String("Bob".to_string()),
+            Value::String("Bob".to_string().into()),
             "Second row, second column should be 'Bob'"
         );
     }

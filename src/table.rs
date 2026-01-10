@@ -9,6 +9,7 @@
 //! - Table joins (cross joins and inner joins via WHERE conditions)
 //! - Column resolution with qualified names (table.column)
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
@@ -16,12 +17,17 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::error::{SqawkError, SqawkResult};
+use crate::storage::Storage;
 
 /// Represents a value in a table cell
 ///
 /// This enum provides the possible data types for a cell value in a table.
 /// It supports the common SQL data types and allows for type conversions
 /// between numeric types (Integer <-> Float) for comparison operations.
+///
+/// String values use `Cow<'static, str>` to support both:
+/// - Owned strings (heap-allocated, from in-memory tables)
+/// - Borrowed strings (zero-copy, from memory-mapped files)
 #[derive(Debug, Clone)]
 pub enum Value {
     /// Represents a NULL or missing value
@@ -30,8 +36,8 @@ pub enum Value {
     Integer(i64),
     /// 64-bit floating point number
     Float(f64),
-    /// UTF-8 string
-    String(String),
+    /// UTF-8 string (owned or borrowed via Cow)
+    String(Cow<'static, str>),
     /// Boolean value (true/false)
     Boolean(bool),
 }
@@ -186,8 +192,33 @@ impl From<&str> for Value {
             _ => {}
         }
 
-        // Default to string
-        Value::String(s.to_string())
+        // Default to owned string
+        Value::String(Cow::Owned(s.to_string()))
+    }
+}
+
+impl From<String> for Value {
+    fn from(s: String) -> Self {
+        // Try to parse as integer first
+        if let Ok(i) = s.parse::<i64>() {
+            return Value::Integer(i);
+        }
+
+        // Try to parse as float
+        if let Ok(fl) = s.parse::<f64>() {
+            return Value::Float(fl);
+        }
+
+        // Try to parse as boolean
+        match s.to_lowercase().as_str() {
+            "true" | "yes" | "1" => return Value::Boolean(true),
+            "false" | "no" | "0" => return Value::Boolean(false),
+            "" => return Value::Null,
+            _ => {}
+        }
+
+        // Default to owned string (avoid extra allocation)
+        Value::String(Cow::Owned(s))
     }
 }
 
@@ -590,8 +621,8 @@ impl<'a> Default for IndexedResultBuilder<'a> {
 // End Index-Based Result Types
 // =============================================================================
 
-/// Represents an in-memory table
-#[derive(Debug, Clone)]
+/// Represents a table with a storage backend
+#[derive(Debug)]
 pub struct Table {
     /// Name of the table
     name: String,
@@ -602,8 +633,8 @@ pub struct Table {
     /// Map of column names to their indices
     column_map: HashMap<String, usize>,
 
-    /// Rows of data
-    rows: Vec<Row>,
+    /// Row data storage backend (memory or mmap)
+    storage: Storage,
 
     /// File path associated with this table (for loading or saving)
     file_path: Option<PathBuf>,
@@ -688,7 +719,7 @@ impl Table {
             name: name.to_string(),
             cols,
             column_map,
-            rows: Vec::new(),
+            storage: Storage::new_memory(),
             file_path,
             modified: false,
             delimiter: ",".to_string(), // Default to comma delimiter
@@ -705,6 +736,44 @@ impl Table {
         let mut table = Self::new(name, column_names, file_path);
         table.delimiter = delimiter;
         table
+    }
+
+    /// Create a new table with a specific storage backend
+    ///
+    /// This constructor is used for memory-mapped file storage where the
+    /// storage already contains the parsed data.
+    pub fn with_storage(
+        name: &str,
+        column_names: Vec<String>,
+        file_path: Option<PathBuf>,
+        delimiter: String,
+        storage: Storage,
+    ) -> Self {
+        // Create column_map from column names
+        let column_map = column_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+
+        // Create full column metadata objects (default to Text type)
+        let cols = column_names
+            .iter()
+            .map(|name| Column {
+                name: name.clone(),
+                data_type: DataType::Text,
+            })
+            .collect();
+
+        Table {
+            name: name.to_string(),
+            cols,
+            column_map,
+            storage,
+            file_path,
+            modified: false,
+            delimiter,
+        }
     }
 
     /// Create a new table with a schema
@@ -737,7 +806,7 @@ impl Table {
             name: name.to_string(),
             cols,
             column_map,
-            rows: Vec::new(),
+            storage: Storage::new_memory(),
             file_path,
             modified: true, // Tables created with schema are considered modified
             delimiter: delimiter.unwrap_or_else(|| ",".to_string()),
@@ -777,7 +846,7 @@ impl Table {
     /// of Value enums representing the cell values. This provides read-only
     /// access to the table data for processing or querying.
     pub fn rows(&self) -> &[Row] {
-        &self.rows
+        self.storage.rows()
     }
 
     /// Get the name of the table
@@ -794,7 +863,7 @@ impl Table {
     /// Returns the number of rows in the table. This is useful for
     /// determining the size of the result set or for validation.
     pub fn row_count(&self) -> usize {
-        self.rows.len()
+        self.storage.row_count()
     }
 
     /// Add a row to the table
@@ -820,7 +889,9 @@ impl Table {
             )));
         }
 
-        self.rows.push(row);
+        // Ensure storage is mutable (converts mmap to memory if needed)
+        self.storage.ensure_mutable();
+        self.storage.push_row(row);
         self.modified = true;
         Ok(())
     }
@@ -846,7 +917,9 @@ impl Table {
             )));
         }
 
-        self.rows.push(row.to_vec());
+        // Ensure storage is mutable (converts mmap to memory if needed)
+        self.storage.ensure_mutable();
+        self.storage.push_row(row.to_vec());
         self.modified = true;
         Ok(())
     }
@@ -912,7 +985,7 @@ impl Table {
         println!();
 
         // Print rows
-        for row in &self.rows {
+        for row in self.rows() {
             for (i, val) in row.iter().enumerate() {
                 if i > 0 {
                     print!(",");
@@ -933,7 +1006,9 @@ impl Table {
     /// # Arguments
     /// * `new_rows` - The new set of rows to replace the existing ones
     pub fn replace_rows(&mut self, new_rows: Vec<Row>) {
-        self.rows = new_rows;
+        // Ensure storage is mutable (converts mmap to memory if needed)
+        self.storage.ensure_mutable();
+        self.storage.replace_rows(new_rows);
         self.modified = true;
     }
 
@@ -953,6 +1028,8 @@ impl Table {
         self.cols.push(column);
         let new_index = self.cols.len() - 1;
         self.column_map.insert(name, new_index);
+        // Ensure storage is mutable (converts mmap to memory if needed)
+        self.storage.ensure_mutable();
         self.modified = true;
     }
 
@@ -971,9 +1048,14 @@ impl Table {
         let new_index = self.cols.len() - 1;
         self.column_map.insert(name, new_index);
 
+        // Ensure storage is mutable (converts mmap to memory if needed)
+        self.storage.ensure_mutable();
+
         // Add default value to all existing rows
-        for row in &mut self.rows {
-            row.push(default_value.clone());
+        if let Some(rows) = self.storage.rows_mut() {
+            for row in rows {
+                row.push(default_value.clone());
+            }
         }
 
         self.modified = true;
@@ -982,7 +1064,9 @@ impl Table {
 
     /// Clear all rows from the table (TRUNCATE TABLE)
     pub fn clear_rows(&mut self) -> crate::error::SqawkResult<()> {
-        self.rows.clear();
+        // Ensure storage is mutable (converts mmap to memory if needed)
+        self.storage.ensure_mutable();
+        self.storage.replace_rows(Vec::new());
         self.modified = true;
         Ok(())
     }
@@ -995,7 +1079,7 @@ impl Table {
     /// # Returns
     /// * Vec<Vec<String>> - All rows converted to strings
     pub fn rows_as_strings(&self) -> Vec<Vec<String>> {
-        self.rows
+        self.rows()
             .iter()
             .map(|row| row.iter().map(|value| value.to_string()).collect())
             .collect()

@@ -36,6 +36,7 @@ mod error;
 mod file_handler;
 mod repl;
 mod sql_executor;
+mod storage;
 mod table;
 mod vm;
 

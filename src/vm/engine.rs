@@ -3049,7 +3049,7 @@ impl<'a> VmEngine<'a> {
                             match &acc.value {
                                 Some(Value::Integer(i)) => Register::Integer(*i),
                                 Some(Value::Float(f)) => Register::Float(*f),
-                                Some(Value::String(s)) => Register::String(s.clone()),
+                                Some(Value::String(s)) => Register::String(s.clone().into_owned()),
                                 Some(Value::Boolean(b)) => Register::Boolean(*b),
                                 _ => Register::Null,
                             }

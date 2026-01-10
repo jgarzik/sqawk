@@ -13,5 +13,6 @@ pub mod error;
 pub mod file_handler;
 pub mod repl;
 pub mod sql_executor;
+pub mod storage;
 pub mod table;
 pub mod vm;

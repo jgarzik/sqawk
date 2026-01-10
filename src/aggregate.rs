@@ -213,7 +213,7 @@ mod tests {
             Value::Integer(10),
             Value::Null,
             Value::Integer(20),
-            Value::String("test".to_string()),
+            Value::String("test".to_string().into()),
         ];
 
         let count = AggregateFunction::Count.execute(&values).unwrap();
@@ -276,7 +276,7 @@ mod tests {
         let values = vec![
             Value::Integer(30),
             Value::Float(5.5),
-            Value::String("abc".to_string()),
+            Value::String("abc".to_string().into()),
             Value::Null,
         ];
 
@@ -302,11 +302,11 @@ mod tests {
         let values = vec![
             Value::Integer(30),
             Value::Float(50.5),
-            Value::String("xyz".to_string()),
+            Value::String("xyz".to_string().into()),
             Value::Null,
         ];
 
         let max = AggregateFunction::Max.execute(&values).unwrap();
-        assert_eq!(max, Value::String("xyz".to_string()));
+        assert_eq!(max, Value::String("xyz".to_string().into()));
     }
 }

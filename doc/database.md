@@ -8,7 +8,8 @@ Sqawk implements a lightweight in-memory database engine that supports SQL opera
 
 1. [Data Model](#data-model)
 2. [Architecture](#architecture)
-3. [Performance Considerations](#performance-considerations)
+3. [Storage Backend Architecture](#storage-backend-architecture)
+4. [Performance Considerations](#performance-considerations)
 
 ## Data Model
 
@@ -86,21 +87,63 @@ The file handling system consists of multiple components:
 - Supports tab, colon, pipe, and other custom separators
 - Preserves the original delimiter and format during writeback
 
+## Storage Backend Architecture
+
+Sqawk supports multiple storage backends for table row data, enabling efficient handling of different data sources:
+
+### Memory Storage (Default for stdin)
+
+The `MemoryStorage` backend stores all row data in heap-allocated memory:
+- Used when reading from stdin or pipes
+- All string values are owned (heap-allocated)
+- Supports all operations including INSERT, UPDATE, DELETE
+- Data is mutable throughout the session
+
+### Mmap Storage (Default for on-disk files)
+
+The `MmapStorage` backend uses memory-mapped files for zero-copy access:
+- Automatically used when loading files from disk
+- String values borrow directly from the mmap'd region (zero allocation)
+- Read-only by default to maintain zero-copy efficiency
+- Converts to MemoryStorage on first write operation
+
+### Automatic Backend Selection
+
+The storage backend is selected automatically based on the data source:
+- **On-disk files**: Uses mmap for zero-copy loading
+- **Stdin/pipes**: Uses traditional in-memory storage
+- **Write operations**: Mmap tables convert to memory on first modification
+
+### Write Operation Behavior
+
+When a table with mmap storage is modified (INSERT, UPDATE, DELETE):
+1. All rows are copied to heap memory (converting Cow::Borrowed to Cow::Owned)
+2. The storage backend switches from Mmap to Memory
+3. Subsequent operations use the in-memory copy
+4. The original file remains unchanged until `--write` is specified
+
+This design provides:
+- Zero-allocation loading for read-only queries
+- Transparent handling of write operations
+- Memory efficiency for large read-only datasets
+
 ## Performance Considerations
 
 Sqawk's in-memory database is optimized for:
 
 - **Fast Loading**: Delimiter-separated files are parsed directly into memory
+- **Zero-Copy Access**: Memory-mapped files enable direct access without allocation overhead
 - **Format Flexibility**: Support for CSV, TSV, and custom-delimited files
 - **Efficient Filtering**: WHERE clauses are applied in a single pass
 - **Low Memory Overhead**: Simple data structures minimize memory usage
 - **Zero Configuration**: No setup required, works directly with files in various formats
 
 For larger datasets, consider:
-- The entire dataset must fit in memory
+- The entire dataset must fit in memory (or be addressable via mmap)
 - Complex queries may require multiple passes over the data
-- Write operations create new copies of the data in memory
+- Write operations on mmap tables trigger a copy to memory
 - Custom delimiters may have slightly different performance characteristics than standard CSV
+- Read-only operations on large files benefit most from mmap storage
 
 ## Join Implementation
 

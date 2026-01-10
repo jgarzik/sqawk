@@ -347,7 +347,7 @@ impl From<Value> for Register {
         match value {
             Value::Integer(i) => Register::Integer(i),
             Value::Float(f) => Register::Float(f),
-            Value::String(s) => Register::String(s),
+            Value::String(s) => Register::String(s.into_owned()),
             Value::Boolean(b) => Register::Boolean(b),
             Value::Null => Register::Null,
         }
@@ -356,10 +356,11 @@ impl From<Value> for Register {
 
 impl From<Register> for Value {
     fn from(register: Register) -> Self {
+        use std::borrow::Cow;
         match register {
             Register::Integer(i) => Value::Integer(i),
             Register::Float(f) => Value::Float(f),
-            Register::String(s) => Value::String(s),
+            Register::String(s) => Value::String(Cow::Owned(s)),
             Register::Boolean(b) => Value::Boolean(b),
             Register::Null => Value::Null,
         }

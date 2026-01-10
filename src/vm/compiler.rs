@@ -2706,7 +2706,7 @@ impl<'a> SqlCompiler<'a> {
                     0,
                     reg,
                     0,
-                    Some(s.clone()),
+                    Some(s.clone().into_owned()),
                     &format!("r[{}] = '{}' (subquery result)", reg, s),
                 );
             }
@@ -3046,11 +3046,11 @@ impl<'a> SqlCompiler<'a> {
                     } else if let Ok(f) = n.parse::<f64>() {
                         TableValue::Float(f)
                     } else {
-                        TableValue::String(n.clone())
+                        TableValue::String(n.clone().into())
                     }
                 }
                 Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
-                    TableValue::String(s.clone())
+                    TableValue::String(s.clone().into())
                 }
                 Value::Boolean(b) => TableValue::Boolean(*b),
                 Value::Null => TableValue::Null,

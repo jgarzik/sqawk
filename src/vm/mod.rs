@@ -228,12 +228,25 @@ pub fn execute_vm(
     for (table_name, indices_to_delete) in deletions_by_table {
         let delete_count = indices_to_delete.len();
         let table = database.get_table_mut(&table_name)?;
+
+        // Clone rows with deep conversion to owned values
+        // This is necessary because mmap storage has Cow::Borrowed strings that
+        // would become dangling pointers after the storage is replaced
         let new_rows: Vec<crate::table::Row> = table
             .rows()
             .iter()
             .enumerate()
             .filter(|(idx, _)| !indices_to_delete.contains(idx))
-            .map(|(_, row)| row.clone())
+            .map(|(_, row)| {
+                row.iter()
+                    .map(|value| match value {
+                        crate::table::Value::String(cow) => {
+                            crate::table::Value::String(std::borrow::Cow::Owned(cow.to_string()))
+                        }
+                        v => v.clone(),
+                    })
+                    .collect()
+            })
             .collect();
         table.replace_rows(new_rows);
         modified_tables.insert(table_name.clone());

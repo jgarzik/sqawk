@@ -14,6 +14,8 @@ use crate::csv_handler::CsvHandler;
 use crate::database::Database;
 use crate::delim_handler::DelimHandler;
 use crate::error::{SqawkError, SqawkResult};
+use crate::storage::mmap::MmapStorage;
+use crate::storage::Storage;
 use crate::table::Table;
 
 /// Enum representing different file formats supported by sqawk
@@ -140,21 +142,48 @@ impl FileHandler {
         // Column definitions now come exclusively from Database
         // No need for custom columns logic here anymore
 
-        // Create the table based on the format
-        let table = match format {
-            FileFormat::Csv => {
-                // Load the table from the CSV file, no custom columns since we use Database schemas
-                self.csv_handler.load_csv(file_spec, None, None)?
+        // Determine delimiter for this file
+        let delimiter_str = match format {
+            FileFormat::Csv => ",".to_string(),
+            FileFormat::Delimited => self
+                .config
+                .field_separator()
+                .unwrap_or_else(|| "\t".to_string()),
+        };
+        let delimiter_byte = delimiter_str.as_bytes()[0];
+
+        // Try to use mmap for on-disk files (zero-copy loading)
+        // Only use mmap if the file exists and is a regular file
+        let table = if file_path.is_file() {
+            // Use memory-mapped storage for zero-copy access
+            match MmapStorage::open(&file_path, delimiter_byte) {
+                Ok(mmap_storage) => {
+                    if verbose {
+                        println!("Using mmap storage for table '{}'", table_name);
+                    }
+                    let columns = mmap_storage.columns().to_vec();
+                    Table::with_storage(
+                        &table_name,
+                        columns,
+                        Some(file_path.clone()),
+                        delimiter_str,
+                        Storage::Mmap(mmap_storage),
+                    )
+                }
+                Err(e) => {
+                    // Fall back to regular loading if mmap fails
+                    if verbose {
+                        println!(
+                            "Mmap failed for '{}', falling back to regular loading: {}",
+                            table_name, e
+                        );
+                    }
+                    self.load_file_regular(file_spec, &format)?
+                }
             }
-            FileFormat::Delimited => {
-                let delimiter = self
-                    .config
-                    .field_separator()
-                    .unwrap_or_else(|| "\t".to_string());
-                // No custom columns since we use Database schemas
-                self.delim_handler
-                    .load_delimited(file_spec, &delimiter, None)?
-            }
+        } else {
+            // Stdin or other non-file source - use regular loading
+            self.load_file_regular(file_spec, &format)?
         };
 
         // Now that we have the table, we can update the database without borrowing conflicts
@@ -177,6 +206,26 @@ impl FileHandler {
         }
 
         Ok(Some((table_name, file_path_str)))
+    }
+
+    /// Load a file using the regular (non-mmap) method
+    ///
+    /// This is the fallback method used when mmap is not available or fails.
+    fn load_file_regular(&self, file_spec: &str, format: &FileFormat) -> SqawkResult<Table> {
+        match format {
+            FileFormat::Csv => {
+                // Load the table from the CSV file
+                self.csv_handler.load_csv(file_spec, None, None)
+            }
+            FileFormat::Delimited => {
+                let delimiter = self
+                    .config
+                    .field_separator()
+                    .unwrap_or_else(|| "\t".to_string());
+                self.delim_handler
+                    .load_delimited(file_spec, &delimiter, None)
+            }
+        }
     }
 
     /// Parse a file specification into a table name and path

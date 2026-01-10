@@ -23,7 +23,7 @@ fn create_test_database() -> Database {
         .add_row(vec![
             crate::table::Value::Integer(1),
             crate::table::Value::Integer(25),
-            crate::table::Value::String("Alice".to_string()),
+            crate::table::Value::String("Alice".to_string().into()),
         ])
         .expect("Failed to add test row");
 
@@ -31,7 +31,7 @@ fn create_test_database() -> Database {
         .add_row(vec![
             crate::table::Value::Integer(2),
             crate::table::Value::Integer(35),
-            crate::table::Value::String("Bob".to_string()),
+            crate::table::Value::String("Bob".to_string().into()),
         ])
         .expect("Failed to add test row");
 
