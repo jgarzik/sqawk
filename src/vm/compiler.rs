@@ -248,6 +248,50 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
+    /// Find a column by table name and column name in a list of tables.
+    /// Returns (table_idx, col_idx) if found.
+    pub(crate) fn find_column_in_tables(
+        table_name: &str,
+        col_name: &str,
+        tables: &[&Table],
+        table_names: &[&str],
+    ) -> SqawkResult<(usize, usize)> {
+        for (i, name) in table_names.iter().enumerate() {
+            if table_name.eq_ignore_ascii_case(name) {
+                let columns = tables[i].columns();
+                if let Some(col_idx) = columns.iter().position(|c| c.eq_ignore_ascii_case(col_name)) {
+                    return Ok((i, col_idx));
+                } else {
+                    return Err(SqawkError::ColumnNotFound(col_name.to_string()));
+                }
+            }
+        }
+        Err(SqawkError::TableNotFound(table_name.to_string()))
+    }
+
+    /// Build a wildcard schema (SELECT *) from multiple tables.
+    /// Returns column indices per table and the result schema.
+    pub(crate) fn build_wildcard_schema(
+        tables: &[&Table],
+        table_names: &[&str],
+    ) -> (Vec<Vec<usize>>, ResultSchema) {
+        let mut table_cols = Vec::with_capacity(tables.len());
+        let mut schema = ResultSchema::new();
+
+        for (i, table) in tables.iter().enumerate() {
+            let cols: Vec<usize> = (0..table.column_count()).collect();
+            for meta in table.column_metadata() {
+                schema.add_column(
+                    format!("{}.{}", table_names[i], meta.name),
+                    meta.data_type,
+                );
+            }
+            table_cols.push(cols);
+        }
+
+        (table_cols, schema)
+    }
+
     // Removed unused add_halt method
 
     /// Add a comment to the program if verbose mode is enabled

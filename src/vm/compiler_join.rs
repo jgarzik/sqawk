@@ -965,91 +965,30 @@ impl<'a> SqlCompiler<'a> {
         table_names: &[String],
     ) -> SqawkResult<MultiTableProjection> {
         let num_tables = tables.len();
+        let name_refs: Vec<&str> = table_names.iter().map(|s| s.as_str()).collect();
 
         // Check for SELECT *
         for item in projection {
             if matches!(item, SelectItem::Wildcard(_)) {
-                // Return all columns from all tables
-                let mut table_cols = Vec::with_capacity(num_tables);
-                let mut schema = ResultSchema::new();
-
-                for (i, table) in tables.iter().enumerate() {
-                    let cols: Vec<usize> = (0..table.column_count()).collect();
-                    for meta in table.column_metadata() {
-                        schema.add_column(
-                            format!("{}.{}", table_names[i], meta.name),
-                            meta.data_type,
-                        );
-                    }
-                    table_cols.push(cols);
-                }
+                let (table_cols, schema) = Self::build_wildcard_schema(tables, &name_refs);
                 return Ok((table_cols, Vec::new(), schema, true));
             }
         }
 
         // Handle explicit column selection - track in SELECT order
-        let mut output_cols: Vec<(usize, usize)> = Vec::new(); // (table_idx, col_idx)
+        let mut output_cols: Vec<(usize, usize)> = Vec::new();
         let mut schema = ResultSchema::new();
 
         for item in projection {
-            match item {
+            let (tbl_name, col_name, output_name) = match item {
                 SelectItem::UnnamedExpr(expr) => {
-                    let (tbl_name, col_name) = self.extract_join_column_ref(expr)?;
-                    let output_name = format!("{}.{}", tbl_name, col_name);
-
-                    // Find which table this column belongs to
-                    let mut found = false;
-                    for (i, table_name) in table_names.iter().enumerate() {
-                        if tbl_name.eq_ignore_ascii_case(table_name) {
-                            let columns = tables[i].columns();
-                            if let Some(idx) = columns
-                                .iter()
-                                .position(|c| c.eq_ignore_ascii_case(&col_name))
-                            {
-                                output_cols.push((i, idx));
-                                schema.add_column(
-                                    output_name.clone(),
-                                    tables[i].column_metadata()[idx].data_type,
-                                );
-                                found = true;
-                                break;
-                            } else {
-                                return Err(SqawkError::ColumnNotFound(col_name.clone()));
-                            }
-                        }
-                    }
-                    if !found {
-                        return Err(SqawkError::TableNotFound(tbl_name));
-                    }
+                    let (t, c) = self.extract_join_column_ref(expr)?;
+                    let out = format!("{}.{}", t, c);
+                    (t, c, out)
                 }
                 SelectItem::ExprWithAlias { expr, alias } => {
-                    let (tbl_name, col_name) = self.extract_join_column_ref(expr)?;
-                    let output_name = alias.value.clone();
-
-                    // Find which table this column belongs to
-                    let mut found = false;
-                    for (i, table_name) in table_names.iter().enumerate() {
-                        if tbl_name.eq_ignore_ascii_case(table_name) {
-                            let columns = tables[i].columns();
-                            if let Some(idx) = columns
-                                .iter()
-                                .position(|c| c.eq_ignore_ascii_case(&col_name))
-                            {
-                                output_cols.push((i, idx));
-                                schema.add_column(
-                                    output_name.clone(),
-                                    tables[i].column_metadata()[idx].data_type,
-                                );
-                                found = true;
-                                break;
-                            } else {
-                                return Err(SqawkError::ColumnNotFound(col_name.clone()));
-                            }
-                        }
-                    }
-                    if !found {
-                        return Err(SqawkError::TableNotFound(tbl_name));
-                    }
+                    let (t, c) = self.extract_join_column_ref(expr)?;
+                    (t, c, alias.value.clone())
                 }
                 SelectItem::Wildcard(_) => unreachable!("Handled above"),
                 _ => {
@@ -1057,7 +996,11 @@ impl<'a> SqlCompiler<'a> {
                         "Unsupported projection item in multi-table JOIN".into(),
                     ));
                 }
-            }
+            };
+
+            let (tbl_idx, col_idx) = Self::find_column_in_tables(&tbl_name, &col_name, tables, &name_refs)?;
+            output_cols.push((tbl_idx, col_idx));
+            schema.add_column(output_name, tables[tbl_idx].column_metadata()[col_idx].data_type);
         }
 
         Ok((vec![Vec::new(); num_tables], output_cols, schema, false))
@@ -1917,28 +1860,14 @@ impl<'a> SqlCompiler<'a> {
         left_table_name: &str,
         right_table_name: &str,
     ) -> SqawkResult<(Vec<usize>, Vec<usize>, ResultSchema)> {
-        let left_columns = left_table.columns();
-        let right_columns = right_table.columns();
-        let left_meta = left_table.column_metadata();
-        let right_meta = right_table.column_metadata();
+        let tables: Vec<&Table> = vec![left_table, right_table];
+        let table_names: Vec<&str> = vec![left_table_name, right_table_name];
 
         // For SELECT *, return all columns from both tables
         for item in projection {
             if matches!(item, SelectItem::Wildcard(_)) {
-                let left_cols: Vec<usize> = (0..left_table.column_count()).collect();
-                let right_cols: Vec<usize> = (0..right_table.column_count()).collect();
-                // Build schema with table prefixes and types
-                let mut schema = ResultSchema::new();
-                for meta in left_meta {
-                    schema.add_column(format!("{}.{}", left_table_name, meta.name), meta.data_type);
-                }
-                for meta in right_meta {
-                    schema.add_column(
-                        format!("{}.{}", right_table_name, meta.name),
-                        meta.data_type,
-                    );
-                }
-                return Ok((left_cols, right_cols, schema));
+                let (table_cols, schema) = Self::build_wildcard_schema(&tables, &table_names);
+                return Ok((table_cols[0].clone(), table_cols[1].clone(), schema));
             }
         }
 
@@ -1948,62 +1877,15 @@ impl<'a> SqlCompiler<'a> {
         let mut schema = ResultSchema::new();
 
         for item in projection {
-            match item {
+            let (tbl_name, col_name, output_name) = match item {
                 SelectItem::UnnamedExpr(expr) => {
-                    let (table_name, col_name) = self.extract_join_column_ref(expr)?;
-                    let output_name = format!("{}.{}", table_name, col_name);
-
-                    if table_name.eq_ignore_ascii_case(left_table_name) {
-                        if let Some(idx) = left_columns
-                            .iter()
-                            .position(|c| c.eq_ignore_ascii_case(&col_name))
-                        {
-                            left_cols.push(idx);
-                            schema.add_column(output_name, left_meta[idx].data_type);
-                        } else {
-                            return Err(SqawkError::ColumnNotFound(col_name.clone()));
-                        }
-                    } else if table_name.eq_ignore_ascii_case(right_table_name) {
-                        if let Some(idx) = right_columns
-                            .iter()
-                            .position(|c| c.eq_ignore_ascii_case(&col_name))
-                        {
-                            right_cols.push(idx);
-                            schema.add_column(output_name, right_meta[idx].data_type);
-                        } else {
-                            return Err(SqawkError::ColumnNotFound(col_name.clone()));
-                        }
-                    } else {
-                        return Err(SqawkError::TableNotFound(table_name));
-                    }
+                    let (t, c) = self.extract_join_column_ref(expr)?;
+                    let out = format!("{}.{}", t, c);
+                    (t, c, out)
                 }
                 SelectItem::ExprWithAlias { expr, alias } => {
-                    let (table_name, col_name) = self.extract_join_column_ref(expr)?;
-                    let output_name = alias.value.clone();
-
-                    if table_name.eq_ignore_ascii_case(left_table_name) {
-                        if let Some(idx) = left_columns
-                            .iter()
-                            .position(|c| c.eq_ignore_ascii_case(&col_name))
-                        {
-                            left_cols.push(idx);
-                            schema.add_column(output_name, left_meta[idx].data_type);
-                        } else {
-                            return Err(SqawkError::ColumnNotFound(col_name.clone()));
-                        }
-                    } else if table_name.eq_ignore_ascii_case(right_table_name) {
-                        if let Some(idx) = right_columns
-                            .iter()
-                            .position(|c| c.eq_ignore_ascii_case(&col_name))
-                        {
-                            right_cols.push(idx);
-                            schema.add_column(output_name, right_meta[idx].data_type);
-                        } else {
-                            return Err(SqawkError::ColumnNotFound(col_name.clone()));
-                        }
-                    } else {
-                        return Err(SqawkError::TableNotFound(table_name));
-                    }
+                    let (t, c) = self.extract_join_column_ref(expr)?;
+                    (t, c, alias.value.clone())
                 }
                 SelectItem::Wildcard(_) => unreachable!("Handled above"),
                 _ => {
@@ -2011,7 +1893,15 @@ impl<'a> SqlCompiler<'a> {
                         "Unsupported projection item in JOIN".into(),
                     ));
                 }
+            };
+
+            let (tbl_idx, col_idx) = Self::find_column_in_tables(&tbl_name, &col_name, &tables, &table_names)?;
+            if tbl_idx == 0 {
+                left_cols.push(col_idx);
+            } else {
+                right_cols.push(col_idx);
             }
+            schema.add_column(output_name, tables[tbl_idx].column_metadata()[col_idx].data_type);
         }
 
         Ok((left_cols, right_cols, schema))
