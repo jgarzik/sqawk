@@ -13,7 +13,7 @@ fn test_intersect_common_rows() -> Result<(), Box<dyn std::error::Error>> {
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content_a)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content_b)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a INTERSECT SELECT * FROM b")
         .arg(file_a.to_str().unwrap())
@@ -49,7 +49,7 @@ fn test_intersect_disjoint_tables() -> Result<(), Box<dyn std::error::Error>> {
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content_a)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content_b)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a INTERSECT SELECT * FROM b")
         .arg(file_a.to_str().unwrap())
@@ -87,7 +87,7 @@ fn test_intersect_identical_tables() -> Result<(), Box<dyn std::error::Error>> {
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a INTERSECT SELECT * FROM b")
         .arg(file_a.to_str().unwrap())
@@ -111,7 +111,7 @@ fn test_intersect_subset_tables() -> Result<(), Box<dyn std::error::Error>> {
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content_a)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content_b)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a INTERSECT SELECT * FROM b")
         .arg(file_a.to_str().unwrap())
@@ -145,7 +145,7 @@ fn test_intersect_removes_duplicates() -> Result<(), Box<dyn std::error::Error>>
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content_a)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content_b)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a INTERSECT SELECT * FROM b")
         .arg(file_a.to_str().unwrap())

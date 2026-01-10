@@ -12,7 +12,7 @@ fn test_like_percent_prefix() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
     // Test LIKE with prefix pattern using VM
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE name LIKE 'A%'")
         .arg(file_path.to_str().unwrap());
@@ -33,7 +33,7 @@ fn test_like_percent_suffix() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "users.csv", content)?;
 
     // Test LIKE with suffix pattern using VM
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE email LIKE '%@example.com'")
         .arg(file_path.to_str().unwrap());
@@ -54,7 +54,7 @@ fn test_like_percent_contains() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "items.csv", content)?;
 
     // Test LIKE with contains pattern using VM
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM items WHERE description LIKE '%and%'")
         .arg(file_path.to_str().unwrap());
@@ -75,7 +75,7 @@ fn test_like_underscore() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "codes.csv", content)?;
 
     // Test LIKE with underscore pattern using VM
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM codes WHERE code LIKE 'A_B'")
         .arg(file_path.to_str().unwrap());
@@ -97,7 +97,7 @@ fn test_not_like() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "people.csv", content)?;
 
     // Test NOT LIKE using VM
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE name NOT LIKE 'A%'")
         .arg(file_path.to_str().unwrap());
@@ -118,7 +118,7 @@ fn test_ilike_case_insensitive() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "names.csv", content)?;
 
     // Test ILIKE case-insensitive pattern using VM
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM names WHERE name ILIKE 'al%'")
         .arg(file_path.to_str().unwrap());
@@ -141,7 +141,7 @@ fn test_like_exact_match() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "records.csv", content)?;
 
     // Test LIKE with exact pattern using VM
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM records WHERE status LIKE 'active'")
         .arg(file_path.to_str().unwrap());
@@ -162,7 +162,7 @@ fn test_like_special_chars() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "files.csv", content)?;
 
     // Test LIKE with literal dot using VM
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM files WHERE value LIKE 'test.csv'")
         .arg(file_path.to_str().unwrap());

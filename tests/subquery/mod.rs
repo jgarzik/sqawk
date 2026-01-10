@@ -13,7 +13,7 @@ fn test_scalar_subquery_max() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "people.csv", content)?;
 
     // Test: SELECT * FROM people WHERE age = (SELECT MAX(age) FROM people)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE age = (SELECT MAX(age) FROM people)")
         .arg(file_path.to_str().unwrap());
@@ -33,7 +33,7 @@ fn test_scalar_subquery_min() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "people.csv", content)?;
 
     // Test: SELECT * FROM people WHERE age = (SELECT MIN(age) FROM people)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE age = (SELECT MIN(age) FROM people)")
         .arg(file_path.to_str().unwrap());
@@ -54,7 +54,7 @@ fn test_scalar_subquery_count() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test: SELECT * FROM data WHERE id = (SELECT COUNT(*) FROM data)
     // COUNT(*) = 5, so should match id=5
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE id = (SELECT COUNT(*) FROM data)")
         .arg(file_path.to_str().unwrap());
@@ -79,7 +79,7 @@ fn test_scalar_subquery_sum() -> Result<(), Box<dyn std::error::Error>> {
     let content2 = "id,value\n1,10\n2,20\n3,30\n4,60\n";
     let file_path2 = create_custom_csv(temp_dir.path(), "data2.csv", content2)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data2 WHERE value = (SELECT SUM(value) FROM data2 WHERE id <= 3)")
         .arg(file_path2.to_str().unwrap());
@@ -100,7 +100,7 @@ fn test_scalar_subquery_avg() -> Result<(), Box<dyn std::error::Error>> {
 
     // AVG(score) = (80+90+100+90)/4 = 90
     // Should match id=2 and id=4 where score=90
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM scores WHERE score = (SELECT AVG(score) FROM scores)")
         .arg(file_path.to_str().unwrap());
@@ -121,7 +121,7 @@ fn test_scalar_subquery_empty_result() -> Result<(), Box<dyn std::error::Error>>
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
     // Subquery with impossible WHERE returns no rows
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE value = (SELECT MAX(value) FROM data WHERE value > 1000)")
         .arg(file_path.to_str().unwrap());
@@ -142,7 +142,7 @@ fn test_scalar_subquery_greater_than() -> Result<(), Box<dyn std::error::Error>>
     // Test: SELECT * FROM people WHERE age > (SELECT AVG(age) FROM people)
     // AVG(age) = (25+30+35+40+20)/5 = 30
     // Should return people with age > 30: Charlie(35), David(40)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE age > (SELECT AVG(age) FROM people)")
         .arg(file_path.to_str().unwrap());

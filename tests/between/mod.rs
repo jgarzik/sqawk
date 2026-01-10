@@ -12,7 +12,7 @@ fn test_between_integers() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "people.csv", content)?;
 
     // Test BETWEEN with integer range using VM
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE age BETWEEN 25 AND 35")
         .arg(file_path.to_str().unwrap());
@@ -34,7 +34,7 @@ fn test_between_boundaries() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "numbers.csv", content)?;
 
     // Test BETWEEN includes boundaries (20 and 40 should be included)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM numbers WHERE value BETWEEN 20 AND 40")
         .arg(file_path.to_str().unwrap());
@@ -56,7 +56,7 @@ fn test_not_between() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "scores.csv", content)?;
 
     // Test NOT BETWEEN - should return values outside the range
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM scores WHERE score NOT BETWEEN 60 AND 80")
         .arg(file_path.to_str().unwrap());
@@ -79,7 +79,7 @@ fn test_between_no_matches() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
     // Test BETWEEN with range that has no matches - VM mode returns empty output
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE value BETWEEN 100 AND 200")
         .arg(file_path.to_str().unwrap());
@@ -98,7 +98,7 @@ fn test_between_single_match() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "products.csv", content)?;
 
     // Test BETWEEN with exactly one value in range
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM products WHERE price BETWEEN 100 AND 200")
         .arg(file_path.to_str().unwrap());
@@ -118,7 +118,7 @@ fn test_between_equal_bounds() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "nums.csv", content)?;
 
     // Test BETWEEN where low == high (should match exact value)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM nums WHERE num BETWEEN 10 AND 10")
         .arg(file_path.to_str().unwrap());

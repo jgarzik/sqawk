@@ -11,7 +11,7 @@ fn test_row_number_simple() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name\n1,Alice\n2,Bob\n3,Charlie\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, ROW_NUMBER() OVER () AS rn FROM data")
         .arg(file_path.to_str().unwrap());
@@ -32,7 +32,7 @@ fn test_row_number_partition() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name,dept\n1,Alice,Sales\n2,Bob,Sales\n3,Charlie,IT\n4,Diana,IT\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, dept, ROW_NUMBER() OVER (PARTITION BY dept) AS rn FROM data")
         .arg(file_path.to_str().unwrap());
@@ -55,7 +55,7 @@ fn test_row_number_order() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name,score\n1,Alice,80\n2,Bob,90\n3,Charlie,70\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, score, ROW_NUMBER() OVER (ORDER BY score DESC) AS rn FROM data")
         .arg(file_path.to_str().unwrap());
@@ -77,7 +77,7 @@ fn test_rank_ties() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name,score\n1,Alice,90\n2,Bob,85\n3,Charlie,90\n4,Diana,80\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, score, RANK() OVER (ORDER BY score DESC) AS rnk FROM data")
         .arg(file_path.to_str().unwrap());
@@ -99,7 +99,7 @@ fn test_dense_rank() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name,score\n1,Alice,90\n2,Bob,85\n3,Charlie,90\n4,Diana,80\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, score, DENSE_RANK() OVER (ORDER BY score DESC) AS drnk FROM data")
         .arg(file_path.to_str().unwrap());
@@ -121,7 +121,7 @@ fn test_lag_simple() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name,salary\n1,Alice,50000\n2,Bob,60000\n3,Charlie,70000\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, salary, LAG(salary) OVER (ORDER BY salary) AS prev_salary FROM data")
         .arg(file_path.to_str().unwrap());
@@ -143,7 +143,7 @@ fn test_lead_simple() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name,salary\n1,Alice,50000\n2,Bob,60000\n3,Charlie,70000\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, salary, LEAD(salary) OVER (ORDER BY salary) AS next_salary FROM data")
         .arg(file_path.to_str().unwrap());
@@ -165,7 +165,7 @@ fn test_lag_partition() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name,dept,salary\n1,Alice,Sales,50000\n2,Bob,Sales,60000\n3,Charlie,IT,70000\n4,Diana,IT,80000\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, dept, salary, LAG(salary) OVER (PARTITION BY dept ORDER BY salary) AS prev_salary FROM data")
         .arg(file_path.to_str().unwrap());
@@ -188,7 +188,7 @@ fn test_lead_partition() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name,dept,salary\n1,Alice,Sales,50000\n2,Bob,Sales,60000\n3,Charlie,IT,70000\n4,Diana,IT,80000\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, dept, salary, LEAD(salary) OVER (PARTITION BY dept ORDER BY salary) AS next_salary FROM data")
         .arg(file_path.to_str().unwrap());
@@ -211,7 +211,7 @@ fn test_lag_offset() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name,salary\n1,Alice,50000\n2,Bob,55000\n3,Charlie,60000\n4,Diana,65000\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg(
             "SELECT name, salary, LAG(salary, 2) OVER (ORDER BY salary) AS prev_2_salary FROM data",
@@ -236,7 +236,7 @@ fn test_lead_offset() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name,salary\n1,Alice,50000\n2,Bob,55000\n3,Charlie,60000\n4,Diana,65000\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, salary, LEAD(salary, 2) OVER (ORDER BY salary) AS next_2_salary FROM data")
         .arg(file_path.to_str().unwrap());
@@ -259,7 +259,7 @@ fn test_sum_over_order() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name,salary\n1,Alice,50000\n2,Bob,55000\n3,Charlie,60000\n4,Diana,65000\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, salary, SUM(salary) OVER (ORDER BY salary) AS running_sum FROM data")
         .arg(file_path.to_str().unwrap());
@@ -281,7 +281,7 @@ fn test_avg_over_order() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name,score\n1,Alice,100\n2,Bob,80\n3,Charlie,60\n4,Diana,40\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, score, AVG(score) OVER (ORDER BY score DESC) AS running_avg FROM data")
         .arg(file_path.to_str().unwrap());
@@ -305,7 +305,7 @@ fn test_count_over_order() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name,salary\n1,Alice,50000\n2,Bob,55000\n3,Charlie,60000\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, salary, COUNT(salary) OVER (ORDER BY salary) AS running_count FROM data")
         .arg(file_path.to_str().unwrap());
@@ -326,7 +326,7 @@ fn test_min_max_over_order() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name,salary\n1,Alice,50000\n2,Bob,60000\n3,Charlie,55000\n4,Diana,70000\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, salary, MIN(salary) OVER (ORDER BY salary) AS running_min, MAX(salary) OVER (ORDER BY salary) AS running_max FROM data")
         .arg(file_path.to_str().unwrap());
@@ -349,7 +349,7 @@ fn test_sum_over_partition() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name,dept,salary\n1,Alice,Sales,50000\n2,Bob,Sales,60000\n3,Charlie,IT,70000\n4,Diana,IT,80000\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, dept, salary, SUM(salary) OVER (PARTITION BY dept ORDER BY salary) AS dept_sum FROM data")
         .arg(file_path.to_str().unwrap());

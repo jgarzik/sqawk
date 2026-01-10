@@ -11,7 +11,7 @@ fn test_abs_negative() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,value\n1,-5\n2,10\n3,-15\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT id, ABS(value) AS abs_val FROM data")
         .arg(file_path.to_str().unwrap());
@@ -32,7 +32,7 @@ fn test_round() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,value\n1,3.7\n2,3.2\n3,3.5\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT id, ROUND(value) AS rounded FROM data")
         .arg(file_path.to_str().unwrap());
@@ -53,7 +53,7 @@ fn test_ceil() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,value\n1,3.1\n2,3.9\n3,4.0\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT id, CEIL(value) AS ceiled FROM data")
         .arg(file_path.to_str().unwrap());
@@ -74,7 +74,7 @@ fn test_floor() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,value\n1,3.1\n2,3.9\n3,4.0\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT id, FLOOR(value) AS floored FROM data")
         .arg(file_path.to_str().unwrap());

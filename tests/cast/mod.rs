@@ -12,7 +12,7 @@ fn test_cast_integer_to_text() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
     // Test CAST integer to TEXT for comparison
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE CAST(value AS TEXT) = '100'")
         .arg(file_path.to_str().unwrap());
@@ -32,7 +32,7 @@ fn test_cast_text_to_integer() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
     // Test CAST literal to INTEGER for comparison
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE CAST('100' AS INTEGER) < value")
         .arg(file_path.to_str().unwrap());
@@ -53,7 +53,7 @@ fn test_cast_to_varchar() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
     // Test CAST to VARCHAR (should work like TEXT)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE CAST(num AS VARCHAR) = '42'")
         .arg(file_path.to_str().unwrap());
@@ -73,7 +73,7 @@ fn test_cast_column_to_integer() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
     // Cast string column to integer for numeric comparison
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE CAST(strnum AS INTEGER) > 75")
         .arg(file_path.to_str().unwrap());
@@ -94,7 +94,7 @@ fn test_cast_integer_to_integer() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
     // CAST integer to integer should preserve value
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE CAST(value AS INT) = 20")
         .arg(file_path.to_str().unwrap());
@@ -114,7 +114,7 @@ fn test_cast_both_sides() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
     // Cast id to text for string comparison
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE CAST(id AS TEXT) = '2'")
         .arg(file_path.to_str().unwrap());

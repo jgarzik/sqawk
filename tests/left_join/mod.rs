@@ -13,7 +13,7 @@ fn test_left_join_with_matches() -> Result<(), Box<dyn std::error::Error>> {
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content_a)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content_b)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a LEFT JOIN b ON a.id = b.id")
         .arg(file_a.to_str().unwrap())
@@ -36,7 +36,7 @@ fn test_left_join_with_nulls() -> Result<(), Box<dyn std::error::Error>> {
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content_a)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content_b)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a LEFT JOIN b ON a.id = b.id")
         .arg(file_a.to_str().unwrap())
@@ -61,7 +61,7 @@ fn test_left_join_all_nulls() -> Result<(), Box<dyn std::error::Error>> {
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content_a)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content_b)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a LEFT JOIN b ON a.id = b.id")
         .arg(file_a.to_str().unwrap())
@@ -85,7 +85,7 @@ fn test_left_outer_join_syntax() -> Result<(), Box<dyn std::error::Error>> {
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content_a)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content_b)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a LEFT OUTER JOIN b ON a.id = b.id")
         .arg(file_a.to_str().unwrap())
@@ -107,7 +107,7 @@ fn test_left_join_empty_right() -> Result<(), Box<dyn std::error::Error>> {
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content_a)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content_b)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a LEFT JOIN b ON a.id = b.id")
         .arg(file_a.to_str().unwrap())

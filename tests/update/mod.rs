@@ -17,7 +17,7 @@ fn test_update_with_where() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // First verify we have initial data
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM people")
         .arg(file_path.to_str().unwrap());
@@ -29,7 +29,7 @@ fn test_update_with_where() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicates::str::contains("3,Charlie,35"));
 
     // Now execute UPDATE with WHERE
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("UPDATE people SET age = 31 WHERE name = 'Alice'")
         .arg("-s")
@@ -66,7 +66,7 @@ fn test_update_all_rows() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // First verify we have initial data
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM people")
         .arg(file_path.to_str().unwrap());
@@ -77,7 +77,7 @@ fn test_update_all_rows() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicates::str::contains("1,Alice,32"));
 
     // Now execute UPDATE without WHERE
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("UPDATE people SET age = 40") // Update all ages to 40
         .arg("-s")
@@ -114,7 +114,7 @@ fn test_update_and_write() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // Execute UPDATE with --write flag
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("UPDATE people SET name = 'Alicia' WHERE name = 'Alice'")
         .arg("-s")

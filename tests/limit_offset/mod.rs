@@ -3,14 +3,13 @@
 //! Tests for SQL queries with LIMIT and OFFSET clauses in various contexts
 //! including with ORDER BY, aggregate functions, and GROUP BY.
 
-use assert_cmd::Command;
 
 use crate::helpers::{get_departments_file, get_duplicates_file, get_sample_file};
 
 #[test]
 fn test_limit_basic() -> Result<(), Box<dyn std::error::Error>> {
     // Test basic LIMIT functionality
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM sample LIMIT 2")
         .arg(get_sample_file().to_str().unwrap())
@@ -52,7 +51,7 @@ fn test_limit_basic() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_limit_with_offset() -> Result<(), Box<dyn std::error::Error>> {
     // Test LIMIT with OFFSET
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM sample LIMIT 2 OFFSET 1")
         .arg(get_sample_file().to_str().unwrap())
@@ -97,7 +96,7 @@ fn test_limit_with_offset() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_limit_with_order_by() -> Result<(), Box<dyn std::error::Error>> {
     // Test LIMIT with ORDER BY
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM sample ORDER BY age DESC LIMIT 2")
         .arg(get_sample_file().to_str().unwrap())
@@ -149,7 +148,7 @@ fn test_limit_with_order_by() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_limit_with_aggregates() -> Result<(), Box<dyn std::error::Error>> {
     // Test LIMIT with aggregate functions and GROUP BY
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT department, COUNT(*) AS count, AVG(salary) AS avg_salary FROM departments GROUP BY department ORDER BY avg_salary DESC LIMIT 2")
         .arg(get_departments_file().to_str().unwrap());
@@ -192,7 +191,7 @@ fn test_limit_with_aggregates() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_distinct_with_limit() -> Result<(), Box<dyn std::error::Error>> {
     // Test DISTINCT with LIMIT and OFFSET
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT DISTINCT department, role FROM duplicates ORDER BY department ASC LIMIT 3 OFFSET 1")
         .arg(get_duplicates_file().to_str().unwrap())
@@ -258,7 +257,7 @@ fn test_distinct_with_limit() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_zero_limit() -> Result<(), Box<dyn std::error::Error>> {
     // Test LIMIT 0 (should return only the header)
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM sample LIMIT 0")
         .arg(get_sample_file().to_str().unwrap())
@@ -306,7 +305,7 @@ fn test_zero_limit() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_offset_beyond_table_size() -> Result<(), Box<dyn std::error::Error>> {
     // Test OFFSET beyond table size (should return only the header)
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM sample LIMIT 10 OFFSET 10")
         .arg(get_sample_file().to_str().unwrap())

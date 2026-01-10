@@ -3,7 +3,6 @@
 //! Tests for SQL GROUP BY clause with various aggregate functions.
 
 use crate::helpers::get_departments_file;
-use assert_cmd::Command;
 use predicates::prelude::*;
 
 #[test]
@@ -11,7 +10,7 @@ fn test_basic_group_by() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = get_departments_file();
 
     // Run sqawk with basic GROUP BY
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT department, COUNT(*) AS count, SUM(salary) AS total_salary, AVG(salary) AS avg_salary FROM departments GROUP BY department")
         .arg(file_path.to_str().unwrap())
@@ -52,7 +51,7 @@ fn test_group_by_with_order_by() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = get_departments_file();
 
     // Run sqawk with GROUP BY and ORDER BY
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT department, COUNT(*) AS employee_count, AVG(salary) AS avg_salary FROM departments GROUP BY department ORDER BY avg_salary DESC")
         .arg(file_path.to_str().unwrap())
@@ -106,7 +105,7 @@ fn test_group_by_with_complex_expressions() -> Result<(), Box<dyn std::error::Er
     let file_path = get_departments_file();
 
     // Run sqawk with complex GROUP BY expressions
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT department, COUNT(*) AS employee_count, SUM(salary) AS total_salary, AVG(salary) AS avg_salary, MIN(salary) AS min_salary, MAX(salary) AS max_salary FROM departments GROUP BY department ORDER BY avg_salary DESC")
         .arg(file_path.to_str().unwrap())
@@ -175,7 +174,7 @@ fn test_group_by_with_having() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = get_departments_file();
 
     // Run sqawk with GROUP BY and HAVING
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT department, COUNT(*) AS employee_count, AVG(salary) AS avg_salary FROM departments GROUP BY department HAVING COUNT(*) > 2")
         .arg(file_path.to_str().unwrap())
@@ -218,7 +217,7 @@ fn test_group_by_with_having_avg() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = get_departments_file();
 
     // Run sqawk with GROUP BY and HAVING with AVG function
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT department, COUNT(*) AS employee_count, AVG(salary) AS avg_salary FROM departments GROUP BY department HAVING AVG(salary) > 70000")
         .arg(file_path.to_str().unwrap())

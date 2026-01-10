@@ -17,7 +17,7 @@ fn test_headerless_auto_detect_numeric_first_row() -> Result<(), Box<dyn std::er
         "1,100,200\n2,150,250\n3,200,300\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT a, b, c FROM numbers")
         .arg(data_file.to_str().unwrap());
@@ -42,7 +42,7 @@ fn test_headerless_passwd_style() -> Result<(), Box<dyn std::error::Error>> {
         "root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-F:")
         .arg("-s")
         .arg("SELECT a, c, f FROM passwd")
@@ -68,7 +68,7 @@ fn test_headerless_path_in_first_row() -> Result<(), Box<dyn std::error::Error>>
         "/usr/bin,executable,1000\n/etc/config,config,500\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT a, b FROM paths")
         .arg(data_file.to_str().unwrap());
@@ -88,7 +88,7 @@ fn test_headerless_alphabetic_columns() -> Result<(), Box<dyn std::error::Error>
 
     let data_file = create_custom_csv(temp_dir.path(), "data.csv", "1,2,3,4,5\n6,7,8,9,10\n")?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT a, b, c, d, e FROM data")
         .arg(data_file.to_str().unwrap());
@@ -112,7 +112,7 @@ fn test_headerless_filter_query() -> Result<(), Box<dyn std::error::Error>> {
         "1,Alice,100\n2,Bob,200\n3,Charlie,50\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT b FROM data WHERE c > 75")
         .arg(data_file.to_str().unwrap());
@@ -136,7 +136,7 @@ fn test_headerless_aggregate() -> Result<(), Box<dyn std::error::Error>> {
         "1,North,100\n2,South,200\n3,North,150\n4,South,250\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT b, SUM(c) FROM data GROUP BY b")
         .arg(data_file.to_str().unwrap());
@@ -160,7 +160,7 @@ fn test_headerless_with_comments() -> Result<(), Box<dyn std::error::Error>> {
         "# This is a comment\n1,Alice,100\n# Another comment\n2,Bob,200\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data")
         .arg(data_file.to_str().unwrap());
@@ -180,7 +180,7 @@ fn test_headerless_asterisk_field() -> Result<(), Box<dyn std::error::Error>> {
 
     let data_file = create_custom_csv(temp_dir.path(), "data.csv", "user1,*,1001\nuser2,*,1002\n")?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT a, c FROM data")
         .arg(data_file.to_str().unwrap());

@@ -18,7 +18,7 @@ fn test_correlated_exists_users_with_orders() -> Result<(), Box<dyn std::error::
 
     // Test: SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)
     // Alice (id=1) and Bob (id=2) have orders, Charlie (id=3) does not
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)")
         .arg(users_path.to_str().unwrap())
@@ -54,7 +54,7 @@ fn test_correlated_not_exists_users_without_orders() -> Result<(), Box<dyn std::
 
     // Test: SELECT * FROM users WHERE NOT EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)
     // Only Alice (id=1) has orders, so Bob and Charlie should be returned
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE NOT EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)")
         .arg(users_path.to_str().unwrap())
@@ -90,7 +90,7 @@ fn test_correlated_exists_with_filter() -> Result<(), Box<dyn std::error::Error>
 
     // Test: SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id AND amount > 100)
     // Only Alice (id=1) has an order with amount > 100 (150)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id AND amount > 100)")
         .arg(users_path.to_str().unwrap())
@@ -128,7 +128,7 @@ fn test_correlated_scalar_subquery_max() -> Result<(), Box<dyn std::error::Error
 
     // Test: SELECT * FROM employees e WHERE salary = (SELECT MAX(salary) FROM employees WHERE dept = e.dept)
     // Bob (120) is max in eng, Diana (110) is max in sales
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM employees e WHERE salary = (SELECT MAX(salary) FROM employees WHERE dept = e.dept)")
         .arg(employees_path.to_str().unwrap());
@@ -169,7 +169,7 @@ fn test_correlated_scalar_subquery_count() -> Result<(), Box<dyn std::error::Err
 
     // Test: SELECT * FROM users WHERE (SELECT COUNT(*) FROM orders WHERE orders.user_id = users.id) > 1
     // Only Alice has more than 1 order
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE (SELECT COUNT(*) FROM orders WHERE orders.user_id = users.id) > 1")
         .arg(users_path.to_str().unwrap())
@@ -208,7 +208,7 @@ fn test_correlated_exists_same_table() -> Result<(), Box<dyn std::error::Error>>
     // Test: Find managers (employees who manage someone)
     // SELECT * FROM employees e WHERE EXISTS (SELECT 1 FROM employees WHERE manager_id = e.id)
     // Alice (id=1) manages Bob and Charlie, Bob (id=2) manages Diana
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM employees e WHERE EXISTS (SELECT 1 FROM employees WHERE manager_id = e.id)")
         .arg(employees_path.to_str().unwrap());

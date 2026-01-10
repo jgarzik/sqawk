@@ -49,7 +49,7 @@ fn test_insert() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // Build the command
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("INSERT INTO people (id, name, age) VALUES (4, 'Dave', 40)")
         .arg("-s")
@@ -85,7 +85,7 @@ fn test_insert_select() -> Result<(), Box<dyn std::error::Error>> {
     let target_path = create_custom_csv(temp_dir.path(), "target.csv", "id,name,age\n")?;
 
     // Test INSERT...SELECT with WHERE
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("INSERT INTO target SELECT * FROM source WHERE age > 30")
         .arg("-s")
@@ -158,7 +158,7 @@ fn test_multiple_files() -> Result<(), Box<dyn std::error::Error>> {
     let scores_file = create_custom_csv(temp_dir.path(), "scores.csv", scores_content)?;
 
     // Use direct command execution since our SQL is simpler
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM scores WHERE score > 80")
         .arg(format!("scores={}", scores_file.to_str().unwrap()))
@@ -231,7 +231,7 @@ fn test_delete_with_where() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // First verify we have 3 rows initially
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM people")
         .arg(file_path.to_str().unwrap());
@@ -243,7 +243,7 @@ fn test_delete_with_where() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicates::str::contains("3,Charlie,35"));
 
     // Now execute DELETE with WHERE
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("DELETE FROM people WHERE age > 30")
         .arg("-s")
@@ -280,7 +280,7 @@ fn test_delete_all() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // First verify we have rows initially
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM people")
         .arg(file_path.to_str().unwrap());
@@ -291,7 +291,7 @@ fn test_delete_all() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicates::str::contains("1,Alice,32"));
 
     // Now execute DELETE without WHERE
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("DELETE FROM people")
         .arg("-s")

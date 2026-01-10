@@ -18,7 +18,7 @@ fn test_exists_subquery_has_rows() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test: SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders)
     // Since orders table has rows, all users should be returned
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders)")
         .arg(users_path.to_str().unwrap())
@@ -46,7 +46,7 @@ fn test_exists_subquery_with_where_match() -> Result<(), Box<dyn std::error::Err
 
     // Test: SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE amount > 150)
     // order 2 has amount=200 > 150, so EXISTS is true
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE amount > 150)")
         .arg(users_path.to_str().unwrap())
@@ -74,7 +74,7 @@ fn test_exists_subquery_with_where_no_match() -> Result<(), Box<dyn std::error::
 
     // Test: SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE amount > 500)
     // No orders with amount > 500, so EXISTS is false - no users returned
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE amount > 500)")
         .arg(users_path.to_str().unwrap())
@@ -99,7 +99,7 @@ fn test_not_exists_subquery_has_rows() -> Result<(), Box<dyn std::error::Error>>
 
     // Test: SELECT * FROM users WHERE NOT EXISTS (SELECT 1 FROM orders)
     // Since orders table has rows, NOT EXISTS is false - no users returned
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE NOT EXISTS (SELECT 1 FROM orders)")
         .arg(users_path.to_str().unwrap())
@@ -124,7 +124,7 @@ fn test_not_exists_subquery_no_match() -> Result<(), Box<dyn std::error::Error>>
 
     // Test: SELECT * FROM users WHERE NOT EXISTS (SELECT 1 FROM orders WHERE amount > 1000)
     // No orders with amount > 1000, so NOT EXISTS is true - all users returned
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE NOT EXISTS (SELECT 1 FROM orders WHERE amount > 1000)")
         .arg(users_path.to_str().unwrap())
@@ -151,7 +151,7 @@ fn test_exists_single_row() -> Result<(), Box<dyn std::error::Error>> {
     let single_path = create_custom_csv(temp_dir.path(), "single.csv", single_content)?;
 
     // Test: SELECT * FROM data WHERE EXISTS (SELECT 1 FROM single)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE EXISTS (SELECT 1 FROM single)")
         .arg(data_path.to_str().unwrap())
@@ -179,7 +179,7 @@ fn test_exists_with_other_conditions() -> Result<(), Box<dyn std::error::Error>>
 
     // Test: SELECT * FROM users WHERE age > 25 AND EXISTS (SELECT 1 FROM orders)
     // EXISTS is true, but we also filter by age > 25
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM users WHERE age > 25 AND EXISTS (SELECT 1 FROM orders)")
         .arg(users_path.to_str().unwrap())

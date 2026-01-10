@@ -19,7 +19,7 @@ fn test_in_subquery_basic() -> Result<(), Box<dyn std::error::Error>> {
     let users_path = create_custom_csv(temp_dir.path(), "users.csv", users_content)?;
 
     // Test: SELECT * FROM orders WHERE user_id IN (SELECT id FROM users)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM orders WHERE user_id IN (SELECT id FROM users)")
         .arg(orders_path.to_str().unwrap())
@@ -51,7 +51,7 @@ fn test_in_subquery_with_where() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test: SELECT * FROM orders WHERE user_id IN (SELECT id FROM users WHERE active = 1)
     // Only users 1 (Alice) and 3 (Charlie) are active
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM orders WHERE user_id IN (SELECT id FROM users WHERE active = 1)")
         .arg(orders_path.to_str().unwrap())
@@ -81,7 +81,7 @@ fn test_not_in_subquery() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test: SELECT * FROM orders WHERE user_id NOT IN (SELECT id FROM users)
     // Users 5 and 6 are not in the users table
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM orders WHERE user_id NOT IN (SELECT id FROM users)")
         .arg(orders_path.to_str().unwrap())
@@ -108,7 +108,7 @@ fn test_in_subquery_empty_result() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test: SELECT * FROM data WHERE value IN (SELECT value FROM empty WHERE value > 1000)
     // Subquery returns no rows
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE value IN (SELECT value FROM empty WHERE value > 1000)")
         .arg(data_path.to_str().unwrap())
@@ -130,7 +130,7 @@ fn test_in_subquery_same_table() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test: Find all employees who are managers
     // SELECT * FROM employees WHERE id IN (SELECT manager_id FROM employees)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM employees WHERE id IN (SELECT manager_id FROM employees)")
         .arg(file_path.to_str().unwrap());
@@ -156,7 +156,7 @@ fn test_in_subquery_strings() -> Result<(), Box<dyn std::error::Error>> {
     let categories_path = create_custom_csv(temp_dir.path(), "categories.csv", categories_content)?;
 
     // Test: SELECT * FROM products WHERE category IN (SELECT name FROM categories WHERE active = 1)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM products WHERE category IN (SELECT name FROM categories WHERE active = 1)")
         .arg(products_path.to_str().unwrap())

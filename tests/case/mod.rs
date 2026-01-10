@@ -12,7 +12,7 @@ fn test_case_simple_integers() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "records.csv", content)?;
 
     // Test simple CASE expression (CASE status WHEN 1 THEN 'active' ...)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM records WHERE CASE status WHEN 1 THEN 1 WHEN 2 THEN 0 ELSE 0 END = 1")
         .arg(file_path.to_str().unwrap());
@@ -33,7 +33,7 @@ fn test_case_searched_greater_than() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
     // Test searched CASE expression (CASE WHEN value > 50 THEN ...)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE CASE WHEN value > 50 THEN 1 ELSE 0 END = 1")
         .arg(file_path.to_str().unwrap());
@@ -53,7 +53,7 @@ fn test_case_multiple_when_branches() -> Result<(), Box<dyn std::error::Error>> 
     let file_path = create_custom_csv(temp_dir.path(), "grades.csv", content)?;
 
     // Test CASE with multiple WHEN branches - filter for A grades (>= 90)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM grades WHERE CASE WHEN grade > 89 THEN 1 WHEN grade > 79 THEN 0 ELSE 0 END = 1")
         .arg(file_path.to_str().unwrap());
@@ -73,7 +73,7 @@ fn test_case_with_else() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "accounts.csv", content)?;
 
     // Test CASE where ELSE applies - non-premium accounts
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM accounts WHERE CASE type WHEN 'premium' THEN 0 ELSE 1 END = 1")
         .arg(file_path.to_str().unwrap());
@@ -94,7 +94,7 @@ fn test_case_no_when_match_uses_else() -> Result<(), Box<dyn std::error::Error>>
     let file_path = create_custom_csv(temp_dir.path(), "codes.csv", content)?;
 
     // No code matches A or B, so all go to ELSE (1)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM codes WHERE CASE code WHEN 'A' THEN 0 WHEN 'B' THEN 0 ELSE 1 END = 1")
         .arg(file_path.to_str().unwrap());
@@ -116,7 +116,7 @@ fn test_case_searched_equality() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "items.csv", content)?;
 
     // Test searched CASE with equality
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM items WHERE CASE WHEN status = 'active' THEN 1 ELSE 0 END = 1")
         .arg(file_path.to_str().unwrap());

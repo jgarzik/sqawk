@@ -12,7 +12,7 @@ fn test_in_list_integers() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "people.csv", content)?;
 
     // Test IN with integer list using VM
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE age IN (25, 35, 40)")
         .arg(file_path.to_str().unwrap());
@@ -34,7 +34,7 @@ fn test_in_list_strings() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "people.csv", content)?;
 
     // Test IN with string list using VM
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM people WHERE city IN ('NYC', 'LA')")
         .arg(file_path.to_str().unwrap());
@@ -56,7 +56,7 @@ fn test_not_in_list() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "records.csv", content)?;
 
     // Test NOT IN using VM
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM records WHERE status NOT IN ('active', 'archived')")
         .arg(file_path.to_str().unwrap());
@@ -77,7 +77,7 @@ fn test_in_list_single_value() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
     // Test IN with single value using VM
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE value IN (20)")
         .arg(file_path.to_str().unwrap());
@@ -97,7 +97,7 @@ fn test_in_list_no_matches() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "nums.csv", content)?;
 
     // Test IN with values that don't match
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM nums WHERE num IN (100, 200, 300)")
         .arg(file_path.to_str().unwrap());
@@ -116,7 +116,7 @@ fn test_in_list_all_match() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "codes.csv", content)?;
 
     // Test IN that matches all rows
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM codes WHERE code IN ('A', 'B', 'C')")
         .arg(file_path.to_str().unwrap());

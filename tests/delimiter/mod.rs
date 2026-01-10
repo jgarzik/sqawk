@@ -3,14 +3,13 @@
 //! Tests for different file delimiter options (-F flag) with tab and colon separators.
 
 use crate::helpers::{get_contacts_file, get_employees_tsv_file};
-use assert_cmd::Command;
 
 #[test]
 fn test_tab_delimiter() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = get_employees_tsv_file();
 
     // Run sqawk with tab delimiter
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT id, name, salary, department FROM employees WHERE salary > 70000")
         .arg("-F")
@@ -65,7 +64,7 @@ fn test_colon_delimiter() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = get_contacts_file();
 
     // Run sqawk with colon delimiter
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT id, name, email FROM contacts WHERE id > 5")
         .arg("-F")

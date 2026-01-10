@@ -11,7 +11,7 @@ fn test_now() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id\n1\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT NOW() AS current_time FROM data")
         .arg(file_path.to_str().unwrap());
@@ -31,7 +31,7 @@ fn test_date_extract() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,datetime\n1,2024-01-15 10:30:00\n2,2024-06-20 14:45:00\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT DATE(datetime) AS dt FROM data")
         .arg(file_path.to_str().unwrap());
@@ -51,7 +51,7 @@ fn test_time_extract() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,datetime\n1,2024-01-15 10:30:00\n2,2024-06-20 14:45:00\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT TIME(datetime) AS tm FROM data")
         .arg(file_path.to_str().unwrap());
@@ -71,7 +71,7 @@ fn test_current_date() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id\n1\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT CURRENT_DATE AS today FROM data")
         .arg(file_path.to_str().unwrap());

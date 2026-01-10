@@ -3,7 +3,6 @@
 //! Tests for SQL column aliasing functionality with AS keyword.
 
 use crate::helpers::get_employees_file;
-use assert_cmd::Command;
 use predicates::prelude::*;
 
 #[test]
@@ -11,7 +10,7 @@ fn test_basic_column_aliases() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = get_employees_file();
 
     // Run sqawk with basic column aliases
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name AS employee_name, age AS employee_age, department AS dept FROM employees")
         .arg(file_path.to_str().unwrap())
@@ -43,7 +42,7 @@ fn test_mixed_aliases_and_regular_columns() -> Result<(), Box<dyn std::error::Er
     let file_path = get_employees_file();
 
     // Run sqawk with a mix of aliased and regular columns
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT id, name AS employee_name, department FROM employees")
         .arg(file_path.to_str().unwrap())
@@ -65,7 +64,7 @@ fn test_aliases_with_where_clause() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = get_employees_file();
 
     // Run sqawk with aliases and a WHERE clause
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name AS employee_name, age AS employee_age FROM employees WHERE age > 25")
         .arg(file_path.to_str().unwrap())

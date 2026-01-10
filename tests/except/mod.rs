@@ -13,7 +13,7 @@ fn test_except_basic() -> Result<(), Box<dyn std::error::Error>> {
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content_a)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content_b)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a EXCEPT SELECT * FROM b")
         .arg(file_a.to_str().unwrap())
@@ -52,7 +52,7 @@ fn test_except_disjoint_tables() -> Result<(), Box<dyn std::error::Error>> {
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content_a)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content_b)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a EXCEPT SELECT * FROM b")
         .arg(file_a.to_str().unwrap())
@@ -75,7 +75,7 @@ fn test_except_identical_tables() -> Result<(), Box<dyn std::error::Error>> {
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a EXCEPT SELECT * FROM b")
         .arg(file_a.to_str().unwrap())
@@ -103,7 +103,7 @@ fn test_except_subset_as_first() -> Result<(), Box<dyn std::error::Error>> {
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content_a)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content_b)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a EXCEPT SELECT * FROM b")
         .arg(file_a.to_str().unwrap())
@@ -127,7 +127,7 @@ fn test_except_subset_as_second() -> Result<(), Box<dyn std::error::Error>> {
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content_a)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content_b)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a EXCEPT SELECT * FROM b")
         .arg(file_a.to_str().unwrap())
@@ -158,7 +158,7 @@ fn test_except_removes_duplicates() -> Result<(), Box<dyn std::error::Error>> {
     let file_a = create_custom_csv(temp_dir.path(), "a.csv", content_a)?;
     let file_b = create_custom_csv(temp_dir.path(), "b.csv", content_b)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM a EXCEPT SELECT * FROM b")
         .arg(file_a.to_str().unwrap())

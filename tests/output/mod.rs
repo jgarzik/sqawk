@@ -20,7 +20,7 @@ fn test_stdout_select_csv() -> Result<(), Box<dyn std::error::Error>> {
         "id,name,value\n1,Alice,100\n2,Bob,200\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data")
         .arg(file_path.to_str().unwrap());
@@ -44,7 +44,7 @@ fn test_stdout_select_with_delimiter() -> Result<(), Box<dyn std::error::Error>>
         "id\tname\tvalue\n1\tAlice\t100\n2\tBob\t200\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-F")
         .arg("\t")
         .arg("-s")
@@ -71,7 +71,7 @@ fn test_stdout_empty_result() -> Result<(), Box<dyn std::error::Error>> {
         "id,name,value\n1,Alice,100\n2,Bob,200\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data WHERE id = 999")
         .arg(file_path.to_str().unwrap());
@@ -99,7 +99,7 @@ fn test_file_write_csv() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // Update a value and write back
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("UPDATE data SET value = 150 WHERE name = 'Alice'")
         .arg("--write")
@@ -136,7 +136,7 @@ fn test_file_write_tsv() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // Update a value and write back
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-F")
         .arg("\t")
         .arg("-s")
@@ -170,7 +170,7 @@ fn test_file_write_insert() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = create_temp_dir()?;
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", "id,name,value\n1,Alice,100\n")?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("INSERT INTO data (id, name, value) VALUES (2, 'Bob', 200)")
         .arg("--write")
@@ -196,7 +196,7 @@ fn test_file_write_delete() -> Result<(), Box<dyn std::error::Error>> {
         "id,name,value\n1,Alice,100\n2,Bob,200\n3,Charlie,300\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("DELETE FROM data WHERE name = 'Bob'")
         .arg("--write")
@@ -221,7 +221,7 @@ fn test_file_no_write_by_default() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", original_content)?;
 
     // Update without --write flag
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("UPDATE data SET value = 999 WHERE name = 'Alice'")
         .arg(file_path.to_str().unwrap());
@@ -246,7 +246,7 @@ fn test_file_write_preserves_original_on_read_only_query() -> Result<(), Box<dyn
     let original_content = "id,name,value\n1,Alice,100\n2,Bob,200\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", original_content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM data")
         .arg("--write")
@@ -274,7 +274,7 @@ fn test_file_write_multiple_operations() -> Result<(), Box<dyn std::error::Error
         "id,name,value\n1,Alice,100\n2,Bob,200\n3,Charlie,300\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("UPDATE data SET value = 150 WHERE name = 'Alice'")
         .arg("-s")

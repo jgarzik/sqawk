@@ -6,11 +6,19 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use tempfile::TempDir;
+
+/// Create a Command for running the sqawk binary
+///
+/// Uses the cargo_bin_cmd! macro which is compatible with custom cargo build directories.
+#[macro_export]
+macro_rules! sqawk_cmd {
+    () => {
+        assert_cmd::cargo::cargo_bin_cmd!("sqawk")
+    };
+}
 
 /// Represents a test case for sqawk
 pub struct SqawkTestCase {
@@ -83,8 +91,8 @@ fn run_test_case_with_file(
     test_case: SqawkTestCase,
     test_file: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Build the command
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    // Build the command using cargo_bin_cmd! macro (compatible with custom build dirs)
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
 
     // Add SQL statement
     cmd.arg("-s").arg(&test_case.sql);

@@ -3,7 +3,6 @@
 //! Tests for COUNT, SUM, AVG, MIN, MAX functions and their combinations.
 
 use crate::helpers::get_employees_file;
-use assert_cmd::Command;
 use predicates::prelude::*;
 
 #[test]
@@ -11,7 +10,7 @@ fn test_basic_aggregate_functions() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = get_employees_file();
 
     // Run sqawk with basic aggregate functions
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT COUNT(*), SUM(age), AVG(salary), MIN(age), MAX(salary) FROM employees")
         .arg(file_path.to_str().unwrap())
@@ -32,7 +31,7 @@ fn test_aggregate_functions_with_aliases() -> Result<(), Box<dyn std::error::Err
     let file_path = get_employees_file();
 
     // Run sqawk with aggregate functions and aliases
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT COUNT(*) AS count, SUM(salary) AS total_salary, AVG(age) AS avg_age, MIN(salary) AS min_salary, MAX(age) AS max_age FROM employees")
         .arg(file_path.to_str().unwrap())
@@ -54,7 +53,7 @@ fn test_aggregate_functions_with_filter() -> Result<(), Box<dyn std::error::Erro
     let file_path = get_employees_file();
 
     // Run sqawk with filtered aggregate functions
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT COUNT(*), SUM(salary), AVG(age), MIN(salary), MAX(age) FROM employees WHERE age > 25")
         .arg(file_path.to_str().unwrap())
@@ -74,7 +73,7 @@ fn test_aggregate_functions_with_filter() -> Result<(), Box<dyn std::error::Erro
 fn test_aggregate_on_employees() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = get_employees_file();
 
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT COUNT(*) AS total_count, AVG(age) AS average_age FROM employees")
         .arg(file_path.to_str().unwrap())

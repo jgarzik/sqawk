@@ -17,7 +17,7 @@ fn test_tabledef_basic() -> Result<(), Box<dyn std::error::Error>> {
         "1,Alice,100\n2,Bob,200\n3,Charlie,300\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("--tabledef=data:id,name,value")
         .arg("-s")
         .arg("SELECT name, value FROM data WHERE value > 150")
@@ -44,7 +44,7 @@ fn test_tabledef_with_custom_delimiter() -> Result<(), Box<dyn std::error::Error
         "root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\nuser:x:1000:1000:User:/home/user:/bin/bash\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-F:")
         .arg("--tabledef=passwd:username,password,uid,gid,gecos,home,shell")
         .arg("-s")
@@ -72,7 +72,7 @@ fn test_tabledef_multiple_tables() -> Result<(), Box<dyn std::error::Error>> {
         "101,1,500\n102,2,300\n103,1,200\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("--tabledef=users:id,name")
         .arg("--tabledef=orders:order_id,user_id,amount")
         .arg("-s")
@@ -99,7 +99,7 @@ fn test_tabledef_with_table_alias() -> Result<(), Box<dyn std::error::Error>> {
         "1,Apple,1.50\n2,Banana,0.75\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("--tabledef=products:id,name,price")
         .arg("-s")
         .arg("SELECT name, price FROM products")
@@ -124,7 +124,7 @@ fn test_tabledef_aggregate_query() -> Result<(), Box<dyn std::error::Error>> {
         "2024-01,North,1000\n2024-01,South,1500\n2024-02,North,1200\n2024-02,South,1800\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("--tabledef=sales:month,region,amount")
         .arg("-s")
         .arg("SELECT region, SUM(amount) as total FROM sales GROUP BY region")
@@ -145,7 +145,7 @@ fn test_tabledef_with_write() -> Result<(), Box<dyn std::error::Error>> {
 
     let data_file = create_custom_csv(temp_dir.path(), "data.csv", "1,Alice,100\n2,Bob,200\n")?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("--tabledef=data:id,name,value")
         .arg("-s")
         .arg("UPDATE data SET value = 999 WHERE name = 'Alice'")

@@ -11,7 +11,7 @@ fn test_concat() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,first,last\n1,John,Doe\n2,Jane,Smith\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT CONCAT(first, ' ', last) AS full_name FROM data")
         .arg(file_path.to_str().unwrap());
@@ -31,7 +31,7 @@ fn test_left() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name\n1,Alexander\n2,Bob\n3,Charlotte\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT LEFT(name, 3) AS short FROM data")
         .arg(file_path.to_str().unwrap());
@@ -52,7 +52,7 @@ fn test_right() -> Result<(), Box<dyn std::error::Error>> {
     let content = "id,name\n1,Alexander\n2,Bob\n3,Charlotte\n";
     let file_path = create_custom_csv(temp_dir.path(), "data.csv", content)?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT RIGHT(name, 3) AS ending FROM data")
         .arg(file_path.to_str().unwrap());

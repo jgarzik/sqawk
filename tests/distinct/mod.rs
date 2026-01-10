@@ -3,14 +3,13 @@
 //! Tests for DISTINCT SELECT queries in various contexts including
 //! with WHERE clauses, ORDER BY clauses, and JOINs.
 
-use assert_cmd::Command;
 
 use crate::helpers::{get_duplicates_file, get_orders_file, get_users_file};
 
 #[test]
 fn test_distinct_basic() -> Result<(), Box<dyn std::error::Error>> {
     // Test the basic DISTINCT functionality with a simple query
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT DISTINCT name, department FROM duplicates")
         .arg(get_duplicates_file().to_str().unwrap())
@@ -52,7 +51,7 @@ fn test_distinct_basic() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_distinct_with_where() -> Result<(), Box<dyn std::error::Error>> {
     // Test DISTINCT with a WHERE clause
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT DISTINCT name, role FROM duplicates WHERE department = 'Engineering'")
         .arg(get_duplicates_file().to_str().unwrap())
@@ -111,7 +110,7 @@ fn test_distinct_with_where() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_distinct_with_order_by() -> Result<(), Box<dyn std::error::Error>> {
     // Test DISTINCT with ORDER BY
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT DISTINCT name, department FROM duplicates ORDER BY department, name")
         .arg(get_duplicates_file().to_str().unwrap())
@@ -174,7 +173,7 @@ fn test_distinct_with_order_by() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_distinct_with_join() -> Result<(), Box<dyn std::error::Error>> {
     // Test DISTINCT with JOIN operations
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT DISTINCT users.name, orders.product_id FROM users INNER JOIN orders ON users.id = orders.user_id")
         .arg(get_users_file().to_str().unwrap())
@@ -230,7 +229,7 @@ fn test_distinct_with_join() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_distinct_with_select_star() -> Result<(), Box<dyn std::error::Error>> {
     // Test DISTINCT with SELECT * (should deduplicate identical rows but not filter ID differences)
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT DISTINCT * FROM duplicates WHERE department = 'Engineering'")
         .arg(get_duplicates_file().to_str().unwrap())
@@ -293,7 +292,7 @@ fn test_distinct_with_select_star() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_distinct_without_id() -> Result<(), Box<dyn std::error::Error>> {
     // Test DISTINCT without ID column to ensure proper deduplication
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT DISTINCT name, department, role FROM duplicates")
         .arg(get_duplicates_file().to_str().unwrap())

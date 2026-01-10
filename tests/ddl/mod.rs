@@ -17,7 +17,7 @@ fn test_drop_table_basic() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // DROP TABLE should succeed (table queued for removal)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("DROP TABLE people")
         .arg("-v")
@@ -36,7 +36,7 @@ fn test_drop_table_nonexistent() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = create_temp_dir()?;
     let file_path = create_custom_csv(temp_dir.path(), "people.csv", "id,name,age\n1,Alice,32\n")?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("DROP TABLE nonexistent")
         .arg(file_path.to_str().unwrap());
@@ -59,7 +59,7 @@ fn test_drop_table_if_exists() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // Drop non-existent table with IF EXISTS (should not error)
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("DROP TABLE IF EXISTS nonexistent")
         .arg("-v")
@@ -83,7 +83,7 @@ fn test_drop_table_if_exists_existing() -> Result<(), Box<dyn std::error::Error>
     )?;
 
     // Drop existing table with IF EXISTS
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("DROP TABLE IF EXISTS people")
         .arg("-v")
@@ -107,7 +107,7 @@ fn test_truncate_table() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // Truncate the table and verify it's empty
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("TRUNCATE TABLE people")
         .arg("-s")
@@ -131,7 +131,7 @@ fn test_truncate_verbose() -> Result<(), Box<dyn std::error::Error>> {
         "id,name,age\n1,Alice,32\n2,Bob,25\n",
     )?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("TRUNCATE TABLE people")
         .arg("-v")
@@ -151,7 +151,7 @@ fn test_alter_table_add_column() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "people.csv", "id,name\n1,Alice\n2,Bob\n")?;
 
     // Add a new column and verify
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("ALTER TABLE people ADD COLUMN age INTEGER")
         .arg("-s")
@@ -172,7 +172,7 @@ fn test_alter_table_add_text_column() -> Result<(), Box<dyn std::error::Error>> 
     let temp_dir = create_temp_dir()?;
     let file_path = create_custom_csv(temp_dir.path(), "people.csv", "id,name\n1,Alice\n2,Bob\n")?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("ALTER TABLE people ADD COLUMN email TEXT")
         .arg("-s")
@@ -197,7 +197,7 @@ fn test_create_table_as_select() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // Create new table from SELECT with WHERE clause
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("CREATE TABLE engineers AS SELECT id, name FROM people WHERE department = 'Engineering'")
         .arg("-s")
@@ -224,7 +224,7 @@ fn test_create_table_as_select_all_columns() -> Result<(), Box<dyn std::error::E
     )?;
 
     // Create new table with SELECT *
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("CREATE TABLE backup AS SELECT * FROM people")
         .arg("-s")
@@ -251,7 +251,7 @@ fn test_create_table_as_select_with_filter() -> Result<(), Box<dyn std::error::E
     )?;
 
     // Create new table with filtered data
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("CREATE TABLE seniors AS SELECT id, name FROM people WHERE age > 30")
         .arg("-s")
@@ -272,7 +272,7 @@ fn test_create_table_verbose() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = create_temp_dir()?;
     let file_path = create_custom_csv(temp_dir.path(), "people.csv", "id,name\n1,Alice\n2,Bob\n")?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("CREATE TABLE copy AS SELECT * FROM people")
         .arg("-v")
@@ -297,7 +297,7 @@ fn test_create_table_with_location_creates_empty_table() -> Result<(), Box<dyn s
 
     let dummy_file = create_custom_csv(temp_dir.path(), "dummy.csv", "x\n1\n")?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg(format!(
             "CREATE TABLE mydata (id INT, name TEXT, value INT) LOCATION '{}'",
@@ -323,7 +323,7 @@ fn test_create_table_with_location_insert_and_write() -> Result<(), Box<dyn std:
 
     let dummy_file = create_custom_csv(temp_dir.path(), "dummy.csv", "x\n1\n")?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg(format!(
             "CREATE TABLE mydata (id INT, name TEXT) LOCATION '{}'",
@@ -357,7 +357,7 @@ fn test_create_table_with_location_and_delimiter() -> Result<(), Box<dyn std::er
 
     let dummy_file = create_custom_csv(temp_dir.path(), "dummy.csv", "x\n1\n")?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg(format!(
             "CREATE TABLE mydata (id INT, name TEXT) LOCATION '{}' STORED AS TEXTFILE WITH (DELIMITER='\t')",
@@ -386,7 +386,7 @@ fn test_create_table_with_location_multiple_operations() -> Result<(), Box<dyn s
 
     let dummy_file = create_custom_csv(temp_dir.path(), "dummy.csv", "x\n1\n")?;
 
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg(format!(
             "CREATE TABLE mydata (id INT, name TEXT, value INT) LOCATION '{}'",
