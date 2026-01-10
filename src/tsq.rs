@@ -6,12 +6,59 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+
+// Simple RNG using libc srand/rand
+struct Rng;
+
+impl Rng {
+    fn seed(seed: u32) {
+        unsafe {
+            libc::srand(seed);
+        }
+    }
+
+    fn next_u32() -> u32 {
+        unsafe { libc::rand() as u32 }
+    }
+
+    fn gen_range_usize(min: usize, max: usize) -> usize {
+        if min >= max {
+            return min;
+        }
+        min + (Self::next_u32() as usize % (max - min + 1))
+    }
+
+    fn gen_range_i32(min: i32, max: i32) -> i32 {
+        if min >= max {
+            return min;
+        }
+        min + (Self::next_u32() as i32).abs() % (max - min + 1)
+    }
+
+    fn gen_range_f64(min: f64, max: f64) -> f64 {
+        let r = Self::next_u32() as f64 / u32::MAX as f64;
+        min + r * (max - min)
+    }
+
+    fn gen_bool(probability: f64) -> bool {
+        Self::gen_range_f64(0.0, 1.0) < probability
+    }
+}
+
+/// Generate default seed from time XOR pid
+fn default_seed() -> u64 {
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let pid = process::id() as u64;
+    time ^ pid
+}
 
 // ============================================================================
 // CLI Arguments
@@ -374,7 +421,6 @@ struct VerificationData {
 // ============================================================================
 
 struct DataGenerator {
-    rng: StdRng,
     row_count: usize,
     verbose: bool,
     verification: VerificationData,
@@ -382,8 +428,9 @@ struct DataGenerator {
 
 impl DataGenerator {
     fn new(seed: u64, row_count: usize, verbose: bool) -> Self {
+        // Seed the global RNG
+        Rng::seed(seed as u32);
         Self {
-            rng: StdRng::seed_from_u64(seed),
             row_count,
             verbose,
             verification: VerificationData {
@@ -415,12 +462,12 @@ impl DataGenerator {
     }
 
     fn random_date(&mut self, year_start: i32, year_end: i32) -> String {
-        let year = self.rng.gen_range(year_start..=year_end);
-        let month = self.rng.gen_range(1..=12);
+        let year = Rng::gen_range_i32(year_start, year_end);
+        let month = Rng::gen_range_i32(1, 12);
         let day = match month {
-            2 => self.rng.gen_range(1..=28),
-            4 | 6 | 9 | 11 => self.rng.gen_range(1..=30),
-            _ => self.rng.gen_range(1..=31),
+            2 => Rng::gen_range_i32(1, 28),
+            4 | 6 | 9 | 11 => Rng::gen_range_i32(1, 30),
+            _ => Rng::gen_range_i32(1, 31),
         };
         format!("{:04}-{:02}-{:02}", year, month, day)
     }
@@ -443,15 +490,15 @@ impl DataGenerator {
             "ut",
             "labore",
         ];
-        let word_count = self.rng.gen_range(3..=10);
+        let word_count = Rng::gen_range_usize(3, 10);
         let mut text: Vec<String> = (0..word_count)
-            .map(|_| words[self.rng.gen_range(0..words.len())].to_string())
+            .map(|_| words[Rng::gen_range_usize(0, words.len() - 1)].to_string())
             .collect();
 
-        if with_special_chars && self.rng.gen_bool(0.1) {
+        if with_special_chars && Rng::gen_bool(0.1) {
             // Add some special characters occasionally
             let specials = ["can't", "won't", "it's", "O'Brien", "Smith & Co"];
-            text.push(specials[self.rng.gen_range(0..specials.len())].to_string());
+            text.push(specials[Rng::gen_range_usize(0, specials.len() - 1)].to_string());
         }
 
         text.join(" ")
@@ -470,11 +517,11 @@ impl DataGenerator {
         )?;
 
         for i in 1..=self.row_count {
-            let first = FIRST_NAMES[self.rng.gen_range(0..FIRST_NAMES.len())];
-            let last = LAST_NAMES[self.rng.gen_range(0..LAST_NAMES.len())];
+            let first = FIRST_NAMES[Rng::gen_range_usize(0, FIRST_NAMES.len() - 1)];
+            let last = LAST_NAMES[Rng::gen_range_usize(0, LAST_NAMES.len() - 1)];
             let name = format!("{} {}", first, last);
 
-            let email_domain = EMAIL_DOMAINS[self.rng.gen_range(0..EMAIL_DOMAINS.len())];
+            let email_domain = EMAIL_DOMAINS[Rng::gen_range_usize(0, EMAIL_DOMAINS.len() - 1)];
             let email = format!(
                 "{}.{}{}@{}",
                 first.to_lowercase(),
@@ -483,14 +530,14 @@ impl DataGenerator {
                 email_domain
             );
 
-            let (city, state) = CITIES[self.rng.gen_range(0..CITIES.len())];
-            let country = COUNTRIES[self.rng.gen_range(0..COUNTRIES.len())];
+            let (city, state) = CITIES[Rng::gen_range_usize(0, CITIES.len() - 1)];
+            let country = COUNTRIES[Rng::gen_range_usize(0, COUNTRIES.len() - 1)];
             let signup_date = self.random_date(2020, 2025);
-            let is_active = if self.rng.gen_bool(0.85) { 1 } else { 0 };
-            let credit_score = self.rng.gen_range(300..=850);
+            let is_active = if Rng::gen_bool(0.85) { 1 } else { 0 };
+            let credit_score = Rng::gen_range_i32(300, 850);
 
             // ~20% have notes
-            let notes = if self.rng.gen_bool(0.2) {
+            let notes = if Rng::gen_bool(0.2) {
                 self.verification.customers_with_notes += 1;
                 Self::escape_csv(&self.random_text(true))
             } else {
@@ -568,23 +615,23 @@ impl DataGenerator {
         let subcategory_map: HashMap<&str, &[&str]> = SUBCATEGORIES.iter().cloned().collect();
 
         for i in 1..=count {
-            let adj = PRODUCT_ADJECTIVES[self.rng.gen_range(0..PRODUCT_ADJECTIVES.len())];
-            let noun = PRODUCT_NOUNS[self.rng.gen_range(0..PRODUCT_NOUNS.len())];
+            let adj = PRODUCT_ADJECTIVES[Rng::gen_range_usize(0, PRODUCT_ADJECTIVES.len() - 1)];
+            let noun = PRODUCT_NOUNS[Rng::gen_range_usize(0, PRODUCT_NOUNS.len() - 1)];
             let name = format!("{} {} {}", adj, noun, i);
 
-            let category = CATEGORIES[self.rng.gen_range(0..CATEGORIES.len())];
+            let category = CATEGORIES[Rng::gen_range_usize(0, CATEGORIES.len() - 1)];
             let subcats = subcategory_map.get(category).unwrap();
-            let subcategory = subcats[self.rng.gen_range(0..subcats.len())];
+            let subcategory = subcats[Rng::gen_range_usize(0, subcats.len() - 1)];
 
-            let price: f64 = self.rng.gen_range(0.99..=9999.99);
+            let price: f64 = Rng::gen_range_f64(0.99, 9999.99);
             let price = (price * 100.0).round() / 100.0;
-            let cost = (price * self.rng.gen_range(0.5..=0.9) * 100.0).round() / 100.0;
-            let quantity_in_stock = self.rng.gen_range(0..=10000);
-            let is_discontinued = if self.rng.gen_bool(0.05) { 1 } else { 0 };
+            let cost = (price * Rng::gen_range_f64(0.5, 0.9) * 100.0).round() / 100.0;
+            let quantity_in_stock = Rng::gen_range_usize(0, 10000);
+            let is_discontinued = if Rng::gen_bool(0.05) { 1 } else { 0 };
             let created_date = self.random_date(2018, 2025);
 
             // ~10% have description
-            let description = if self.rng.gen_bool(0.9) {
+            let description = if Rng::gen_bool(0.9) {
                 Self::escape_csv(&self.random_text(false))
             } else {
                 String::new()
@@ -647,24 +694,24 @@ impl DataGenerator {
 
         for i in 1..=count {
             // Pareto distribution: 80% of orders from 20% of customers
-            let customer_id = if self.rng.gen_bool(0.8) {
+            let customer_id = if Rng::gen_bool(0.8) {
                 // Top 20% of customers
-                self.rng.gen_range(1..=(self.row_count / 5).max(1))
+                Rng::gen_range_usize(1, (self.row_count / 5).max(1))
             } else {
-                self.rng.gen_range(1..=self.row_count)
+                Rng::gen_range_usize(1, self.row_count)
             };
 
             *customer_order_counts.entry(customer_id).or_insert(0) += 1;
 
             let order_date = self.random_date(2023, 2025);
-            let status = ORDER_STATUSES[self.rng.gen_range(0..ORDER_STATUSES.len())];
-            let total_amount: f64 = self.rng.gen_range(10.0..=5000.0);
+            let status = ORDER_STATUSES[Rng::gen_range_usize(0, ORDER_STATUSES.len() - 1)];
+            let total_amount: f64 = Rng::gen_range_f64(10.0, 5000.0);
             let total_amount = (total_amount * 100.0).round() / 100.0;
-            let discount_percent = [0, 5, 10, 15, 20, 25][self.rng.gen_range(0..6)];
-            let shipping_method = SHIPPING_METHODS[self.rng.gen_range(0..SHIPPING_METHODS.len())];
+            let discount_percent = [0, 5, 10, 15, 20, 25][Rng::gen_range_usize(0, 5)];
+            let shipping_method = SHIPPING_METHODS[Rng::gen_range_usize(0, SHIPPING_METHODS.len() - 1)];
 
             // ~50% have notes
-            let notes = if self.rng.gen_bool(0.5) {
+            let notes = if Rng::gen_bool(0.5) {
                 Self::escape_csv(&self.random_text(false))
             } else {
                 String::new()
@@ -733,10 +780,10 @@ impl DataGenerator {
         let order_count = order_info.len();
 
         for i in 1..=count {
-            let order_id = self.rng.gen_range(1..=order_count);
-            let product_id = self.rng.gen_range(1..=product_count);
-            let quantity = self.rng.gen_range(1..=10);
-            let unit_price: f64 = self.rng.gen_range(5.0..=500.0);
+            let order_id = Rng::gen_range_usize(1, order_count);
+            let product_id = Rng::gen_range_usize(1, product_count);
+            let quantity = Rng::gen_range_usize(1, 10);
+            let unit_price: f64 = Rng::gen_range_f64(5.0, 500.0);
             let unit_price = (unit_price * 100.0).round() / 100.0;
             let line_total = (quantity as f64 * unit_price * 100.0).round() / 100.0;
 
@@ -768,21 +815,21 @@ impl DataGenerator {
         let product_count = self.verification.product_count;
 
         for i in 1..=count {
-            let customer_id = self.rng.gen_range(1..=self.row_count);
-            let product_id = self.rng.gen_range(1..=product_count);
-            let rating = self.rng.gen_range(1..=5);
+            let customer_id = Rng::gen_range_usize(1, self.row_count);
+            let product_id = Rng::gen_range_usize(1, product_count);
+            let rating = Rng::gen_range_i32(1, 5);
             let review_date = self.random_date(2023, 2025);
             let title = Self::escape_csv(&self.random_text(false));
 
             // ~85% have body
-            let body = if self.rng.gen_bool(0.85) {
+            let body = if Rng::gen_bool(0.85) {
                 self.verification.reviews_with_body += 1;
                 Self::escape_csv(&self.random_text(true))
             } else {
                 String::new()
             };
 
-            let helpful_votes = self.rng.gen_range(0..=1000);
+            let helpful_votes = Rng::gen_range_usize(0, 1000);
 
             // Track verification data
             *self.verification.rating_counts.entry(rating).or_insert(0) += 1;
@@ -2055,13 +2102,8 @@ fn write_metadata(base_path: &Path, seed: u64, rows: usize, v: &VerificationData
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Determine seed
-    let seed = args.seed.unwrap_or_else(|| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    });
+    // Determine seed: CLI --seed or (time ^ pid)
+    let seed = args.seed.unwrap_or_else(default_seed);
 
     println!("TSQ - Test SQL Query Generator for sqawk");
     println!("=========================================");

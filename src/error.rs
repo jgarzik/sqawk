@@ -4,11 +4,9 @@
 //! It provides a comprehensive error handling system that categorizes
 //! different failure modes, supports error propagation, and supplies
 //! helpful error messages to users.
-//!
-//! The module uses thiserror to minimize boilerplate code and create
-//! a consistent error handling approach throughout the codebase.
 
-use thiserror::Error;
+use std::error::Error;
+use std::fmt;
 
 /// SqawkError represents all possible errors that can occur in the sqawk application
 ///
@@ -21,18 +19,15 @@ use thiserror::Error;
 ///
 /// Each variant includes descriptive error messages to help users understand
 /// and troubleshoot problems.
-#[derive(Error, Debug)]
+#[derive(Debug)]
 pub enum SqawkError {
     /// Error during file system operations (reading/writing files)
-    #[error("I/O error: {0}")]
-    IoError(#[from] std::io::Error),
+    IoError(std::io::Error),
 
     /// Error while parsing or processing delimited file data
-    #[error("File parsing error: {0}")]
-    CsvError(#[from] csv::Error),
+    CsvError(csv::Error),
 
     /// Enhanced CSV parsing error with file location information
-    #[error("CSV parse error in {file} at line {line}: {error}")]
     CsvParseError {
         file: String,
         line: usize,
@@ -40,44 +35,91 @@ pub enum SqawkError {
     },
 
     /// Error during SQL query parsing with sqlparser
-    #[error("SQL parsing error: {0}")]
-    SqlParseError(#[from] sqlparser::parser::ParserError),
+    SqlParseError(sqlparser::parser::ParserError),
 
     /// Error when a referenced table doesn't exist
-    #[error("Table '{0}' not found")]
     TableNotFound(String),
 
     /// Error when trying to create a table that already exists
-    #[error("Table '{0}' already exists")]
     TableAlreadyExists(String),
 
     /// Error when a file doesn't exist
-    #[error("File not found: {0}")]
     FileNotFound(String),
 
     /// Error when a table doesn't have an associated file path
-    #[error("Table '{0}' has no associated file path")]
     NoFilePath(String),
 
     /// Error when a referenced column doesn't exist in a table
-    #[error("Column '{0}' not found")]
     ColumnNotFound(String),
 
     /// Error for invalid file=table specifications
-    #[error("Invalid file specification: {0}")]
     InvalidFileSpec(String),
 
     /// Error for SQL features that aren't implemented yet
-    #[error("Unsupported SQL feature: {0}")]
     UnsupportedSqlFeature(String),
 
     /// Error for semantically invalid SQL queries
-    #[error("Invalid SQL query: {0}")]
     InvalidSqlQuery(String),
 
     /// Error in VM execution
-    #[error("VM execution error: {0}")]
     VmError(String),
+}
+
+impl fmt::Display for SqawkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SqawkError::IoError(e) => write!(f, "I/O error: {}", e),
+            SqawkError::CsvError(e) => write!(f, "File parsing error: {}", e),
+            SqawkError::CsvParseError { file, line, error } => {
+                write!(f, "CSV parse error in {} at line {}: {}", file, line, error)
+            }
+            SqawkError::SqlParseError(e) => write!(f, "SQL parsing error: {}", e),
+            SqawkError::TableNotFound(name) => write!(f, "Table '{}' not found", name),
+            SqawkError::TableAlreadyExists(name) => write!(f, "Table '{}' already exists", name),
+            SqawkError::FileNotFound(path) => write!(f, "File not found: {}", path),
+            SqawkError::NoFilePath(name) => {
+                write!(f, "Table '{}' has no associated file path", name)
+            }
+            SqawkError::ColumnNotFound(name) => write!(f, "Column '{}' not found", name),
+            SqawkError::InvalidFileSpec(spec) => write!(f, "Invalid file specification: {}", spec),
+            SqawkError::UnsupportedSqlFeature(feature) => {
+                write!(f, "Unsupported SQL feature: {}", feature)
+            }
+            SqawkError::InvalidSqlQuery(msg) => write!(f, "Invalid SQL query: {}", msg),
+            SqawkError::VmError(msg) => write!(f, "VM execution error: {}", msg),
+        }
+    }
+}
+
+impl Error for SqawkError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            SqawkError::IoError(e) => Some(e),
+            SqawkError::CsvError(e) => Some(e),
+            SqawkError::SqlParseError(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+// From implementations for automatic error conversion (replaces #[from])
+
+impl From<std::io::Error> for SqawkError {
+    fn from(err: std::io::Error) -> Self {
+        SqawkError::IoError(err)
+    }
+}
+
+impl From<csv::Error> for SqawkError {
+    fn from(err: csv::Error) -> Self {
+        SqawkError::CsvError(err)
+    }
+}
+
+impl From<sqlparser::parser::ParserError> for SqawkError {
+    fn from(err: sqlparser::parser::ParserError) -> Self {
+        SqawkError::SqlParseError(err)
+    }
 }
 
 // Custom implementation of PartialEq for SqawkError
