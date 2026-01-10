@@ -4,7 +4,6 @@
 //! covered by the focused test modules.
 
 use crate::helpers::create_temp_dir;
-use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 
@@ -17,7 +16,7 @@ fn test_sequential_sql_statements() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(&file_path, content)?;
 
     // Execute multiple statements with sequential dependencies
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("INSERT INTO people (id, name, age) VALUES (4, 'David', 40)")
         .arg("-s")
@@ -45,7 +44,7 @@ fn test_is_null_operator() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(&file_path, content)?;
 
     // Test IS NULL operator
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM null_test WHERE department IS NULL")
         .arg(file_path.to_str().unwrap())
@@ -56,7 +55,7 @@ fn test_is_null_operator() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicate::str::contains("3,Charlie,"));
 
     // Test IS NOT NULL operator
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM null_test WHERE name IS NOT NULL")
         .arg(file_path.to_str().unwrap())

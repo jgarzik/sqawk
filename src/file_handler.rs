@@ -14,6 +14,8 @@ use crate::csv_handler::CsvHandler;
 use crate::database::Database;
 use crate::delim_handler::DelimHandler;
 use crate::error::{SqawkError, SqawkResult};
+use crate::storage::mmap::MmapStorage;
+use crate::storage::Storage;
 use crate::table::Table;
 
 /// Enum representing different file formats supported by sqawk
@@ -117,19 +119,24 @@ impl FileHandler {
         let file_path_str = file_path.to_string_lossy().to_string();
 
         // First, check if the table already exists in the database
-        // This could happen if it was defined through CLI table definitions
-        let existing_schema;
+        // This could happen if it was defined through CLI table definitions (--tabledef)
+        let predefined_columns: Option<Vec<String>>;
         {
             // Create a temporary scope for the database borrow
             let db = self.database_mut();
-            existing_schema = db.has_table(&table_name);
+            predefined_columns = if db.has_table(&table_name) {
+                // Get the predefined column names to use instead of auto-detected ones
+                db.get_table(&table_name).ok().map(|t| t.columns().to_vec())
+            } else {
+                None
+            };
         }
 
         // Show verbose output if needed
         let verbose = self.config.verbose();
-        if existing_schema && verbose {
+        if predefined_columns.is_some() && verbose {
             println!(
-                "Table '{}' already exists in database, loading data into existing schema",
+                "Table '{}' has predefined schema, using those column names",
                 table_name
             );
         }
@@ -140,21 +147,55 @@ impl FileHandler {
         // Column definitions now come exclusively from Database
         // No need for custom columns logic here anymore
 
-        // Create the table based on the format
-        let table = match format {
-            FileFormat::Csv => {
-                // Load the table from the CSV file, no custom columns since we use Database schemas
-                self.csv_handler.load_csv(file_spec, None, None)?
+        // Determine delimiter for this file
+        // If -F flag is provided, always use it (overrides format detection)
+        let delimiter_str = if let Some(sep) = self.config.field_separator() {
+            sep
+        } else {
+            match format {
+                FileFormat::Csv => ",".to_string(),
+                FileFormat::Delimited => "\t".to_string(),
             }
-            FileFormat::Delimited => {
-                let delimiter = self
-                    .config
-                    .field_separator()
-                    .unwrap_or_else(|| "\t".to_string());
-                // No custom columns since we use Database schemas
-                self.delim_handler
-                    .load_delimited(file_spec, &delimiter, None)?
+        };
+        let delimiter_byte = delimiter_str.as_bytes()[0];
+
+        // Try to use mmap for on-disk files (zero-copy loading)
+        // Only use mmap if the file exists and is a regular file
+        let table = if file_path.is_file() {
+            // Use memory-mapped storage for zero-copy access
+            // Pass predefined columns so mmap treats first row as data when appropriate
+            match MmapStorage::open_with_columns(
+                &file_path,
+                delimiter_byte,
+                predefined_columns.clone(),
+            ) {
+                Ok(mmap_storage) => {
+                    if verbose {
+                        println!("Using mmap storage for table '{}'", table_name);
+                    }
+                    let columns = mmap_storage.columns().to_vec();
+                    Table::with_storage(
+                        &table_name,
+                        columns,
+                        Some(file_path.clone()),
+                        delimiter_str,
+                        Storage::Mmap(mmap_storage),
+                    )
+                }
+                Err(e) => {
+                    // Fall back to regular loading if mmap fails
+                    if verbose {
+                        println!(
+                            "Mmap failed for '{}', falling back to regular loading: {}",
+                            table_name, e
+                        );
+                    }
+                    self.load_file_regular(file_spec, &format, &predefined_columns)?
+                }
             }
+        } else {
+            // Stdin or other non-file source - use regular loading
+            self.load_file_regular(file_spec, &format, &predefined_columns)?
         };
 
         // Now that we have the table, we can update the database without borrowing conflicts
@@ -162,12 +203,15 @@ impl FileHandler {
             // Create a new scope for database operations
             let db = self.database_mut();
 
-            // Handle existing schema if needed
-            if existing_schema {
-                // For now, we'll replace it - in the future we might want to handle this
-                // more gracefully with schema validation and merging
+            // Handle existing schema if needed (from --tabledef)
+            if predefined_columns.is_some() {
+                // Remove the placeholder table created by --tabledef
+                // We're replacing it with the actual table containing data
                 if verbose {
-                    println!("Replacing existing table '{}' with loaded data", table_name);
+                    println!(
+                        "Replacing predefined schema for '{}' with loaded data",
+                        table_name
+                    );
                 }
                 db.remove_table(&table_name);
             }
@@ -177,6 +221,32 @@ impl FileHandler {
         }
 
         Ok(Some((table_name, file_path_str)))
+    }
+
+    /// Load a file using the regular (non-mmap) method
+    ///
+    /// This is the fallback method used when mmap is not available or fails.
+    fn load_file_regular(
+        &self,
+        file_spec: &str,
+        format: &FileFormat,
+        predefined_columns: &Option<Vec<String>>,
+    ) -> SqawkResult<Table> {
+        match format {
+            FileFormat::Csv => {
+                // Load the table from the CSV file
+                self.csv_handler
+                    .load_csv(file_spec, predefined_columns.clone(), None)
+            }
+            FileFormat::Delimited => {
+                let delimiter = self
+                    .config
+                    .field_separator()
+                    .unwrap_or_else(|| "\t".to_string());
+                self.delim_handler
+                    .load_delimited(file_spec, &delimiter, predefined_columns.clone())
+            }
+        }
     }
 
     /// Parse a file specification into a table name and path
@@ -238,55 +308,6 @@ impl FileHandler {
         // SAFETY: The caller of `new` ensures the database outlives this FileHandler
         let db = unsafe { &*self.database };
         db.get_table(table_name)
-    }
-
-    /// Get a mutable reference to a table by name
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table to retrieve
-    ///
-    /// # Returns
-    /// * `SqawkResult<&mut Table>` - Mutable reference to the requested table
-    pub fn get_table_mut(&mut self, table_name: &str) -> SqawkResult<&mut Table> {
-        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
-        let db = unsafe { &mut *self.database };
-        db.get_table_mut(table_name)
-    }
-
-    /// Add a table to the collection
-    ///
-    /// # Arguments
-    /// * `name` - Name of the table
-    /// * `table` - Table to add
-    ///
-    /// # Returns
-    /// * `SqawkResult<()>` - Result of the operation
-    pub fn add_table(&mut self, name: String, mut table: Table) -> SqawkResult<()> {
-        // Check if the table has a file path before adding and log information
-        if let Some(path) = table.file_path() {
-            if self.config.verbose() {
-                println!("Adding table '{}' with file path: {:?}", name, path);
-            }
-
-            // Make absolute path if necessary (needed for CREATE TABLE with relative paths)
-            if !path.is_absolute() {
-                // Get current directory
-                if let Ok(mut cur_dir) = std::env::current_dir() {
-                    // Join with the relative path
-                    cur_dir.push(path.clone());
-                    if self.config.verbose() {
-                        println!("Converting to absolute path: {:?}", cur_dir);
-                    }
-                    // Update the file path in the table
-                    table.set_file_path(cur_dir);
-                }
-            }
-        } else if self.config.verbose() {
-            println!("Adding table '{}' with NO file path", name);
-        }
-
-        // Add the table to the database
-        self.database_mut().add_table(name, table)
     }
 
     /// Get all table names

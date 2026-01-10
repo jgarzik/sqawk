@@ -4,6 +4,7 @@
 //! It facilitates SQL querying against in-memory CSV tables.
 
 pub mod aggregate;
+pub mod capacity;
 pub mod cli;
 pub mod config;
 pub mod csv_handler;
@@ -13,6 +14,6 @@ pub mod error;
 pub mod file_handler;
 pub mod repl;
 pub mod sql_executor;
-pub mod string_functions;
+pub mod storage;
 pub mod table;
 pub mod vm;

@@ -2,7 +2,7 @@
 //!
 //! This file contains tests for the SQL UPDATE statement.
 
-use crate::helpers::{create_temp_dir, prepare_test_file};
+use crate::helpers::{create_custom_csv, create_temp_dir};
 
 use std::fs;
 
@@ -10,10 +10,14 @@ use std::fs;
 fn test_update_with_where() -> Result<(), Box<dyn std::error::Error>> {
     // This test verifies the UPDATE functionality with a WHERE clause
     let temp_dir = create_temp_dir()?;
-    let file_path = prepare_test_file(temp_dir.path())?;
+    let file_path = create_custom_csv(
+        temp_dir.path(),
+        "people.csv",
+        "id,name,age\n1,Alice,32\n2,Bob,25\n3,Charlie,35\n",
+    )?;
 
     // First verify we have initial data
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM people")
         .arg(file_path.to_str().unwrap());
@@ -25,7 +29,7 @@ fn test_update_with_where() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicates::str::contains("3,Charlie,35"));
 
     // Now execute UPDATE with WHERE
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("UPDATE people SET age = 31 WHERE name = 'Alice'")
         .arg("-s")
@@ -55,10 +59,14 @@ fn test_update_with_where() -> Result<(), Box<dyn std::error::Error>> {
 fn test_update_all_rows() -> Result<(), Box<dyn std::error::Error>> {
     // This test verifies the UPDATE functionality without a WHERE clause (updates all rows)
     let temp_dir = create_temp_dir()?;
-    let file_path = prepare_test_file(temp_dir.path())?;
+    let file_path = create_custom_csv(
+        temp_dir.path(),
+        "people.csv",
+        "id,name,age\n1,Alice,32\n2,Bob,25\n3,Charlie,35\n",
+    )?;
 
     // First verify we have initial data
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM people")
         .arg(file_path.to_str().unwrap());
@@ -69,7 +77,7 @@ fn test_update_all_rows() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicates::str::contains("1,Alice,32"));
 
     // Now execute UPDATE without WHERE
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("UPDATE people SET age = 40") // Update all ages to 40
         .arg("-s")
@@ -99,10 +107,14 @@ fn test_update_all_rows() -> Result<(), Box<dyn std::error::Error>> {
 fn test_update_and_write() -> Result<(), Box<dyn std::error::Error>> {
     // This test verifies that UPDATE with --write flag persists changes to the file
     let temp_dir = create_temp_dir()?;
-    let file_path = prepare_test_file(temp_dir.path())?;
+    let file_path = create_custom_csv(
+        temp_dir.path(),
+        "people.csv",
+        "id,name,age\n1,Alice,32\n2,Bob,25\n3,Charlie,35\n",
+    )?;
 
     // Execute UPDATE with --write flag
-    let mut cmd = assert_cmd::Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("UPDATE people SET name = 'Alicia' WHERE name = 'Alice'")
         .arg("-s")

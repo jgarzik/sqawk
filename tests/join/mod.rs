@@ -2,27 +2,14 @@
 //!
 //! Tests for cross joins, inner joins, and multi-table joins.
 
-use assert_cmd::Command;
 use predicates::prelude::*;
-use std::path::PathBuf;
 
-// Helper function to get the path to static test files for joins
-fn get_users_file() -> PathBuf {
-    PathBuf::from("tests/data/users.csv")
-}
-
-fn get_orders_file() -> PathBuf {
-    PathBuf::from("tests/data/orders.csv")
-}
-
-fn get_products_file() -> PathBuf {
-    PathBuf::from("tests/data/products.csv")
-}
+use crate::helpers::{get_orders_file, get_products_file, get_users_file};
 
 #[test]
 fn test_cross_join() -> Result<(), Box<dyn std::error::Error>> {
     // Test a basic cross join between two tables
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM users, orders")
         .arg(get_users_file().to_str().unwrap())
@@ -41,7 +28,7 @@ fn test_cross_join() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicate::str::contains("Jane,jane@example.com"));
 
     // Test with LIMIT separately - this will only show the first user due to how cross join ordering works
-    let mut cmd2 = Command::cargo_bin("sqawk")?;
+    let mut cmd2 = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd2.arg("-s")
         .arg("SELECT * FROM users, orders LIMIT 5")
         .arg(get_users_file().to_str().unwrap())
@@ -55,7 +42,7 @@ fn test_cross_join() -> Result<(), Box<dyn std::error::Error>> {
         .stderr(predicate::str::contains("Applying LIMIT/OFFSET"));
 
     // Test a filtered query to specifically get Jane's data
-    let mut cmd3 = Command::cargo_bin("sqawk")?;
+    let mut cmd3 = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd3.arg("-s")
         .arg("SELECT users.name, users.email FROM users, orders WHERE users.id = 2 LIMIT 1")
         .arg(get_users_file().to_str().unwrap())
@@ -72,7 +59,7 @@ fn test_cross_join() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_inner_join() -> Result<(), Box<dyn std::error::Error>> {
     // Test an inner join between users and orders using WHERE condition
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM users, orders WHERE users.id = orders.user_id")
         .arg(get_users_file().to_str().unwrap())
@@ -104,7 +91,7 @@ fn test_inner_join() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_inner_join_with_projection() -> Result<(), Box<dyn std::error::Error>> {
     // Test an inner join with column projection
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT users.name, orders.product_id, orders.date FROM users, orders WHERE users.id = orders.user_id")
         .arg(get_users_file().to_str().unwrap())
@@ -126,7 +113,7 @@ fn test_inner_join_with_projection() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_three_table_join() -> Result<(), Box<dyn std::error::Error>> {
     // Test a three-way join between users, orders, and products
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT users.name, products.name, products.price, orders.date FROM users, orders, products WHERE orders.user_id = users.id AND orders.product_id = products.product_id")
         .arg(get_users_file().to_str().unwrap())
@@ -151,7 +138,7 @@ fn test_three_table_join() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_join_with_additional_filtering() -> Result<(), Box<dyn std::error::Error>> {
     // Test a join with additional non-join filtering in the WHERE clause
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT users.name, products.name, products.price FROM users, orders, products WHERE users.id = orders.user_id AND products.product_id = orders.product_id AND products.price > 500")
         .arg(get_users_file().to_str().unwrap())
@@ -192,7 +179,7 @@ fn test_join_order_preservation() -> Result<(), Box<dyn std::error::Error>> {
     // Test that join result order is preserved based on input order
     // This test verifies that the order of rows in the result set
 
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT users.name, orders.id FROM users, orders WHERE users.id = orders.user_id")
         .arg(get_users_file().to_str().unwrap())

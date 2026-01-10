@@ -1,34 +1,46 @@
 [package]
 name = "sqawk"
-version = "0.1.1"
+version = "0.8.0"
 edition = "2021"
 authors = ["Jeff Garzik <jgarzik@pobox.com>"]
 description = "An SQL-based command-line tool for processing delimiter-separated files (CSV, TSV, etc.), inspired by awk"
 license = "MIT"
 repository = "https://github.com/jgarzik/sqawk"
 homepage = "https://github.com/jgarzik/sqawk"
-documentation = "https://github.com/jgarzik/sqawk"
 readme = "README.md"
 keywords = ["csv", "tsv", "sql", "delimited", "awk"]
-categories = ["command-line-utilities", "database", "text-processing"]
+categories = ["command-line-utilities", "text-processing", "parser-implementations"]
 # Minimum version of Rust required
-rust-version = "1.65.0"
+rust-version = "1.70.0"
+exclude = ["tests/", "doc/", ".github/", "CLAUDE.md"]
 
 [dependencies]
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
 sqlparser = "0.36"
-csv = "1.2"
-anyhow = "1.0"
-thiserror = "1.0"
-regex = "1.9"
+csv = "1"
+anyhow = "1"
+regex = "1"
+memmap2 = "0.9"
+libc = "0.2"
+tempfile = "3"
 
-rustyline = "15.0.0"
+rustyline = "15"
 
 [dev-dependencies]
-assert_cmd = "2.0"
-predicates = "3.0"
-tempfile = "3.8"
+assert_cmd = "2"
+predicates = "3"
+
+[profile.release]
+lto = true
+
+[profile.profiling]
+inherits = "release"
+debug = true
 
 [[bin]]
 name = "sqawk"
 path = "src/main.rs"
+
+[[bin]]
+name = "tsq"
+path = "src/tsq.rs"

@@ -9,58 +9,25 @@
 //! - Table joins (cross joins and inner joins via WHERE conditions)
 //! - Column resolution with qualified names (table.column)
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 
 use anyhow::Result;
 
-/// Represents a reference to a column, which can be qualified with a table name
-///
-/// This structure is used for handling column references in SQL queries,
-/// particularly for supporting table-qualified column names (e.g., "table.column")
-/// which are essential for resolving column names in JOINs and multi-table queries.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ColumnRef {
-    /// Optional table name qualifier
-    /// When present, it specifies the table to which the column belongs
-    pub table_name: Option<String>,
-
-    /// Column name
-    /// The actual name of the column being referenced
-    pub column_name: String,
-}
-
-impl ColumnRef {
-    // Removed unused methods
-}
-
 use crate::error::{SqawkError, SqawkResult};
-
-/// A unique identifier for a row in a table
-///
-/// This is used to track rows for transactions and versioning support.
-/// Each row gets a unique ID when inserted into a table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RowId(pub u64);
-
-impl RowId {
-    /// Create a new RowId with the given ID value
-    pub fn new(id: u64) -> Self {
-        RowId(id)
-    }
-
-    /// Get the underlying ID value
-    pub fn value(&self) -> u64 {
-        self.0
-    }
-}
+use crate::storage::Storage;
 
 /// Represents a value in a table cell
 ///
 /// This enum provides the possible data types for a cell value in a table.
 /// It supports the common SQL data types and allows for type conversions
 /// between numeric types (Integer <-> Float) for comparison operations.
+///
+/// String values use `Cow<'static, str>` to support both:
+/// - Owned strings (heap-allocated, from in-memory tables)
+/// - Borrowed strings (zero-copy, from memory-mapped files)
 #[derive(Debug, Clone)]
 pub enum Value {
     /// Represents a NULL or missing value
@@ -69,8 +36,8 @@ pub enum Value {
     Integer(i64),
     /// 64-bit floating point number
     Float(f64),
-    /// UTF-8 string
-    String(String),
+    /// UTF-8 string (owned or borrowed via Cow)
+    String(Cow<'static, str>),
     /// Boolean value (true/false)
     Boolean(bool),
 }
@@ -225,16 +192,437 @@ impl From<&str> for Value {
             _ => {}
         }
 
-        // Default to string
-        Value::String(s.to_string())
+        // Default to owned string
+        Value::String(Cow::Owned(s.to_string()))
+    }
+}
+
+impl From<String> for Value {
+    fn from(s: String) -> Self {
+        // Try to parse as integer first
+        if let Ok(i) = s.parse::<i64>() {
+            return Value::Integer(i);
+        }
+
+        // Try to parse as float
+        if let Ok(fl) = s.parse::<f64>() {
+            return Value::Float(fl);
+        }
+
+        // Try to parse as boolean
+        match s.to_lowercase().as_str() {
+            "true" | "yes" | "1" => return Value::Boolean(true),
+            "false" | "no" | "0" => return Value::Boolean(false),
+            "" => return Value::Null,
+            _ => {}
+        }
+
+        // Default to owned string (avoid extra allocation)
+        Value::String(Cow::Owned(s))
     }
 }
 
 /// Represents a row in a table
 pub type Row = Vec<Value>;
 
-/// Represents an in-memory table
-#[derive(Debug, Clone)]
+// =============================================================================
+// Index-Based Result Types (Phase 4A)
+// =============================================================================
+// These types enable efficient query processing by storing row indices instead
+// of cloning entire rows. Materialization only happens at output time.
+//
+// Note: These types are defined in Phase 4A and will be integrated in Phases 4B-4F.
+// The #[allow(dead_code)] attributes will be removed as each type is adopted.
+
+/// Reference to a row within a specific table
+///
+/// This lightweight struct (16 bytes) replaces cloning entire rows (~100+ bytes).
+/// Used for tracking which rows match query conditions.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RowRef {
+    /// Index of the table in the source table list (for JOINs)
+    pub table_idx: usize,
+    /// Index of the row within that table
+    pub row_idx: usize,
+}
+
+#[allow(dead_code)]
+impl RowRef {
+    /// Create a new row reference
+    pub fn new(table_idx: usize, row_idx: usize) -> Self {
+        Self { table_idx, row_idx }
+    }
+
+    /// Create a row reference for single-table operations (table_idx = 0)
+    pub fn single(row_idx: usize) -> Self {
+        Self {
+            table_idx: 0,
+            row_idx,
+        }
+    }
+}
+
+/// Set of row references for single-table operations
+///
+/// Instead of `Vec<Vec<Value>>` (clones all row data), this stores only
+/// indices into the original table. Memory usage: O(n * 8 bytes) vs O(n * row_size).
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct RowSet<'a> {
+    /// Reference to the source table (borrowed, not owned)
+    source: &'a Table,
+    /// Indices of selected rows (into source.rows)
+    indices: Vec<usize>,
+}
+
+#[allow(dead_code)]
+impl<'a> RowSet<'a> {
+    /// Create a new empty RowSet referencing the given table
+    pub fn new(source: &'a Table) -> Self {
+        Self {
+            source,
+            indices: Vec::new(),
+        }
+    }
+
+    /// Create a RowSet with pre-allocated capacity
+    pub fn with_capacity(source: &'a Table, capacity: usize) -> Self {
+        Self {
+            source,
+            indices: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Add a row index to the set
+    pub fn push(&mut self, row_idx: usize) {
+        self.indices.push(row_idx);
+    }
+
+    /// Get the number of rows in this set
+    pub fn len(&self) -> usize {
+        self.indices.len()
+    }
+
+    /// Check if the set is empty
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+
+    /// Get the source table
+    pub fn source(&self) -> &'a Table {
+        self.source
+    }
+
+    /// Get the row indices
+    pub fn indices(&self) -> &[usize] {
+        &self.indices
+    }
+
+    /// Get a value from a specific row and column (no clone)
+    pub fn get_value(&self, row_idx: usize, col_idx: usize) -> Option<&Value> {
+        let actual_row = *self.indices.get(row_idx)?;
+        self.source.rows().get(actual_row)?.get(col_idx)
+    }
+
+    /// Materialize a single row (clones values - use sparingly)
+    pub fn materialize_row(&self, row_idx: usize) -> Option<Vec<Value>> {
+        let actual_row = *self.indices.get(row_idx)?;
+        self.source.rows().get(actual_row).cloned()
+    }
+
+    /// Iterate over row indices
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.indices.iter().copied()
+    }
+}
+
+/// Row references for multi-table operations (JOINs)
+///
+/// For JOIN operations, we need to track which rows from each table
+/// form a result row. Option<usize> handles NULL rows in outer joins.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct JoinedRowSet<'a> {
+    /// References to source tables (borrowed)
+    sources: Vec<&'a Table>,
+    /// Each entry is row indices from each source table
+    /// Option<usize> allows NULL rows for outer joins
+    row_pairs: Vec<Vec<Option<usize>>>,
+}
+
+#[allow(dead_code)]
+impl<'a> JoinedRowSet<'a> {
+    /// Create a new JoinedRowSet for two tables
+    pub fn new(left: &'a Table, right: &'a Table) -> Self {
+        Self {
+            sources: vec![left, right],
+            row_pairs: Vec::new(),
+        }
+    }
+
+    /// Create with pre-allocated capacity
+    pub fn with_capacity(left: &'a Table, right: &'a Table, capacity: usize) -> Self {
+        Self {
+            sources: vec![left, right],
+            row_pairs: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Add a matched row pair (INNER JOIN)
+    pub fn add_match(&mut self, left_idx: usize, right_idx: usize) {
+        self.row_pairs.push(vec![Some(left_idx), Some(right_idx)]);
+    }
+
+    /// Add unmatched left row with NULL right (LEFT JOIN)
+    pub fn add_left_only(&mut self, left_idx: usize) {
+        self.row_pairs.push(vec![Some(left_idx), None]);
+    }
+
+    /// Add unmatched right row with NULL left (RIGHT JOIN)
+    pub fn add_right_only(&mut self, right_idx: usize) {
+        self.row_pairs.push(vec![None, Some(right_idx)]);
+    }
+
+    /// Get the number of result rows
+    pub fn len(&self) -> usize {
+        self.row_pairs.len()
+    }
+
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.row_pairs.is_empty()
+    }
+
+    /// Get value from a joined row (returns &Value or NULL for outer join misses)
+    pub fn get_value(&self, row_idx: usize, table_idx: usize, col_idx: usize) -> &Value {
+        // Static NULL for outer join misses
+        static NULL_VALUE: Value = Value::Null;
+
+        if let Some(row_pair) = self.row_pairs.get(row_idx) {
+            if let Some(Some(actual_row)) = row_pair.get(table_idx) {
+                if let Some(table) = self.sources.get(table_idx) {
+                    if let Some(row) = table.rows().get(*actual_row) {
+                        if let Some(value) = row.get(col_idx) {
+                            return value;
+                        }
+                    }
+                }
+            }
+        }
+        &NULL_VALUE
+    }
+
+    /// Get the source tables
+    pub fn sources(&self) -> &[&'a Table] {
+        &self.sources
+    }
+
+    /// Materialize a single result row (clones values)
+    pub fn materialize_row(
+        &self,
+        row_idx: usize,
+        left_cols: usize,
+        right_cols: usize,
+    ) -> Option<Vec<Value>> {
+        // Verify row exists
+        let _ = self.row_pairs.get(row_idx)?;
+        let mut result = Vec::with_capacity(left_cols + right_cols);
+
+        // Left table columns
+        for col_idx in 0..left_cols {
+            result.push(self.get_value(row_idx, 0, col_idx).clone());
+        }
+
+        // Right table columns
+        for col_idx in 0..right_cols {
+            result.push(self.get_value(row_idx, 1, col_idx).clone());
+        }
+
+        Some(result)
+    }
+}
+
+/// Unified VM result type - either single-table indices, joined indices, or materialized
+///
+/// This enum allows the VM to work with index-based results throughout query
+/// processing, only materializing to actual values when necessary.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum IndexedResult<'a> {
+    /// Result from single table scan/filter
+    Single(RowSet<'a>),
+    /// Result from JOIN operations
+    Joined(JoinedRowSet<'a>),
+    /// Materialized result (for complex expressions, aggregates, or final output)
+    Materialized(Vec<Vec<Value>>),
+}
+
+#[allow(dead_code)]
+impl<'a> IndexedResult<'a> {
+    /// Get the number of result rows
+    pub fn len(&self) -> usize {
+        match self {
+            IndexedResult::Single(rs) => rs.len(),
+            IndexedResult::Joined(js) => js.len(),
+            IndexedResult::Materialized(rows) => rows.len(),
+        }
+    }
+
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Check if this result is already materialized
+    pub fn is_materialized(&self) -> bool {
+        matches!(self, IndexedResult::Materialized(_))
+    }
+}
+
+/// Lazy row view - provides access to row values without immediate cloning
+///
+/// This struct allows iteration over result rows while deferring value
+/// cloning until actually needed (e.g., for output).
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct LazyRow<'a, 'b> {
+    /// Reference to the indexed result
+    result: &'b IndexedResult<'a>,
+    /// Index within the result
+    row_idx: usize,
+}
+
+#[allow(dead_code)]
+impl<'a, 'b> LazyRow<'a, 'b> {
+    /// Create a new lazy row view
+    pub fn new(result: &'b IndexedResult<'a>, row_idx: usize) -> Self {
+        Self { result, row_idx }
+    }
+
+    /// Get the row index
+    pub fn index(&self) -> usize {
+        self.row_idx
+    }
+
+    /// Materialize this row to owned values (clones - use when needed for output)
+    pub fn materialize(&self) -> Option<Vec<Value>> {
+        match self.result {
+            IndexedResult::Single(rs) => rs.materialize_row(self.row_idx),
+            IndexedResult::Joined(js) => {
+                // For joined rows, we need column counts
+                let left_cols = js.sources().first().map(|t| t.column_count()).unwrap_or(0);
+                let right_cols = js.sources().get(1).map(|t| t.column_count()).unwrap_or(0);
+                js.materialize_row(self.row_idx, left_cols, right_cols)
+            }
+            IndexedResult::Materialized(rows) => rows.get(self.row_idx).cloned(),
+        }
+    }
+}
+
+/// Builder for constructing IndexedResult during VM execution
+///
+/// This builder accumulates row indices during query processing and
+/// produces an IndexedResult at the end.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct IndexedResultBuilder<'a> {
+    /// Source tables being queried
+    sources: Vec<&'a Table>,
+    /// Accumulated row indices (single table: one index per row)
+    single_indices: Vec<usize>,
+    /// Accumulated row pairs (joins: multiple indices per row)
+    join_indices: Vec<Vec<Option<usize>>>,
+    /// Whether this is a join operation
+    is_join: bool,
+}
+
+#[allow(dead_code)]
+impl<'a> IndexedResultBuilder<'a> {
+    /// Create a new builder
+    pub fn new() -> Self {
+        Self {
+            sources: Vec::new(),
+            single_indices: Vec::new(),
+            join_indices: Vec::new(),
+            is_join: false,
+        }
+    }
+
+    /// Add a source table
+    pub fn add_source(&mut self, table: &'a Table) {
+        self.sources.push(table);
+        if self.sources.len() > 1 {
+            self.is_join = true;
+        }
+    }
+
+    /// Add a single row index (for single-table operations)
+    pub fn add_row_single(&mut self, row_idx: usize) {
+        self.single_indices.push(row_idx);
+    }
+
+    /// Add a joined row (for multi-table operations)
+    pub fn add_row_joined(&mut self, indices: Vec<Option<usize>>) {
+        self.join_indices.push(indices);
+    }
+
+    /// Check if any rows have been added
+    pub fn is_empty(&self) -> bool {
+        self.single_indices.is_empty() && self.join_indices.is_empty()
+    }
+
+    /// Get the number of result rows
+    pub fn len(&self) -> usize {
+        if self.is_join {
+            self.join_indices.len()
+        } else {
+            self.single_indices.len()
+        }
+    }
+
+    /// Clear accumulated results (for reuse)
+    pub fn clear(&mut self) {
+        self.single_indices.clear();
+        self.join_indices.clear();
+    }
+
+    /// Build the final IndexedResult
+    pub fn build(self) -> Option<IndexedResult<'a>> {
+        if self.sources.is_empty() {
+            return None;
+        }
+
+        if self.is_join && self.sources.len() >= 2 {
+            let joined = JoinedRowSet {
+                sources: self.sources,
+                row_pairs: self.join_indices,
+            };
+            Some(IndexedResult::Joined(joined))
+        } else if let Some(source) = self.sources.into_iter().next() {
+            let row_set = RowSet {
+                source,
+                indices: self.single_indices,
+            };
+            Some(IndexedResult::Single(row_set))
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> Default for IndexedResultBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// =============================================================================
+// End Index-Based Result Types
+// =============================================================================
+
+/// Represents a table with a storage backend
+#[derive(Debug)]
 pub struct Table {
     /// Name of the table
     name: String,
@@ -245,14 +633,8 @@ pub struct Table {
     /// Map of column names to their indices
     column_map: HashMap<String, usize>,
 
-    /// Rows of data
-    rows: Vec<Row>,
-
-    /// Row IDs to uniquely identify each row
-    row_ids: Vec<RowId>,
-
-    /// Next row ID to assign (increments with each row added)
-    next_row_id: u64,
+    /// Row data storage backend (memory or mmap)
+    storage: Storage,
 
     /// File path associated with this table (for loading or saving)
     file_path: Option<PathBuf>,
@@ -312,15 +694,6 @@ pub struct ColumnDefinition {
     pub data_type: DataType,
 }
 
-/// Sort direction for a column in ORDER BY clause
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SortDirection {
-    /// Sort in ascending order (default)
-    Ascending,
-    /// Sort in descending order
-    Descending,
-}
-
 impl Table {
     /// Create a new table with the given name and column names
     ///
@@ -346,9 +719,7 @@ impl Table {
             name: name.to_string(),
             cols,
             column_map,
-            rows: Vec::new(),
-            row_ids: Vec::new(),
-            next_row_id: 1, // Start with 1 as the first row ID
+            storage: Storage::new_memory(),
             file_path,
             modified: false,
             delimiter: ",".to_string(), // Default to comma delimiter
@@ -365,6 +736,44 @@ impl Table {
         let mut table = Self::new(name, column_names, file_path);
         table.delimiter = delimiter;
         table
+    }
+
+    /// Create a new table with a specific storage backend
+    ///
+    /// This constructor is used for memory-mapped file storage where the
+    /// storage already contains the parsed data.
+    pub fn with_storage(
+        name: &str,
+        column_names: Vec<String>,
+        file_path: Option<PathBuf>,
+        delimiter: String,
+        storage: Storage,
+    ) -> Self {
+        // Create column_map from column names
+        let column_map = column_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+
+        // Create full column metadata objects (default to Text type)
+        let cols = column_names
+            .iter()
+            .map(|name| Column {
+                name: name.clone(),
+                data_type: DataType::Text,
+            })
+            .collect();
+
+        Table {
+            name: name.to_string(),
+            cols,
+            column_map,
+            storage,
+            file_path,
+            modified: false,
+            delimiter,
+        }
     }
 
     /// Create a new table with a schema
@@ -397,9 +806,7 @@ impl Table {
             name: name.to_string(),
             cols,
             column_map,
-            rows: Vec::new(),
-            row_ids: Vec::new(),
-            next_row_id: 1, // Start with 1 as the first row ID
+            storage: Storage::new_memory(),
             file_path,
             modified: true, // Tables created with schema are considered modified
             delimiter: delimiter.unwrap_or_else(|| ",".to_string()),
@@ -439,7 +846,7 @@ impl Table {
     /// of Value enums representing the cell values. This provides read-only
     /// access to the table data for processing or querying.
     pub fn rows(&self) -> &[Row] {
-        &self.rows
+        self.storage.rows()
     }
 
     /// Get the name of the table
@@ -456,7 +863,7 @@ impl Table {
     /// Returns the number of rows in the table. This is useful for
     /// determining the size of the result set or for validation.
     pub fn row_count(&self) -> usize {
-        self.rows.len()
+        self.storage.row_count()
     }
 
     /// Add a row to the table
@@ -482,106 +889,39 @@ impl Table {
             )));
         }
 
-        // Add the row with a new unique row ID
-        let row_id = RowId::new(self.next_row_id);
-        self.next_row_id += 1;
-
-        self.rows.push(row);
-        self.row_ids.push(row_id);
+        // Ensure storage is mutable (converts mmap to memory if needed)
+        self.storage.ensure_mutable();
+        self.storage.push_row(row);
         self.modified = true;
         Ok(())
     }
 
-    /// Add a row without validation for recovery mode
+    /// Add a row by cloning values from a slice
     ///
-    /// This method is used internally by the CSV handler in recovery mode
-    /// to add rows that may have had their structure altered to fix issues,
-    /// such as padding missing fields or truncating extra fields.
-    ///
-    /// # Arguments
-    /// * `row` - Vector of values to add as a new row
-    ///
-    /// # Returns
-    /// * `Ok(())` always succeeds
-    pub fn add_row_recovery(&mut self, row: Row) -> SqawkResult<()> {
-        // No validation, assumes the row has been fixed already
-        // Still assign a unique row ID
-        let row_id = RowId::new(self.next_row_id);
-        self.next_row_id += 1;
-
-        self.rows.push(row);
-        self.row_ids.push(row_id);
-        self.modified = true;
-        Ok(())
-    }
-
-    /// Get a row by its unique row ID
+    /// This method allows reusing a row buffer by cloning values from a slice.
+    /// It validates that the slice length matches the table column count.
     ///
     /// # Arguments
-    /// * `row_id` - The unique identifier for the row
+    /// * `row` - Slice of values to clone and add as a new row
     ///
     /// # Returns
-    /// * `Some(&Row)` if a row with the given ID exists
-    /// * `None` if no row with that ID exists
-    pub fn get_row_by_id(&self, row_id: RowId) -> Option<&Row> {
-        // Find the index of the row with this ID
-        let index = self.row_ids.iter().position(|id| *id == row_id)?;
-        self.rows.get(index)
-    }
-
-    /// Get a mutable reference to a row by its unique row ID
-    ///
-    /// # Arguments
-    /// * `row_id` - The unique identifier for the row
-    ///
-    /// # Returns
-    /// * `Some(&mut Row)` if a row with the given ID exists
-    /// * `None` if no row with that ID exists
-    pub fn get_row_by_id_mut(&mut self, row_id: RowId) -> Option<&mut Row> {
-        // Find the index of the row with this ID
-        let index = self.row_ids.iter().position(|id| *id == row_id)?;
-        self.rows.get_mut(index)
-    }
-
-    /// Get the row ID for a row at a specific index
-    ///
-    /// # Arguments
-    /// * `index` - The index of the row
-    ///
-    /// # Returns
-    /// * `Some(RowId)` if the index is valid
-    /// * `None` if the index is out of bounds
-    pub fn get_row_id_at_index(&self, index: usize) -> Option<RowId> {
-        self.row_ids.get(index).copied()
-    }
-
-    /// Remove a row by its unique row ID
-    ///
-    /// # Arguments
-    /// * `row_id` - The unique identifier for the row to remove
-    ///
-    /// # Returns
-    /// * `true` if a row with the given ID was found and removed
-    /// * `false` if no row with that ID exists
-    pub fn remove_row_by_id(&mut self, row_id: RowId) -> bool {
-        if let Some(index) = self.row_ids.iter().position(|id| *id == row_id) {
-            self.rows.remove(index);
-            self.row_ids.remove(index);
-            self.modified = true;
-            true
-        } else {
-            false
+    /// * `Ok(())` if the row was successfully added
+    /// * `Err` if the slice length doesn't match the table schema
+    pub fn add_row_from_slice(&mut self, row: &[Value]) -> SqawkResult<()> {
+        if row.len() != self.column_count() {
+            return Err(SqawkError::InvalidSqlQuery(format!(
+                "Row has {} columns, but table '{}' has {} columns",
+                row.len(),
+                self.name,
+                self.column_count()
+            )));
         }
-    }
 
-    /// Get all row IDs in this table
-    ///
-    /// This is useful for iterating over all rows by ID.
-    ///
-    /// # Returns
-    /// * A slice containing all row IDs in the table
-    pub fn row_ids(&self) -> &[RowId] {
-        &self.row_ids
+        // Ensure storage is mutable (converts mmap to memory if needed)
+        self.storage.ensure_mutable();
+        self.storage.push_row(row.to_vec());
+        self.modified = true;
+        Ok(())
     }
 
     /// Get the file path associated with this table
@@ -598,20 +938,6 @@ impl Table {
         self.file_path.as_ref()
     }
 
-    /// Set file path for this table
-    ///
-    /// Sets the path to the file associated with this table.
-    /// This is useful for tables created with CREATE TABLE.
-    ///
-    /// # Arguments
-    /// * `path` - The new file path
-    pub fn set_file_path(&mut self, path: PathBuf) {
-        // Note: Verbose logging now happens at the caller level via AppConfig.verbose()
-        self.file_path = Some(path);
-    }
-
-    // The set_verbose method has been removed as part of cleanup
-
     /// Get the delimiter for this table
     ///
     /// Returns the delimiter used for this table.
@@ -621,6 +947,14 @@ impl Table {
     /// * A string reference to the delimiter (always defined, defaults to comma)
     pub fn delimiter(&self) -> &String {
         &self.delimiter
+    }
+
+    /// Set the delimiter for this table
+    ///
+    /// # Arguments
+    /// * `delimiter` - The new delimiter string to use
+    pub fn set_delimiter(&mut self, delimiter: String) {
+        self.delimiter = delimiter;
     }
 
     /// Get the index of a column by name
@@ -648,21 +982,23 @@ impl Table {
     /// * `Ok(())` if the table was successfully printed
     /// * `Err` if there was an error writing to stdout
     pub fn print_to_stdout(&self) -> Result<()> {
+        let delim = &self.delimiter;
+
         // Print header
         let column_names = self.columns();
         for (i, col) in column_names.iter().enumerate() {
             if i > 0 {
-                print!(",");
+                print!("{}", delim);
             }
             print!("{}", col);
         }
         println!();
 
         // Print rows
-        for row in &self.rows {
+        for row in self.rows() {
             for (i, val) in row.iter().enumerate() {
                 if i > 0 {
-                    print!(",");
+                    print!("{}", delim);
                 }
                 print!("{}", val);
             }
@@ -670,37 +1006,6 @@ impl Table {
         }
 
         Ok(())
-    }
-
-    /// Create a new table with a subset of rows matching a predicate
-    ///
-    /// Filters the table rows based on a provided predicate function.
-    /// This is the core implementation of SQL WHERE clause functionality.
-    ///
-    /// # Arguments
-    /// * `predicate` - A function that takes a row reference and returns a boolean
-    ///   indicating whether the row should be included in the result
-    ///
-    /// # Returns
-    /// * A new table containing only the rows that match the predicate
-    pub fn select<F>(&self, predicate: F) -> Self
-    where
-        F: Fn(&Row) -> bool,
-    {
-        let mut result = Table::new_with_delimiter(
-            &self.name,
-            self.columns().to_vec(),
-            None,
-            self.delimiter.clone(),
-        );
-
-        for row in &self.rows {
-            if predicate(row) {
-                result.rows.push(row.clone());
-            }
-        }
-
-        result
     }
 
     /// Replace all rows with a new set
@@ -711,80 +1016,67 @@ impl Table {
     /// # Arguments
     /// * `new_rows` - The new set of rows to replace the existing ones
     pub fn replace_rows(&mut self, new_rows: Vec<Row>) {
-        self.rows = new_rows;
+        // Ensure storage is mutable (converts mmap to memory if needed)
+        self.storage.ensure_mutable();
+        self.storage.replace_rows(new_rows);
         self.modified = true;
     }
 
     /// Add a column to the table with a specified data type
-    ///
-    /// This method adds a new column to the table with the given name and data type.
-    /// It's primarily used when creating tables with specific schema definitions.
-    ///
-    /// # Arguments
-    /// * `name` - Name of the column to add
-    /// * `data_type` - Data type for the column (as a string, e.g., "INT", "TEXT")
-    ///
-    /// # Returns
-    /// * `()` - This method doesn't return a result as it cannot fail
+    #[cfg(test)]
     pub fn add_column(&mut self, name: String, data_type_str: String) {
-        // Map the string data type to our internal DataType enum
         let data_type = match data_type_str.to_uppercase().as_str() {
             "INT" | "INTEGER" => DataType::Integer,
             "FLOAT" | "REAL" | "DOUBLE" => DataType::Float,
             "BOOL" | "BOOLEAN" => DataType::Boolean,
-            _ => DataType::Text, // Default to Text for unknown types
+            _ => DataType::Text,
         };
-
-        // Create a new Column instance
         let column = Column {
             name: name.clone(),
             data_type,
         };
-
-        // Add the column to the table's column list
         self.cols.push(column);
-
-        // Update the column map with the new column's index
         let new_index = self.cols.len() - 1;
         self.column_map.insert(name, new_index);
-
-        // Mark the table as modified
+        // Ensure storage is mutable (converts mmap to memory if needed)
+        self.storage.ensure_mutable();
         self.modified = true;
     }
 
-    /// Update a single value in a specific row and column
-    ///
-    /// # Arguments
-    /// * `row_idx` - The index of the row to update
-    /// * `col_idx` - The index of the column to update
-    /// * `value` - The new value to set
-    ///
-    /// # Returns
-    /// * `Ok(())` if the update was successful
-    /// * `Err` if the row or column index is out of bounds
-    pub fn update_value(
+    /// Add a new column with a default value for all existing rows
+    pub fn add_column_with_default(
         &mut self,
-        row_idx: usize,
-        col_idx: usize,
-        value: Value,
-    ) -> SqawkResult<()> {
-        if row_idx >= self.rows.len() {
-            return Err(SqawkError::InvalidSqlQuery(format!(
-                "Row index {} is out of bounds (table has {} rows)",
-                row_idx,
-                self.rows.len()
-            )));
+        name: String,
+        data_type: DataType,
+        default_value: Value,
+    ) -> crate::error::SqawkResult<()> {
+        let column = Column {
+            name: name.clone(),
+            data_type,
+        };
+        self.cols.push(column);
+        let new_index = self.cols.len() - 1;
+        self.column_map.insert(name, new_index);
+
+        // Ensure storage is mutable (converts mmap to memory if needed)
+        self.storage.ensure_mutable();
+
+        // Add default value to all existing rows
+        if let Some(rows) = self.storage.rows_mut() {
+            for row in rows {
+                row.push(default_value.clone());
+            }
         }
 
-        if col_idx >= self.column_count() {
-            return Err(SqawkError::ColumnNotFound(format!(
-                "Column index {} is out of bounds (table has {} columns)",
-                col_idx,
-                self.column_count()
-            )));
-        }
+        self.modified = true;
+        Ok(())
+    }
 
-        self.rows[row_idx][col_idx] = value;
+    /// Clear all rows from the table (TRUNCATE TABLE)
+    pub fn clear_rows(&mut self) -> crate::error::SqawkResult<()> {
+        // Ensure storage is mutable (converts mmap to memory if needed)
+        self.storage.ensure_mutable();
+        self.storage.replace_rows(Vec::new());
         self.modified = true;
         Ok(())
     }
@@ -797,401 +1089,9 @@ impl Table {
     /// # Returns
     /// * Vec<Vec<String>> - All rows converted to strings
     pub fn rows_as_strings(&self) -> Vec<Vec<String>> {
-        self.rows
+        self.rows()
             .iter()
             .map(|row| row.iter().map(|value| value.to_string()).collect())
             .collect()
-    }
-
-    /// Create a new table with only specified columns
-    ///
-    /// Projects the table to include only the columns specified by their indices.
-    /// This is the core implementation of the SQL SELECT column list functionality,
-    /// allowing queries to specify which columns should be included in the result.
-    ///
-    /// # Arguments
-    /// * `column_indices` - Array of column indices to include in the result table
-    ///
-    /// # Returns
-    /// * `Ok(Table)` containing only the specified columns from the original table
-    /// * `Err` if any column index is out of bounds
-    ///   Create a new table with only specified columns and optional aliases
-    ///
-    /// Projects the table to include only the columns specified by their indices,
-    /// applying any aliases provided.
-    ///
-    /// # Arguments
-    /// * `column_specs` - Array of column indices and optional aliases to include in the result table
-    ///
-    /// # Returns
-    /// * `Ok(Table)` containing only the specified columns from the original table with aliases applied
-    /// * `Err` if any column index is out of bounds
-    pub fn project_with_aliases(
-        &self,
-        column_specs: &[(usize, Option<String>)],
-    ) -> SqawkResult<Self> {
-        // Validate column indices
-        for &(idx, _) in column_specs {
-            if idx >= self.column_count() {
-                return Err(SqawkError::ColumnNotFound(format!(
-                    "Column index {} out of bounds",
-                    idx
-                )));
-            }
-        }
-
-        // Create new column list with aliases where specified
-        let column_names = self.columns();
-        let columns: Vec<String> = column_specs
-            .iter()
-            .map(|&(idx, ref alias)| {
-                if let Some(alias_name) = alias {
-                    alias_name.clone()
-                } else {
-                    column_names[idx].clone()
-                }
-            })
-            .collect();
-
-        let mut result = Table::new(&self.name, columns, self.file_path.clone());
-        result.delimiter = self.delimiter.clone();
-
-        // Project rows
-        for row in &self.rows {
-            let projected_row: Vec<Value> = column_specs
-                .iter()
-                .map(|&(idx, _)| row[idx].clone())
-                .collect();
-
-            result.add_row(projected_row)?;
-        }
-
-        Ok(result)
-    }
-
-    /// Execute a CROSS JOIN with another table
-    ///
-    /// This creates a cartesian product of the two tables.
-    ///
-    /// # Arguments
-    /// * `right` - The right table to join with
-    ///
-    /// # Returns
-    /// * A new table containing the joined data
-    ///
-    /// Perform a cross join between two tables
-    ///
-    /// This method implements the Cartesian product of two tables, combining every row from
-    /// the left table with every row from the right table.
-    ///
-    /// # Arguments
-    /// * `right` - The right-hand table to join with
-    ///
-    /// # Returns
-    /// * A new table containing the cross join result
-    pub fn cross_join(&self, right: &Self) -> SqawkResult<Self> {
-        // Create result columns with proper prefixes
-        let columns = self.create_joined_columns(right);
-
-        // Create a new table to hold the join result
-        let mut result = Table::new("join_result", columns, None);
-        result.delimiter = self.delimiter.clone();
-
-        // Fill with cross-joined rows
-        self.fill_cross_joined_rows(right, &mut result)?;
-
-        Ok(result)
-    }
-
-    /// Perform an INNER JOIN between two tables with a custom condition
-    ///
-    /// This method implements the SQL INNER JOIN operation, which combines rows from
-    /// two tables that satisfy a join condition. The implementation follows a
-    /// two-step approach: first creating a cross join (Cartesian product), then
-    /// filtering the combined rows based on the provided condition.
-    ///
-    /// # Arguments
-    /// * `right` - The right-hand table to join with
-    /// * `join_condition` - A closure that evaluates whether a combined row should be included.
-    ///   The closure receives:
-    ///     - A combined row from both tables
-    ///     - A reference to the combined table (for column lookups)
-    ///
-    ///   The closure returns a boolean indicating whether the row satisfies the join condition
-    ///
-    /// # Returns
-    /// * A new table containing only the rows that satisfy the join condition
-    /// * `Err` if there was an error evaluating the condition or adding rows
-    ///
-    /// # Usage Example
-    ///
-    /// This method is typically used to implement SQL's INNER JOIN operation
-    /// with an ON condition. For example, implementing:
-    ///
-    /// SELECT * FROM employees INNER JOIN departments
-    /// ON employees.dept_id = departments.id
-    ///
-    /// The implementation first finds the column indexes for the join keys,
-    /// then compares the values in those columns for each row combination.
-    pub fn inner_join<F>(&self, right: &Self, join_condition: F) -> SqawkResult<Self>
-    where
-        F: Fn(&[Value], &Self) -> SqawkResult<bool>,
-    {
-        // Step 1: Create the output columns structure - this must be done before creating
-        // the result table to ensure columns from both tables are properly qualified
-        let columns = self.create_joined_columns(right);
-
-        // Step 2: Create a new table to hold the join result
-        let name = format!("{}_inner_join", self.name());
-        let mut result = Table::new(&name, columns, None);
-        result.delimiter = self.delimiter.clone();
-
-        // Step 3: First create the cross join (Cartesian product) to evaluate conditions against
-        // This creates every possible combination of rows from both tables
-        let combined_tables = self.cross_join(right)?;
-
-        // Step 4: Filter the cross join result based on the join condition
-        // This is effectively the ON clause in SQL's "INNER JOIN ... ON" syntax
-        for row in combined_tables.rows().iter() {
-            // Evaluate the condition for this row, which comes from the closure
-            // provided by the SQL executor based on the ON condition
-            if join_condition(row, &combined_tables)? {
-                // Add matching rows to the result table
-                result.add_row(row.clone())?;
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Create column names for a joined table
-    ///
-    /// This function creates a list of qualified column names by prefixing
-    /// each column name with its table name if it doesn't already have a prefix.
-    ///
-    /// # Arguments
-    /// * `right` - The right-hand table for the join
-    ///
-    /// # Returns
-    /// * A vector of qualified column names
-    fn create_joined_columns(&self, right: &Self) -> Vec<String> {
-        let mut columns = Vec::new();
-
-        // Add columns from left table (self) with prefixes
-        self.add_prefixed_columns(&mut columns);
-
-        // Add columns from right table with prefixes
-        right.add_prefixed_columns(&mut columns);
-
-        columns
-    }
-
-    /// Add columns with table name prefixes to a column list
-    ///
-    /// This function adds column names to a list, prefixing them with
-    /// the table name if they don't already have a prefix.
-    ///
-    /// # Arguments
-    /// * `columns` - The column list to add to
-    fn add_prefixed_columns(&self, columns: &mut Vec<String>) {
-        for col in self.columns() {
-            // If the column already has a table prefix, keep it as is
-            // Otherwise, add the table name prefix
-            if col.contains('.') {
-                columns.push(col.clone());
-            } else {
-                columns.push(format!("{}.{}", self.name, col));
-            }
-        }
-    }
-
-    /// Fill a table with cross-joined rows
-    ///
-    /// This function creates rows for a cross join by combining each row
-    /// from the left table with each row from the right table.
-    ///
-    /// # Arguments
-    /// * `right` - The right-hand table for the join
-    /// * `result` - The result table to fill with rows
-    ///
-    /// # Returns
-    /// * Ok(()) if all rows were successfully added
-    /// * Err if there was an error adding a row
-    fn fill_cross_joined_rows(&self, right: &Self, result: &mut Self) -> SqawkResult<()> {
-        // For CROSS JOIN, we include every combination of rows
-        for left_row in self.rows() {
-            for right_row in right.rows() {
-                // Create combined row
-                let new_row = self.combine_rows(left_row, right_row, right.column_count());
-
-                // Add the combined row to the result table
-                result.add_row(new_row)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Combine two rows into a single row
-    ///
-    /// This function combines a row from the left table with a row
-    /// from the right table to create a joined row.
-    ///
-    /// # Arguments
-    /// * `left_row` - A row from the left table
-    /// * `right_row` - A row from the right table
-    /// * `right_column_count` - The number of columns in the right table
-    ///
-    /// # Returns
-    /// * A new combined row
-    fn combine_rows(
-        &self,
-        left_row: &[Value],
-        right_row: &[Value],
-        right_column_count: usize,
-    ) -> Vec<Value> {
-        let mut new_row = Vec::with_capacity(self.column_count() + right_column_count);
-
-        // Add values from left row
-        for i in 0..self.column_count() {
-            new_row.push(left_row.get(i).unwrap_or(&Value::Null).clone());
-        }
-
-        // Add values from right row
-        for i in 0..right_column_count {
-            new_row.push(right_row.get(i).unwrap_or(&Value::Null).clone());
-        }
-
-        new_row
-    }
-
-    /// Remove duplicate rows from the table
-    ///
-    /// This method implements the DISTINCT functionality for SQL queries.
-    /// It creates a new table with the same structure but with duplicate rows removed.
-    /// Two rows are considered identical if all of their column values match exactly.
-    ///
-    /// # Returns
-    /// * A new table with duplicate rows removed
-    pub fn distinct(&self) -> SqawkResult<Self> {
-        // Create a new table with the same structure
-        let column_names = self.columns().to_vec();
-        let mut result = Table::new(&self.name, column_names, self.file_path.clone());
-
-        // Use a vector to track rows we've already seen
-        // We can't use a HashSet directly because Row is Vec<Value> which may not implement Hash
-        let mut seen_rows: Vec<Vec<Value>> = Vec::new();
-
-        for row in &self.rows {
-            // Check if this row is already in our seen rows
-            let is_duplicate = seen_rows.iter().any(|seen_row| {
-                // Two rows are identical if they have the same length and all values match
-                row.len() == seen_row.len() && row.iter().zip(seen_row.iter()).all(|(a, b)| a == b)
-            });
-
-            // If it's not a duplicate, add it to result and to seen rows
-            if !is_duplicate {
-                seen_rows.push(row.clone());
-                result.add_row(row.clone())?;
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Sort the table by one or more columns
-    ///
-    /// This method implements the ORDER BY functionality for SQL queries.
-    /// It takes a list of column indices and their respective sort directions,
-    /// then sorts the table rows accordingly. Sort direction can be either
-    /// ascending (the default) or descending.
-    ///
-    /// # Arguments
-    /// * `sort_columns` - A vector of tuples containing (column_index, sort_direction)
-    ///
-    /// # Returns
-    /// * A new sorted table if successful
-    /// * Error if any column index is invalid
-    pub fn sort(&self, sort_columns: Vec<(usize, SortDirection)>) -> SqawkResult<Self> {
-        // Validate column indices
-        for (col_idx, _) in &sort_columns {
-            if *col_idx >= self.column_count() {
-                return Err(SqawkError::ColumnNotFound(format!(
-                    "Column index {} out of bounds for ORDER BY (table has {} columns)",
-                    col_idx,
-                    self.column_count()
-                )));
-            }
-        }
-
-        // Create a new table with the same structure
-        let mut result = Table::new(&self.name, self.columns().to_vec(), self.file_path.clone());
-
-        // Clone the rows for sorting
-        let mut sorted_rows = self.rows.clone();
-
-        // Sort the rows based on the specified columns and directions
-        sorted_rows.sort_by(|row_a, row_b| {
-            // Compare each sort column in order until a difference is found
-            for &(col_idx, direction) in &sort_columns {
-                // Compare values using our PartialOrd implementation
-                match row_a[col_idx].partial_cmp(&row_b[col_idx]) {
-                    Some(ordering) => {
-                        // If not equal, return the ordering (possibly reversed for DESC)
-                        if ordering != std::cmp::Ordering::Equal {
-                            return match direction {
-                                SortDirection::Ascending => ordering,
-                                SortDirection::Descending => ordering.reverse(),
-                            };
-                        }
-                    }
-                    // If values can't be compared (which shouldn't happen with our implementation),
-                    // continue to the next column
-                    None => continue,
-                }
-            }
-
-            // If all specified columns are equal, maintain stable sort
-            std::cmp::Ordering::Equal
-        });
-
-        // Add the sorted rows to the result table
-        for row in sorted_rows {
-            result.add_row(row)?;
-        }
-
-        Ok(result)
-    }
-
-    /// Limits the number of rows in the table
-    ///
-    /// This method applies LIMIT and OFFSET to the table, returning a new table
-    /// containing at most `limit` rows, starting from the `offset` position.
-    /// This is used to implement the SQL LIMIT and OFFSET clauses.
-    ///
-    /// # Arguments
-    /// * `limit` - The maximum number of rows to include
-    /// * `offset` - The number of rows to skip before starting to include rows (default: 0)
-    ///
-    /// # Returns
-    /// * A new table with the specified limit and offset applied
-    pub fn limit(&self, limit: usize, offset: usize) -> SqawkResult<Self> {
-        // Create a new table with the same structure
-        let mut result = Table::new(&self.name, self.columns().to_vec(), self.file_path.clone());
-
-        // If offset is greater than or equal to the number of rows, return an empty table
-        if offset >= self.rows.len() {
-            return Ok(result);
-        }
-
-        // Calculate the end index, capped at the table size
-        let end = std::cmp::min(offset + limit, self.rows.len());
-
-        // Add rows from offset to end
-        for row in &self.rows[offset..end] {
-            result.add_row(row.clone())?;
-        }
-
-        Ok(result)
     }
 }

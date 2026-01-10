@@ -8,7 +8,9 @@ Sqawk implements a lightweight in-memory database engine that supports SQL opera
 
 1. [Data Model](#data-model)
 2. [Architecture](#architecture)
-3. [Performance Considerations](#performance-considerations)
+3. [File I/O Patterns](#file-io-patterns)
+4. [Storage Backend Architecture](#storage-backend-architecture)
+5. [Performance Considerations](#performance-considerations)
 
 ## Data Model
 
@@ -86,45 +88,124 @@ The file handling system consists of multiple components:
 - Supports tab, colon, pipe, and other custom separators
 - Preserves the original delimiter and format during writeback
 
+## File I/O Patterns
+
+### Atomic File Writes
+
+When saving modified tables back to disk (via the `--write` flag), Sqawk uses an atomic write pattern to ensure data integrity:
+
+1. **Write to Temporary File**: Data is first written to a temporary file in the same directory as the target file
+2. **Sync to Disk**: The temporary file is explicitly synced (`fsync`) to ensure data is durably stored on the physical device
+3. **Atomic Rename**: The temporary file is renamed to the target filename using an atomic rename operation
+
+This pattern provides several safety guarantees:
+
+- **Crash Safety**: If the process crashes during writing, the original file remains intact
+- **Disk Full Protection**: If the disk runs out of space, the original file is preserved
+- **All-or-Nothing Semantics**: Either the complete new file exists, or the original file is unchanged
+
+The temporary file is created in the same directory as the target file to ensure the rename operation is atomic (same filesystem requirement on POSIX systems).
+
+### Delimiter Consistency
+
+Sqawk maintains delimiter consistency between input and output:
+
+- When a file is loaded with a specific delimiter (via `-F` flag or file extension detection), that delimiter is preserved in the table metadata
+- Query results are output using the same delimiter as the source table
+- When files are written back, the original delimiter format is preserved
+
+This ensures that TSV files remain TSV, colon-separated files remain colon-separated, and so on. The principle of least surprise: output format matches input format unless explicitly overridden.
+
+### Output Modes
+
+Sqawk supports two primary output modes:
+
+1. **Stdout Output**: Query results (SELECT) are written to standard output using the source table's delimiter
+2. **File Writeback**: Modified tables (via INSERT, UPDATE, DELETE) are written back to their source files when `--write` is specified
+
+For stdout output, the data is streamed directly without buffering concerns. For file writeback, the atomic write pattern described above is used.
+
+## Storage Backend Architecture
+
+Sqawk supports multiple storage backends for table row data, enabling efficient handling of different data sources:
+
+### Memory Storage (Default for stdin)
+
+The `MemoryStorage` backend stores all row data in heap-allocated memory:
+- Used when reading from stdin or pipes
+- All string values are owned (heap-allocated)
+- Supports all operations including INSERT, UPDATE, DELETE
+- Data is mutable throughout the session
+
+### Mmap Storage (Default for on-disk files)
+
+The `MmapStorage` backend uses memory-mapped files for zero-copy access:
+- Automatically used when loading files from disk
+- String values borrow directly from the mmap'd region (zero allocation)
+- Read-only by default to maintain zero-copy efficiency
+- Converts to MemoryStorage on first write operation
+
+### Automatic Backend Selection
+
+The storage backend is selected automatically based on the data source:
+- **On-disk files**: Uses mmap for zero-copy loading
+- **Stdin/pipes**: Uses traditional in-memory storage
+- **Write operations**: Mmap tables convert to memory on first modification
+
+### Write Operation Behavior
+
+When a table with mmap storage is modified (INSERT, UPDATE, DELETE):
+1. All rows are copied to heap memory (converting Cow::Borrowed to Cow::Owned)
+2. The storage backend switches from Mmap to Memory
+3. Subsequent operations use the in-memory copy
+4. The original file remains unchanged until `--write` is specified
+
+This design provides:
+- Zero-allocation loading for read-only queries
+- Transparent handling of write operations
+- Memory efficiency for large read-only datasets
+
 ## Performance Considerations
 
 Sqawk's in-memory database is optimized for:
 
 - **Fast Loading**: Delimiter-separated files are parsed directly into memory
+- **Zero-Copy Access**: Memory-mapped files enable direct access without allocation overhead
 - **Format Flexibility**: Support for CSV, TSV, and custom-delimited files
 - **Efficient Filtering**: WHERE clauses are applied in a single pass
 - **Low Memory Overhead**: Simple data structures minimize memory usage
 - **Zero Configuration**: No setup required, works directly with files in various formats
 
 For larger datasets, consider:
-- The entire dataset must fit in memory
+- The entire dataset must fit in memory (or be addressable via mmap)
 - Complex queries may require multiple passes over the data
-- Write operations create new copies of the data in memory
+- Write operations on mmap tables trigger a copy to memory
 - Custom delimiters may have slightly different performance characteristics than standard CSV
+- Read-only operations on large files benefit most from mmap storage
 
 ## Join Implementation
 
-The database engine includes support for combining data from multiple tables through joins:
+The database engine supports combining data from multiple tables through SQL-standard join operations.
 
-### Join Engine Design
+### Supported Join Types
 
-- **Cross Join Implementation**: Creates a Cartesian product of all rows
-- **Filter-Based Joins**: Uses WHERE conditions for relationship-based filtering
-- **Multi-table Support**: Handles joining multiple tables in sequence
+- **INNER JOIN**: Returns rows when there is a match in both tables
+- **LEFT OUTER JOIN**: Returns all rows from the left table, with matched rows from the right (or NULLs)
+- **RIGHT OUTER JOIN**: Returns all rows from the right table, with matched rows from the left (or NULLs)
+- **FULL OUTER JOIN**: Returns all rows from both tables, with NULLs where no match exists
+- **CROSS JOIN**: Returns the Cartesian product of both tables
 
-### Column Naming Strategy
+### Join Syntax
 
-To maintain clarity when working with multiple tables:
-
-- **Qualified Naming**: Columns are prefixed with their table names
-- **Consistent Referencing**: A consistent naming convention is applied in multi-table operations
-- **Qualified References**: Column references include table qualifiers in conditions
+- **ON constraints**: Supported for specifying join conditions (`JOIN t2 ON t1.id = t2.id`)
+- **USING constraints**: Not supported
+- **Multi-table joins**: Supports chaining 3+ tables in a single query
 
 ### Technical Implementation
 
-- The join operation first creates a cross product, then applies filters
-- Tables are processed in the order specified
-- The column naming system ensures disambiguation in result sets
+- Joins are compiled to VM bytecode for efficient execution
+- Nested loop algorithm with appropriate NULL handling for outer joins
+- Column references use table qualifiers for disambiguation in result sets
 - Type coercion rules are applied consistently in join conditions
 
 ## Current System Limitations
@@ -132,7 +213,6 @@ To maintain clarity when working with multiple tables:
 The database engine has several architectural limitations:
 
 - **No Index Structure**: All operations perform full table scans
-- **Limited Join Capabilities**: Advanced join syntax not implemented
 - **No Transaction Support**: Operations are applied immediately with no rollback capability
 - **Schema Flexibility**: Types are inferred rather than enforced
 - **No Constraints System**: Referential integrity not enforced

@@ -16,6 +16,8 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
+use tempfile::NamedTempFile;
+
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{Table, Value};
 
@@ -43,6 +45,9 @@ impl CsvHandler {
 
     /// Save a table to a CSV file
     ///
+    /// Uses atomic write pattern: writes to a temporary file first, then renames
+    /// into place. This preserves the original file if writing fails midway.
+    ///
     /// # Arguments
     /// * `table` - The table to save
     /// * `file_path` - The path to the file
@@ -50,25 +55,44 @@ impl CsvHandler {
     /// # Returns
     /// * `SqawkResult<()>` - Result of the operation
     pub fn save_csv(&self, table: &Table, file_path: &Path) -> SqawkResult<()> {
-        // Create a CSV writer
-        let file = File::create(file_path).map_err(SqawkError::IoError)?;
-        let mut writer = csv::Writer::from_writer(file);
+        // Create temp file in the same directory as target (required for atomic rename)
+        let parent = file_path.parent().unwrap_or(Path::new("."));
+        let temp_file = NamedTempFile::new_in(parent).map_err(SqawkError::IoError)?;
 
-        // Write header row
-        writer
-            .write_record(table.columns())
-            .map_err(SqawkError::CsvError)?;
+        // Write data in a scope so the writer is dropped before we call persist
+        {
+            // Create a CSV writer writing to the temp file
+            let mut writer = csv::Writer::from_writer(temp_file.as_file());
 
-        // Write data rows
-        for row in table.rows() {
-            let string_values: Vec<String> = row.iter().map(|value| value.to_string()).collect();
-
+            // Write header row
             writer
-                .write_record(&string_values)
+                .write_record(table.columns())
                 .map_err(SqawkError::CsvError)?;
+
+            // Write data rows
+            for row in table.rows() {
+                let string_values: Vec<String> =
+                    row.iter().map(|value| value.to_string()).collect();
+
+                writer
+                    .write_record(&string_values)
+                    .map_err(SqawkError::CsvError)?;
+            }
+
+            // Flush the CSV writer before it's dropped
+            writer.flush().map_err(SqawkError::IoError)?;
         }
 
-        writer.flush().map_err(SqawkError::IoError)?;
+        // Sync to disk before rename to ensure data durability
+        temp_file
+            .as_file()
+            .sync_all()
+            .map_err(SqawkError::IoError)?;
+
+        // Atomically rename temp file to target path
+        temp_file
+            .persist(file_path)
+            .map_err(|e| SqawkError::IoError(e.error))?;
 
         Ok(())
     }
@@ -111,9 +135,12 @@ impl CsvHandler {
         let file = File::open(&file_path)?;
         let reader = BufReader::new(file);
 
+        // has_headers is true by default - first row is column names
+        let has_headers = true;
+
         // Create a CSV reader with enhanced options
         let mut csv_reader = csv::ReaderBuilder::new()
-            .has_headers(true)
+            .has_headers(has_headers)
             .comment(Some(b'#')) // Support comment lines starting with #
             // Enable flexible mode only if error recovery is requested
             .flexible(true) // Always use flexible mode to allow for skipping errors
@@ -121,7 +148,7 @@ impl CsvHandler {
 
         // Get headers or use custom column names if provided
         let headers = if let Some(columns) = custom_columns {
-            // Use the provided custom column names
+            // Use the provided custom column names (first row will be data)
             columns
         } else {
             // Use column names from the CSV header row
@@ -146,33 +173,39 @@ impl CsvHandler {
         let mut skipped_rows = 0;
         let mut row_number = 0;
 
+        // Reusable row buffer to avoid per-row allocations
+        let column_count = table.column_count();
+        let mut row_buffer = Vec::with_capacity(column_count);
+
         for result in csv_reader.records() {
             row_number += 1;
 
             match result {
                 Ok(record) => {
-                    if should_recover && record.len() != table.column_count() {
-                        // In recovery mode, handle rows with different column counts
-                        let mut row = Vec::new();
+                    // Clear buffer for reuse
+                    row_buffer.clear();
 
-                        // For each column in our table
-                        for i in 0..table.column_count() {
+                    if should_recover && record.len() != column_count {
+                        // In recovery mode, handle rows with different column counts
+                        for i in 0..column_count {
                             if i < record.len() {
                                 // Use the value if it exists
-                                row.push(Value::from(record.get(i).unwrap_or("")));
+                                row_buffer.push(Value::from(record.get(i).unwrap_or("")));
                             } else {
                                 // Pad with null values if we need more
-                                row.push(Value::Null);
+                                row_buffer.push(Value::Null);
                             }
                         }
 
-                        // Now we have a properly sized row, add it without validation
-                        table.add_row_recovery(row)?;
+                        // Now we have a properly sized row, add it by cloning from buffer
+                        table.add_row_from_slice(&row_buffer)?;
                     } else {
                         // Normal path - convert record to a row of values and validate
-                        let row = record.iter().map(Value::from).collect();
+                        for field in record.iter() {
+                            row_buffer.push(Value::from(field));
+                        }
                         // This call can fail if the columns don't match and we're not in recovery mode
-                        if let Err(e) = table.add_row(row) {
+                        if let Err(e) = table.add_row_from_slice(&row_buffer) {
                             if should_recover {
                                 // If we're in recovery mode, log and continue
                                 skipped_rows += 1;

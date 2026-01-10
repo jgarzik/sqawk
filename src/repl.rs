@@ -143,9 +143,27 @@ impl Highlighter for CommandCompleter {
 impl Validator for CommandCompleter {
     fn validate(
         &self,
-        _ctx: &mut validate::ValidationContext,
+        ctx: &mut validate::ValidationContext,
     ) -> rustyline::Result<validate::ValidationResult> {
-        Ok(validate::ValidationResult::Valid(None))
+        let input = ctx.input().trim();
+
+        // Empty input is valid (just press enter)
+        if input.is_empty() {
+            return Ok(validate::ValidationResult::Valid(None));
+        }
+
+        // Dot commands are complete on a single line
+        if input.starts_with('.') {
+            return Ok(validate::ValidationResult::Valid(None));
+        }
+
+        // SQL statements must end with semicolon
+        if input.ends_with(';') {
+            return Ok(validate::ValidationResult::Valid(None));
+        }
+
+        // Otherwise, we need more input (multiline SQL)
+        Ok(validate::ValidationResult::Incomplete)
     }
 }
 

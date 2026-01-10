@@ -16,6 +16,7 @@
    - [Interactive Mode (-i)](#interactive-mode--i)
    - [Write Flag (--write)](#write-flag---write)
    - [Field Separator Option (-F)](#field-separator-option--f)
+   - [Table Definition Option (--tabledef)](#table-definition-option---tabledef)
    - [Verbose Mode (-v)](#verbose-mode--v)
    - [Help (--help)](#help---help)
 5. [Working with Files](#working-with-files)
@@ -24,12 +25,16 @@
    - [Handling Multiple Files](#handling-multiple-files)
    - [File Writeback Behavior](#file-writeback-behavior)
    - [Defining Schemas with CREATE TABLE](#defining-schemas-with-create-table)
-6. [Common Usage Patterns](#common-usage-patterns)
-   - [Data Exploration](#data-exploration)
-   - [Data Cleanup](#data-cleanup)
-   - [Data Transformation](#data-transformation)
-   - [Joining Data from Multiple Files](#joining-data-from-multiple-files)
-   - [Generating Reports](#generating-reports)
+6. [Examples](#examples)
+   - [Basic Queries](#basic-queries)
+   - [Aggregation and Grouping](#aggregation-and-grouping)
+   - [Distinct Values](#distinct-values)
+   - [Joins](#joins)
+   - [Data Modification](#data-modification)
+   - [String Functions](#string-functions)
+   - [System Files](#system-files---tabledef)
+   - [Output Redirection](#output-redirection)
+   - [Interactive REPL Session](#interactive-repl-session)
 7. [Working with Large Files](#working-with-large-files)
 8. [Troubleshooting](#troubleshooting)
 9. [Appendices](#appendices)
@@ -260,6 +265,34 @@ Notes on field separators:
 - Common separators include tab (`\t`), comma (`,`), colon (`:`), and pipe (`|`)
 - The specified separator is also used when writing back to files
 
+### Table Definition Option (--tabledef)
+
+The `--tabledef` option allows you to define column names for files that don't have header rows, such as system files like `/etc/passwd`:
+
+```sh
+# Process /etc/passwd with meaningful column names
+sqawk -F: --tabledef=passwd:username,password,uid,gid,gecos,home,shell \
+    -s "SELECT username, home FROM passwd WHERE uid >= 1000" \
+    passwd=/etc/passwd
+```
+
+Format: `--tabledef=table_name:col1,col2,col3,...`
+
+This is useful for:
+- System files like `/etc/passwd`, `/etc/group`, `/etc/hosts`
+- Log files with fixed column formats
+- Any file without a header row
+
+Multiple table definitions can be provided:
+
+```sh
+sqawk -F: \
+    --tabledef=passwd:username,password,uid,gid,gecos,home,shell \
+    --tabledef=group:groupname,password,gid,members \
+    -s "SELECT username, groupname FROM passwd, group WHERE passwd.gid = group.gid" \
+    passwd=/etc/passwd group=/etc/group
+```
+
 ### Verbose Mode (-v)
 
 The verbose mode provides additional information about the operations being performed:
@@ -484,168 +517,148 @@ Example of safe write behavior:
 sqawk -s "UPDATE data SET category = lookup.category FROM lookup WHERE data.code = lookup.code" -s "SELECT * FROM data" data.csv lookup.csv --write
 ```
 
-## Common Usage Patterns
+## Examples
 
-### Data Exploration
-
-Quickly analyze and explore data files:
+### Basic Queries
 
 ```sh
-# Count the number of records
+# Count records
 sqawk -s "SELECT COUNT(*) FROM data" data.csv
 
-# Get basic statistics
-sqawk -s "SELECT MIN(value) AS min, MAX(value) AS max, AVG(value) AS avg FROM data" data.csv
+# Filter rows
+sqawk -s "SELECT * FROM data WHERE status = 'active'" data.csv
 
-# See distribution by category
-sqawk -s "SELECT category, COUNT(*) FROM data GROUP BY category ORDER BY COUNT(*) DESC" data.csv
+# Sort results
+sqawk -s "SELECT * FROM data ORDER BY date DESC" data.csv
 
-# Find unique values in a column
-sqawk -s "SELECT DISTINCT category FROM data ORDER BY category" data.csv
+# Limit output
+sqawk -s "SELECT * FROM data LIMIT 10" data.csv
+```
+
+### Aggregation and Grouping
+
+```sh
+# Basic statistics
+sqawk -s "SELECT MIN(value), MAX(value), AVG(value) FROM data" data.csv
+
+# Group by with count
+sqawk -s "SELECT category, COUNT(*) FROM data GROUP BY category" data.csv
+
+# Multiple aggregates
+sqawk -s "SELECT region, COUNT(*) AS orders, SUM(amount) AS total
+          FROM orders GROUP BY region ORDER BY total DESC" orders.csv
+```
+
+### Distinct Values
+
+```sh
+# Unique values in a column
+sqawk -s "SELECT DISTINCT category FROM data" data.csv
 
 # Count unique values
-sqawk -s "SELECT COUNT(DISTINCT category) AS unique_categories FROM data" data.csv
+sqawk -s "SELECT COUNT(DISTINCT category) FROM data" data.csv
 
-# Find unique combinations of columns
+# Unique combinations
 sqawk -s "SELECT DISTINCT department, role FROM employees" employees.csv
 ```
 
-**Using the Interactive REPL for Data Exploration:**
-
-The interactive REPL mode is especially powerful for iterative data exploration:
+### Joins
 
 ```sh
-# Launch the REPL with your data files
-sqawk -i sales.csv customers.csv products.csv
+# Inner join
+sqawk -s "SELECT u.name, o.date FROM users u
+          INNER JOIN orders o ON u.id = o.user_id" users.csv orders.csv
+
+# Left join (include all users, even without orders)
+sqawk -s "SELECT u.name, o.date FROM users u
+          LEFT JOIN orders o ON u.id = o.user_id" users.csv orders.csv
+
+# Three-table join
+sqawk -s "SELECT u.name, p.name AS product, o.date
+          FROM users u
+          INNER JOIN orders o ON u.id = o.user_id
+          INNER JOIN products p ON o.product_id = p.id" \
+      users.csv orders.csv products.csv
 ```
 
-Once in the REPL, you can rapidly explore your data:
+### Data Modification
+
+```sh
+# Update values
+sqawk -s "UPDATE data SET status = 'archived' WHERE date < '2023-01-01'" data.csv --write
+
+# Delete rows
+sqawk -s "DELETE FROM data WHERE status = 'expired'" data.csv --write
+
+# Insert new rows
+sqawk -s "INSERT INTO data VALUES (100, 'New Item', 'active')" data.csv --write
+```
+
+### String Functions
+
+```sh
+# Case conversion
+sqawk -s "SELECT UPPER(name), LOWER(email) FROM contacts" contacts.csv
+
+# Substring extraction
+sqawk -s "SELECT SUBSTR(date, 1, 7) AS month FROM transactions" transactions.csv
+
+# String replacement
+sqawk -s "UPDATE data SET phone = REPLACE(phone, '-', '')" data.csv --write
+```
+
+### System Files (--tabledef)
+
+```sh
+# Query /etc/passwd
+sqawk -F: --tabledef=passwd:user,pass,uid,gid,gecos,home,shell \
+    -s "SELECT user, home FROM passwd WHERE uid >= 1000" \
+    passwd=/etc/passwd
+
+# Query /etc/hosts
+sqawk --tabledef=hosts:ip,hostname \
+    -s "SELECT * FROM hosts WHERE ip LIKE '192.168.%'" \
+    hosts=/etc/hosts
+```
+
+### Output Redirection
+
+```sh
+# Export filtered data to new file
+sqawk -s "SELECT * FROM data WHERE region = 'North'" data.csv > north_data.csv
+
+# Deduplicate to new file
+sqawk -s "SELECT DISTINCT * FROM data" data.csv > deduped.csv
+
+# Convert delimiter (CSV to TSV)
+sqawk -s "SELECT * FROM data" data.csv | sqawk -F, -s "SELECT * FROM stdin" > data.tsv
+```
+
+### Interactive REPL Session
+
+```sh
+sqawk -i sales.csv customers.csv
+```
 
 ```
-# Check available tables
 sqawk> .tables
-customers products sales
+customers sales
 
-# Examine table structure
 sqawk> .schema sales
-CREATE TABLE sales (
-  id INTEGER,
-  customer_id INTEGER,
-  product_id INTEGER,
-  date TEXT,
-  quantity INTEGER,
-  amount FLOAT
-);
+CREATE TABLE sales (id INTEGER, customer_id INTEGER, amount FLOAT);
 
-# Start with a simple exploration
 sqawk> SELECT COUNT(*) FROM sales;
 count
 1250
 
-# Drill down into specific segments
-sqawk> SELECT date, SUM(amount) FROM sales GROUP BY date ORDER BY date DESC LIMIT 5;
-date,sum
-2023-12-15,12580.75
-2023-12-14,9845.50
-2023-12-13,11267.25
-2023-12-12,8976.00
-2023-12-11,10432.50
+sqawk> SELECT c.name, SUM(s.amount) AS total
+       FROM customers c JOIN sales s ON c.id = s.customer_id
+       GROUP BY c.name ORDER BY total DESC LIMIT 3;
+name,total
+Enterprise Corp,58750.25
+Acme Inc,45620.75
 
-# Join tables to get a richer view
-sqawk> SELECT c.name, COUNT(*) AS order_count, SUM(s.amount) AS total_spent
-       FROM customers c
-       JOIN sales s ON c.id = s.customer_id
-       GROUP BY c.name
-       ORDER BY total_spent DESC
-       LIMIT 3;
-name,order_count,total_spent
-Enterprise Corp,42,58750.25
-Acme Inc,38,45620.75
-Global Services,35,42180.50
-```
-
-The REPL enables a more natural workflow for data analysis, allowing you to:
-- Build queries incrementally
-- See immediate results
-- Refine and adjust as you go
-- Explore relationships between tables
-- Maintain context across multiple queries
-
-### Data Cleanup
-
-Clean and transform data files:
-
-```sh
-# Remove duplicate records using Sqawk's DISTINCT keyword
-sqawk -s "SELECT DISTINCT * FROM data" data.csv > deduped_data.csv
-
-# Extract only unique combinations of name and email
-sqawk -s "SELECT DISTINCT name, email FROM contacts" contacts.csv > unique_contacts.csv
-
-# Delete rows with missing values
-sqawk -s "DELETE FROM data WHERE email IS NULL OR email = ''" data.csv --write
-
-# Fix casing issues
-sqawk -s "UPDATE data SET name = UPPER(name)" data.csv --write
-```
-
-### Data Transformation
-
-Transform data for analysis or export:
-
-```sh
-# Extract subset of columns
-sqawk -s "SELECT id, name, email FROM contacts" contacts.csv > minimal_contacts.csv
-
-# Reshape data by filtering and sorting
-sqawk -s "SELECT * FROM data WHERE region = 'North' ORDER BY date DESC" data.csv > north_region_latest.csv
-
-# Create derived columns
-sqawk -s "SELECT id, name, salary, salary * 0.3 AS bonus FROM employees" employees.csv
-```
-
-### Joining Data from Multiple Files
-
-Combine data from different files:
-
-```sh
-# Simple join between two files
-sqawk -s "SELECT users.name, orders.product_id, orders.date FROM users INNER JOIN orders ON users.id = orders.user_id" users.csv orders.csv
-
-# Three-way join with filtering
-sqawk -s "SELECT users.name AS customer, products.name AS product, orders.date 
-          FROM users 
-          INNER JOIN orders ON users.id = orders.user_id 
-          INNER JOIN products ON orders.product_id = products.product_id 
-          WHERE orders.date > '2023-01-01'" 
-      users.csv orders.csv products.csv
-      
-# Using DISTINCT with JOINs to find unique customer-product pairs
-sqawk -s "SELECT DISTINCT users.name, products.name 
-          FROM users 
-          INNER JOIN orders ON users.id = orders.user_id 
-          INNER JOIN products ON orders.product_id = products.product_id" 
-      users.csv orders.csv products.csv
-```
-
-### Generating Reports
-
-Create summary reports from data:
-
-```sh
-# Sales summary by region
-sqawk -s "SELECT region, COUNT(*) AS order_count, SUM(amount) AS total_sales 
-          FROM orders 
-          GROUP BY region 
-          ORDER BY total_sales DESC" 
-      orders.csv
-
-# Monthly trends
-sqawk -s "SELECT SUBSTR(date, 1, 7) AS month, COUNT(*) AS transaction_count 
-          FROM transactions 
-          GROUP BY month 
-          ORDER BY month" 
-      transactions.csv
+sqawk> .exit
 ```
 
 ## Working with Large Files
@@ -725,7 +738,7 @@ Sqawk loads all data into memory, which provides excellent performance but requi
    - Use the `-v` verbose flag to see the exact SQL being executed
    - Verify SQL statement syntax, particularly quotes, parentheses, and required clauses
 
-6. **Special characters in files**:
+9. **Special characters in files**:
    - For files with quotes or special characters, Sqawk follows CSV escaping rules
    - If encountering parsing issues, check for malformed CSV data
 

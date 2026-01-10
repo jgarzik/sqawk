@@ -2,35 +2,15 @@
 //!
 //! Tests for SQL GROUP BY clause with various aggregate functions.
 
-use crate::helpers::create_temp_dir;
-use assert_cmd::Command;
+use crate::helpers::get_departments_file;
 use predicates::prelude::*;
-use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
-
-// Helper function to create a departments test file
-fn create_departments_file() -> Result<(tempfile::TempDir, PathBuf), Box<dyn std::error::Error>> {
-    let temp_dir = create_temp_dir()?;
-    let file_path = temp_dir.path().join("departments.csv");
-
-    // Create a CSV file for GROUP BY testing
-    let content = "id,name,department,salary\n1,Alice,Engineering,75000\n2,Bob,Marketing,65000\n3,Charlie,Engineering,85000\n4,David,Sales,60000\n5,Eve,Marketing,70000\n6,Frank,Engineering,90000\n7,Grace,Sales,65000\n";
-
-    let mut file = fs::File::create(&file_path)?;
-    file.write_all(content.as_bytes())?;
-
-    // Return both the TempDir (to keep it alive) and the file path
-    Ok((temp_dir, file_path))
-}
 
 #[test]
 fn test_basic_group_by() -> Result<(), Box<dyn std::error::Error>> {
-    // Create test data file - keep temp_dir alive for the test duration
-    let (_temp_dir, file_path) = create_departments_file()?;
+    let file_path = get_departments_file();
 
     // Run sqawk with basic GROUP BY
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT department, COUNT(*) AS count, SUM(salary) AS total_salary, AVG(salary) AS avg_salary FROM departments GROUP BY department")
         .arg(file_path.to_str().unwrap())
@@ -68,11 +48,10 @@ fn test_basic_group_by() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_group_by_with_order_by() -> Result<(), Box<dyn std::error::Error>> {
-    // Create test data file - keep temp_dir alive for the test duration
-    let (_temp_dir, file_path) = create_departments_file()?;
+    let file_path = get_departments_file();
 
     // Run sqawk with GROUP BY and ORDER BY
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT department, COUNT(*) AS employee_count, AVG(salary) AS avg_salary FROM departments GROUP BY department ORDER BY avg_salary DESC")
         .arg(file_path.to_str().unwrap())
@@ -123,11 +102,10 @@ fn test_group_by_with_order_by() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_group_by_with_complex_expressions() -> Result<(), Box<dyn std::error::Error>> {
-    // Create test data file - keep temp_dir alive for the test duration
-    let (_temp_dir, file_path) = create_departments_file()?;
+    let file_path = get_departments_file();
 
     // Run sqawk with complex GROUP BY expressions
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT department, COUNT(*) AS employee_count, SUM(salary) AS total_salary, AVG(salary) AS avg_salary, MIN(salary) AS min_salary, MAX(salary) AS max_salary FROM departments GROUP BY department ORDER BY avg_salary DESC")
         .arg(file_path.to_str().unwrap())
@@ -193,11 +171,10 @@ fn test_group_by_with_complex_expressions() -> Result<(), Box<dyn std::error::Er
 
 #[test]
 fn test_group_by_with_having() -> Result<(), Box<dyn std::error::Error>> {
-    // Create test data file - keep temp_dir alive for the test duration
-    let (_temp_dir, file_path) = create_departments_file()?;
+    let file_path = get_departments_file();
 
     // Run sqawk with GROUP BY and HAVING
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT department, COUNT(*) AS employee_count, AVG(salary) AS avg_salary FROM departments GROUP BY department HAVING COUNT(*) > 2")
         .arg(file_path.to_str().unwrap())
@@ -237,11 +214,10 @@ fn test_group_by_with_having() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_group_by_with_having_avg() -> Result<(), Box<dyn std::error::Error>> {
-    // Create test data file - keep temp_dir alive for the test duration
-    let (_temp_dir, file_path) = create_departments_file()?;
+    let file_path = get_departments_file();
 
     // Run sqawk with GROUP BY and HAVING with AVG function
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT department, COUNT(*) AS employee_count, AVG(salary) AS avg_salary FROM departments GROUP BY department HAVING AVG(salary) > 70000")
         .arg(file_path.to_str().unwrap())

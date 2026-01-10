@@ -3,7 +3,6 @@
 //! Tests for sorting functionality with different column combinations and directions.
 
 use crate::helpers::*;
-use assert_cmd::Command;
 use predicates::prelude::*;
 
 /// Test ordering by a single column in ascending order (implicit)
@@ -53,7 +52,7 @@ fn test_order_by_multiple_columns() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "employees.csv", content)?;
 
     // Build the command
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT * FROM employees ORDER BY dept ASC, salary DESC")
         .arg(format!("employees={}", file_path.to_str().unwrap()));
@@ -94,7 +93,7 @@ fn test_order_by_with_where() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "employees.csv", content)?;
 
     // Build the command
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, age FROM employees WHERE dept = 'IT' ORDER BY age DESC")
         .arg(format!("employees={}", file_path.to_str().unwrap()));
@@ -132,7 +131,7 @@ fn test_order_by_with_projection() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_custom_csv(temp_dir.path(), "employees.csv", content)?;
 
     // Build the command - include age in the SELECT since we need it for ORDER BY
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT name, salary, age FROM employees ORDER BY age DESC")
         .arg(format!("employees={}", file_path.to_str().unwrap()));

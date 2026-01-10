@@ -2,27 +2,14 @@
 //!
 //! Tests for SQL JOIN with the ON clause, as opposed to using WHERE for join conditions.
 
-use assert_cmd::Command;
 use predicates::prelude::*;
-use std::path::PathBuf;
 
-// Helper functions to get the path to standard test files
-fn get_users_file() -> PathBuf {
-    PathBuf::from("tests/data/users.csv")
-}
-
-fn get_orders_file() -> PathBuf {
-    PathBuf::from("tests/data/orders.csv")
-}
-
-fn get_products_file() -> PathBuf {
-    PathBuf::from("tests/data/products.csv")
-}
+use crate::helpers::{get_orders_file, get_products_file, get_users_file};
 
 #[test]
 fn test_inner_join_on_basic() -> Result<(), Box<dyn std::error::Error>> {
     // Test a basic INNER JOIN with ON clause
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT users.name, orders.product_id, orders.date FROM users INNER JOIN orders ON users.id = orders.user_id")
         .arg(get_users_file().to_str().unwrap())
@@ -63,7 +50,7 @@ fn test_inner_join_on_basic() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_inner_join_on_with_where() -> Result<(), Box<dyn std::error::Error>> {
     // Test INNER JOIN with ON and additional WHERE filtering
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT users.name, orders.product_id, orders.date FROM users INNER JOIN orders ON users.id = orders.user_id WHERE orders.product_id > 102")
         .arg(get_users_file().to_str().unwrap())
@@ -99,7 +86,7 @@ fn test_inner_join_on_with_where() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_three_way_inner_join_on() -> Result<(), Box<dyn std::error::Error>> {
     // Test a three-way INNER JOIN with ON clauses
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT users.name AS user, products.name AS product, products.price, orders.date FROM users INNER JOIN orders ON users.id = orders.user_id INNER JOIN products ON orders.product_id = products.product_id")
         .arg(get_users_file().to_str().unwrap())
@@ -126,7 +113,7 @@ fn test_three_way_inner_join_on() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_complex_operations_with_join_on() -> Result<(), Box<dyn std::error::Error>> {
     // Test a complex query with JOIN ON, WHERE, and ORDER BY
-    let mut cmd = Command::cargo_bin("sqawk")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("SELECT users.name AS customer, orders.date AS purchase_date, products.name AS item, products.price AS price FROM users INNER JOIN orders ON users.id = orders.user_id INNER JOIN products ON orders.product_id = products.product_id WHERE products.price > 100 ORDER BY price DESC")
         .arg(get_users_file().to_str().unwrap())
