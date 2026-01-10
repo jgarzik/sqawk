@@ -15,8 +15,10 @@
 //! to use the specified delimiter instead of commas.
 
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+
+use tempfile::NamedTempFile;
 
 use crate::capacity::{generate_alpha_columns, is_likely_data_row};
 use crate::error::{SqawkError, SqawkResult};
@@ -52,6 +54,9 @@ impl DelimHandler {
 
     /// Save a table to a delimiter-separated file
     ///
+    /// Uses atomic write pattern: writes to a temporary file first, then renames
+    /// into place. This preserves the original file if writing fails midway.
+    ///
     /// # Arguments
     /// * `table` - The table to save
     /// * `file_path` - The path to the file
@@ -65,27 +70,41 @@ impl DelimHandler {
         file_path: &Path,
         delimiter: &str,
     ) -> SqawkResult<()> {
-        use std::fs::File;
-        use std::io::{BufWriter, Write};
+        // Create temp file in the same directory as target (required for atomic rename)
+        let parent = file_path.parent().unwrap_or(Path::new("."));
+        let temp_file = NamedTempFile::new_in(parent).map_err(SqawkError::IoError)?;
 
-        // Open the file for writing
-        let file = File::create(file_path).map_err(SqawkError::IoError)?;
-        let mut writer = BufWriter::new(file);
+        // Write data in a scope so the writer is dropped before we call persist
+        {
+            // Create a buffered writer for the temp file
+            let mut writer = BufWriter::new(temp_file.as_file());
 
-        // Write the header row
-        let header = table.columns().join(delimiter);
-        writeln!(writer, "{}", header).map_err(SqawkError::IoError)?;
+            // Write the header row
+            let header = table.columns().join(delimiter);
+            writeln!(writer, "{}", header).map_err(SqawkError::IoError)?;
 
-        // Write data rows
-        for row in table.rows() {
-            let row_values: Vec<String> = row.iter().map(|value| value.to_string()).collect();
+            // Write data rows
+            for row in table.rows() {
+                let row_values: Vec<String> = row.iter().map(|value| value.to_string()).collect();
 
-            let row_str = row_values.join(delimiter);
-            writeln!(writer, "{}", row_str).map_err(SqawkError::IoError)?;
+                let row_str = row_values.join(delimiter);
+                writeln!(writer, "{}", row_str).map_err(SqawkError::IoError)?;
+            }
+
+            // Flush the buffered writer before it's dropped
+            writer.flush().map_err(SqawkError::IoError)?;
         }
 
-        // Flush and close the writer
-        writer.flush().map_err(SqawkError::IoError)?;
+        // Sync to disk before rename to ensure data durability
+        temp_file
+            .as_file()
+            .sync_all()
+            .map_err(SqawkError::IoError)?;
+
+        // Atomically rename temp file to target path
+        temp_file
+            .persist(file_path)
+            .map_err(|e| SqawkError::IoError(e.error))?;
 
         Ok(())
     }

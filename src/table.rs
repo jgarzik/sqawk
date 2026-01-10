@@ -949,6 +949,14 @@ impl Table {
         &self.delimiter
     }
 
+    /// Set the delimiter for this table
+    ///
+    /// # Arguments
+    /// * `delimiter` - The new delimiter string to use
+    pub fn set_delimiter(&mut self, delimiter: String) {
+        self.delimiter = delimiter;
+    }
+
     /// Get the index of a column by name
     ///
     /// Looks up a column by name and returns its index in the table.
@@ -974,11 +982,13 @@ impl Table {
     /// * `Ok(())` if the table was successfully printed
     /// * `Err` if there was an error writing to stdout
     pub fn print_to_stdout(&self) -> Result<()> {
+        let delim = &self.delimiter;
+
         // Print header
         let column_names = self.columns();
         for (i, col) in column_names.iter().enumerate() {
             if i > 0 {
-                print!(",");
+                print!("{}", delim);
             }
             print!("{}", col);
         }
@@ -988,7 +998,7 @@ impl Table {
         for row in self.rows() {
             for (i, val) in row.iter().enumerate() {
                 if i > 0 {
-                    print!(",");
+                    print!("{}", delim);
                 }
                 print!("{}", val);
             }

@@ -60,6 +60,7 @@ mod ddl; // Tests for DDL operations (DROP TABLE, ALTER TABLE, TRUNCATE, CREATE 
 mod headerless; // Tests for headerless file auto-detection (a, b, c column naming)
 mod tabledef; // Tests for --tabledef CLI option
 
+mod output; // Tests for stdout and file output (atomic writes)
 mod repl; // Tests for interactive REPL functionality with pre-generated input
 mod string_functions; // Tests for string functions (UPPER, LOWER, TRIM, SUBSTR, REPLACE)
 

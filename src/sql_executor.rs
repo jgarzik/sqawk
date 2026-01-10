@@ -86,7 +86,18 @@ impl<'a> SqlExecutor<'a> {
         // Track affected rows from the last statement
         self.affected_rows = result.affected_rows;
 
-        Ok(result.table)
+        // Set delimiter on result table to match config (for consistent output format)
+        let table = match result.table {
+            Some(mut t) => {
+                if let Some(delim) = self.config.field_separator() {
+                    t.set_delimiter(delim);
+                }
+                Some(t)
+            }
+            None => None,
+        };
+
+        Ok(table)
     }
 
     /// Save all modified tables back to their source files

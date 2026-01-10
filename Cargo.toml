@@ -24,13 +24,13 @@ regex = "1.9"
 rand = { version = "0.8", features = ["std_rng"] }
 memmap2 = "0.9"
 libc = "0.2"
+tempfile = "3"
 
 rustyline = "15.0.0"
 
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.0"
-tempfile = "3.8"
 
 [profile.release]
 lto = true

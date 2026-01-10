@@ -8,8 +8,9 @@ Sqawk implements a lightweight in-memory database engine that supports SQL opera
 
 1. [Data Model](#data-model)
 2. [Architecture](#architecture)
-3. [Storage Backend Architecture](#storage-backend-architecture)
-4. [Performance Considerations](#performance-considerations)
+3. [File I/O Patterns](#file-io-patterns)
+4. [Storage Backend Architecture](#storage-backend-architecture)
+5. [Performance Considerations](#performance-considerations)
 
 ## Data Model
 
@@ -86,6 +87,43 @@ The file handling system consists of multiple components:
 - Configured via the `-F` command-line option
 - Supports tab, colon, pipe, and other custom separators
 - Preserves the original delimiter and format during writeback
+
+## File I/O Patterns
+
+### Atomic File Writes
+
+When saving modified tables back to disk (via the `--write` flag), Sqawk uses an atomic write pattern to ensure data integrity:
+
+1. **Write to Temporary File**: Data is first written to a temporary file in the same directory as the target file
+2. **Sync to Disk**: The temporary file is explicitly synced (`fsync`) to ensure data is durably stored on the physical device
+3. **Atomic Rename**: The temporary file is renamed to the target filename using an atomic rename operation
+
+This pattern provides several safety guarantees:
+
+- **Crash Safety**: If the process crashes during writing, the original file remains intact
+- **Disk Full Protection**: If the disk runs out of space, the original file is preserved
+- **All-or-Nothing Semantics**: Either the complete new file exists, or the original file is unchanged
+
+The temporary file is created in the same directory as the target file to ensure the rename operation is atomic (same filesystem requirement on POSIX systems).
+
+### Delimiter Consistency
+
+Sqawk maintains delimiter consistency between input and output:
+
+- When a file is loaded with a specific delimiter (via `-F` flag or file extension detection), that delimiter is preserved in the table metadata
+- Query results are output using the same delimiter as the source table
+- When files are written back, the original delimiter format is preserved
+
+This ensures that TSV files remain TSV, colon-separated files remain colon-separated, and so on. The principle of least surprise: output format matches input format unless explicitly overridden.
+
+### Output Modes
+
+Sqawk supports two primary output modes:
+
+1. **Stdout Output**: Query results (SELECT) are written to standard output using the source table's delimiter
+2. **File Writeback**: Modified tables (via INSERT, UPDATE, DELETE) are written back to their source files when `--write` is specified
+
+For stdout output, the data is streamed directly without buffering concerns. For file writeback, the atomic write pattern described above is used.
 
 ## Storage Backend Architecture
 

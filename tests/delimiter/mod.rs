@@ -29,9 +29,10 @@ fn test_tab_delimiter() -> Result<(), Box<dyn std::error::Error>> {
     // employees.tsv has: id, name, department, salary, age
     // Rows with salary > 70000: John Smith (75000), Bob Johnson (80000), Alice Williams (85000),
     //                          David Miller (90000), Frank Wilson (82000), Henry Martin (78000)
+    // Output should be tab-delimited (matching input)
     assert!(
-        stdout.contains("id,name,salary,department"),
-        "Header row should be present"
+        stdout.contains("id\tname\tsalary\tdepartment"),
+        "Header row should be present with tab delimiter"
     );
     assert!(
         stdout.contains("John Smith") && stdout.contains("75000"),
@@ -82,9 +83,10 @@ fn test_colon_delimiter() -> Result<(), Box<dyn std::error::Error>> {
     // Check that header and desired rows are present
     // contacts.txt has: id:name:email:phone:city
     // Rows with id > 5: David Miller (6), Emily Davis (7), Frank Wilson (8), Grace Taylor (9), Henry Martin (10)
+    // Output should be colon-delimited (matching input)
     assert!(
-        stdout.contains("id,name,email"),
-        "Header row should be present"
+        stdout.contains("id:name:email"),
+        "Header row should be present with colon delimiter"
     );
     assert!(
         stdout.contains("David Miller") && stdout.contains("david.miller@example.com"),

@@ -16,6 +16,8 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
+use tempfile::NamedTempFile;
+
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{Table, Value};
 
@@ -43,6 +45,9 @@ impl CsvHandler {
 
     /// Save a table to a CSV file
     ///
+    /// Uses atomic write pattern: writes to a temporary file first, then renames
+    /// into place. This preserves the original file if writing fails midway.
+    ///
     /// # Arguments
     /// * `table` - The table to save
     /// * `file_path` - The path to the file
@@ -50,25 +55,44 @@ impl CsvHandler {
     /// # Returns
     /// * `SqawkResult<()>` - Result of the operation
     pub fn save_csv(&self, table: &Table, file_path: &Path) -> SqawkResult<()> {
-        // Create a CSV writer
-        let file = File::create(file_path).map_err(SqawkError::IoError)?;
-        let mut writer = csv::Writer::from_writer(file);
+        // Create temp file in the same directory as target (required for atomic rename)
+        let parent = file_path.parent().unwrap_or(Path::new("."));
+        let temp_file = NamedTempFile::new_in(parent).map_err(SqawkError::IoError)?;
 
-        // Write header row
-        writer
-            .write_record(table.columns())
-            .map_err(SqawkError::CsvError)?;
+        // Write data in a scope so the writer is dropped before we call persist
+        {
+            // Create a CSV writer writing to the temp file
+            let mut writer = csv::Writer::from_writer(temp_file.as_file());
 
-        // Write data rows
-        for row in table.rows() {
-            let string_values: Vec<String> = row.iter().map(|value| value.to_string()).collect();
-
+            // Write header row
             writer
-                .write_record(&string_values)
+                .write_record(table.columns())
                 .map_err(SqawkError::CsvError)?;
+
+            // Write data rows
+            for row in table.rows() {
+                let string_values: Vec<String> =
+                    row.iter().map(|value| value.to_string()).collect();
+
+                writer
+                    .write_record(&string_values)
+                    .map_err(SqawkError::CsvError)?;
+            }
+
+            // Flush the CSV writer before it's dropped
+            writer.flush().map_err(SqawkError::IoError)?;
         }
 
-        writer.flush().map_err(SqawkError::IoError)?;
+        // Sync to disk before rename to ensure data durability
+        temp_file
+            .as_file()
+            .sync_all()
+            .map_err(SqawkError::IoError)?;
+
+        // Atomically rename temp file to target path
+        temp_file
+            .persist(file_path)
+            .map_err(|e| SqawkError::IoError(e.error))?;
 
         Ok(())
     }
