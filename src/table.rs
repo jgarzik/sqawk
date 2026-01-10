@@ -825,20 +825,28 @@ impl Table {
         Ok(())
     }
 
-    /// Add a row without validation for recovery mode
+    /// Add a row by cloning values from a slice
     ///
-    /// This method is used internally by the CSV handler in recovery mode
-    /// to add rows that may have had their structure altered to fix issues,
-    /// such as padding missing fields or truncating extra fields.
+    /// This method allows reusing a row buffer by cloning values from a slice.
+    /// It validates that the slice length matches the table column count.
     ///
     /// # Arguments
-    /// * `row` - Vector of values to add as a new row
+    /// * `row` - Slice of values to clone and add as a new row
     ///
     /// # Returns
-    /// * `Ok(())` always succeeds
-    pub fn add_row_recovery(&mut self, row: Row) -> SqawkResult<()> {
-        // No validation, assumes the row has been fixed already
-        self.rows.push(row);
+    /// * `Ok(())` if the row was successfully added
+    /// * `Err` if the slice length doesn't match the table schema
+    pub fn add_row_from_slice(&mut self, row: &[Value]) -> SqawkResult<()> {
+        if row.len() != self.column_count() {
+            return Err(SqawkError::InvalidSqlQuery(format!(
+                "Row has {} columns, but table '{}' has {} columns",
+                row.len(),
+                self.name,
+                self.column_count()
+            )));
+        }
+
+        self.rows.push(row.to_vec());
         self.modified = true;
         Ok(())
     }

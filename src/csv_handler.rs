@@ -146,33 +146,39 @@ impl CsvHandler {
         let mut skipped_rows = 0;
         let mut row_number = 0;
 
+        // Reusable row buffer to avoid per-row allocations
+        let column_count = table.column_count();
+        let mut row_buffer = Vec::with_capacity(column_count);
+
         for result in csv_reader.records() {
             row_number += 1;
 
             match result {
                 Ok(record) => {
-                    if should_recover && record.len() != table.column_count() {
-                        // In recovery mode, handle rows with different column counts
-                        let mut row = Vec::new();
+                    // Clear buffer for reuse
+                    row_buffer.clear();
 
-                        // For each column in our table
-                        for i in 0..table.column_count() {
+                    if should_recover && record.len() != column_count {
+                        // In recovery mode, handle rows with different column counts
+                        for i in 0..column_count {
                             if i < record.len() {
                                 // Use the value if it exists
-                                row.push(Value::from(record.get(i).unwrap_or("")));
+                                row_buffer.push(Value::from(record.get(i).unwrap_or("")));
                             } else {
                                 // Pad with null values if we need more
-                                row.push(Value::Null);
+                                row_buffer.push(Value::Null);
                             }
                         }
 
-                        // Now we have a properly sized row, add it without validation
-                        table.add_row_recovery(row)?;
+                        // Now we have a properly sized row, add it by cloning from buffer
+                        table.add_row_from_slice(&row_buffer)?;
                     } else {
                         // Normal path - convert record to a row of values and validate
-                        let row = record.iter().map(Value::from).collect();
+                        for field in record.iter() {
+                            row_buffer.push(Value::from(field));
+                        }
                         // This call can fail if the columns don't match and we're not in recovery mode
-                        if let Err(e) = table.add_row(row) {
+                        if let Err(e) = table.add_row_from_slice(&row_buffer) {
                             if should_recover {
                                 // If we're in recovery mode, log and continue
                                 skipped_rows += 1;

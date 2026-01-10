@@ -33,6 +33,10 @@ tempfile = "3.8"
 [profile.release]
 lto = true
 
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [[bin]]
 name = "sqawk"
 path = "src/main.rs"

@@ -231,14 +231,20 @@ impl DelimHandler {
             delimiter.to_string(),
         );
 
-        // Read rows
+        // Read rows with reusable buffer to avoid per-row allocations
+        let column_count = table.column_count();
+        let mut row_buffer = Vec::with_capacity(column_count);
+
         for result in csv_reader.records() {
             let record = result.map_err(SqawkError::CsvError)?;
 
-            // Convert record to a row of values
-            let row = record.iter().map(Value::from).collect();
+            // Clear buffer for reuse and fill with values
+            row_buffer.clear();
+            for field in record.iter() {
+                row_buffer.push(Value::from(field));
+            }
 
-            table.add_row(row)?;
+            table.add_row_from_slice(&row_buffer)?;
         }
 
         Ok(table)
