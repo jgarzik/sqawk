@@ -1,4 +1,3 @@
-
 #[test]
 fn test_repl_from_file() {
     // Removed unused temporary directory

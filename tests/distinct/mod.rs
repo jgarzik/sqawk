@@ -3,7 +3,6 @@
 //! Tests for DISTINCT SELECT queries in various contexts including
 //! with WHERE clauses, ORDER BY clauses, and JOINs.
 
-
 use crate::helpers::{get_duplicates_file, get_orders_file, get_users_file};
 
 #[test]

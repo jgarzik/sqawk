@@ -3,7 +3,6 @@
 //! Tests for SQL queries with LIMIT and OFFSET clauses in various contexts
 //! including with ORDER BY, aggregate functions, and GROUP BY.
 
-
 use crate::helpers::{get_departments_file, get_duplicates_file, get_sample_file};
 
 #[test]

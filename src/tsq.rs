@@ -708,7 +708,8 @@ impl DataGenerator {
             let total_amount: f64 = Rng::gen_range_f64(10.0, 5000.0);
             let total_amount = (total_amount * 100.0).round() / 100.0;
             let discount_percent = [0, 5, 10, 15, 20, 25][Rng::gen_range_usize(0, 5)];
-            let shipping_method = SHIPPING_METHODS[Rng::gen_range_usize(0, SHIPPING_METHODS.len() - 1)];
+            let shipping_method =
+                SHIPPING_METHODS[Rng::gen_range_usize(0, SHIPPING_METHODS.len() - 1)];
 
             // ~50% have notes
             let notes = if Rng::gen_bool(0.5) {
