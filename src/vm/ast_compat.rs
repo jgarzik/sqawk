@@ -168,7 +168,28 @@ pub(crate) fn create_table_options(options: &CreateTableOptions) -> &[SqlOption]
 /// understands (`delimiter`, `header`, ...). Non key-value forms yield `None`.
 pub(crate) fn sql_option_key_value(option: &SqlOption) -> Option<(String, String)> {
     match option {
-        SqlOption::KeyValue { key, value } => Some((key.value.clone(), value.to_string())),
+        SqlOption::KeyValue { key, value } => {
+            // Unwrap the literal rather than rendering it back to SQL.
+            //
+            // `value.to_string()` produces the SQL text INCLUDING quotes, so a
+            // double-quoted option value kept its quote characters: `WITH
+            // (delimiter = "|")` yielded the three-character delimiter `"|"`
+            // and wrote rows no reader could parse back.
+            let text = match value {
+                Expr::Value(v) => match &v.value {
+                    sqlparser::ast::Value::SingleQuotedString(s)
+                    | sqlparser::ast::Value::DoubleQuotedString(s)
+                    | sqlparser::ast::Value::Number(s, _) => s.clone(),
+                    other => other.to_string(),
+                },
+                // A double-quoted option value parses as a QUOTED IDENTIFIER,
+                // not a string literal, so `WITH (delimiter = "|")` arrives
+                // here as an Ident. Its `value` is already unquoted.
+                Expr::Identifier(ident) => ident.value.clone(),
+                other => other.to_string(),
+            };
+            Some((key.value.clone(), text))
+        }
         _ => None,
     }
 }

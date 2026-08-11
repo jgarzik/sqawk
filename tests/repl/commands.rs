@@ -206,3 +206,100 @@ fn test_repl_zero_row_update_reports_zero() {
         "second UPDATE matched nothing and must report 0, got:\n{stdout}"
     );
 }
+
+/// A trailing DML statement on a multi-statement REPL line must still report
+/// its change count, and a plain SELECT must not report one at all.
+///
+/// execute_sql returned only the last row-producing statement, so a trailing
+/// DELETE was invisible and repl.rs never reached the change-count branch.
+/// Reporting the count unconditionally then printed "0 rows affected" after
+/// every SELECT, so the executor now tracks whether a DML actually ran.
+#[test]
+fn test_repl_reports_changes_for_trailing_dml() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let dir = crate::helpers::create_temp_dir().expect("temp dir");
+    let dest = dir.path().join("people.csv");
+    std::fs::copy("tests/data/people.csv", &dest).expect("copy fixture");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sqawk"))
+        .arg("-i")
+        .arg(format!("people={}", dest.to_str().unwrap()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to start sqawk");
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(
+            b".changes on\n\
+              SELECT * FROM people; DELETE FROM people WHERE id = 1;\n\
+              SELECT id FROM people;\n\
+              .exit\n",
+        )
+        .expect("write");
+
+    let out = child.wait_with_output().expect("wait");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let counts: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.ends_with("rows affected"))
+        .collect();
+
+    assert_eq!(
+        counts,
+        ["1 rows affected"],
+        "the DELETE must report once and the SELECTs not at all, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Query returned 3 rows") && stdout.contains("Query returned 2 rows"),
+        "both SELECT result sets should print, got:\n{stdout}"
+    );
+}
+
+/// A statement that fails must not leave its derived-table alias registered.
+#[test]
+fn test_repl_failed_derived_table_does_not_leak() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sqawk"))
+        .arg("-i")
+        .arg("tests/data/people.csv")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to start sqawk");
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(
+            b"SELECT nosuch FROM (SELECT * FROM people) x;\n\
+              SELECT id FROM (SELECT * FROM people) x;\n\
+              .tables\n\
+              .exit\n",
+        )
+        .expect("write");
+
+    let out = child.wait_with_output().expect("wait");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let combined = format!("{stdout}{stderr}");
+
+    assert!(
+        !combined.contains("shadows an existing table"),
+        "the failed statement leaked its alias, got:\n{combined}"
+    );
+    assert!(
+        !stdout.lines().any(|l| l.trim() == "x"),
+        ".tables lists a phantom derived-table alias, got:\n{stdout}"
+    );
+}

@@ -1117,7 +1117,7 @@ impl<'a> SqlCompiler<'a> {
                 Expr::Function(func) => {
                     let name = func.name.to_string().to_uppercase();
                     if matches!(name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX") {
-                        let func_type = Self::agg_func_type(&name);
+                        let func_type = Self::agg_func_type_for(func);
                         let col_ref = if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
                             func_args(func).first()
                         {
@@ -2580,28 +2580,50 @@ impl<'a> SqlCompiler<'a> {
                     .position(|r| r.eq_ignore_ascii_case(table_ref))
                     .ok_or_else(|| SqawkError::TableNotFound(table_ref.clone()))?;
 
-                // Find the column in that table
-                let col_idx = tables[tbl_idx]
-                    .column_index(col_name)
+                let col_idx = Self::column_index_ci(tables[tbl_idx], col_name)
                     .ok_or_else(|| SqawkError::ColumnNotFound(col_name.clone()))?;
 
                 Ok((tbl_idx, col_idx))
             }
             Expr::Identifier(ident) => {
-                // Unqualified column - search all tables
+                // Unqualified column: search every table, matching
+                // case-insensitively and reporting ambiguity.
+                //
+                // This used an exact-match lookup and returned the first table
+                // that had the column, while NameCtx (which serves the
+                // expression compiler) matches case-insensitively and treats a
+                // name present in two tables as an error. The same identifier
+                // therefore resolved differently depending on which resolver
+                // the code path reached.
                 let col_name = &ident.value;
+                let mut found: Option<(usize, usize)> = None;
                 for (tbl_idx, table) in tables.iter().enumerate() {
-                    if let Some(col_idx) = table.column_index(col_name) {
-                        return Ok((tbl_idx, col_idx));
+                    if let Some(col_idx) = Self::column_index_ci(table, col_name) {
+                        if found.is_some() {
+                            return Err(SqawkError::InvalidSqlQuery(format!(
+                                "Column '{}' is ambiguous across the tables in FROM",
+                                col_name
+                            )));
+                        }
+                        found = Some((tbl_idx, col_idx));
                     }
                 }
-                Err(SqawkError::ColumnNotFound(col_name.clone()))
+                found.ok_or_else(|| SqawkError::ColumnNotFound(col_name.clone()))
             }
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
                 "Unsupported column expression in multi-table query: {:?}",
                 expr
             ))),
         }
+    }
+
+    /// Case-insensitive column lookup, matching how `NameCtx` resolves names.
+    fn column_index_ci(table: &Table, name: &str) -> Option<usize> {
+        let want = name.to_ascii_lowercase();
+        table
+            .column_metadata()
+            .iter()
+            .position(|c| c.name.to_ascii_lowercase() == want)
     }
 
     /// Build result schema for a multi-table aggregate query

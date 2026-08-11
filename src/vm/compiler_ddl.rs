@@ -432,8 +432,10 @@ impl<'a> SqlCompiler<'a> {
         let delimiter = with_options.iter().find_map(|opt| {
             let (key, value) = sql_option_key_value(opt)?;
             if key.to_lowercase() == "delimiter" {
-                // `value` is rendered SQL, so a string literal arrives quoted.
-                return Some(value.trim_matches('\'').to_string());
+                // sql_option_key_value unwraps the literal, so no quote
+                // stripping is needed -- and stripping only single quotes left
+                // double-quoted values carrying their quotes.
+                return Some(value);
             }
             None
         });

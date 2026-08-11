@@ -10,6 +10,19 @@ use super::compiler::SqlCompiler;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{DataType, Table};
 
+/// Whether a window function is one of the aggregates, as opposed to a
+/// ranking or offset function.
+///
+/// Defined once: this list was spelled out at two sites, so adding an
+/// aggregate window function meant editing both, and missing the second left
+/// running totals in the output with nothing to indicate it.
+fn is_aggregate_window_fn(name: &str) -> bool {
+    matches!(
+        name.to_uppercase().as_str(),
+        "SUM" | "COUNT" | "AVG" | "MIN" | "MAX"
+    )
+}
+
 impl<'a> SqlCompiler<'a> {
     pub(crate) fn compile_select_with_window(
         &mut self,
@@ -21,6 +34,22 @@ impl<'a> SqlCompiler<'a> {
         let ephemeral_cursor = 1i64;
 
         self.add_comment("Window function query");
+
+        // A wildcard in a window query is not expanded by this path: the
+        // projection analysis below counts one output column per SELECT item,
+        // so `SELECT *, SUM(x) OVER (...)` emitted two columns for a
+        // four-column table and lost the rest. Reject it rather than return a
+        // silently truncated row.
+        if select.projection.iter().any(|i| {
+            matches!(
+                i,
+                SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..)
+            )
+        }) {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "SELECT * cannot be combined with a window function; list the columns".into(),
+            ));
+        }
 
         // Analyze the projection to find window functions and their specs
         let (window_funcs, mut base_columns) =
@@ -500,23 +529,20 @@ impl<'a> SqlCompiler<'a> {
         // With an ORDER BY the running total is the correct answer, so this is
         // emitted only when the window is unordered.
         if order_cols.is_empty() && !partition_cols.is_empty() {
+            // With wildcards rejected above, each projection item yields
+            // exactly one output column, so the SELECT-list index IS the
+            // result-column index that WindowFinalize needs.
             let agg_output_positions: Vec<usize> = select
                 .projection
                 .iter()
                 .enumerate()
-                .filter(|(_, item)| {
-                    matches!(
-                        item,
-                        SelectItem::UnnamedExpr(Expr::Function(f))
-                            | SelectItem::ExprWithAlias {
-                                expr: Expr::Function(f),
-                                ..
-                            } if f.over.is_some()
-                                && matches!(
-                                    f.name.to_string().to_uppercase().as_str(),
-                                    "SUM" | "COUNT" | "AVG" | "MIN" | "MAX"
-                                )
-                    )
+                .filter(|(_, item)| match item {
+                    SelectItem::UnnamedExpr(Expr::Function(f))
+                    | SelectItem::ExprWithAlias {
+                        expr: Expr::Function(f),
+                        ..
+                    } => f.over.is_some() && is_aggregate_window_fn(&f.name.to_string()),
+                    _ => false,
                 })
                 .map(|(i, _)| i)
                 .collect();

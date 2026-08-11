@@ -4,8 +4,8 @@
 
 use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Select, SelectItem};
 
-use super::ast_compat::{func_args, func_is_distinct, group_by_exprs};
-use super::bytecode::{OpCode, ResultSchema, AGG_DISTINCT};
+use super::ast_compat::{func_args, group_by_exprs};
+use super::bytecode::{OpCode, ResultSchema};
 use super::compiler::{NameCtx, SqlCompiler};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
@@ -191,16 +191,9 @@ impl<'a> SqlCompiler<'a> {
     ) -> SqawkResult<Option<(i64, i64)>> {
         match expr {
             Expr::Function(func) => {
-                let name = func.name.to_string().to_uppercase();
-                // DISTINCT rides along as a flag bit on the function type.
-                // It used to be dropped entirely -- func.distinct was never
-                // read -- so COUNT(DISTINCT department) counted rows.
-                let func_type = Self::agg_func_type(&name)
-                    | if func_is_distinct(func) {
-                        AGG_DISTINCT
-                    } else {
-                        0
-                    };
+                // DISTINCT rides along as a flag bit on the function type,
+                // derived in one place so no site can forget it.
+                let func_type = Self::agg_func_type_for(func);
 
                 // Check for COUNT(*)
                 if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
@@ -387,7 +380,7 @@ impl<'a> SqlCompiler<'a> {
                     if let Expr::Function(func) = expr {
                         let name = func.name.to_string().to_uppercase();
                         if matches!(name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX") {
-                            let func_type = Self::agg_func_type(&name);
+                            let func_type = Self::agg_func_type_for(func);
                             if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
                                 func_args(func).first()
                             {
@@ -774,13 +767,7 @@ impl<'a> SqlCompiler<'a> {
                 // SUM(salary), whichever appeared first, and filtered on
                 // entirely the wrong column. MIN vs MAX bound correctly, which
                 // is why it stayed hidden.
-                let name = func.name.to_string().to_uppercase();
-                let func_type = Self::agg_func_type(&name)
-                    | if func_is_distinct(func) {
-                        AGG_DISTINCT
-                    } else {
-                        0
-                    };
+                let func_type = Self::agg_func_type_for(func);
 
                 let wanted_col: Option<usize> = match func_args(func).first() {
                     Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) => None,
