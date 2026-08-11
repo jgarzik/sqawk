@@ -2139,3 +2139,46 @@ fn three_table_join_unfiltered() -> Result<(), Box<dyn std::error::Error>> {
          Jane,Phone,800\nJane,Monitor,350",
     )
 }
+
+// ---------------------------------------------------------------------------
+// Correlated subquery scoping.
+//
+// A name binds in the subquery's scope first and only then in the enclosing
+// query's. Function arguments must follow the same rule: resolving them in a
+// rebuilt inner-only scope makes an outer reference silently bind to the inner
+// table, which turns a comparison between the two into a comparison of a value
+// with itself -- true for every row.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn correlated_subquery_scalar() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees e \
+         WHERE salary > (SELECT AVG(salary) FROM employees WHERE department = e.department)",
+        "name\nEve\nFrank\nGrace",
+    )
+}
+
+#[test]
+fn correlated_subquery_exists() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees e WHERE EXISTS \
+         (SELECT 1 FROM employees x WHERE x.department = e.department AND x.age > 40)",
+        "name\nDavid\nGrace",
+    )
+}
+
+#[test]
+fn correlated_subquery_with_function_on_outer_column() -> Result<(), Box<dyn std::error::Error>> {
+    // Must agree with the unwrapped form above. Wrapping both sides in a
+    // function may not change which rows qualify.
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees e WHERE EXISTS \
+         (SELECT 1 FROM employees x \
+          WHERE UPPER(x.department) = UPPER(e.department) AND x.age > 40)",
+        "name\nDavid\nGrace",
+    )
+}

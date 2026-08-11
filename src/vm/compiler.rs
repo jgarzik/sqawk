@@ -32,10 +32,12 @@ pub(crate) type MultiTableProjection = (Vec<Vec<usize>>, Vec<(usize, usize)>, Re
 /// Outer column reference found in a correlated subquery (Phase 4B)
 #[derive(Debug, Clone)]
 struct OuterColumnRef {
-    /// The table qualifier (alias or table name)
+    /// The table qualifier (alias or table name) the outer query used.
+    ///
+    /// Only the qualifier is needed: which column it names is resolved by
+    /// NameCtx against the outer table, so recording it here would be a second
+    /// copy of that lookup.
     qualifier: String,
-    /// The column name
-    column: String,
 }
 
 /// A symbolic jump target.
@@ -106,6 +108,15 @@ pub(crate) struct NameCtx<'t> {
     /// FROM sources in cursor order. Empty for `SELECT 1` (no FROM).
     pub srcs: Vec<Src<'t>>,
 
+    /// Enclosing query's sources, for a correlated subquery.
+    ///
+    /// SQL resolves a name in the innermost scope first and only then looks
+    /// outward, so these are consulted only when `srcs` has no match. Keeping
+    /// them in a separate list rather than appending to `srcs` preserves that
+    /// precedence, and keeps the ambiguity check meaningful: two tables in one
+    /// FROM are ambiguous, but an inner name shadowing an outer one is not.
+    pub outer: Vec<Src<'t>>,
+
     /// Aggregate results available to this expression, keyed by the rendered
     /// call text (`"sum(salary)"`).
     ///
@@ -127,6 +138,7 @@ impl<'t> NameCtx<'t> {
                 table,
                 refname: table.name().to_ascii_lowercase(),
             }],
+            outer: Vec::new(),
             agg_bindings: Vec::new(),
         }
     }
@@ -135,6 +147,7 @@ impl<'t> NameCtx<'t> {
     pub(crate) fn multi(srcs: Vec<Src<'t>>) -> Self {
         NameCtx {
             srcs,
+            outer: Vec::new(),
             agg_bindings: Vec::new(),
         }
     }
@@ -144,6 +157,7 @@ impl<'t> NameCtx<'t> {
     pub(crate) fn empty() -> Self {
         NameCtx {
             srcs: Vec::new(),
+            outer: Vec::new(),
             agg_bindings: Vec::new(),
         }
     }
@@ -187,7 +201,18 @@ impl<'t> NameCtx<'t> {
                 }
             }
         }
-        found.ok_or_else(|| SqawkError::ColumnNotFound(name.to_string()))
+        if let Some(col) = found {
+            return Ok(col);
+        }
+        // Not in this scope: look outward, nearest first.
+        for src in &self.outer {
+            for (i, col) in src.table.column_metadata().iter().enumerate() {
+                if col.name.to_ascii_lowercase() == want {
+                    return Ok(ColumnRef::new(src, i));
+                }
+            }
+        }
+        Err(SqawkError::ColumnNotFound(name.to_string()))
     }
 
     /// Resolve a `table.column` (or `alias.column`) reference.
@@ -208,7 +233,19 @@ impl<'t> NameCtx<'t> {
                 qualifier, name
             )));
         }
-        // Unknown qualifier: fall back to an unqualified match so that a
+        // Qualifier not in this scope: try the enclosing one, which is how a
+        // correlated subquery refers to its outer row.
+        for src in &self.outer {
+            if src.refname != qual {
+                continue;
+            }
+            for (i, col) in src.table.column_metadata().iter().enumerate() {
+                if col.name.to_ascii_lowercase() == want {
+                    return Ok(ColumnRef::new(src, i));
+                }
+            }
+        }
+        // Unknown qualifier entirely: fall back to an unqualified match so a
         // single-table query can still say `employees.age` when the cursor was
         // opened under a different refname.
         self.resolve_unqualified(name)
@@ -3598,7 +3635,6 @@ impl<'a> SqlCompiler<'a> {
         match expr {
             Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
                 let qualifier = parts[0].value.to_lowercase();
-                let column = parts[1].value.to_lowercase();
 
                 // Check if this references the outer table (not the subquery's own table)
                 let is_outer_ref = {
@@ -3619,7 +3655,7 @@ impl<'a> SqlCompiler<'a> {
                 };
 
                 if is_outer_ref {
-                    refs.push(OuterColumnRef { qualifier, column });
+                    refs.push(OuterColumnRef { qualifier });
                 }
             }
             Expr::BinaryOp { left, right, .. } => {
@@ -4161,6 +4197,17 @@ impl<'a> SqlCompiler<'a> {
 
     /// Compile an operand in a correlated WHERE clause
     #[allow(clippy::too_many_arguments)]
+    /// Compile an operand of a correlated subquery's condition.
+    ///
+    /// The subquery's own tables form the inner scope and the enclosing
+    /// query's the outer one, which is exactly `NameCtx`'s two-level
+    /// resolution: an unqualified name binds to the subquery, and a name it
+    /// does not have is looked up outward.
+    ///
+    /// This was a private operand compiler handling identifiers, qualified
+    /// identifiers and literals, so a correlated condition could not contain
+    /// arithmetic or a function call even though a plain WHERE could.
+    #[allow(clippy::too_many_arguments)]
     fn compile_correlated_operand(
         &mut self,
         expr: &Expr,
@@ -4171,123 +4218,31 @@ impl<'a> SqlCompiler<'a> {
         outer_refs: &[OuterColumnRef],
         dest_reg: i64,
     ) -> SqawkResult<()> {
-        match expr {
-            Expr::Identifier(ident) => {
-                // Unqualified column - must be from subquery table
-                let col_name = ident.value.to_lowercase();
-                let col_idx = subquery_table
-                    .column_index(&col_name)
-                    .ok_or(SqawkError::ColumnNotFound(col_name.clone()))?;
-                self.emit(
-                    OpCode::Column,
-                    sub_cursor_idx as i64,
-                    col_idx as i64,
-                    dest_reg,
-                    None,
-                    &format!("r[{}] = subquery.{}", dest_reg, col_name),
-                );
-                Ok(())
-            }
-            Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
-                let qualifier = parts[0].value.to_lowercase();
-                let col_name = parts[1].value.to_lowercase();
+        // An alias the outer query used for its table must resolve too, not
+        // just the table's own name.
+        let outer_refname = outer_refs
+            .first()
+            .map(|r| r.qualifier.clone())
+            .unwrap_or_else(|| outer_table.name().to_ascii_lowercase());
 
-                // Check if this is an outer reference
-                let is_outer = outer_refs
-                    .iter()
-                    .any(|r| r.qualifier == qualifier && r.column == col_name)
-                    || qualifier == outer_table.name().to_lowercase();
-
-                if is_outer {
-                    // Load from outer table
-                    let col_idx = outer_table
-                        .column_index(&col_name)
-                        .ok_or(SqawkError::ColumnNotFound(col_name.clone()))?;
-                    self.emit(
-                        OpCode::Column,
-                        outer_cursor_idx as i64,
-                        col_idx as i64,
-                        dest_reg,
-                        None,
-                        &format!("r[{}] = outer.{}", dest_reg, col_name),
-                    );
-                } else {
-                    // Load from subquery table
-                    let col_idx = subquery_table
-                        .column_index(&col_name)
-                        .ok_or(SqawkError::ColumnNotFound(col_name.clone()))?;
-                    self.emit(
-                        OpCode::Column,
-                        sub_cursor_idx as i64,
-                        col_idx as i64,
-                        dest_reg,
-                        None,
-                        &format!("r[{}] = subquery.{}", dest_reg, col_name),
-                    );
-                }
-                Ok(())
-            }
-            Expr::Value(ValueWithSpan { value: v, .. }) => {
-                match v {
-                    Value::Number(n, _) => {
-                        if let Ok(i) = n.parse::<i64>() {
-                            self.emit(
-                                OpCode::Integer,
-                                i,
-                                dest_reg,
-                                0,
-                                None,
-                                &format!("r[{}] = {}", dest_reg, i),
-                            );
-                        } else if let Ok(f) = n.parse::<f64>() {
-                            self.emit(
-                                OpCode::String,
-                                0,
-                                dest_reg,
-                                0,
-                                Some(f.to_string()),
-                                &format!("r[{}] = {}", dest_reg, f),
-                            );
-                            self.emit(
-                                OpCode::Cast,
-                                dest_reg,
-                                dest_reg,
-                                0,
-                                Some("REAL".to_string()),
-                                "",
-                            );
-                        }
-                    }
-                    Value::SingleQuotedString(s) => {
-                        self.emit(
-                            OpCode::String,
-                            0,
-                            dest_reg,
-                            0,
-                            Some(s.clone()),
-                            &format!("r[{}] = '{}'", dest_reg, s),
-                        );
-                    }
-                    _ => {
-                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                            "Unsupported value type in correlated subquery: {:?}",
-                            v
-                        )))
-                    }
-                }
-                Ok(())
-            }
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported operand in correlated subquery: {:?}",
-                expr
-            ))),
-        }
+        let mut ctx = NameCtx::single(subquery_table, sub_cursor_idx as i64);
+        ctx.outer = vec![
+            Src {
+                cursor: outer_cursor_idx as i64,
+                reg_base: None,
+                table: outer_table,
+                refname: outer_refname,
+            },
+            Src {
+                cursor: outer_cursor_idx as i64,
+                reg_base: None,
+                table: outer_table,
+                refname: outer_table.name().to_ascii_lowercase(),
+            },
+        ];
+        self.code_expr(expr, &ctx, Some(dest_reg)).map(|_| ())
     }
 
-    /// Compile a correlated scalar subquery (Phase 4B)
-    ///
-    /// For each outer row, iterates through the subquery table and computes
-    /// an aggregate over matching rows.
     fn compile_correlated_scalar_subquery(
         &mut self,
         subquery: &Query,
@@ -5005,8 +4960,7 @@ impl<'a> SqlCompiler<'a> {
     fn compile_func_coalesce(
         &mut self,
         func: &Function,
-        table: &Table,
-        cursor_idx: usize,
+        ctx: &NameCtx<'_>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).is_empty() {
@@ -5023,7 +4977,7 @@ impl<'a> SqlCompiler<'a> {
             let null_check_reg = self.allocate_register();
 
             // Compile the argument
-            self.compile_where_operand(&expr, table, cursor_idx, arg_reg)?;
+            self.code_expr_into(&expr, ctx, arg_reg)?;
 
             // Check if it's NULL
             self.emit(
@@ -5119,8 +5073,7 @@ impl<'a> SqlCompiler<'a> {
     fn compile_func_nullif(
         &mut self,
         func: &Function,
-        table: &Table,
-        cursor_idx: usize,
+        ctx: &NameCtx<'_>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).len() != 2 {
@@ -5137,8 +5090,8 @@ impl<'a> SqlCompiler<'a> {
         let cmp_reg = self.allocate_register();
 
         // Compile both arguments
-        self.compile_where_operand(&expr1, table, cursor_idx, reg1)?;
-        self.compile_where_operand(&expr2, table, cursor_idx, reg2)?;
+        self.code_expr_into(&expr1, ctx, reg1)?;
+        self.code_expr_into(&expr2, ctx, reg2)?;
 
         // Compare them
         self.emit(
@@ -5211,8 +5164,7 @@ impl<'a> SqlCompiler<'a> {
         &mut self,
         func_name: &str,
         func: &Function,
-        table: &Table,
-        cursor_idx: usize,
+        ctx: &NameCtx<'_>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).is_empty() {
@@ -5226,7 +5178,7 @@ impl<'a> SqlCompiler<'a> {
         let src_reg = self.allocate_register();
 
         // Compile the argument
-        self.compile_where_operand(&expr, table, cursor_idx, src_reg)?;
+        self.code_expr_into(&expr, ctx, src_reg)?;
 
         // Emit StringFunc opcode
         self.emit(
@@ -5245,8 +5197,7 @@ impl<'a> SqlCompiler<'a> {
     fn compile_func_substr(
         &mut self,
         func: &Function,
-        table: &Table,
-        cursor_idx: usize,
+        ctx: &NameCtx<'_>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).len() < 2 {
@@ -5262,14 +5213,14 @@ impl<'a> SqlCompiler<'a> {
         let start_reg = self.allocate_register();
 
         // Compile string and start arguments
-        self.compile_where_operand(&str_expr, table, cursor_idx, str_reg)?;
-        self.compile_where_operand(&start_expr, table, cursor_idx, start_reg)?;
+        self.code_expr_into(&str_expr, ctx, str_reg)?;
+        self.code_expr_into(&start_expr, ctx, start_reg)?;
 
         // Check if we have a length argument
         let func_spec = if func_args(func).len() >= 3 {
             let len_expr = self.extract_function_arg_expr(&func_args(func)[2])?;
             let len_reg = self.allocate_register();
-            self.compile_where_operand(&len_expr, table, cursor_idx, len_reg)?;
+            self.code_expr_into(&len_expr, ctx, len_reg)?;
             format!("SUBSTR:{}", len_reg)
         } else {
             "SUBSTR".to_string()
@@ -5292,8 +5243,7 @@ impl<'a> SqlCompiler<'a> {
     fn compile_func_replace(
         &mut self,
         func: &Function,
-        table: &Table,
-        cursor_idx: usize,
+        ctx: &NameCtx<'_>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).len() != 3 {
@@ -5311,9 +5261,9 @@ impl<'a> SqlCompiler<'a> {
         let to_reg = self.allocate_register();
 
         // Compile all three arguments
-        self.compile_where_operand(&str_expr, table, cursor_idx, str_reg)?;
-        self.compile_where_operand(&from_expr, table, cursor_idx, from_reg)?;
-        self.compile_where_operand(&to_expr, table, cursor_idx, to_reg)?;
+        self.code_expr_into(&str_expr, ctx, str_reg)?;
+        self.code_expr_into(&from_expr, ctx, from_reg)?;
+        self.code_expr_into(&to_expr, ctx, to_reg)?;
 
         // Emit StringFunc opcode with from_reg and to_reg in P4
         self.emit(
@@ -5332,8 +5282,7 @@ impl<'a> SqlCompiler<'a> {
     fn compile_func_concat(
         &mut self,
         func: &Function,
-        table: &Table,
-        cursor_idx: usize,
+        ctx: &NameCtx<'_>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).len() < 2 {
@@ -5345,14 +5294,14 @@ impl<'a> SqlCompiler<'a> {
         // Compile first argument to src_reg
         let first_expr = self.extract_function_arg_expr(&func_args(func)[0])?;
         let src_reg = self.allocate_register();
-        self.compile_where_operand(&first_expr, table, cursor_idx, src_reg)?;
+        self.code_expr_into(&first_expr, ctx, src_reg)?;
 
         // Compile remaining arguments and build P4 spec
         let mut arg_regs = Vec::with_capacity(func_args(func).len().saturating_sub(1));
         for arg in func_args(func).iter().skip(1) {
             let expr = self.extract_function_arg_expr(arg)?;
             let reg = self.allocate_register();
-            self.compile_where_operand(&expr, table, cursor_idx, reg)?;
+            self.code_expr_into(&expr, ctx, reg)?;
             arg_regs.push(reg.to_string());
         }
 
@@ -5376,8 +5325,7 @@ impl<'a> SqlCompiler<'a> {
         &mut self,
         func_name: &str,
         func: &Function,
-        table: &Table,
-        cursor_idx: usize,
+        ctx: &NameCtx<'_>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).len() != 2 {
@@ -5393,8 +5341,8 @@ impl<'a> SqlCompiler<'a> {
         let str_reg = self.allocate_register();
         let len_reg = self.allocate_register();
 
-        self.compile_where_operand(&str_expr, table, cursor_idx, str_reg)?;
-        self.compile_where_operand(&len_expr, table, cursor_idx, len_reg)?;
+        self.code_expr_into(&str_expr, ctx, str_reg)?;
+        self.code_expr_into(&len_expr, ctx, len_reg)?;
 
         self.emit(
             OpCode::StringFunc,
@@ -5416,8 +5364,7 @@ impl<'a> SqlCompiler<'a> {
         &mut self,
         func_name: &str,
         func: &Function,
-        table: &Table,
-        cursor_idx: usize,
+        ctx: &NameCtx<'_>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).is_empty() {
@@ -5431,7 +5378,7 @@ impl<'a> SqlCompiler<'a> {
         let src_reg = self.allocate_register();
 
         // Compile the argument
-        self.compile_where_operand(&expr, table, cursor_idx, src_reg)?;
+        self.code_expr_into(&expr, ctx, src_reg)?;
 
         // Emit MathFunc opcode
         self.emit(
@@ -5465,8 +5412,7 @@ impl<'a> SqlCompiler<'a> {
         &mut self,
         func_name: &str,
         func: &Function,
-        table: &Table,
-        cursor_idx: usize,
+        ctx: &NameCtx<'_>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).is_empty() {
@@ -5480,7 +5426,7 @@ impl<'a> SqlCompiler<'a> {
         let src_reg = self.allocate_register();
 
         // Compile the argument
-        self.compile_where_operand(&expr, table, cursor_idx, src_reg)?;
+        self.code_expr_into(&expr, ctx, src_reg)?;
 
         // Emit DateFunc opcode
         self.emit(
@@ -5499,33 +5445,28 @@ impl<'a> SqlCompiler<'a> {
     fn compile_function(
         &mut self,
         func: &Function,
-        table: &Table,
-        cursor_idx: usize,
+        ctx: &NameCtx<'_>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         let func_name = Self::get_function_name(func);
 
         match func_name.as_str() {
-            "COALESCE" => self.compile_func_coalesce(func, table, cursor_idx, target_reg),
-            "NULLIF" => self.compile_func_nullif(func, table, cursor_idx, target_reg),
+            "COALESCE" => self.compile_func_coalesce(func, ctx, target_reg),
+            "NULLIF" => self.compile_func_nullif(func, ctx, target_reg),
             "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "LENGTH" => {
-                self.compile_func_string_simple(&func_name, func, table, cursor_idx, target_reg)
+                self.compile_func_string_simple(&func_name, func, ctx, target_reg)
             }
-            "SUBSTR" | "SUBSTRING" => self.compile_func_substr(func, table, cursor_idx, target_reg),
-            "REPLACE" => self.compile_func_replace(func, table, cursor_idx, target_reg),
-            "CONCAT" => self.compile_func_concat(func, table, cursor_idx, target_reg),
-            "LEFT" | "RIGHT" => {
-                self.compile_func_left_right(&func_name, func, table, cursor_idx, target_reg)
-            }
+            "SUBSTR" | "SUBSTRING" => self.compile_func_substr(func, ctx, target_reg),
+            "REPLACE" => self.compile_func_replace(func, ctx, target_reg),
+            "CONCAT" => self.compile_func_concat(func, ctx, target_reg),
+            "LEFT" | "RIGHT" => self.compile_func_left_right(&func_name, func, ctx, target_reg),
             "ABS" | "ROUND" | "CEIL" | "CEILING" | "FLOOR" => {
-                self.compile_func_math(&func_name, func, table, cursor_idx, target_reg)
+                self.compile_func_math(&func_name, func, ctx, target_reg)
             }
             "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" => {
                 self.compile_func_datetime_noarg(&func_name, target_reg)
             }
-            "DATE" | "TIME" => {
-                self.compile_func_datetime(&func_name, func, table, cursor_idx, target_reg)
-            }
+            "DATE" | "TIME" => self.compile_func_datetime(&func_name, func, ctx, target_reg),
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
                 "Unsupported function: {}",
                 func_name
@@ -5968,6 +5909,17 @@ impl<'a> SqlCompiler<'a> {
                 );
             }
 
+            // Function calls resolve their arguments in the CALLER's scope.
+            //
+            // Reaching them through the single-source fallback rebuilt a
+            // context containing only the innermost table, so inside a
+            // correlated subquery `UPPER(e.department)` silently resolved
+            // `e.department` against the SUBQUERY table -- making both sides of
+            // a comparison identical and matching every row.
+            Expr::Function(func) => {
+                self.compile_function(func, ctx, dest)?;
+            }
+
             // TRIM / CEIL / FLOOR are their own Expr variants rather than
             // Function calls. They were previously handled only inside the
             // projection path, so they worked in a SELECT list and failed in
@@ -6075,6 +6027,16 @@ impl<'a> SqlCompiler<'a> {
                 }
             }
         }
+    }
+
+    /// `code_expr` with the argument order the function compilers use.
+    fn code_expr_into(
+        &mut self,
+        expr: &Expr,
+        ctx: &NameCtx<'_>,
+        target_reg: i64,
+    ) -> SqawkResult<()> {
+        self.code_expr(expr, ctx, Some(target_reg)).map(|_| ())
     }
 
     /// Compile `expr` as a boolean predicate, returning its register.
@@ -6348,7 +6310,11 @@ impl<'a> SqlCompiler<'a> {
             }
             Expr::Function(func) => {
                 // Handle COALESCE and NULLIF functions
-                self.compile_function(func, table, cursor_idx, target_reg)?;
+                self.compile_function(
+                    func,
+                    &NameCtx::single(table, cursor_idx as i64),
+                    target_reg,
+                )?;
             }
             Expr::Subquery(subquery) => {
                 // Handle scalar subquery as an operand
