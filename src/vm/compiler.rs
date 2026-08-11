@@ -58,12 +58,41 @@ pub(crate) struct Label(usize);
 pub(crate) struct Src<'t> {
     /// VM cursor id for this source.
     pub cursor: i64,
+    /// Base register holding this source's columns, when the loop has already
+    /// materialized them.
+    ///
+    /// Multi-table joins load every column into registers before evaluating
+    /// join conditions, so a column reference there is a register offset
+    /// rather than a `Column` read from a cursor. Modelling both here means
+    /// one expression compiler serves both loop shapes.
+    pub reg_base: Option<i64>,
     /// The table behind the cursor.
     pub table: &'t Table,
     /// How the query refers to it: the alias if there is one, else the table
     /// name. Stored ASCII-lowercased, since SQL identifiers are matched
     /// case-insensitively.
     pub refname: String,
+}
+
+/// A resolved column: where its value lives at run time.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ColumnRef {
+    /// Read column `col` from cursor `cursor`.
+    Cursor { cursor: i64, col: usize },
+    /// The value is already in this register.
+    Register(i64),
+}
+
+impl ColumnRef {
+    fn new(src: &Src<'_>, col: usize) -> Self {
+        match src.reg_base {
+            Some(base) => ColumnRef::Register(base + col as i64),
+            None => ColumnRef::Cursor {
+                cursor: src.cursor,
+                col,
+            },
+        }
+    }
 }
 
 /// Name resolution scope for [`SqlCompiler::code_expr`].
@@ -94,6 +123,7 @@ impl<'t> NameCtx<'t> {
         NameCtx {
             srcs: vec![Src {
                 cursor,
+                reg_base: None,
                 table,
                 refname: table.name().to_ascii_lowercase(),
             }],
@@ -140,9 +170,9 @@ impl<'t> NameCtx<'t> {
     ///
     /// Returns `Err` if no source has the column, or if more than one does --
     /// silently picking the first would make the result depend on FROM order.
-    fn resolve_unqualified(&self, name: &str) -> SqawkResult<(i64, usize)> {
+    fn resolve_unqualified(&self, name: &str) -> SqawkResult<ColumnRef> {
         let want = name.to_ascii_lowercase();
-        let mut found: Option<(i64, usize)> = None;
+        let mut found: Option<ColumnRef> = None;
         for src in &self.srcs {
             for (i, col) in src.table.column_metadata().iter().enumerate() {
                 if col.name.to_ascii_lowercase() == want {
@@ -152,7 +182,7 @@ impl<'t> NameCtx<'t> {
                             name
                         )));
                     }
-                    found = Some((src.cursor, i));
+                    found = Some(ColumnRef::new(src, i));
                     break;
                 }
             }
@@ -161,7 +191,7 @@ impl<'t> NameCtx<'t> {
     }
 
     /// Resolve a `table.column` (or `alias.column`) reference.
-    fn resolve_qualified(&self, qualifier: &str, name: &str) -> SqawkResult<(i64, usize)> {
+    fn resolve_qualified(&self, qualifier: &str, name: &str) -> SqawkResult<ColumnRef> {
         let qual = qualifier.to_ascii_lowercase();
         let want = name.to_ascii_lowercase();
         for src in &self.srcs {
@@ -170,7 +200,7 @@ impl<'t> NameCtx<'t> {
             }
             for (i, col) in src.table.column_metadata().iter().enumerate() {
                 if col.name.to_ascii_lowercase() == want {
-                    return Ok((src.cursor, i));
+                    return Ok(ColumnRef::new(src, i));
                 }
             }
             return Err(SqawkError::ColumnNotFound(format!(
@@ -5745,15 +5775,8 @@ impl<'a> SqlCompiler<'a> {
             // Column references resolve through the context, so they work
             // across joins and aliases and are matched case-insensitively.
             Expr::Identifier(ident) => {
-                let (cursor, col_idx) = ctx.resolve_unqualified(&ident.value)?;
-                self.emit(
-                    OpCode::Column,
-                    cursor,
-                    col_idx as i64,
-                    dest,
-                    None,
-                    &format!("r[{}] = {} (column {})", dest, ident.value, col_idx),
-                );
+                let col = ctx.resolve_unqualified(&ident.value)?;
+                self.emit_column_ref(col, dest, &ident.value);
             }
 
             // `table.column` / `alias.column`. The old WHERE compiler had no
@@ -5762,15 +5785,8 @@ impl<'a> SqlCompiler<'a> {
             Expr::CompoundIdentifier(parts) if parts.len() >= 2 => {
                 let qualifier = &parts[parts.len() - 2].value;
                 let name = &parts[parts.len() - 1].value;
-                let (cursor, col_idx) = ctx.resolve_qualified(qualifier, name)?;
-                self.emit(
-                    OpCode::Column,
-                    cursor,
-                    col_idx as i64,
-                    dest,
-                    None,
-                    &format!("r[{}] = {}.{} (column {})", dest, qualifier, name, col_idx),
-                );
+                let col = ctx.resolve_qualified(qualifier, name)?;
+                self.emit_column_ref(col, dest, &format!("{}.{}", qualifier, name));
             }
 
             Expr::Nested(inner) => {
@@ -6033,6 +6049,32 @@ impl<'a> SqlCompiler<'a> {
         }
 
         Ok(dest)
+    }
+
+    /// Emit whatever loads a resolved column into `dest`.
+    fn emit_column_ref(&mut self, col: ColumnRef, dest: i64, label: &str) {
+        match col {
+            ColumnRef::Cursor { cursor, col } => self.emit(
+                OpCode::Column,
+                cursor,
+                col as i64,
+                dest,
+                None,
+                &format!("r[{}] = {} (column {})", dest, label, col),
+            ),
+            ColumnRef::Register(src) => {
+                if src != dest {
+                    self.emit(
+                        OpCode::Copy,
+                        src,
+                        dest,
+                        0,
+                        None,
+                        &format!("r[{}] = {} (r[{}])", dest, label, src),
+                    );
+                }
+            }
+        }
     }
 
     /// Compile `expr` as a boolean predicate, returning its register.

@@ -2102,3 +2102,40 @@ fn function_in_join_on_clause() -> Result<(), Box<dyn std::error::Error>> {
         "users.name,orders.id\nJane,102\nJane,104",
     )
 }
+
+#[test]
+fn three_table_join_with_compound_on() -> Result<(), Box<dyn std::error::Error>> {
+    // Multi-table joins load every column into registers before evaluating
+    // join conditions, so a column reference there is a register offset rather
+    // than a cursor read. Both addressing modes now go through one expression
+    // compiler, which is what lets this ON clause carry more than a single
+    // comparison.
+    assert_query(
+        &[
+            "tests/data/users.csv",
+            "tests/data/orders.csv",
+            "tests/data/products.csv",
+        ],
+        "SELECT users.name, products.name FROM users \
+         JOIN orders ON users.id = orders.user_id \
+         JOIN products ON orders.product_id = products.product_id AND products.price > 200",
+        "users.name,products.name\nJohn,Laptop\nJane,Phone\nJane,Monitor",
+    )
+}
+
+#[test]
+fn three_table_join_unfiltered() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &[
+            "tests/data/users.csv",
+            "tests/data/orders.csv",
+            "tests/data/products.csv",
+        ],
+        "SELECT users.name, products.name, products.price FROM users \
+         JOIN orders ON users.id = orders.user_id \
+         JOIN products ON orders.product_id = products.product_id",
+        "users.name,products.name,products.price\n\
+         John,Laptop,1200\nJohn,Headphones,150\nJohn,Keyboard,80\n\
+         Jane,Phone,800\nJane,Monitor,350",
+    )
+}

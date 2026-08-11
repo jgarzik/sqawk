@@ -2,7 +2,6 @@
 //!
 //! This module extends SqlCompiler with JOIN compilation methods.
 
-use sqlparser::ast::ValueWithSpan;
 use sqlparser::ast::{
     Expr, FunctionArg, FunctionArgExpr, JoinConstraint, JoinOperator, Query, Select, SelectItem,
     TableWithJoins,
@@ -2060,6 +2059,7 @@ impl<'a> SqlCompiler<'a> {
             .enumerate()
             .map(|(i, (table, name))| Src {
                 cursor: i as i64,
+                reg_base: None,
                 table,
                 refname: name.to_ascii_lowercase(),
             })
@@ -2365,112 +2365,41 @@ impl<'a> SqlCompiler<'a> {
         Ok(())
     }
 
-    /// Compile a join condition for multi-table joins
+    /// Compile a join condition for multi-table joins.
+    ///
+    /// Here every table's columns have already been loaded into registers, so
+    /// a column reference is a register offset rather than a cursor read. That
+    /// is what `Src::reg_base` models, which lets this share the expression
+    /// compiler with the cursor-based paths instead of carrying its own
+    /// condition/operand pair -- one that understood a single top-level
+    /// comparison and nothing else.
     fn compile_multi_join_condition(
         &mut self,
         expr: &Expr,
         table_names: &[String],
         table_start_regs: &[i64],
     ) -> SqawkResult<i64> {
-        match expr {
-            Expr::BinaryOp { left, op, right } => {
-                let left_reg =
-                    self.compile_multi_join_operand(left, table_names, table_start_regs)?;
-                let right_reg =
-                    self.compile_multi_join_operand(right, table_names, table_start_regs)?;
-                self.emit_comparison(op, left_reg, right_reg)
-            }
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported multi-join condition: {:?}",
-                expr
-            ))),
-        }
+        let tables: Vec<&Table> = table_names
+            .iter()
+            .map(|n| self.database.get_table(n))
+            .collect::<SqawkResult<_>>()?;
+
+        let srcs = tables
+            .iter()
+            .zip(table_names.iter())
+            .zip(table_start_regs.iter())
+            .enumerate()
+            .map(|(i, ((table, name), base))| Src {
+                cursor: i as i64,
+                reg_base: Some(*base),
+                table,
+                refname: name.to_ascii_lowercase(),
+            })
+            .collect();
+        let ctx = NameCtx::multi(srcs);
+        self.code_expr(expr, &ctx, None)
     }
 
-    /// Compile an operand for multi-table join conditions
-    fn compile_multi_join_operand(
-        &mut self,
-        expr: &Expr,
-        table_names: &[String],
-        table_start_regs: &[i64],
-    ) -> SqawkResult<i64> {
-        match expr {
-            Expr::CompoundIdentifier(parts) => {
-                if parts.len() == 2 {
-                    let table_alias = parts[0].value.to_lowercase();
-                    let col_name = parts[1].value.to_lowercase();
-
-                    // Find which table this refers to
-                    for (i, name) in table_names.iter().enumerate() {
-                        if name.to_lowercase() == table_alias {
-                            let table = self.database.get_table(name)?;
-                            if let Some(col_idx) = table.column_index(&col_name) {
-                                // The column value should already be loaded in register
-                                let reg = table_start_regs[i] + col_idx as i64;
-                                return Ok(reg);
-                            }
-                        }
-                    }
-                }
-                Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Could not resolve column reference: {:?}",
-                    expr
-                )))
-            }
-            Expr::Identifier(ident) => {
-                // Unqualified column name - search all tables
-                let col_name = ident.value.to_lowercase();
-                for (i, name) in table_names.iter().enumerate() {
-                    let table = self.database.get_table(name)?;
-                    if let Some(col_idx) = table.column_index(&col_name) {
-                        let reg = table_start_regs[i] + col_idx as i64;
-                        return Ok(reg);
-                    }
-                }
-                Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Could not find column: {}",
-                    col_name
-                )))
-            }
-            Expr::Value(ValueWithSpan { value: val, .. }) => {
-                let reg = self.allocate_register();
-                match val {
-                    sqlparser::ast::Value::Number(n, _) => {
-                        if let Ok(i) = n.parse::<i64>() {
-                            self.emit(OpCode::Integer, i, reg, 0, None, "Load constant");
-                        } else {
-                            return Err(SqawkError::UnsupportedSqlFeature(
-                                "Only integer constants supported".into(),
-                            ));
-                        }
-                    }
-                    sqlparser::ast::Value::SingleQuotedString(s) => {
-                        self.emit(
-                            OpCode::String,
-                            0,
-                            reg,
-                            0,
-                            Some(s.clone()),
-                            "Load string constant",
-                        );
-                    }
-                    _ => {
-                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                            "Unsupported value type: {:?}",
-                            val
-                        )))
-                    }
-                }
-                Ok(reg)
-            }
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported operand in multi-join: {:?}",
-                expr
-            ))),
-        }
-    }
-
-    /// Resolve projection for join - returns (left_col_indices, right_col_indices, schema)
     fn resolve_join_projection(
         &self,
         projection: &[SelectItem],
@@ -2620,11 +2549,13 @@ impl<'a> SqlCompiler<'a> {
         let ctx = NameCtx::multi(vec![
             Src {
                 cursor: left_cursor as i64,
+                reg_base: None,
                 table: left_table,
                 refname: left_ref.to_ascii_lowercase(),
             },
             Src {
                 cursor: right_cursor as i64,
+                reg_base: None,
                 table: right_table,
                 refname: right_ref.to_ascii_lowercase(),
             },
