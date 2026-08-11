@@ -52,6 +52,8 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 - No database setup or schema definition required
 - Automatic type inference and cross-file operations
 - Powerful SQL dialect including joins, sorting, filtering, and aggregations
+- Subqueries (scalar, `IN`, `EXISTS`, correlated) and derived tables
+- Set operations (UNION, INTERSECT, EXCEPT) and window functions
 - Interactive REPL mode for SQL exploration and execution
 - Safe operation with explicit write-back control
 
@@ -75,7 +77,7 @@ To build from source:
 
 1. Clone the repository:
    ```sh
-   git clone https://github.com/username/sqawk.git
+   git clone https://github.com/jgarzik/sqawk.git
    cd sqawk
    ```
 
@@ -704,12 +706,22 @@ Sqawk loads all data into memory, which provides excellent performance but requi
    - For tab-delimited files, use `-F '\t'`
    - Ensure consistent delimiters throughout your files
 
-3. **Type conversion errors**:
-   - Sqawk automatically infers types but sometimes needs hints
-   - Use explicit casts in SQL when needed: `CAST(value AS INT)`
-   - Check that numeric columns don't contain non-numeric characters
+3. **Unexpected results from comparisons**:
+   - Types are inferred per value, so one column can hold numbers and text
+   - Comparing a number against a numeric string coerces and compares
+     numerically, so `WHERE salary > '60000'` behaves as you would expect
+   - Use explicit casts when you want to force one interpretation:
+     `CAST(value AS INT)`
+   - See the SQL reference for the full coercion and NULL rules
 
-4. **CSV parsing errors with malformed rows**:
+4. **Rows unexpectedly missing from results**:
+   - An empty field reads as NULL, and any comparison involving NULL is
+     UNKNOWN, so such rows satisfy neither `x > 5` nor `x <= 5`
+   - This follows SQL, and is not an error -- use `IS NULL` / `IS NOT NULL`
+     to test for NULL explicitly
+   - `COUNT(*)` counts rows while `COUNT(col)` counts non-NULL values
+
+5. **CSV parsing errors with malformed rows**:
    - Error messages about "field count mismatch" indicate rows with inconsistent numbers of fields
    - Error messages include line numbers to help locate problematic rows
    - Common causes include:
@@ -718,27 +730,27 @@ Sqawk loads all data into memory, which provides excellent performance but requi
      - Newlines within quoted fields
    - Use the error recovery options described in the File Format Support section to handle malformed rows
 
-5. **Issues with comment lines**:
+6. **Issues with comment lines**:
    - Comments must start at the beginning of a line with the comment character
    - Comment characters appearing within data (not at the start of a line) are treated as regular data
    - If you're seeing unexpected parsing errors, check if comment lines are properly formatted
 
-6. **Memory limitations**:
+7. **Memory limitations**:
    - If processing very large files, filter data early in your queries
    - Consider processing in batches or using more targeted queries
    - Select only the columns you need rather than using SELECT *
 
-7. **Changes not saved**:
+8. **Changes not saved**:
    - Remember to use the `--write` flag to save changes
    - Only modified tables are written back
    - Check verbose output (`-v`) to confirm which tables were modified
 
-8. **SQL syntax errors**:
+9. **SQL syntax errors**:
    - Try running your query in interactive mode to get immediate feedback
    - Use the `-v` verbose flag to see the exact SQL being executed
    - Verify SQL statement syntax, particularly quotes, parentheses, and required clauses
 
-9. **Special characters in files**:
+10. **Special characters in files**:
    - For files with quotes or special characters, Sqawk follows CSV escaping rules
    - If encountering parsing issues, check for malformed CSV data
 
@@ -766,14 +778,15 @@ For more help, use the verbose mode (`-v`) to see detailed information about pro
 2. **Use version control** or backups before modifying important data files
 3. **Qualify column names** with table names in multi-table queries
 4. **Use verbose mode** (`-v`) when learning or debugging
-5. **Chain SQL statements** for complex operations rather than using complex subqueries
+5. **Chain SQL statements** with `-s` or `;` when it reads more clearly; each
+   statement produces its own result and sees the effects of the ones before it
 6. **Test on sample data** before processing large files
 
 ### Additional Resources
 
 - [SQL Language Reference](sql_reference.md) - Complete guide to Sqawk's SQL dialect
-- [GitHub Repository](https://github.com/username/sqawk) - Source code and issue tracking
-- [Release Notes](https://github.com/username/sqawk/releases) - Latest features and bug fixes
+- [GitHub Repository](https://github.com/jgarzik/sqawk) - Source code and issue tracking
+- [Release Notes](https://github.com/jgarzik/sqawk/releases) - Latest features and bug fixes
 
 ---
 

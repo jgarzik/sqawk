@@ -608,6 +608,17 @@ impl<'a> SqlCompiler<'a> {
         let mut order_asc = Vec::new();
 
         if let Some(WindowType::WindowSpec(spec)) = window_type {
+            // An explicit frame is parsed but not implemented. Accepting it
+            // silently returns the default frame's answer -- `ROWS BETWEEN 1
+            // PRECEDING AND CURRENT ROW` produced a running total over the
+            // whole partition rather than a two-row sliding window -- so it is
+            // rejected instead. A clear error beats a plausible wrong number.
+            if spec.window_frame.is_some() {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Explicit window frames (ROWS/RANGE BETWEEN) are not supported".into(),
+                ));
+            }
+
             // Extract PARTITION BY columns
             for expr in &spec.partition_by {
                 if let Expr::Identifier(ident) = expr {

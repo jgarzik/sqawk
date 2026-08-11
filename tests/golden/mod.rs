@@ -2235,3 +2235,17 @@ fn alias_in_implicit_join() -> Result<(), Box<dyn std::error::Error>> {
         "u.name,o.id\nJohn,101\nJohn,103\nJohn,105\nJane,102\nJane,104",
     )
 }
+
+#[test]
+fn explicit_window_frame_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    // The frame clause was parsed and then ignored, so this returned the
+    // default frame's answer -- a running total over the whole partition
+    // rather than a two-row sliding window. Rejecting it is correct until
+    // frames are implemented: a clear error beats a plausible wrong number.
+    assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT name, SUM(salary) OVER (ORDER BY salary ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) \
+         FROM employees",
+        "Explicit window frames",
+    )
+}
