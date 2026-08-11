@@ -1822,3 +1822,58 @@ fn order_by_unselected_column_with_where() -> Result<(), Box<dyn std::error::Err
         "name\nCharlie\nFrank\nAlice",
     )
 }
+
+// ---------------------------------------------------------------------------
+// Aggregates composed with expressions.
+//
+// An aggregate argument is an ordinary expression, and after aggregation an
+// aggregate result is an ordinary value. Both directions previously failed:
+// the argument went through a resolver that yields a column INDEX, and
+// detection looked only at the top level so an aggregate inside arithmetic was
+// not recognised as an aggregate query at all.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn aggregate_over_arithmetic() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT SUM(salary + age) FROM employees",
+        "SUM\n540257",
+    )
+}
+
+#[test]
+fn aggregate_over_function() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT MAX(LENGTH(name)), MIN(LENGTH(name)) FROM employees",
+        "MAX,MIN\n7,3",
+    )
+}
+
+#[test]
+fn arithmetic_over_aggregate() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT SUM(salary) + 1 FROM employees",
+        "expr\n540001",
+    )
+}
+
+#[test]
+fn arithmetic_between_two_aggregates() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT COUNT(*) * 2, MAX(salary) - MIN(salary) FROM employees",
+        "expr,expr\n16,45000",
+    )
+}
+
+#[test]
+fn aggregate_mixed_with_plain_projection() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT COUNT(*), SUM(salary) / COUNT(*) FROM employees",
+        "COUNT,expr\n8,67500",
+    )
+}

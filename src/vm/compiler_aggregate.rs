@@ -20,6 +20,28 @@ enum GroupOut {
 }
 
 impl<'a> SqlCompiler<'a> {
+    /// Collect every aggregate call within `expr`, in order of appearance.
+    ///
+    /// Detection used to look only at the top level, so `SUM(salary) + 1` was
+    /// not recognised as an aggregate query at all and fell through to the
+    /// plain table-scan path, where SUM is not a known scalar function.
+    fn collect_aggregates<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
+        if Self::is_aggregate_call(expr) {
+            out.push(expr);
+            return;
+        }
+        match expr {
+            Expr::BinaryOp { left, right, .. } => {
+                Self::collect_aggregates(left, out);
+                Self::collect_aggregates(right, out);
+            }
+            Expr::UnaryOp { expr: inner, .. }
+            | Expr::Nested(inner)
+            | Expr::Cast { expr: inner, .. } => Self::collect_aggregates(inner, out),
+            _ => {}
+        }
+    }
+
     pub(crate) fn compile_select_with_aggregate(
         &mut self,
         select: &Select,
@@ -69,20 +91,23 @@ impl<'a> SqlCompiler<'a> {
             );
         }
 
-        // For each aggregate in the projection, emit AggStep
-        let mut acc_regs = Vec::new();
+        // Gather every aggregate appearing anywhere in the projection, then
+        // step each one per row.
+        let mut agg_calls: Vec<&Expr> = Vec::new();
         for item in &select.projection {
-            match item {
-                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-                    if let Some((func_type, col_reg)) =
-                        self.compile_aggregate_step(expr, table, cursor_idx)?
-                    {
-                        let acc_reg = self.allocate_register();
-                        acc_regs.push((acc_reg, func_type));
-                        self.emit(OpCode::AggStep, func_type, col_reg, acc_reg, None, "");
-                    }
-                }
-                _ => {}
+            if let SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } = item {
+                Self::collect_aggregates(expr, &mut agg_calls);
+            }
+        }
+
+        let mut acc_regs = Vec::new();
+        for call in &agg_calls {
+            if let Some((func_type, col_reg)) =
+                self.compile_aggregate_step(call, table, cursor_idx)?
+            {
+                let acc_reg = self.allocate_register();
+                acc_regs.push(acc_reg);
+                self.emit(OpCode::AggStep, func_type, col_reg, acc_reg, None, "");
             }
         }
 
@@ -104,25 +129,48 @@ impl<'a> SqlCompiler<'a> {
             inst.p2 = after_loop as i64;
         }
 
-        // Finalize aggregates and output result
-        let result_start_reg = self.allocate_registers(acc_regs.len());
-
-        for (i, (acc_reg, _)) in acc_regs.iter().enumerate() {
+        // Finalize each aggregate into its own register.
+        let agg_start_reg = self.allocate_registers(acc_regs.len().max(1));
+        for (i, acc_reg) in acc_regs.iter().enumerate() {
             self.emit(
                 OpCode::AggFinal,
                 *acc_reg,
-                result_start_reg + i as i64,
+                agg_start_reg + i as i64,
                 0,
                 None,
                 "",
             );
         }
 
+        // Bind them by call text, then compile each projection item as an
+        // ordinary expression. That is what makes `SUM(salary) + 1` work: the
+        // arithmetic is compiled by the shared expression compiler, which
+        // resolves the inner SUM to its finalized register.
+        let mut ctx = NameCtx::single(table, cursor_idx);
+        for (i, call) in agg_calls.iter().enumerate() {
+            ctx.agg_bindings
+                .push((NameCtx::agg_key(call), agg_start_reg + i as i64));
+        }
+
+        let out_items: Vec<&Expr> = select
+            .projection
+            .iter()
+            .filter_map(|item| match item {
+                SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => Some(e),
+                _ => None,
+            })
+            .collect();
+
+        let result_start_reg = self.allocate_registers(out_items.len().max(1));
+        for (i, expr) in out_items.iter().enumerate() {
+            self.code_expr(expr, &ctx, Some(result_start_reg + i as i64))?;
+        }
+
         // Output result row
         self.emit(
             OpCode::ResultRow,
             result_start_reg,
-            acc_regs.len() as i64,
+            out_items.len() as i64,
             0,
             None,
             "",
@@ -156,20 +204,18 @@ impl<'a> SqlCompiler<'a> {
                     return Ok(Some((func_type, -1)));
                 }
 
-                // Get the column argument
+                // Compile the argument as a full expression.
+                //
+                // This used to call resolve_column_expr, which yields a column
+                // INDEX and so only accepts a bare column reference --
+                // `SUM(salary + age)` was rejected with "Only column
+                // references supported in SELECT". An aggregate argument is
+                // an ordinary expression evaluated once per row.
                 if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr))) =
                     func_args(func).first()
                 {
-                    let col_idx = self.resolve_column_expr(arg_expr, table)?;
-                    let col_reg = self.allocate_register();
-                    self.emit(
-                        OpCode::Column,
-                        cursor_idx,
-                        col_idx as i64,
-                        col_reg,
-                        None,
-                        "",
-                    );
+                    let ctx = NameCtx::single(table, cursor_idx);
+                    let col_reg = self.code_expr(arg_expr, &ctx, None)?;
                     return Ok(Some((func_type, col_reg)));
                 }
 

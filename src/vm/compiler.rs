@@ -76,6 +76,15 @@ pub(crate) struct Src<'t> {
 pub(crate) struct NameCtx<'t> {
     /// FROM sources in cursor order. Empty for `SELECT 1` (no FROM).
     pub srcs: Vec<Src<'t>>,
+
+    /// Aggregate results available to this expression, keyed by the rendered
+    /// call text (`"sum(salary)"`).
+    ///
+    /// After aggregation an aggregate is a value like any other, so an
+    /// expression may contain one -- `SUM(salary) + 1`. Binding them here lets
+    /// the ordinary expression compiler handle the surrounding arithmetic
+    /// instead of needing a separate post-aggregation compiler.
+    pub agg_bindings: Vec<(String, i64)>,
 }
 
 impl<'t> NameCtx<'t> {
@@ -88,13 +97,31 @@ impl<'t> NameCtx<'t> {
                 table,
                 refname: table.name().to_ascii_lowercase(),
             }],
+            agg_bindings: Vec::new(),
         }
     }
 
     /// A scope with no FROM sources, for constant expressions.
     #[allow(dead_code)] // used by constant-expression contexts
     pub(crate) fn empty() -> Self {
-        NameCtx { srcs: Vec::new() }
+        NameCtx {
+            srcs: Vec::new(),
+            agg_bindings: Vec::new(),
+        }
+    }
+
+    /// Normalized key for an aggregate call, used to bind and to look up.
+    pub(crate) fn agg_key(expr: &Expr) -> String {
+        expr.to_string().to_ascii_lowercase()
+    }
+
+    /// Register holding the result of an already-computed aggregate.
+    fn lookup_agg(&self, expr: &Expr) -> Option<i64> {
+        let key = Self::agg_key(expr);
+        self.agg_bindings
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, r)| *r)
     }
 
     /// Resolve an unqualified column name across every source.
@@ -5686,6 +5713,23 @@ impl<'a> SqlCompiler<'a> {
                 return self.code_expr(inner, ctx, Some(dest));
             }
 
+            // An aggregate call in a position where aggregates have already
+            // been computed: read the bound register rather than trying to
+            // compile SUM as a scalar function.
+            Expr::Function(_) if ctx.lookup_agg(expr).is_some() => {
+                let src = ctx.lookup_agg(expr).unwrap();
+                if src != dest {
+                    self.emit(
+                        OpCode::Copy,
+                        src,
+                        dest,
+                        0,
+                        None,
+                        &format!("r[{}] = aggregate r[{}]", dest, src),
+                    );
+                }
+            }
+
             // String concatenation. sqlparser has always produced this node;
             // there was simply no arm for it, so `a || b` was reported as an
             // unsupported operator. It lowers onto the CONCAT string function
@@ -5704,6 +5748,53 @@ impl<'a> SqlCompiler<'a> {
                     0,
                     Some(format!("CONCAT:{}", right_reg)),
                     &format!("r[{}] = r[{}] || r[{}]", dest, left_reg, right_reg),
+                );
+            }
+
+            // Arithmetic and comparison operators, compiled here rather than
+            // delegated, so the name-resolution context propagates into the
+            // operands. Delegating rebuilt a bare single-table context and
+            // dropped any aggregate bindings, which is what made
+            // `SUM(salary) + 1` report SUM as an unknown scalar function.
+            Expr::BinaryOp { left, op, right }
+                if matches!(
+                    op,
+                    BinaryOperator::Plus
+                        | BinaryOperator::Minus
+                        | BinaryOperator::Multiply
+                        | BinaryOperator::Divide
+                        | BinaryOperator::Modulo
+                        | BinaryOperator::Gt
+                        | BinaryOperator::Lt
+                        | BinaryOperator::GtEq
+                        | BinaryOperator::LtEq
+                        | BinaryOperator::Eq
+                        | BinaryOperator::NotEq
+                ) =>
+            {
+                let left_reg = self.code_expr(left, ctx, None)?;
+                let right_reg = self.code_expr(right, ctx, None)?;
+                let opcode = match op {
+                    BinaryOperator::Plus => OpCode::Add,
+                    BinaryOperator::Minus => OpCode::Subtract,
+                    BinaryOperator::Multiply => OpCode::Multiply,
+                    BinaryOperator::Divide => OpCode::Divide,
+                    BinaryOperator::Modulo => OpCode::Remainder,
+                    BinaryOperator::Gt => OpCode::Gt,
+                    BinaryOperator::Lt => OpCode::Lt,
+                    BinaryOperator::GtEq => OpCode::Ge,
+                    BinaryOperator::LtEq => OpCode::Le,
+                    BinaryOperator::Eq => OpCode::Eq,
+                    BinaryOperator::NotEq => OpCode::Ne,
+                    _ => unreachable!("guarded above"),
+                };
+                self.emit(
+                    opcode,
+                    left_reg,
+                    right_reg,
+                    dest,
+                    None,
+                    &format!("r[{}] = r[{}] {:?} r[{}]", dest, left_reg, op, right_reg),
                 );
             }
 
@@ -6708,13 +6799,23 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// Check if an expression is or contains an aggregate function
+    /// Check if an expression is or CONTAINS an aggregate function.
+    ///
+    /// Recursive: this used to match only a top-level call, so
+    /// `SELECT SUM(salary) + 1` was not recognised as an aggregate query and
+    /// took the plain table-scan path, where SUM is not a known scalar
+    /// function.
     fn is_aggregate_expr(&self, expr: &Expr) -> bool {
+        if Self::is_aggregate_call(expr) {
+            return true;
+        }
         match expr {
-            Expr::Function(func) => {
-                let name = func.name.to_string().to_uppercase();
-                matches!(name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX")
+            Expr::BinaryOp { left, right, .. } => {
+                self.is_aggregate_expr(left) || self.is_aggregate_expr(right)
             }
+            Expr::UnaryOp { expr: inner, .. }
+            | Expr::Nested(inner)
+            | Expr::Cast { expr: inner, .. } => self.is_aggregate_expr(inner),
             _ => false,
         }
     }

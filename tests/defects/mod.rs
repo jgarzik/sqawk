@@ -234,7 +234,6 @@ fn comparison_works_in_projection() -> Result<(), Box<dyn std::error::Error>> {
 /// Aggregate over an expression -- `resolve_column_expr` rejects anything that
 /// is not a bare column reference.
 #[test]
-#[ignore = "aggregate over expression unsupported"]
 fn aggregate_accepts_expression_argument() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
@@ -247,7 +246,6 @@ fn aggregate_accepts_expression_argument() -> Result<(), Box<dyn std::error::Err
 /// aggregate query (`is_aggregate_expr` only matches a top-level Function),
 /// so it falls into the plain table-scan path.
 #[test]
-#[ignore = "aggregate nested in expression not detected"]
 fn aggregate_nested_in_expression_works() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
