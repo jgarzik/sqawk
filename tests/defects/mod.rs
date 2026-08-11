@@ -347,7 +347,6 @@ fn string_number_comparison_coerces() -> Result<(), Box<dyn std::error::Error>> 
 /// `build_sort_spec` maps the ORDER BY key into the *projected* column list
 /// and errors if it is absent, so you cannot sort by a column you don't select.
 #[test]
-#[ignore = "ORDER BY requires the key to be in the SELECT list"]
 fn order_by_column_not_in_select_list() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
@@ -359,7 +358,6 @@ fn order_by_column_not_in_select_list() -> Result<(), Box<dyn std::error::Error>
 
 /// ORDER BY an arbitrary expression.
 #[test]
-#[ignore = "ORDER BY expression unsupported"]
 fn order_by_expression() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],

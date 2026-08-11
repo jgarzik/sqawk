@@ -1778,3 +1778,47 @@ fn full_join_reversed_projection_nullfill() -> Result<(), Box<dyn std::error::Er
         "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\nNULL,Cara\nOrphan,NULL",
     )
 }
+
+// ---------------------------------------------------------------------------
+// ORDER BY keys independent of the projection.
+//
+// The sorter payload is [sort keys.., output columns..], so a key is just a
+// value computed per row whether or not it is projected. It previously held
+// only the output columns, which forced every key to be a selected column.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn order_by_unselected_column() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees ORDER BY salary DESC",
+        "name\nGrace\nDavid\nFrank\nAlice\nCharlie\nEve\nBob\nHenry",
+    )
+}
+
+#[test]
+fn order_by_arithmetic_expression() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees ORDER BY salary * -1 LIMIT 3",
+        "name\nGrace\nDavid\nFrank",
+    )
+}
+
+#[test]
+fn order_by_function_then_column() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees ORDER BY LENGTH(name) DESC, name ASC LIMIT 3",
+        "name\nCharlie\nAlice\nDavid",
+    )
+}
+
+#[test]
+fn order_by_unselected_column_with_where() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees WHERE department = 'Engineering' ORDER BY age DESC",
+        "name\nCharlie\nFrank\nAlice",
+    )
+}

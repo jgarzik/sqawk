@@ -1071,14 +1071,32 @@ impl<'a> SqlCompiler<'a> {
         let sorter_id = 0i64;
         let col_count = columns.len();
 
-        // Build sort spec from ORDER BY
-        let sort_spec = self.build_sort_spec(query_order_by(query), table, columns)?;
+        // Sorter payload is [sort keys.., output columns..].
+        //
+        // It used to hold only the output columns, and the sort spec mapped
+        // each ORDER BY key to a position among them -- so ordering by a
+        // column you did not select was rejected with "ORDER BY column must be
+        // in SELECT list", and ordering by an expression was rejected outright.
+        // Carrying the keys separately removes both restrictions: a key is
+        // just another value computed per row, whether or not it is projected.
+        let order_by = query_order_by(query);
+        let key_count = order_by.len();
+        let total_cols = key_count + col_count;
+
+        let sort_spec: String = order_by
+            .iter()
+            .enumerate()
+            .map(|(i, ob)| {
+                format!("{}:{}", i, if order_by_is_asc(ob) { "asc" } else { "desc" })
+            })
+            .collect::<Vec<_>>()
+            .join(",");
 
         // Open sorter
         self.emit(
             OpCode::SorterOpen,
             sorter_id,
-            col_count as i64,
+            total_cols as i64,
             0,
             Some(sort_spec),
             "",
@@ -1107,29 +1125,34 @@ impl<'a> SqlCompiler<'a> {
 
         let loop_start = self.program.len();
 
-        // Load columns into registers
-        let start_reg = self.allocate_registers(col_count);
+        // WHERE first, so filtered rows never reach the sorter.
+        let next_label = self.label();
+        if let Some(where_expr) = &select.selection {
+            let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
+            self.emit_jump_to(
+                OpCode::IfZ,
+                cond_reg,
+                next_label,
+                0,
+                None,
+                "Skip row if WHERE is false",
+            );
+        }
+
+        // One contiguous block: sort keys first, then the output columns.
+        let start_reg = self.allocate_registers(total_cols);
+
+        let ctx = NameCtx::single(table, cursor_idx);
+        for (i, ob) in order_by.iter().enumerate() {
+            self.code_expr(&ob.expr, &ctx, Some(start_reg + i as i64))?;
+        }
 
         for (i, col_idx) in columns.iter().enumerate() {
             self.emit(
                 OpCode::Column,
                 cursor_idx,
                 *col_idx as i64,
-                start_reg + i as i64,
-                None,
-                "",
-            );
-        }
-
-        // Compile WHERE clause if present
-        if let Some(where_expr) = &select.selection {
-            let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
-            // Skip SorterInsert, go to Next
-            self.emit(
-                OpCode::IfZ,
-                cond_reg,
-                (self.program.len() + 2) as i64,
-                0,
+                start_reg + (key_count + i) as i64,
                 None,
                 "",
             );
@@ -1140,12 +1163,13 @@ impl<'a> SqlCompiler<'a> {
             OpCode::SorterInsert,
             sorter_id,
             start_reg,
-            col_count as i64,
+            total_cols as i64,
             None,
             "",
         );
 
         // Next row
+        self.resolve(next_label);
         self.emit(OpCode::Next, cursor_idx, loop_start as i64, 0, None, "");
 
         let after_scan = self.program.len();
@@ -1193,7 +1217,7 @@ impl<'a> SqlCompiler<'a> {
             OpCode::SorterData,
             sorter_id,
             start_reg,
-            col_count as i64,
+            total_cols as i64,
             None,
             "",
         );
@@ -1240,7 +1264,15 @@ impl<'a> SqlCompiler<'a> {
 
         // Output result row
         self.resolve(result_row_label);
-        self.emit(OpCode::ResultRow, start_reg, col_count as i64, 0, None, "");
+        // Emit only the output half: the sort keys are internal.
+        self.emit(
+            OpCode::ResultRow,
+            start_reg + key_count as i64,
+            col_count as i64,
+            0,
+            None,
+            "",
+        );
 
         // Handle LIMIT
         if let Some(lim_reg) = limit_reg {
@@ -1510,52 +1542,6 @@ impl<'a> SqlCompiler<'a> {
         Ok(())
     }
 
-    /// Build sort spec string from ORDER BY clause
-    fn build_sort_spec(
-        &self,
-        order_by: &[sqlparser::ast::OrderByExpr],
-        table: &Table,
-        projected_columns: &[usize],
-    ) -> SqawkResult<String> {
-        let mut specs = Vec::new();
-        for expr in order_by {
-            // Find column index in original table
-            let table_col_idx = match &expr.expr {
-                Expr::Identifier(ident) => {
-                    let col_name = ident.value.to_lowercase();
-                    table
-                        .column_index(&col_name)
-                        .ok_or(SqawkError::ColumnNotFound(col_name))?
-                }
-                Expr::CompoundIdentifier(parts) => {
-                    let col_name = parts
-                        .last()
-                        .map(|p| p.value.to_lowercase())
-                        .unwrap_or_default();
-                    table
-                        .column_index(&col_name)
-                        .ok_or(SqawkError::ColumnNotFound(col_name))?
-                }
-                _ => {
-                    return Err(SqawkError::UnsupportedSqlFeature(
-                        "Complex ORDER BY expressions not supported".into(),
-                    ))
-                }
-            };
-            // Map to position in projected columns
-            let col_idx = projected_columns
-                .iter()
-                .position(|&c| c == table_col_idx)
-                .ok_or_else(|| {
-                    SqawkError::InvalidSqlQuery(
-                        "ORDER BY column must be in SELECT list".to_string(),
-                    )
-                })?;
-            let asc = order_by_is_asc(expr);
-            specs.push(format!("{}:{}", col_idx, if asc { "asc" } else { "desc" }));
-        }
-        Ok(specs.join(","))
-    }
 
     /// Extract LIMIT and OFFSET values from query
     pub(crate) fn extract_limit_offset(&self, query: &Query) -> SqawkResult<(Option<i64>, i64)> {
