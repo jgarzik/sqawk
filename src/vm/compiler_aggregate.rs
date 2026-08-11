@@ -2,11 +2,10 @@
 //!
 //! This module extends SqlCompiler with aggregate and GROUP BY compilation methods.
 
-use sqlparser::ast::ValueWithSpan;
 use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Select, SelectItem};
 
 use super::bytecode::{OpCode, ResultSchema, AGG_DISTINCT};
-use super::compiler::SqlCompiler;
+use super::compiler::{NameCtx, SqlCompiler};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
 use super::ast_compat::{func_args, func_is_distinct, group_by_exprs};
@@ -476,6 +475,7 @@ impl<'a> SqlCompiler<'a> {
         if let Some(having_expr) = &select.having {
             let having_reg = self.compile_having_condition(
                 having_expr,
+                table,
                 &group_col_indices,
                 &agg_info,
                 result_start_reg,
@@ -589,6 +589,7 @@ impl<'a> SqlCompiler<'a> {
         if let Some(having_expr) = &select.having {
             let having_reg = self.compile_having_condition(
                 having_expr,
+                table,
                 &group_col_indices,
                 &agg_info,
                 result_start_reg,
@@ -625,9 +626,11 @@ impl<'a> SqlCompiler<'a> {
 
     /// Compile a HAVING condition and return the register containing the result (1 or 0)
     /// agg_result_regs maps aggregate function signatures to their result registers
+    #[allow(clippy::too_many_arguments)]
     fn compile_having_condition(
         &mut self,
         having_expr: &Expr,
+        table: &Table,
         group_col_indices: &[usize],
         agg_info: &[(i64, Option<usize>)],
         result_start_reg: i64,
@@ -637,6 +640,7 @@ impl<'a> SqlCompiler<'a> {
             Expr::BinaryOp { left, op, right } => {
                 let left_reg = self.compile_having_operand(
                     left,
+                    table,
                     group_col_indices,
                     agg_info,
                     result_start_reg,
@@ -644,6 +648,7 @@ impl<'a> SqlCompiler<'a> {
                 )?;
                 let right_reg = self.compile_having_operand(
                     right,
+                    table,
                     group_col_indices,
                     agg_info,
                     result_start_reg,
@@ -659,9 +664,11 @@ impl<'a> SqlCompiler<'a> {
     }
 
     /// Compile an operand in a HAVING condition
+    #[allow(clippy::too_many_arguments)]
     fn compile_having_operand(
         &mut self,
         expr: &Expr,
+        table: &Table,
         group_col_indices: &[usize],
         agg_info: &[(i64, Option<usize>)],
         result_start_reg: i64,
@@ -669,14 +676,30 @@ impl<'a> SqlCompiler<'a> {
     ) -> SqawkResult<i64> {
         match expr {
             Expr::Function(func) => {
-                // Find the aggregate function in agg_info and return its result register
+                // Match the aggregate on BOTH its function type and its
+                // argument column.
+                //
+                // This used to compare func_type alone, so with two aggregates
+                // of the same kind -- `SELECT department, SUM(salary),
+                // SUM(age) ... HAVING SUM(age) > 60` -- HAVING bound to
+                // SUM(salary), whichever appeared first, and filtered on
+                // entirely the wrong column. MIN vs MAX bound correctly, which
+                // is why it stayed hidden.
                 let name = func.name.to_string().to_uppercase();
-                let func_type = Self::agg_func_type(&name);
+                let func_type = Self::agg_func_type(&name)
+                    | if func_is_distinct(func) { AGG_DISTINCT } else { 0 };
 
-                // Find matching aggregate in agg_info by function type
-                for (i, (agg_func_type, _)) in agg_info.iter().enumerate() {
-                    if *agg_func_type == func_type {
-                        // Found matching aggregate - copy its result to a new register
+                let wanted_col: Option<usize> =
+                    match func_args(func).first() {
+                        Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) => None,
+                        Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr))) => {
+                            Some(self.resolve_column_expr(arg_expr, table)?)
+                        }
+                        _ => None,
+                    };
+
+                for (i, (agg_func_type, agg_col)) in agg_info.iter().enumerate() {
+                    if *agg_func_type == func_type && *agg_col == wanted_col {
                         let agg_result_reg =
                             result_start_reg + group_col_indices.len() as i64 + i as i64;
                         let reg = self.allocate_register();
@@ -686,24 +709,46 @@ impl<'a> SqlCompiler<'a> {
                 }
 
                 Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Aggregate function in HAVING not found in SELECT: {}",
-                    name
+                    "Aggregate in HAVING must also appear in SELECT: {}",
+                    expr
                 )))
             }
-            Expr::Value(ValueWithSpan { value, .. }) => {
-                let reg = self.allocate_register();
-                if let sqlparser::ast::Value::Number(n, _) = value {
-                    if let Ok(i) = n.parse::<i64>() {
-                        self.emit(OpCode::Integer, i, reg, 0, None, "");
-                    }
-                }
-                Ok(reg)
+            Expr::Value(_) => {
+                // Compile the literal through the shared expression compiler.
+                //
+                // This arm used to handle Value::Number only, and silently
+                // emitted NOTHING for anything else -- so `HAVING department =
+                // 'Sales'` compared the group key against an uninitialized
+                // register and matched no group.
+                self.code_expr(expr, &NameCtx::single(table, 0), None)
             }
-            Expr::Identifier(_) => {
-                // GROUP BY column reference - copy from first group key register
-                // (simplified - for multi-column GROUP BY would need column name matching)
+            Expr::Identifier(ident) => {
+                // A GROUP BY key referenced in HAVING. This used to copy
+                // group_key_reg unconditionally -- the FIRST key column --
+                // whatever name was written, so any reference to a later key
+                // silently filtered on the first one.
+                let col_name = ident.value.to_ascii_lowercase();
+                let col_idx = table
+                    .column_index(&col_name)
+                    .ok_or_else(|| SqawkError::ColumnNotFound(col_name.clone()))?;
+                let key_pos = group_col_indices
+                    .iter()
+                    .position(|c| *c == col_idx)
+                    .ok_or_else(|| {
+                        SqawkError::InvalidSqlQuery(format!(
+                            "Column '{}' in HAVING must appear in GROUP BY",
+                            ident.value
+                        ))
+                    })?;
                 let reg = self.allocate_register();
-                self.emit(OpCode::Copy, group_key_reg, reg, 0, None, "");
+                self.emit(
+                    OpCode::Copy,
+                    group_key_reg + key_pos as i64,
+                    reg,
+                    0,
+                    None,
+                    "",
+                );
                 Ok(reg)
             }
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(

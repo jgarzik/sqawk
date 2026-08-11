@@ -1538,3 +1538,27 @@ fn group_by_with_where_excluding_a_whole_group() -> Result<(), Box<dyn std::erro
         "department,COUNT\nEngineering,3\nSales,2",
     )
 }
+
+#[test]
+fn having_on_a_group_key() -> Result<(), Box<dyn std::error::Error>> {
+    // The HAVING operand compiler handled only numeric literals and silently
+    // emitted nothing for a string, so this matched no group at all.
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT department, COUNT(*) FROM employees GROUP BY department \
+         HAVING department = 'Sales'",
+        "department,COUNT\nSales,2",
+    )
+}
+
+#[test]
+fn having_selects_between_same_type_aggregates() -> Result<(), Box<dyn std::error::Error>> {
+    // Two SUMs: HAVING must bind to the one it names, not the first in the
+    // projection. SUM(age) values are 97/22/53/85 by department.
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT department, SUM(salary), SUM(age) FROM employees GROUP BY department \
+         HAVING SUM(age) > 90",
+        "department,SUM,SUM\nEngineering,210000,97",
+    )
+}

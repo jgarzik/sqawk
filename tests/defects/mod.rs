@@ -86,7 +86,6 @@ fn limit_applies_to_group_by() -> Result<(), Box<dyn std::error::Error>> {
 /// ignoring the argument column, so `HAVING SUM(age)` binds to `SUM(salary)`.
 /// Needs two same-type aggregates to surface -- MIN vs MAX bind correctly.
 #[test]
-#[ignore = "defect 7: HAVING binds to wrong aggregate"]
 fn having_binds_to_the_named_aggregate() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
