@@ -102,7 +102,6 @@ fn having_binds_to_the_named_aggregate() -> Result<(), Box<dyn std::error::Error
 
 /// Defect 6: `func.distinct` is never read, so COUNT(DISTINCT x) counts rows.
 #[test]
-#[ignore = "defect 6: COUNT(DISTINCT) ignores DISTINCT"]
 fn count_distinct_deduplicates() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],

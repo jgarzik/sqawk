@@ -5,7 +5,8 @@
 //! and the program counter during execution.
 
 use super::bytecode::{
-    Instruction, OpCode, Program, Register, AGG_AVG, AGG_COUNT, AGG_MAX, AGG_MIN, AGG_SUM,
+    Instruction, OpCode, Program, Register, AGG_AVG, AGG_COUNT, AGG_DISTINCT, AGG_MAX, AGG_MIN,
+    AGG_SUM, AGG_TYPE_MASK,
 };
 use crate::capacity::{
     DEFAULT_ACCUMULATOR_CAPACITY, DEFAULT_CURSOR_CAPACITY, DEFAULT_MODIFICATIONS_CAPACITY,
@@ -330,6 +331,9 @@ struct AggAccumulator {
     count: i64,
     /// Accumulated value (sum for SUM/AVG, min/max for MIN/MAX)
     value: Option<Value>,
+    /// Values already accumulated, for DISTINCT aggregates. `None` when the
+    /// aggregate is not DISTINCT, so the ordinary path allocates nothing.
+    seen: Option<std::collections::HashSet<String>>,
 }
 
 impl Sorter {
@@ -2926,7 +2930,8 @@ impl<'a> VmEngine<'a> {
                 // P1 = function type (0=COUNT, 1=SUM, 2=AVG, 3=MIN, 4=MAX)
                 // P2 = value register
                 // P3 = accumulator register (used as key for accumulator storage)
-                let func_type = inst.p1;
+                let func_type = inst.p1 & AGG_TYPE_MASK;
+                let is_distinct = inst.p1 & AGG_DISTINCT != 0;
                 let value_reg = inst.p2 as usize;
                 let acc_reg = inst.p3 as usize;
 
@@ -2948,6 +2953,11 @@ impl<'a> VmEngine<'a> {
                             func_type,
                             count: 0,
                             value: None,
+                            seen: if is_distinct {
+                                Some(std::collections::HashSet::new())
+                            } else {
+                                None
+                            },
                         },
                     );
                     // Mark the register as non-Null to indicate accumulator is active
@@ -2959,7 +2969,26 @@ impl<'a> VmEngine<'a> {
                     func_type,
                     count: 0,
                     value: None,
+                    seen: if is_distinct {
+                        Some(std::collections::HashSet::new())
+                    } else {
+                        None
+                    },
                 });
+
+                // DISTINCT: ignore a value already accumulated for this group.
+                // NULLs are not tracked -- every aggregate already skips them.
+                if is_distinct {
+                    if let Some(val) = value.as_ref() {
+                        if !matches!(val, Value::Null) {
+                            let key = format!("{:?}", val);
+                            let seen = acc.seen.get_or_insert_with(Default::default);
+                            if !seen.insert(key) {
+                                return Ok(ExecuteResult::Continue);
+                            }
+                        }
+                    }
+                }
 
                 match func_type {
                     AGG_COUNT => {

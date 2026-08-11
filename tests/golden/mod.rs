@@ -1399,3 +1399,15 @@ fn where_with_offset_only() -> Result<(), Box<dyn std::error::Error>> {
         "name\nDavid\nEve\nFrank\nGrace",
     )
 }
+
+/// DISTINCT rides on the aggregate function type as a flag bit, so it composes
+/// with every aggregate rather than only COUNT. repeats.csv holds 10,10,20,30,30.
+#[test]
+fn aggregate_distinct_variants() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/repeats.csv"],
+        "SELECT SUM(v), SUM(DISTINCT v), COUNT(v), COUNT(DISTINCT v), \
+         MIN(DISTINCT v), MAX(DISTINCT v), AVG(DISTINCT v) FROM repeats",
+        "SUM,SUM,COUNT,COUNT,MIN,MAX,AVG\n100,60,5,3,10,30,20",
+    )
+}

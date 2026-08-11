@@ -24,6 +24,17 @@ pub const AGG_MIN: i64 = 3;
 /// MAX aggregate function type
 pub const AGG_MAX: i64 = 4;
 
+/// Flag bit OR-ed into an AggStep/AggFinal function type to request DISTINCT.
+///
+/// Carried as a flag rather than as five extra constants so that DISTINCT
+/// composes with every aggregate: `COUNT(DISTINCT x)`, `SUM(DISTINCT x)` and
+/// the rest all use the same mechanism. Mask with `AGG_TYPE_MASK` to recover
+/// the base function.
+pub const AGG_DISTINCT: i64 = 0x100;
+
+/// Mask selecting the base aggregate function out of a function-type word.
+pub const AGG_TYPE_MASK: i64 = 0xFF;
+
 /// A column in a result schema
 #[derive(Debug, Clone)]
 pub struct ResultColumn {

@@ -5,11 +5,11 @@
 use sqlparser::ast::ValueWithSpan;
 use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Select, SelectItem};
 
-use super::bytecode::{OpCode, ResultSchema};
+use super::bytecode::{OpCode, ResultSchema, AGG_DISTINCT};
 use super::compiler::SqlCompiler;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
-use super::ast_compat::{func_args, group_by_exprs};
+use super::ast_compat::{func_args, func_is_distinct, group_by_exprs};
 
 impl<'a> SqlCompiler<'a> {
     pub(crate) fn compile_select_with_aggregate(
@@ -136,7 +136,11 @@ impl<'a> SqlCompiler<'a> {
         match expr {
             Expr::Function(func) => {
                 let name = func.name.to_string().to_uppercase();
-                let func_type = Self::agg_func_type(&name);
+                // DISTINCT rides along as a flag bit on the function type.
+                // It used to be dropped entirely -- func.distinct was never
+                // read -- so COUNT(DISTINCT department) counted rows.
+                let func_type = Self::agg_func_type(&name)
+                    | if func_is_distinct(func) { AGG_DISTINCT } else { 0 };
 
                 // Check for COUNT(*)
                 if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) = func_args(func).first() {

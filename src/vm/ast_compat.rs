@@ -36,7 +36,6 @@ pub(crate) fn func_args(func: &Function) -> &[FunctionArg] {
 /// Older sqlparser exposed this as a plain `Function::distinct` bool; it now
 /// lives in the argument list as a `DuplicateTreatment`. `ALL` is the default
 /// and means the same thing as omitting it.
-#[allow(dead_code)] // wired up when COUNT(DISTINCT) is fixed
 pub(crate) fn func_is_distinct(func: &Function) -> bool {
     match &func.args {
         FunctionArguments::List(list) => {
