@@ -4,6 +4,7 @@
 
 use sqlparser::ast::{Expr, Select, SelectItem, SetExpr, TableFactor};
 
+use super::ast_compat::assignment_column;
 use super::bytecode::OpCode;
 use super::compiler::SqlCompiler;
 use crate::error::{SqawkError, SqawkResult};
@@ -464,13 +465,7 @@ impl<'a> SqlCompiler<'a> {
         let mut assignment_map: Vec<(usize, &Expr)> = Vec::new();
         for assignment in assignments {
             // Handle different column identifier formats
-            let col_name = if !assignment.id.is_empty() {
-                assignment.id[0].value.clone()
-            } else {
-                return Err(SqawkError::InvalidSqlQuery(
-                    "Invalid assignment target".to_string(),
-                ));
-            };
+            let col_name = assignment_column(assignment)?;
 
             let col_idx = table_ref
                 .column_index(&col_name)

@@ -2,12 +2,14 @@
 //!
 //! This module extends SqlCompiler with aggregate and GROUP BY compilation methods.
 
+use sqlparser::ast::ValueWithSpan;
 use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Select, SelectItem};
 
 use super::bytecode::{OpCode, ResultSchema};
 use super::compiler::SqlCompiler;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
+use super::ast_compat::{func_args, group_by_exprs};
 
 impl<'a> SqlCompiler<'a> {
     pub(crate) fn compile_select_with_aggregate(
@@ -137,14 +139,14 @@ impl<'a> SqlCompiler<'a> {
                 let func_type = Self::agg_func_type(&name);
 
                 // Check for COUNT(*)
-                if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) = func.args.first() {
+                if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) = func_args(func).first() {
                     // COUNT(*) - use -1 to indicate no column
                     return Ok(Some((func_type, -1)));
                 }
 
                 // Get the column argument
                 if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr))) =
-                    func.args.first()
+                    func_args(func).first()
                 {
                     let col_idx = self.resolve_column_expr(arg_expr, table)?;
                     let col_reg = self.allocate_register();
@@ -201,7 +203,7 @@ impl<'a> SqlCompiler<'a> {
 
         // Determine GROUP BY column indices
         let mut group_col_indices: Vec<usize> = Vec::new();
-        for expr in select.group_by.iter() {
+        for expr in group_by_exprs(&select.group_by).iter() {
             match expr {
                 Expr::Identifier(ident) => {
                     let col_name = ident.value.to_lowercase();
@@ -238,12 +240,12 @@ impl<'a> SqlCompiler<'a> {
                         if matches!(name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX") {
                             let func_type = Self::agg_func_type(&name);
                             if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
-                                func.args.first()
+                                func_args(func).first()
                             {
                                 agg_info.push((func_type, None));
                             } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(
                                 arg_expr,
-                            ))) = func.args.first()
+                            ))) = func_args(func).first()
                             {
                                 let col_idx = self.resolve_column_expr(arg_expr, table)?;
                                 agg_info.push((func_type, Some(col_idx)));
@@ -649,7 +651,7 @@ impl<'a> SqlCompiler<'a> {
                     name
                 )))
             }
-            Expr::Value(value) => {
+            Expr::Value(ValueWithSpan { value, .. }) => {
                 let reg = self.allocate_register();
                 if let sqlparser::ast::Value::Number(n, _) = value {
                     if let Ok(i) = n.parse::<i64>() {

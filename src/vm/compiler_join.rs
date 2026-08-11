@@ -2,6 +2,7 @@
 //!
 //! This module extends SqlCompiler with JOIN compilation methods.
 
+use sqlparser::ast::ValueWithSpan;
 use sqlparser::ast::{
     BinaryOperator, Expr, FunctionArg, FunctionArgExpr, JoinConstraint, JoinOperator, Query,
     Select, SelectItem, TableWithJoins, Value,
@@ -20,6 +21,7 @@ use super::bytecode::{OpCode, ResultSchema};
 use super::compiler::{MultiTableProjection, SqlCompiler};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
+use super::ast_compat::{func_args, group_by_exprs};
 
 /// Classify a `JoinOperator` into sqawk's join kind plus its constraint.
 ///
@@ -36,29 +38,24 @@ use crate::table::Table;
 /// asking for an ON expression.
 fn classify_join(op: &JoinOperator) -> SqawkResult<(&'static str, Option<&JoinConstraint>)> {
     Ok(match op {
-        JoinOperator::Inner(c) => ("INNER", Some(c)),
-        JoinOperator::LeftOuter(c) => ("LEFT", Some(c)),
-        JoinOperator::RightOuter(c) => ("RIGHT", Some(c)),
+        // A bare `JOIN ... ON` is an INNER JOIN. sqlparser distinguishes the
+        // spelling (`Join` vs `Inner`); SQL does not.
+        JoinOperator::Join(c) | JoinOperator::Inner(c) => ("INNER", Some(c)),
+        // Likewise `LEFT JOIN` and `LEFT OUTER JOIN` are the same operation,
+        // as are the RIGHT pair. sqlparser reserves the `*Outer` variants for
+        // the explicit OUTER spelling.
+        JoinOperator::Left(c) | JoinOperator::LeftOuter(c) => ("LEFT", Some(c)),
+        JoinOperator::Right(c) | JoinOperator::RightOuter(c) => ("RIGHT", Some(c)),
         JoinOperator::FullOuter(c) => ("FULL", Some(c)),
-        JoinOperator::CrossJoin => ("CROSS", None),
-        JoinOperator::LeftSemi(_) => {
+        JoinOperator::CrossJoin(_) => ("CROSS", None),
+        JoinOperator::Semi(_) | JoinOperator::LeftSemi(_) | JoinOperator::RightSemi(_) => {
             return Err(SqawkError::UnsupportedSqlFeature(
-                "LEFT SEMI JOIN not supported".into(),
+                "SEMI JOIN not supported".into(),
             ))
         }
-        JoinOperator::RightSemi(_) => {
+        JoinOperator::Anti(_) | JoinOperator::LeftAnti(_) | JoinOperator::RightAnti(_) => {
             return Err(SqawkError::UnsupportedSqlFeature(
-                "RIGHT SEMI JOIN not supported".into(),
-            ))
-        }
-        JoinOperator::LeftAnti(_) => {
-            return Err(SqawkError::UnsupportedSqlFeature(
-                "LEFT ANTI JOIN not supported".into(),
-            ))
-        }
-        JoinOperator::RightAnti(_) => {
-            return Err(SqawkError::UnsupportedSqlFeature(
-                "RIGHT ANTI JOIN not supported".into(),
+                "ANTI JOIN not supported".into(),
             ))
         }
         JoinOperator::CrossApply => {
@@ -69,6 +66,23 @@ fn classify_join(op: &JoinOperator) -> SqawkResult<(&'static str, Option<&JoinCo
         JoinOperator::OuterApply => {
             return Err(SqawkError::UnsupportedSqlFeature(
                 "OUTER APPLY not supported".into(),
+            ))
+        }
+        JoinOperator::AsOf { .. } => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "ASOF JOIN not supported".into(),
+            ))
+        }
+        // MySQL optimizer hint: semantically a plain INNER JOIN, but it also
+        // forces a join order. Rejected rather than silently ignoring the hint.
+        JoinOperator::StraightJoin(_) => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "STRAIGHT_JOIN not supported".into(),
+            ))
+        }
+        JoinOperator::ArrayJoin | JoinOperator::LeftArrayJoin | JoinOperator::InnerArrayJoin => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "ARRAY JOIN not supported".into(),
             ))
         }
     })
@@ -117,7 +131,7 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Check for CROSS JOIN - handle separately
-        if matches!(&join.join_operator, JoinOperator::CrossJoin) {
+        if matches!(&join.join_operator, JoinOperator::CrossJoin(_)) {
             return self.compile_cross_join(&left_table_name, &right_table_name, projection);
         }
 
@@ -1016,7 +1030,7 @@ impl<'a> SqlCompiler<'a> {
 
         // Determine GROUP BY column references
         let mut group_col_refs: Vec<(usize, usize)> = Vec::new(); // (table_idx, col_idx)
-        for expr in select.group_by.iter() {
+        for expr in group_by_exprs(&select.group_by).iter() {
             let (tbl_idx, col_idx) = self.resolve_multi_table_column(expr, &tables, &table_refs)?;
             group_col_refs.push((tbl_idx, col_idx));
         }
@@ -1041,11 +1055,11 @@ impl<'a> SqlCompiler<'a> {
                     if matches!(name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX") {
                         let func_type = Self::agg_func_type(&name);
                         let col_ref = if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
-                            func.args.first()
+                            func_args(func).first()
                         {
                             None // COUNT(*)
                         } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr))) =
-                            func.args.first()
+                            func_args(func).first()
                         {
                             let (tbl_idx, col_idx) =
                                 self.resolve_multi_table_column(arg_expr, &tables, &table_refs)?;
@@ -2078,7 +2092,7 @@ impl<'a> SqlCompiler<'a> {
                     )))
                 }
             }
-            Expr::Value(value) => {
+            Expr::Value(ValueWithSpan { value, .. }) => {
                 match value {
                     Value::Number(num, _) => {
                         if let Ok(int_val) = num.parse::<i64>() {
@@ -2487,7 +2501,7 @@ impl<'a> SqlCompiler<'a> {
                     col_name
                 )))
             }
-            Expr::Value(val) => {
+            Expr::Value(ValueWithSpan { value: val, .. }) => {
                 let reg = self.allocate_register();
                 match val {
                     sqlparser::ast::Value::Number(n, _) => {
@@ -2776,7 +2790,7 @@ impl<'a> SqlCompiler<'a> {
                     col_name
                 )))
             }
-            Expr::Value(val) => {
+            Expr::Value(ValueWithSpan { value: val, .. }) => {
                 // Literal value in join condition
                 let reg = self.allocate_register();
                 match val {

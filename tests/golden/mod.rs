@@ -1276,3 +1276,79 @@ fn outer_join_full_nullfill() -> Result<(), Box<dyn std::error::Error>> {
         ),
     )
 }
+
+// ---------------------------------------------------------------------------
+// Error paths.
+//
+// Only two tests in the pre-existing suite assert a failure at all, so nothing
+// pinned which inputs must be REJECTED. These do -- and they matter especially
+// after an AST upgrade, where an unhandled node can quietly start being
+// accepted (or a supported one start being refused).
+// ---------------------------------------------------------------------------
+
+use crate::helpers::assert_query_fails;
+
+#[test]
+fn err_unknown_column() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT nosuchcolumn FROM employees",
+        "not found",
+    )
+}
+
+#[test]
+fn err_unknown_table() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM nosuchtable",
+        "not found",
+    )
+}
+
+#[test]
+fn err_syntax() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT FROM WHERE",
+        "Failed to execute SQL",
+    )
+}
+
+#[test]
+fn err_group_by_all_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    // GROUP BY ALL parses but carries no key list. It must be rejected rather
+    // than silently treated as "no GROUP BY".
+    assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT department, COUNT(*) FROM employees GROUP BY ALL",
+        "GROUP BY ALL is not supported",
+    )
+}
+
+#[test]
+fn err_order_by_all_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    // Likewise ORDER BY ALL must not be silently ignored. Under the dialect
+    // sqawk parses with, `ALL` here comes through as an ordinary identifier
+    // rather than as OrderByKind::All, so this is rejected as an unknown
+    // column instead of by the explicit guard in compile_query. Either route
+    // is acceptable; silently returning unsorted rows is not, which is what
+    // this test pins.
+    assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees ORDER BY ALL",
+        "not found",
+    )
+}
+
+#[test]
+fn err_semi_join_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    // Join kinds sqawk cannot execute must produce a clear error, not a
+    // silently wrong join. This is the arm that a sqlparser variant rename
+    // would otherwise slip past.
+    assert_query_fails(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT users.name FROM users LEFT SEMI JOIN orders ON users.id = orders.user_id",
+        "not supported",
+    )
+}

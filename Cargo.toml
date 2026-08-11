@@ -16,7 +16,7 @@ exclude = ["tests/", "doc/", ".github/", "CLAUDE.md"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-sqlparser = "0.36"
+sqlparser = "0.62"
 csv = "1"
 anyhow = "1"
 regex = "1"

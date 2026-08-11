@@ -2,12 +2,13 @@
 //!
 //! This module extends SqlCompiler with window function compilation methods.
 
-use sqlparser::ast::{Expr, Select, SelectItem, Value, WindowType};
+use sqlparser::ast::{Expr, Select, SelectItem, Value, ValueWithSpan, WindowType};
 
 use super::bytecode::{OpCode, ResultSchema};
 use super::compiler::SqlCompiler;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{DataType, Table};
+use super::ast_compat::{func_args, order_by_is_asc};
 
 impl<'a> SqlCompiler<'a> {
     pub(crate) fn compile_select_with_window(
@@ -280,9 +281,9 @@ impl<'a> SqlCompiler<'a> {
                     {
                         if func.name.to_string().to_uppercase() == *func_name && func.over.is_some()
                         {
-                            if !func.args.is_empty() {
+                            if !func_args(func).is_empty() {
                                 if let Ok(Expr::Identifier(ident)) =
-                                    self.extract_function_arg_expr(&func.args[0])
+                                    self.extract_function_arg_expr(&func_args(func)[0])
                                 {
                                     if let Some(src_idx) = table.column_index(&ident.value) {
                                         agg_col_pos =
@@ -355,9 +356,9 @@ impl<'a> SqlCompiler<'a> {
                             let p4 = if func_name == "LAG" || func_name == "LEAD" {
                                 // LAG/LEAD(column, offset, default)
                                 // Get column position in ephemeral cursor
-                                let col_pos = if !func.args.is_empty() {
+                                let col_pos = if !func_args(func).is_empty() {
                                     if let Ok(Expr::Identifier(ident)) =
-                                        self.extract_function_arg_expr(&func.args[0])
+                                        self.extract_function_arg_expr(&func_args(func)[0])
                                     {
                                         if let Some(src_idx) = table.column_index(&ident.value) {
                                             base_columns
@@ -375,9 +376,9 @@ impl<'a> SqlCompiler<'a> {
                                 };
 
                                 // Get offset (default 1)
-                                let offset = if func.args.len() >= 2 {
-                                    if let Ok(Expr::Value(Value::Number(n, _))) =
-                                        self.extract_function_arg_expr(&func.args[1])
+                                let offset = if func_args(func).len() >= 2 {
+                                    if let Ok(Expr::Value(ValueWithSpan { value: Value::Number(n, _), .. })) =
+                                        self.extract_function_arg_expr(&func_args(func)[1])
                                     {
                                         n.parse::<i64>().unwrap_or(1)
                                     } else {
@@ -514,9 +515,9 @@ impl<'a> SqlCompiler<'a> {
                             window_funcs.push((name, func.over.clone()));
 
                             // If it's an aggregate window function, add argument column
-                            if !func.args.is_empty() {
+                            if !func_args(func).is_empty() {
                                 if let Ok(Expr::Identifier(ident)) =
-                                    self.extract_function_arg_expr(&func.args[0])
+                                    self.extract_function_arg_expr(&func_args(func)[0])
                                 {
                                     if let Some(col_idx) = table.column_index(&ident.value) {
                                         if !base_columns.contains(&col_idx) {
@@ -576,7 +577,7 @@ impl<'a> SqlCompiler<'a> {
                 if let Expr::Identifier(ident) = &order_expr.expr {
                     if let Some(col_idx) = table.column_index(&ident.value) {
                         order_cols.push(col_idx);
-                        order_asc.push(order_expr.asc.unwrap_or(true));
+                        order_asc.push(order_by_is_asc(order_expr));
                     }
                 }
             }

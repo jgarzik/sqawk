@@ -7,6 +7,7 @@
 //!
 //! For more information on this approach, see: https://www.sqlite.org/opcode.html
 
+pub mod ast_compat;
 pub mod bytecode;
 pub mod compiler;
 mod compiler_aggregate;
