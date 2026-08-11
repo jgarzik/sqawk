@@ -40,6 +40,8 @@ pub struct SqlExecutor<'a> {
 
     /// Number of rows affected by the last DML statement
     affected_rows: usize,
+    /// Whether the last executed script contained a row-counting DML statement
+    dml_executed: bool,
 }
 
 impl<'a> SqlExecutor<'a> {
@@ -55,6 +57,7 @@ impl<'a> SqlExecutor<'a> {
             modified_tables: HashSet::with_capacity(DEFAULT_TABLE_CAPACITY),
             config: config.clone(),
             affected_rows: 0,
+            dml_executed: false,
         }
     }
 
@@ -87,6 +90,7 @@ impl<'a> SqlExecutor<'a> {
 
         // Track affected rows from the last statement
         self.affected_rows = result.affected_rows;
+        self.dml_executed = result.dml_executed;
 
         // Set delimiter on each result table to match config
         let mut tables = result.tables;
@@ -193,16 +197,29 @@ impl<'a> SqlExecutor<'a> {
     /// * `sql` - SQL statement to execute
     ///
     /// # Returns
-    /// * `Result<Option<ResultSet>>` - Optional ResultSet containing query results
-    pub fn execute_sql(&mut self, sql: &str) -> Result<Option<ResultSet>> {
+    /// * One ResultSet per statement that produced rows, in order.
+    ///
+    /// Returning only the last one hid earlier result sets AND suppressed the
+    /// change count of a trailing DML statement, because the caller treated
+    /// "there is a result set" as "this line produced no changes".
+    pub fn execute_sql(&mut self, sql: &str) -> Result<Vec<ResultSet>> {
         let result = self.execute(sql)?;
 
-        // The REPL shows one result set at a time; a multi-statement line
-        // reports the last statement's.
-        Ok(result.last().map(|table| ResultSet {
-            columns: table.columns().to_vec(),
-            rows: table.rows_as_strings(),
-        }))
+        Ok(result
+            .iter()
+            .map(|table| ResultSet {
+                columns: table.columns().to_vec(),
+                rows: table.rows_as_strings(),
+            })
+            .collect())
+    }
+
+    /// Whether the last executed script ran a row-counting DML statement.
+    ///
+    /// Distinguishes "a DML ran and changed nothing" from "no DML ran", which
+    /// a count of zero cannot express on its own.
+    pub fn last_statement_changed_rows(&self) -> bool {
+        self.dml_executed
     }
 
     /// Check if a table exists

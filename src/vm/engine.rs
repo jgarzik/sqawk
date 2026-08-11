@@ -892,7 +892,11 @@ impl<'a> VmEngine<'a> {
                 // Create a new table from P4 specification
                 // P4 format: "table_name:col1:type1,col2:type2,...|filepath|delimiter"
                 let spec = inst.p4.clone().unwrap_or_default();
-                let parts: Vec<&str> = spec.split('|').collect();
+                // splitn, not split: the delimiter is the LAST field and may
+                // itself be '|'. Splitting on every '|' turned
+                // `WITH (delimiter = '|')` into an extra empty field and left
+                // the table with the default comma instead.
+                let parts: Vec<&str> = spec.splitn(3, '|').collect();
 
                 if parts.is_empty() {
                     return Err(SqawkError::VmError(

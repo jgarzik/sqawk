@@ -2289,3 +2289,137 @@ fn implicit_join_order_by_without_limit() -> Result<(), Box<dyn std::error::Erro
         "u.name,o.id\nJohn,105\nJane,104\nJohn,103\nJane,102\nJohn,101",
     )
 }
+
+// ---------------------------------------------------------------------------
+// Defects found by the high-effort review of this branch.
+//
+// Each is a place where a path that had not yet been unified drifted from the
+// one that had: DISTINCT set in one aggregate site and not another, column
+// resolution case-insensitive in NameCtx and exact elsewhere, SUBSTR arity
+// checked on the Function spelling but not the Expr::Substring one.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn distinct_aggregate_under_group_by() -> Result<(), Box<dyn std::error::Error>> {
+    // Two sites derived the aggregate function type independently and only one
+    // OR-ed in the DISTINCT flag, so DISTINCT was dropped whenever GROUP BY
+    // was present -- while the same aggregate without GROUP BY was correct.
+    assert_query(
+        &["tests/data/repeats_grouped.csv"],
+        "SELECT grp, COUNT(DISTINCT val), SUM(DISTINCT val) FROM repeats_grouped GROUP BY grp",
+        "grp,COUNT,SUM\na,2,3\nb,2,4",
+    )
+}
+
+#[test]
+fn distinct_aggregate_in_having() -> Result<(), Box<dyn std::error::Error>> {
+    // HAVING did set the flag, so it could not match the aggregate the
+    // projection had registered without it.
+    assert_query(
+        &["tests/data/repeats_grouped.csv"],
+        "SELECT grp, COUNT(DISTINCT val) FROM repeats_grouped GROUP BY grp \
+         HAVING COUNT(DISTINCT val) > 1",
+        "grp,COUNT\na,2\nb,2",
+    )
+}
+
+#[test]
+fn order_by_over_select_star_join() -> Result<(), Box<dyn std::error::Error>> {
+    // The ORDER BY key was matched against SELECT-list text, which cannot see
+    // through a wildcard, so this was rejected outright.
+    assert_query(
+        &["tests/data/customers.csv", "tests/data/purchases.csv"],
+        "SELECT * FROM customers, purchases WHERE customers.id = purchases.customer_id \
+         ORDER BY purchases.id DESC",
+        "customers.id,customers.name,purchases.id,purchases.customer_id,purchases.item\n\
+         2,Ben,12,2,Desk\n\
+         1,Ann,11,1,Pen\n\
+         1,Ann,10,1,Book",
+    )
+}
+
+#[test]
+fn order_by_bare_key_against_qualified_projection() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT users.name, orders.id FROM users JOIN orders ON users.id = orders.user_id \
+         ORDER BY id DESC LIMIT 2",
+        "users.name,orders.id\nJohn,105\nJane,104",
+    )
+}
+
+#[test]
+fn positional_order_by_sorts() -> Result<(), Box<dyn std::error::Error>> {
+    // `ORDER BY 2` compiled to the constant 2, giving every row the same sort
+    // key and silently turning the sort into a no-op.
+    assert_query(
+        &["tests/data/customers.csv"],
+        "SELECT name, id FROM customers ORDER BY 2 DESC",
+        "name,id\nCara,3\nBen,2\nAnn,1",
+    )
+}
+
+#[test]
+fn positional_order_by_out_of_range_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_fails(
+        &["tests/data/customers.csv"],
+        "SELECT name FROM customers ORDER BY 5",
+        "out of range",
+    )
+}
+
+#[test]
+fn window_aggregate_over_explicit_columns() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/windowed.csv"],
+        "SELECT a, d, SUM(x) OVER (PARTITION BY d) FROM windowed",
+        "a,d,SUM\n1,E,30\n2,E,30\n3,S,30",
+    )
+}
+
+#[test]
+fn window_with_wildcard_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    // The window path counts one output column per SELECT item, so a wildcard
+    // silently emitted a truncated row (2 columns for a 4-column table).
+    assert_query_fails(
+        &["tests/data/windowed.csv"],
+        "SELECT *, SUM(x) OVER (PARTITION BY d) FROM windowed",
+        "SELECT * cannot be combined with a window function",
+    )
+}
+
+#[test]
+fn substr_without_start_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    // sqlparser parses SUBSTR(x) into Expr::Substring with no start, and
+    // defaulting it to 1 returned the whole string unchanged.
+    assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT SUBSTR(name) FROM employees",
+        "SUBSTR requires at least two arguments",
+    )
+}
+
+#[test]
+fn unqualified_ambiguous_column_in_multi_table_is_rejected(
+) -> Result<(), Box<dyn std::error::Error>> {
+    // `id` exists in both tables. The multi-table resolver returned the first
+    // match where NameCtx reports ambiguity, so the same name resolved
+    // differently depending on which resolver the path reached.
+    assert_query_fails(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT id, COUNT(*) FROM users, orders WHERE users.id = orders.user_id GROUP BY id",
+        "ambiguous",
+    )
+}
+
+#[test]
+fn unqualified_column_in_multi_table_is_case_insensitive() -> Result<(), Box<dyn std::error::Error>>
+{
+    // The same resolver matched exactly while NameCtx matched
+    // case-insensitively, so `NAME` resolved in one path and not the other.
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT NAME, COUNT(*) FROM users, orders WHERE users.id = orders.user_id GROUP BY NAME",
+        "NAME,COUNT\nJane,2\nJohn,3",
+    )
+}

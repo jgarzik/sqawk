@@ -435,8 +435,8 @@ impl<'a> Repl<'a> {
             Err(err) => return Err(ReplError::SqlExecutor(err)),
         };
 
-        // Print results
-        if let Some(result_set) = result {
+        // Print every statement's result set, each with its own header.
+        for result_set in &result {
             if result_set.rows.is_empty() {
                 println!("Query returned no rows");
             } else {
@@ -445,11 +445,16 @@ impl<'a> Repl<'a> {
                 println!("{}", result_set.columns.join(","));
 
                 // Print rows
-                for row in result_set.rows {
+                for row in &result_set.rows {
                     println!("{}", row.join(","));
                 }
             }
-        } else if self.show_changes {
+        }
+
+        // The change count is reported independently of whether the line also
+        // produced rows. Gating it on "no result set" hid the count for a
+        // trailing DML on a line like `SELECT ...; DELETE ...`.
+        if self.show_changes && self.executor.last_statement_changed_rows() {
             // For non-SELECT statements that don't return rows (INSERT, UPDATE, DELETE)
             // Try to display the number of affected rows if show_changes is enabled
             // Reported even when zero. With `.changes on` a statement that
