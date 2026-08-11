@@ -1877,3 +1877,48 @@ fn aggregate_mixed_with_plain_projection() -> Result<(), Box<dyn std::error::Err
         "COUNT,expr\n8,67500",
     )
 }
+
+// ---------------------------------------------------------------------------
+// Multi-statement scripts.
+//
+// Each statement is compiled and executed on its own, so it gets its own
+// result set AND observes the database as the previous statement left it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn two_selects_keep_separate_headers() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/people.csv"],
+        "SELECT name FROM people WHERE age > 30; SELECT COUNT(*) FROM people",
+        "name\nAlice\nCharlie\nCOUNT\n3",
+    )
+}
+
+#[test]
+fn select_sees_preceding_delete() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/people.csv"],
+        "DELETE FROM people WHERE age < 30; SELECT name FROM people",
+        "name\nAlice\nCharlie",
+    )
+}
+
+#[test]
+fn insert_then_select_sees_the_row() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/people.csv"],
+        "INSERT INTO people VALUES (4, 'Dana', 41); SELECT name FROM people WHERE age > 40",
+        "name\nDana",
+    )
+}
+
+#[test]
+fn create_table_then_insert_then_select() -> Result<(), Box<dyn std::error::Error>> {
+    // The third statement can only compile if the first has already taken
+    // effect, which is what per-statement execution provides.
+    assert_query(
+        &["tests/data/people.csv"],
+        "CREATE TABLE t (a INTEGER, b TEXT); INSERT INTO t VALUES (1, 'x'); SELECT * FROM t",
+        "a,b\n1,x",
+    )
+}

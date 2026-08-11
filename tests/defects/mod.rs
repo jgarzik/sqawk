@@ -410,18 +410,32 @@ fn update_set_expression_with_where() -> Result<(), Box<dyn std::error::Error>> 
     )
 }
 
-/// A DML statement followed by a SELECT in the same invocation emits only the
-/// header, dropping the SELECT's rows entirely. `SELECT; SELECT` works, so
-/// this is specific to a preceding DML statement.
+/// A DML statement followed by a SELECT must run the SELECT against the
+/// updated table and emit its rows. Statements used to share one bytecode
+/// program and one result buffer, and modifications were applied only after
+/// the whole program finished, so the SELECT saw the pre-update table.
 #[test]
-#[ignore = "UPDATE followed by SELECT emits no rows for the SELECT"]
 fn update_then_select_emits_the_select() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
-        "UPDATE employees SET salary = 1 WHERE id = 1; SELECT name, salary FROM employees LIMIT 2",
-        "name,salary\n\
-         Alice,1\n\
-         Bob,55000",
+        "UPDATE employees SET salary = 1 WHERE id = 1; \
+         SELECT name, salary FROM employees WHERE id = 1",
+        "name,salary\nAlice,1",
+    )
+}
+
+/// UPDATE must leave rows where it found them.
+///
+/// It is implemented as delete-plus-insert, and the insert appends, so any row
+/// it touches jumps to the end of the table. This is not merely cosmetic: with
+/// --write the reordering is persisted to the user's file.
+#[test]
+#[ignore = "UPDATE moves modified rows to the end of the table"]
+fn update_preserves_row_order() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &[employees_csv()],
+        "UPDATE employees SET salary = 1 WHERE id = 1; SELECT id, salary FROM employees LIMIT 3",
+        "id,salary\n1,1\n2,55000\n3,65000",
     )
 }
 
@@ -493,7 +507,6 @@ fn group_by_order_by_avg_is_not_coincidental() -> Result<(), Box<dyn std::error:
 /// `SELECT name ...; SELECT COUNT(*) ...` emits the header `COUNT` above
 /// `Alice`, `Charlie`, `3`.
 #[test]
-#[ignore = "multi-statement output uses the last statement's header for all rows"]
 fn multi_statement_output_has_per_statement_headers(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
