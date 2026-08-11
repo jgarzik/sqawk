@@ -38,6 +38,22 @@ struct OuterColumnRef {
     column: String,
 }
 
+/// A symbolic jump target.
+///
+/// Jump destinations used to be computed arithmetically, as offsets from
+/// `program.len()` counting instructions that had not been emitted yet -- e.g.
+/// `let skip_offset = if limit_reg.is_some() { 3 } else { 2 }`. That couples
+/// every jump to the exact shape of the code after it, so inserting,
+/// reordering, or conditionally omitting an instruction silently retargets the
+/// jump. The failure mode is a wrong answer, not a crash.
+///
+/// A `Label` is created before it is known where it points, used as a jump
+/// destination any number of times, and bound to an address later with
+/// [`SqlCompiler::resolve`]. Unresolved labels are a compile-time bug and are
+/// caught by an assertion when the program is finished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Label(usize);
+
 /// SQL statement compiler that generates bytecode for the VM engine
 pub struct SqlCompiler<'a> {
     /// The database containing tables
@@ -57,6 +73,13 @@ pub struct SqlCompiler<'a> {
 
     /// Current outer table alias for correlated subquery detection
     pub(crate) current_outer_alias: Option<String>,
+
+    /// Resolved address of each label, indexed by label id. `None` until
+    /// [`SqlCompiler::resolve`] binds it.
+    label_addrs: Vec<Option<usize>>,
+
+    /// Jumps awaiting resolution: (instruction address, target label).
+    pending_jumps: Vec<(usize, Label)>,
 }
 
 impl<'a> SqlCompiler<'a> {
@@ -69,7 +92,70 @@ impl<'a> SqlCompiler<'a> {
             register_counter: 0,
             verbose,
             current_outer_alias: None,
+            label_addrs: Vec::new(),
+            pending_jumps: Vec::new(),
         }
+    }
+
+    /// Create a new, unresolved jump target.
+    pub(crate) fn label(&mut self) -> Label {
+        self.label_addrs.push(None);
+        Label(self.label_addrs.len() - 1)
+    }
+
+    /// Bind `label` to the next instruction to be emitted.
+    ///
+    /// Panics if the label was already resolved -- a label denotes exactly one
+    /// address, and rebinding one silently redirects every jump to it.
+    pub(crate) fn resolve(&mut self, label: Label) {
+        let addr = self.program.len();
+        debug_assert!(
+            self.label_addrs[label.0].is_none(),
+            "label {:?} resolved twice (already at {:?}, now {})",
+            label,
+            self.label_addrs[label.0],
+            addr
+        );
+        self.label_addrs[label.0] = Some(addr);
+    }
+
+    /// Emit a jump instruction whose destination (p2) is `target`.
+    ///
+    /// The destination is patched in by [`SqlCompiler::finish_labels`], so the
+    /// target may be resolved before or after this call.
+    pub(crate) fn emit_jump_to(
+        &mut self,
+        opcode: OpCode,
+        p1: i64,
+        target: Label,
+        p3: i64,
+        p4: Option<String>,
+        comment: &str,
+    ) {
+        let addr = self.program.len();
+        // p2 is a placeholder; finish_labels overwrites it.
+        self.emit(opcode, p1, -1, p3, p4, comment);
+        self.pending_jumps.push((addr, target));
+    }
+
+    /// Patch every pending jump with its label's address.
+    ///
+    /// Called once when a program is finished. An unresolved label means a
+    /// code path forgot to mark its destination, which would leave a jump
+    /// pointing at the placeholder -- so it fails loudly rather than
+    /// generating a program that runs and returns nonsense.
+    pub(crate) fn finish_labels(&mut self) -> SqawkResult<()> {
+        for (addr, label) in std::mem::take(&mut self.pending_jumps) {
+            let target = self.label_addrs[label.0].ok_or_else(|| {
+                SqawkError::InvalidSqlQuery(format!(
+                    "internal error: jump at {} targets unresolved label {:?}",
+                    addr, label
+                ))
+            })?;
+            self.patch_jump(addr, target);
+        }
+        self.label_addrs.clear();
+        Ok(())
     }
 
     /// Allocate a new register and return its index
@@ -355,6 +441,8 @@ impl<'a> SqlCompiler<'a> {
         self.program = Program::new();
         self.reset_registers();
         self.table_map.clear();
+        self.label_addrs.clear();
+        self.pending_jumps.clear();
 
         // Parse the SQL statement
         let dialect = HiveDialect {};
@@ -393,6 +481,10 @@ impl<'a> SqlCompiler<'a> {
             instruction.p2 = transaction_addr as i64;
             instruction.comment = Some(format!("Start at {}", transaction_addr).into());
         }
+
+        // Patch every symbolic jump now that all addresses are known. This
+        // errors rather than emitting a program with a placeholder target.
+        self.finish_labels()?;
 
         // Hand the engine the real register high-water mark.
         self.program.register_count = self.register_counter;
@@ -990,70 +1082,65 @@ impl<'a> SqlCompiler<'a> {
             "",
         );
 
+        // Symbolic targets for the drain loop. Using labels here matters
+        // because whether a LIMIT instruction exists changes the distance
+        // between the OFFSET logic and SorterNext -- the exact coupling that
+        // the old `skip_offset = if limit_reg.is_some() { 3 } else { 2 }`
+        // encoded by hand.
+        let result_row_label = self.label();
+        let sorter_next_label = self.label();
+        let after_loop_label = self.label();
+
         // Handle OFFSET - skip first N rows
         if let Some(off_reg) = offset_reg {
+            let decrement_label = self.label();
+
             // If offset counter > 0, decrement and skip this row
-            self.emit(
+            self.emit_jump_to(
                 OpCode::IfPos,
                 off_reg,
-                (self.program.len() + 2) as i64, // Jump to decrement and next (DecrJumpZero)
+                decrement_label,
                 0,
                 None,
-                "",
+                "offset remaining -> skip this row",
             );
             // Offset exhausted, continue to output
-            let output_addr = self.program.len();
-            self.emit(
+            self.emit_jump_to(
                 OpCode::Goto,
                 0,
-                0, // Will be patched to ResultRow
+                result_row_label,
                 0,
                 None,
-                "",
+                "offset exhausted -> output row",
             );
-            // Decrement offset and go to next
-            self.emit(
-                OpCode::DecrJumpZero,
-                off_reg,
-                (self.program.len() + 1) as i64, // Continue to SorterNext
-                0,
-                None,
-                "",
-            );
-            // Skip offset depends on whether there's a LIMIT instruction after ResultRow
-            let skip_offset = if limit_reg.is_some() { 3 } else { 2 };
-            self.emit(
-                OpCode::Goto,
-                0,
-                (self.program.len() + skip_offset) as i64, // Skip to SorterNext
-                0,
-                None,
-                "",
-            );
-            // Patch the Goto to ResultRow
-            let result_row_addr = self.program.len() as i64;
-            if let Some(inst) = self.program.instructions.get_mut(output_addr) {
-                inst.p2 = result_row_addr;
-            }
+
+            self.resolve(decrement_label);
+            // Decrement offset, then fall through to the skip.
+            let continue_label = self.label();
+            self.emit_jump_to(OpCode::DecrJumpZero, off_reg, continue_label, 0, None, "");
+            self.resolve(continue_label);
+            self.emit_jump_to(OpCode::Goto, 0, sorter_next_label, 0, None, "skip row");
         }
 
         // Output result row
+        self.resolve(result_row_label);
         self.emit(OpCode::ResultRow, start_reg, col_count as i64, 0, None, "");
 
         // Handle LIMIT
         if let Some(lim_reg) = limit_reg {
             // DecrJumpZero exits when limit reached
-            self.emit(
+            self.emit_jump_to(
                 OpCode::DecrJumpZero,
                 lim_reg,
-                (self.program.len() + 2) as i64, // Jump past SorterNext to end
+                after_loop_label,
                 0,
                 None,
-                "",
+                "limit reached -> exit loop",
             );
         }
 
         // Next sorted row
+        self.resolve(sorter_next_label);
         self.emit(
             OpCode::SorterNext,
             sorter_id,
@@ -1064,6 +1151,7 @@ impl<'a> SqlCompiler<'a> {
         );
 
         // Close cursor
+        self.resolve(after_loop_label);
         self.emit(OpCode::Close, cursor_idx, 0, 0, None, "");
 
         // Handle DISTINCT - emit Distinct opcode to deduplicate results
@@ -1176,16 +1264,23 @@ impl<'a> SqlCompiler<'a> {
             );
         }
 
+        // A row that fails WHERE must resume at Next -- NOT at a fixed offset.
+        // The distance from here to Next depends on whether OFFSET and LIMIT
+        // emit instructions, so the old `program.len() + 2` landed on the
+        // LIMIT counter's DecrJumpZero (making LIMIT count rows *scanned*
+        // rather than rows *returned*) or, with OFFSET, on ResultRow itself.
+        let next_label = self.label();
+
         // WHERE clause
         if let Some(where_expr) = &select.selection {
             let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
-            self.emit(
+            self.emit_jump_to(
                 OpCode::IfZ,
                 cond_reg,
-                (self.program.len() + 2) as i64,
+                next_label,
                 0,
                 None,
-                "",
+                "Skip row if WHERE is false",
             );
         }
 
@@ -1258,6 +1353,7 @@ impl<'a> SqlCompiler<'a> {
 
         // Next row
         let next_addr = self.program.len();
+        self.resolve(next_label);
         self.emit(OpCode::Next, cursor_idx, loop_start as i64, 0, None, "");
 
         let after_loop = self.program.len();
@@ -5506,25 +5602,14 @@ impl<'a> SqlCompiler<'a> {
         // Handle logical operators (AND, OR) specially
         match op {
             BinaryOperator::And => {
-                // For AND, both conditions must be true
-                // Compile left condition
-                let left_result = self.compile_where_condition(left, table, cursor_idx)?;
-
-                // If left is false, skip right evaluation and return 0
-                let skip_to_false = self.program.len();
-                self.emit(
-                    OpCode::IfZ,
-                    left_result,
-                    0, // Will be patched
-                    0,
-                    None,
-                    "if left is false, skip to false",
-                );
-
-                // Compile right condition
-                let right_result = self.compile_where_condition(right, table, cursor_idx)?;
-
-                // Result is right_result (if we got here, left was true)
+                // For AND, both conditions must be true.
+                //
+                // The result register MUST be initialized before the
+                // short-circuit test on the left operand. Registers persist
+                // across loop iterations, so if the left-false jump skips the
+                // initialization, the register still holds this expression's
+                // result from a PREVIOUS row -- and a row failing the left
+                // condition inherits the previous row's verdict.
                 let result_reg = self.allocate_register();
                 self.emit(
                     OpCode::Integer,
@@ -5535,15 +5620,32 @@ impl<'a> SqlCompiler<'a> {
                     &format!("r[{}] = 0 (default AND result)", result_reg),
                 );
 
-                // If right is false, skip setting result to 1
-                let skip_to_end = self.program.len();
-                self.emit(
+                let end_label = self.label();
+
+                // Compile left condition
+                let left_result = self.compile_where_condition(left, table, cursor_idx)?;
+
+                // If left is false, the result stays 0; skip right entirely.
+                self.emit_jump_to(
                     OpCode::IfZ,
-                    right_result,
-                    0, // Will be patched to skip to end
+                    left_result,
+                    end_label,
                     0,
                     None,
-                    "if right is false, skip to end",
+                    "if left is false, AND is false",
+                );
+
+                // Compile right condition
+                let right_result = self.compile_where_condition(right, table, cursor_idx)?;
+
+                // If right is false, the result stays 0.
+                self.emit_jump_to(
+                    OpCode::IfZ,
+                    right_result,
+                    end_label,
+                    0,
+                    None,
+                    "if right is false, AND is false",
                 );
 
                 // Both are true, set result to 1
@@ -5556,34 +5658,7 @@ impl<'a> SqlCompiler<'a> {
                     &format!("r[{}] = 1 (AND true)", result_reg),
                 );
 
-                // Jump to end
-                let goto_end = self.program.len();
-                self.emit(
-                    OpCode::Goto,
-                    0,
-                    0, // Will be patched
-                    0,
-                    None,
-                    "goto end",
-                );
-
-                // False label (left was false)
-                let false_label = self.program.len();
-                if let Some(inst) = self.program.instructions.get_mut(skip_to_false) {
-                    inst.p2 = false_label as i64;
-                }
-
-                // Result is already 0 (set above), so we just fall through
-
-                // End label
-                let end_label = self.program.len();
-                if let Some(inst) = self.program.instructions.get_mut(skip_to_end) {
-                    inst.p2 = end_label as i64;
-                }
-                if let Some(inst) = self.program.instructions.get_mut(goto_end) {
-                    inst.p2 = end_label as i64;
-                }
-
+                self.resolve(end_label);
                 return Ok(result_reg);
             }
             BinaryOperator::Or => {

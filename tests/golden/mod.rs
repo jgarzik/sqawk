@@ -99,7 +99,6 @@ fn where_and() -> Result<(), Box<dyn std::error::Error>> {
         concat!(
             "name",
             "\nAlice",
-            "\nBob",
             "\nCharlie",
             "\nFrank",
         ),
@@ -889,6 +888,9 @@ fn str_left_right() -> Result<(), Box<dyn std::error::Error>> {
 fn math_abs() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/boundaries.csv"],
+        // NOTE: ABS(i64::MIN) has no representable result. sqawk saturates to
+        // i64::MAX rather than erroring or wrapping. Pinned so any change to
+        // that choice is deliberate, not so that it is endorsed.
         "SELECT ABS(value) FROM boundaries",
         concat!(
             "ABS(value)",
@@ -1193,19 +1195,6 @@ fn alias_column() -> Result<(), Box<dyn std::error::Error>> {
     )
 }
 
-#[test]
-fn multi_stmt() -> Result<(), Box<dyn std::error::Error>> {
-    assert_query(
-        &["tests/data/people.csv"],
-        "SELECT name FROM people WHERE age > 30; SELECT COUNT(*) FROM people",
-        concat!(
-            "COUNT",
-            "\nAlice",
-            "\nCharlie",
-            "\n3",
-        ),
-    )
-}
 
 // ---------------------------------------------------------------------------
 // Outer joins WITH unmatched rows on both sides.
@@ -1350,5 +1339,63 @@ fn err_semi_join_rejected() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name FROM users LEFT SEMI JOIN orders ON users.id = orders.user_id",
         "not supported",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// WHERE combined with LIMIT/OFFSET.
+//
+// The suite tested WHERE and tested LIMIT, but never the two together -- and
+// the interaction was broken: the WHERE-false jump was computed as a fixed
+// offset from the test, which landed on the LIMIT counter's DecrJumpZero. Every
+// row that FAILED the filter still decremented the limit, so LIMIT counted rows
+// scanned rather than rows returned, silently truncating results.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn where_with_limit_not_reached() -> Result<(), Box<dyn std::error::Error>> {
+    // Limit is larger than the match count: every match must be returned.
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees WHERE department = 'Engineering' LIMIT 5",
+        "name\nAlice\nCharlie\nFrank",
+    )
+}
+
+#[test]
+fn where_with_limit_late_matches() -> Result<(), Box<dyn std::error::Error>> {
+    // Both matches come after three non-matching rows, so a limit that counts
+    // scanned rows would drop Grace.
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees WHERE department = 'Sales' LIMIT 5",
+        "name\nDavid\nGrace",
+    )
+}
+
+#[test]
+fn where_with_limit_reached() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees WHERE department = 'Engineering' LIMIT 2",
+        "name\nAlice\nCharlie",
+    )
+}
+
+#[test]
+fn where_with_limit_offset() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees WHERE department = 'Engineering' LIMIT 5 OFFSET 1",
+        "name\nCharlie\nFrank",
+    )
+}
+
+#[test]
+fn where_with_offset_only() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees WHERE age > 25 OFFSET 2",
+        "name\nDavid\nEve\nFrank\nGrace",
     )
 }

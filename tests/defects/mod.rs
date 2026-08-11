@@ -464,3 +464,27 @@ fn group_by_order_by_avg_is_not_coincidental() -> Result<(), Box<dyn std::error:
          Engineering,3",
     )
 }
+
+// ---------------------------------------------------------------------------
+// Group 10: multi-statement output
+// ---------------------------------------------------------------------------
+
+/// Each statement in a `stmt; stmt` script must print its own result set with
+/// its own header. Currently the rows of every statement are concatenated and
+/// printed under the LAST statement's schema, so
+/// `SELECT name ...; SELECT COUNT(*) ...` emits the header `COUNT` above
+/// `Alice`, `Charlie`, `3`.
+#[test]
+#[ignore = "multi-statement output uses the last statement's header for all rows"]
+fn multi_statement_output_has_per_statement_headers(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/people.csv"],
+        "SELECT name FROM people WHERE age > 30; SELECT COUNT(*) FROM people",
+        "name\n\
+         Alice\n\
+         Charlie\n\
+         COUNT\n\
+         3",
+    )
+}
