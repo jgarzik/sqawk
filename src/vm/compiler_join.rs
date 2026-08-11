@@ -21,6 +21,59 @@ use super::compiler::{MultiTableProjection, SqlCompiler};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
 
+/// Classify a `JoinOperator` into sqawk's join kind plus its constraint.
+///
+/// This is the single place where `JoinOperator` is destructured, and the match
+/// is deliberately EXHAUSTIVE -- no `_` arm. sqlparser treats any AST change as
+/// breaking, and `JoinOperator` gains variants across versions: newer releases
+/// parse a plain `LEFT JOIN` as `Left` rather than `LeftOuter`, reserving
+/// `LeftOuter` for the explicit `LEFT OUTER JOIN` spelling. Behind a catch-all
+/// that rename turns every `LEFT JOIN` in the suite into a runtime error (or,
+/// worse, silently into an INNER JOIN); with an exhaustive match it is a
+/// compile error that names the site.
+///
+/// `CrossJoin` returns `None` for its constraint -- callers handle it before
+/// asking for an ON expression.
+fn classify_join(op: &JoinOperator) -> SqawkResult<(&'static str, Option<&JoinConstraint>)> {
+    Ok(match op {
+        JoinOperator::Inner(c) => ("INNER", Some(c)),
+        JoinOperator::LeftOuter(c) => ("LEFT", Some(c)),
+        JoinOperator::RightOuter(c) => ("RIGHT", Some(c)),
+        JoinOperator::FullOuter(c) => ("FULL", Some(c)),
+        JoinOperator::CrossJoin => ("CROSS", None),
+        JoinOperator::LeftSemi(_) => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "LEFT SEMI JOIN not supported".into(),
+            ))
+        }
+        JoinOperator::RightSemi(_) => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "RIGHT SEMI JOIN not supported".into(),
+            ))
+        }
+        JoinOperator::LeftAnti(_) => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "LEFT ANTI JOIN not supported".into(),
+            ))
+        }
+        JoinOperator::RightAnti(_) => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "RIGHT ANTI JOIN not supported".into(),
+            ))
+        }
+        JoinOperator::CrossApply => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "CROSS APPLY not supported".into(),
+            ))
+        }
+        JoinOperator::OuterApply => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "OUTER APPLY not supported".into(),
+            ))
+        }
+    })
+}
+
 impl<'a> SqlCompiler<'a> {
     pub(crate) fn compile_join(
         &mut self,
@@ -68,17 +121,14 @@ impl<'a> SqlCompiler<'a> {
             return self.compile_cross_join(&left_table_name, &right_table_name, projection);
         }
 
-        // Determine join type and constraint
-        let (join_type, join_condition) = match &join.join_operator {
-            JoinOperator::LeftOuter(constraint) => ("LEFT", constraint),
-            JoinOperator::RightOuter(constraint) => ("RIGHT", constraint),
-            JoinOperator::FullOuter(constraint) => ("FULL", constraint),
-            JoinOperator::Inner(constraint) => ("INNER", constraint),
-            JoinOperator::CrossJoin => unreachable!("Handled above"),
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Unsupported join type".into(),
-                ))
+        // Determine join type and constraint. See `classify_join`.
+        let (join_type, join_condition) = match classify_join(&join.join_operator)? {
+            ("CROSS", _) => unreachable!("Handled above"),
+            (kind, Some(constraint)) => (kind, constraint),
+            (kind, None) => {
+                return Err(SqawkError::UnsupportedSqlFeature(format!(
+                    "{kind} JOIN without a constraint is not supported"
+                )))
             }
         };
 
@@ -2117,9 +2167,12 @@ impl<'a> SqlCompiler<'a> {
                 }
             };
 
-            // Only support INNER JOIN for multi-table joins
-            match &join.join_operator {
-                JoinOperator::Inner(JoinConstraint::On(expr)) => {
+            // Only support INNER JOIN for multi-table joins. Routed through
+            // `classify_join` so a new/renamed JoinOperator variant is a
+            // compile error here too, rather than silently falling into the
+            // "Only INNER JOIN" error arm.
+            match classify_join(&join.join_operator)? {
+                ("INNER", Some(JoinConstraint::On(expr))) => {
                     join_conditions.push(expr);
                 }
                 _ => {
