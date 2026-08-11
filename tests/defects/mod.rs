@@ -190,7 +190,6 @@ fn order_by_applies_to_join() -> Result<(), Box<dyn std::error::Error>> {
 /// NULL. The same query without LIMIT returns correct values, because it takes
 /// a different compilation path.
 #[test]
-#[ignore = "defect 5: arithmetic projection returns NULL under LIMIT"]
 fn arithmetic_projection_survives_limit() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
@@ -220,7 +219,6 @@ fn case_works_in_projection() -> Result<(), Box<dyn std::error::Error>> {
 /// `||` parses fine in sqlparser 0.36 -- the compiler simply has no arm for
 /// `BinaryOperator::StringConcat` (compiler.rs:1922).
 #[test]
-#[ignore = "string concatenation operator unsupported"]
 fn string_concat_operator_works() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
@@ -233,7 +231,6 @@ fn string_concat_operator_works() -> Result<(), Box<dyn std::error::Error>> {
 
 /// A comparison used as a projected *value* rather than a filter.
 #[test]
-#[ignore = "comparison unsupported in SELECT list"]
 fn comparison_works_in_projection() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
@@ -276,7 +273,6 @@ fn aggregate_nested_in_expression_works() -> Result<(), Box<dyn std::error::Erro
 
 /// `NOT` has no arm in the WHERE compiler at all.
 #[test]
-#[ignore = "NOT unsupported in WHERE"]
 fn not_works_in_where() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
@@ -289,7 +285,6 @@ fn not_works_in_where() -> Result<(), Box<dyn std::error::Error>> {
 /// Table-alias-qualified columns are rejected in a single-table WHERE:
 /// `compile_where_operand` has no `CompoundIdentifier` arm.
 #[test]
-#[ignore = "alias-qualified column unsupported in single-table WHERE"]
 fn alias_qualified_column_works_in_where() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
@@ -303,7 +298,6 @@ fn alias_qualified_column_works_in_where() -> Result<(), Box<dyn std::error::Err
 /// in WHERE: `SELECT NAME` works while `WHERE NAME = 'Alice'` errors with
 /// "Column 'NAME' not found" (find_column_index, compiler.rs:6010).
 #[test]
-#[ignore = "column resolution case-sensitive in WHERE but not in SELECT"]
 fn column_resolution_is_case_insensitive() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],

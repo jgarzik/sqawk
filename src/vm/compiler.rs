@@ -54,6 +54,99 @@ struct OuterColumnRef {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Label(usize);
 
+/// One FROM source visible to expression compilation.
+pub(crate) struct Src<'t> {
+    /// VM cursor id for this source.
+    pub cursor: i64,
+    /// The table behind the cursor.
+    pub table: &'t Table,
+    /// How the query refers to it: the alias if there is one, else the table
+    /// name. Stored ASCII-lowercased, since SQL identifiers are matched
+    /// case-insensitively.
+    pub refname: String,
+}
+
+/// Name resolution scope for [`SqlCompiler::code_expr`].
+///
+/// The reason two expression compilers drifted apart is that both threaded a
+/// bare `(table, cursor_idx)` pair, a shape that cannot express a join, an
+/// alias, or a post-aggregation scope. Everything a name can resolve against
+/// lives here instead, so one compiler serves the SELECT list, WHERE, HAVING,
+/// ORDER BY and SET clauses.
+pub(crate) struct NameCtx<'t> {
+    /// FROM sources in cursor order. Empty for `SELECT 1` (no FROM).
+    pub srcs: Vec<Src<'t>>,
+}
+
+impl<'t> NameCtx<'t> {
+    /// The common single-table scope, equivalent to the old
+    /// `(table, cursor_idx)` pair.
+    pub(crate) fn single(table: &'t Table, cursor: i64) -> Self {
+        NameCtx {
+            srcs: vec![Src {
+                cursor,
+                table,
+                refname: table.name().to_ascii_lowercase(),
+            }],
+        }
+    }
+
+    /// A scope with no FROM sources, for constant expressions.
+    #[allow(dead_code)] // used by constant-expression contexts
+    pub(crate) fn empty() -> Self {
+        NameCtx { srcs: Vec::new() }
+    }
+
+    /// Resolve an unqualified column name across every source.
+    ///
+    /// Case-insensitive: `SELECT NAME` already worked while
+    /// `WHERE NAME = 'x'` did not, because the projection path lowercased and
+    /// `find_column_index` compared exactly.
+    ///
+    /// Returns `Err` if no source has the column, or if more than one does --
+    /// silently picking the first would make the result depend on FROM order.
+    fn resolve_unqualified(&self, name: &str) -> SqawkResult<(i64, usize)> {
+        let want = name.to_ascii_lowercase();
+        let mut found: Option<(i64, usize)> = None;
+        for src in &self.srcs {
+            for (i, col) in src.table.column_metadata().iter().enumerate() {
+                if col.name.to_ascii_lowercase() == want {
+                    if found.is_some() {
+                        return Err(SqawkError::InvalidSqlQuery(format!(
+                            "Column '{}' is ambiguous across the tables in FROM",
+                            name
+                        )));
+                    }
+                    found = Some((src.cursor, i));
+                    break;
+                }
+            }
+        }
+        found.ok_or_else(|| SqawkError::ColumnNotFound(name.to_string()))
+    }
+
+    /// Resolve a `table.column` (or `alias.column`) reference.
+    fn resolve_qualified(&self, qualifier: &str, name: &str) -> SqawkResult<(i64, usize)> {
+        let qual = qualifier.to_ascii_lowercase();
+        let want = name.to_ascii_lowercase();
+        for src in &self.srcs {
+            if src.refname != qual {
+                continue;
+            }
+            for (i, col) in src.table.column_metadata().iter().enumerate() {
+                if col.name.to_ascii_lowercase() == want {
+                    return Ok((src.cursor, i));
+                }
+            }
+            return Err(SqawkError::ColumnNotFound(format!("{}.{}", qualifier, name)));
+        }
+        // Unknown qualifier: fall back to an unqualified match so that a
+        // single-table query can still say `employees.age` when the cursor was
+        // opened under a different refname.
+        self.resolve_unqualified(name)
+    }
+}
+
 /// SQL statement compiler that generates bytecode for the VM engine
 pub struct SqlCompiler<'a> {
     /// The database containing tables
@@ -2433,123 +2526,19 @@ impl<'a> SqlCompiler<'a> {
         cursor_idx: usize,
         dest_reg: i64,
     ) -> SqawkResult<()> {
-        match expr {
-            Expr::Identifier(ident) => {
-                let col_name = ident.value.to_lowercase();
-                if let Some(col_idx) = table.column_index(&col_name) {
-                    self.emit(
-                        OpCode::Column,
-                        cursor_idx as i64,
-                        col_idx as i64,
-                        dest_reg,
-                        None,
-                        &format!("r[{}] = {}", dest_reg, col_name),
-                    );
-                }
-            }
-            Expr::Function(func) => {
-                let func_name = func.name.to_string().to_uppercase();
-                if let Some(sqlparser::ast::FunctionArg::Unnamed(
-                    sqlparser::ast::FunctionArgExpr::Expr(Expr::Identifier(ident)),
-                )) = func_args(func).first()
-                {
-                    let col_name = ident.value.to_lowercase();
-                    if let Some(col_idx) = table.column_index(&col_name) {
-                        let src_reg = self.allocate_register();
-                        self.emit(
-                            OpCode::Column,
-                            cursor_idx as i64,
-                            col_idx as i64,
-                            src_reg,
-                            None,
-                            &format!("Load {} for {}", col_name, func_name),
-                        );
-
-                        // Handle different string functions
-                        match func_name.as_str() {
-                            "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "LENGTH" => {
-                                self.emit(
-                                    OpCode::StringFunc,
-                                    src_reg,
-                                    dest_reg,
-                                    0,
-                                    Some(func_name.clone()),
-                                    &format!("{}()", func_name),
-                                );
-                            }
-                            "SUBSTR" | "SUBSTRING" => {
-                                // Handle SUBSTR with start and length
-                                let (start, len) = self.extract_substr_args(func)?;
-                                let start_reg = self.allocate_register();
-                                self.emit(
-                                    OpCode::Integer,
-                                    start,
-                                    start_reg,
-                                    0,
-                                    None,
-                                    "SUBSTR start",
-                                );
-                                let len_reg = self.allocate_register();
-                                self.emit(OpCode::Integer, len, len_reg, 0, None, "SUBSTR length");
-                                // P3 = start register, P4 = "SUBSTR:len_reg"
-                                self.emit(
-                                    OpCode::StringFunc,
-                                    src_reg,
-                                    dest_reg,
-                                    start_reg,
-                                    Some(format!("SUBSTR:{}", len_reg)),
-                                    "SUBSTR()",
-                                );
-                            }
-                            _ => {
-                                // Copy source to dest for unknown functions
-                                self.emit(OpCode::Copy, src_reg, dest_reg, 0, None, "Copy value");
-                            }
-                        };
-                    }
-                }
-            }
-            _ => {
-                // For other expressions, try to resolve as column
-                if let Ok(col_idx) = self.resolve_column_expr(expr, table) {
-                    self.emit(
-                        OpCode::Column,
-                        cursor_idx as i64,
-                        col_idx as i64,
-                        dest_reg,
-                        None,
-                        &format!("r[{}] = column {}", dest_reg, col_idx),
-                    );
-                }
-            }
-        }
-        Ok(())
+        // Delegate to the single expression compiler.
+        //
+        // This function used to be a parallel implementation that understood
+        // only bare columns and a fixed list of single-argument functions.
+        // Its `_` arm tried resolve_column_expr and, on failure, emitted NO
+        // INSTRUCTION AT ALL -- leaving the destination register at its
+        // default NULL. That is why `SELECT name, salary*2 FROM employees
+        // LIMIT 3` produced NULLs while the same query without LIMIT (which
+        // took a different path) produced correct values.
+        let ctx = NameCtx::single(table, cursor_idx as i64);
+        self.code_expr(expr, &ctx, Some(dest_reg)).map(|_| ())
     }
 
-    /// Extract SUBSTR arguments (start, length) from function
-    fn extract_substr_args(&self, func: &sqlparser::ast::Function) -> SqawkResult<(i64, i64)> {
-        let mut start = 1i64;
-        let mut length = 100i64; // Default length
-
-        let args: Vec<_> = func_args(func).iter().collect();
-        if args.len() >= 2 {
-            if let sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(
-                Expr::Value(ValueWithSpan { value: sqlparser::ast::Value::Number(n, _), .. }),
-            )) = &args[1]
-            {
-                start = n.parse().unwrap_or(1);
-            }
-        }
-        if args.len() >= 3 {
-            if let sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(
-                Expr::Value(ValueWithSpan { value: sqlparser::ast::Value::Number(n, _), .. }),
-            )) = &args[2]
-            {
-                length = n.parse().unwrap_or(100);
-            }
-        }
-        Ok((start, length))
-    }
 
     /// Compile a WHERE condition and return the register containing the result
     pub(crate) fn compile_where_condition(
@@ -2721,6 +2710,27 @@ impl<'a> SqlCompiler<'a> {
                 // EXISTS (SELECT ...) - check if subquery returns any rows
                 self.compile_exists_subquery(subquery, *negated, table, cursor_idx)
             }
+            // `NOT <predicate>`. Previously unsupported in any position: the
+            // predicate compiler had no arm, and the several NOT-forms that
+            // did work (NOT LIKE, NOT IN, IS NOT NULL) each hand-rolled their
+            // own inversion instead of sharing one.
+            Expr::UnaryOp {
+                op: UnaryOperator::Not,
+                expr: inner,
+            } => {
+                let inner_reg = self.compile_where_condition(inner, table, cursor_idx)?;
+                let dest = self.allocate_register();
+                self.emit(
+                    OpCode::Not,
+                    inner_reg,
+                    dest,
+                    0,
+                    None,
+                    &format!("r[{}] = NOT r[{}]", dest, inner_reg),
+                );
+                Ok(dest)
+            }
+            Expr::Nested(inner) => self.compile_where_condition(inner, table, cursor_idx),
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
                 "Unsupported WHERE clause expression: {:?}",
                 where_expr
@@ -5785,7 +5795,169 @@ impl<'a> SqlCompiler<'a> {
     }
 
     /// Compile a WHERE clause operand (column reference or literal)
+    /// Compile `expr` into a register, returning that register.
+    ///
+    /// This is the single expression compiler -- the analogue of SQLite's
+    /// `sqlite3ExprCode()`. It is used from every position an expression can
+    /// appear in, so a node supported in one position is supported in all of
+    /// them. sqawk previously had two: `compile_expr` (no `Identifier` arm at
+    /// all) and `compile_projection_expr`/`resolve_column_expr` ("Only column
+    /// references supported in SELECT"). That split is why `CASE` and `CAST`
+    /// worked in WHERE but not in a SELECT list, and why `SUBSTR` in WHERE
+    /// broke on the sqlparser upgrade while `SUBSTR` in a projection did not.
+    ///
+    /// `into` names the destination register when the caller needs the value
+    /// at a specific place -- which is how contiguous blocks for `ResultRow`
+    /// and `SorterInsert` are built without the copy-shuffling the old
+    /// projection paths did.
+    ///
+    /// Invariant: on `Ok(reg)`, code has been emitted that defines `reg` on
+    /// every path. There is deliberately no arm that returns `Ok` without
+    /// emitting -- that bug (an `_` arm that silently emitted nothing, leaving
+    /// the register at its default NULL) is why `SELECT name, salary*2 ...
+    /// LIMIT 3` returned NULL.
+    pub(crate) fn code_expr(
+        &mut self,
+        expr: &Expr,
+        ctx: &NameCtx<'_>,
+        into: Option<i64>,
+    ) -> SqawkResult<i64> {
+        let dest = into.unwrap_or_else(|| self.allocate_register());
+
+        match expr {
+            // Column references resolve through the context, so they work
+            // across joins and aliases and are matched case-insensitively.
+            Expr::Identifier(ident) => {
+                let (cursor, col_idx) = ctx.resolve_unqualified(&ident.value)?;
+                self.emit(
+                    OpCode::Column,
+                    cursor,
+                    col_idx as i64,
+                    dest,
+                    None,
+                    &format!("r[{}] = {} (column {})", dest, ident.value, col_idx),
+                );
+            }
+
+            // `table.column` / `alias.column`. The old WHERE compiler had no
+            // arm for this at all, so `FROM employees e WHERE e.age > 30`
+            // failed on a single-table query.
+            Expr::CompoundIdentifier(parts) if parts.len() >= 2 => {
+                let qualifier = &parts[parts.len() - 2].value;
+                let name = &parts[parts.len() - 1].value;
+                let (cursor, col_idx) = ctx.resolve_qualified(qualifier, name)?;
+                self.emit(
+                    OpCode::Column,
+                    cursor,
+                    col_idx as i64,
+                    dest,
+                    None,
+                    &format!("r[{}] = {}.{} (column {})", dest, qualifier, name, col_idx),
+                );
+            }
+
+            Expr::Nested(inner) => {
+                return self.code_expr(inner, ctx, Some(dest));
+            }
+
+            // String concatenation. sqlparser has always produced this node;
+            // there was simply no arm for it, so `a || b` was reported as an
+            // unsupported operator. It lowers onto the CONCAT string function
+            // the engine already implements.
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::StringConcat,
+                right,
+            } => {
+                let left_reg = self.code_expr(left, ctx, None)?;
+                let right_reg = self.code_expr(right, ctx, None)?;
+                self.emit(
+                    OpCode::StringFunc,
+                    left_reg,
+                    dest,
+                    0,
+                    Some(format!("CONCAT:{}", right_reg)),
+                    &format!("r[{}] = r[{}] || r[{}]", dest, left_reg, right_reg),
+                );
+            }
+
+            // Logical negation, including NULL propagation. Previously
+            // unsupported in any position.
+            Expr::UnaryOp {
+                op: UnaryOperator::Not,
+                expr: inner,
+            } => {
+                let inner_reg = self.code_expr(inner, ctx, None)?;
+                self.emit(
+                    OpCode::Not,
+                    inner_reg,
+                    dest,
+                    0,
+                    None,
+                    &format!("r[{}] = NOT r[{}]", dest, inner_reg),
+                );
+            }
+
+            // Everything else still goes through the original operand
+            // compiler. Arms migrate out of it into the match above as the
+            // pipeline work proceeds; routing through here first means every
+            // call site picks up the new capabilities immediately.
+            other => {
+                let (table, cursor) = self.legacy_single_source(ctx, other)?;
+                self.compile_operand_legacy(other, table, cursor, dest)?;
+            }
+        }
+
+        Ok(dest)
+    }
+
+    /// Compile `expr` as a boolean predicate, returning its register.
+    #[allow(dead_code)] // wired up by the staged SELECT pipeline
+    pub(crate) fn code_predicate(&mut self, expr: &Expr, ctx: &NameCtx<'_>) -> SqawkResult<i64> {
+        let (table, cursor) = self.legacy_single_source(ctx, expr)?;
+        self.compile_where_condition(expr, table, cursor)
+    }
+
+    /// Extract the single `(table, cursor)` pair the not-yet-migrated code
+    /// still expects.
+    ///
+    /// Multi-source contexts are handled by the join compiler's own operand
+    /// paths for now; this errors rather than silently resolving against the
+    /// wrong table.
+    fn legacy_single_source<'t>(
+        &self,
+        ctx: &NameCtx<'t>,
+        expr: &Expr,
+    ) -> SqawkResult<(&'t Table, usize)> {
+        match ctx.srcs.len() {
+            1 => Ok((ctx.srcs[0].table, ctx.srcs[0].cursor as usize)),
+            0 => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Expression requires a FROM clause: {:?}",
+                expr
+            ))),
+            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Expression not supported across multiple tables: {:?}",
+                expr
+            ))),
+        }
+    }
+
+    /// Shim preserving the old operand entry point.
+    ///
+    /// Every existing caller keeps working and gains the new capabilities
+    /// (qualified names, case-insensitive resolution, `||`, `NOT`) for free.
     pub(crate) fn compile_where_operand(
+        &mut self,
+        expr: &Expr,
+        table: &Table,
+        cursor_idx: usize,
+        target_reg: i64,
+    ) -> SqawkResult<()> {
+        let ctx = NameCtx::single(table, cursor_idx as i64);
+        self.code_expr(expr, &ctx, Some(target_reg)).map(|_| ())
+    }
+
+    fn compile_operand_legacy(
         &mut self,
         expr: &Expr,
         table: &Table,
