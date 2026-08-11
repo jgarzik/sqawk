@@ -517,3 +517,19 @@ fn multi_statement_output_has_per_statement_headers(
          3",
     )
 }
+
+// ---------------------------------------------------------------------------
+// Group 11: aggregates over joins
+// ---------------------------------------------------------------------------
+
+/// An aggregate over a join is rejected: the join projection resolver accepts
+/// only column references, so `COUNT(*)` never reaches the aggregate path.
+#[test]
+#[ignore = "aggregates are not supported over an explicit JOIN"]
+fn aggregate_over_join() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &[users_csv(), orders_csv()],
+        "SELECT COUNT(*) FROM users JOIN orders ON users.id = orders.user_id",
+        "COUNT\n5",
+    )
+}

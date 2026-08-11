@@ -2,12 +2,12 @@
 fn test_repl_from_file() {
     // Removed unused temporary directory
 
-    // Run sqawk with input from repl_commands.txt in the tmp directory
+    // Run sqawk with a canned REPL session from tests/data/
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     let assert = cmd
         .arg("--interactive")
         .arg("tests/data/sample.csv")
-        .pipe_stdin("tests/tmp/test_repl_commands.txt")
+        .pipe_stdin("tests/data/repl_commands.txt")
         .unwrap()
         .assert()
         .success();
