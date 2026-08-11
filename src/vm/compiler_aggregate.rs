@@ -303,6 +303,26 @@ impl<'a> SqlCompiler<'a> {
 
         let loop_start = self.program.len();
 
+        // WHERE filtering.
+        //
+        // This function never read select.selection, so WHERE was silently
+        // ignored on EVERY grouped query: `... WHERE salary > 60000 GROUP BY
+        // department` returned all departments with unfiltered counts. Filter
+        // before feeding the sorter so excluded rows never reach an
+        // accumulator.
+        let next_label = self.label();
+        if let Some(where_expr) = &select.selection {
+            let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
+            self.emit_jump_to(
+                OpCode::IfZ,
+                cond_reg,
+                next_label,
+                0,
+                None,
+                "Skip row if WHERE is false",
+            );
+        }
+
         // Allocate registers for row data
         let row_start_reg = self.allocate_registers(total_cols);
 
@@ -347,6 +367,7 @@ impl<'a> SqlCompiler<'a> {
         );
 
         // Next row
+        self.resolve(next_label);
         self.emit(OpCode::Next, cursor_idx, loop_start as i64, 0, None, "");
 
         let after_scan = self.program.len();
@@ -397,13 +418,32 @@ impl<'a> SqlCompiler<'a> {
         let first_row_jump_addr = self.program.len();
         self.emit(OpCode::IfPos, first_row_reg, 0, 0, None, "");
 
-        // Compare first group column with saved group key
-        let cmp_reg = self.allocate_register();
-        self.emit(OpCode::Ne, row_start_reg, group_key_reg, cmp_reg, None, "");
-
-        // If group NOT changed (cmp_reg is 0), skip output and go to step aggregates
-        let skip_output_addr = self.program.len();
-        self.emit(OpCode::IfZ, cmp_reg, 0, 0, None, "");
+        // Compare ALL group key columns against the saved key.
+        //
+        // This was a single `Ne` against column 0, so `GROUP BY department,
+        // role` grouped on department alone and reported whichever role
+        // happened to arrive first. Compare/Jump handles the whole key vector
+        // in two instructions regardless of width, and treats NULL as equal to
+        // NULL so NULL keys group together rather than starting a new group on
+        // every row.
+        self.emit(
+            OpCode::Compare,
+            row_start_reg,
+            group_key_reg,
+            group_col_indices.len() as i64,
+            None,
+            "Compare group key vector",
+        );
+        // Equal -> same group, skip the flush. Less/Greater -> group changed.
+        let flush_label = self.label();
+        let skip_output_label = self.label();
+        self.emit_jump_to_three(
+            flush_label,
+            skip_output_label,
+            flush_label,
+            "Group changed?",
+        );
+        self.resolve(flush_label);
 
         // Group changed - output previous group
         // Copy group key to result
@@ -492,13 +532,8 @@ impl<'a> SqlCompiler<'a> {
         // Clear first row flag
         self.emit(OpCode::Integer, 0, first_row_reg, 0, None, "");
 
-        // === Step aggregates section (skip output jumps here) ===
-        let step_agg_addr = self.program.len();
-
-        // Patch skip output jump
-        if let Some(inst) = self.program.instructions.get_mut(skip_output_addr) {
-            inst.p2 = step_agg_addr as i64;
-        }
+        // === Step aggregates section (same-group rows jump here) ===
+        self.resolve(skip_output_label);
 
         // Step aggregates for current row
         for (i, (func_type, _)) in agg_info.iter().enumerate() {

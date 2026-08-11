@@ -1494,3 +1494,47 @@ fn concat_operator_as_filter() -> Result<(), Box<dyn std::error::Error>> {
         "name\nAlice",
     )
 }
+
+// ---------------------------------------------------------------------------
+// GROUP BY interactions that were previously unrepresentable.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn group_by_with_where_and_having() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT department, COUNT(*) FROM employees WHERE age > 25 GROUP BY department \
+         HAVING COUNT(*) > 1",
+        // age > 25 drops Bob(25) and Henry(22), leaving Marketing with one
+        // row, which HAVING then removes.
+        "department,COUNT\nEngineering,3\nSales,2",
+    )
+}
+
+#[test]
+fn group_by_three_columns() -> Result<(), Box<dyn std::error::Error>> {
+    // Every key column must participate; a difference in the last one still
+    // starts a new group.
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT department, role, COUNT(*) FROM employees GROUP BY department, role",
+        "department,role,COUNT\n\
+         Engineering,Developer,2\n\
+         Engineering,Manager,1\n\
+         HR,Intern,1\n\
+         Marketing,Analyst,1\n\
+         Marketing,Specialist,1\n\
+         Sales,Director,2",
+    )
+}
+
+#[test]
+fn group_by_with_where_excluding_a_whole_group() -> Result<(), Box<dyn std::error::Error>> {
+    // HR's only row is filtered out, so the group must disappear entirely
+    // rather than appear with a zero or unfiltered count.
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT department, COUNT(*) FROM employees WHERE salary > 60000 GROUP BY department",
+        "department,COUNT\nEngineering,3\nSales,2",
+    )
+}

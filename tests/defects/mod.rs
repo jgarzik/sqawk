@@ -25,7 +25,6 @@ use crate::helpers::{
 /// so WHERE is silently ignored on *every* GROUP BY query.
 /// Currently returns all four departments with unfiltered counts.
 #[test]
-#[ignore = "defect 1: WHERE ignored on GROUP BY"]
 fn where_is_applied_to_group_by() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
@@ -41,7 +40,6 @@ fn where_is_applied_to_group_by() -> Result<(), Box<dyn std::error::Error>> {
 /// collapses to the first column. Currently returns 4 rows instead of 6,
 /// with an arbitrary `role` value.
 #[test]
-#[ignore = "defect 2: multi-column GROUP BY collapses to first key"]
 fn group_by_uses_all_key_columns() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
@@ -203,7 +201,6 @@ fn arithmetic_projection_survives_limit() -> Result<(), Box<dyn std::error::Erro
 /// `CASE` is routed in WHERE but hits `resolve_column_expr` in a projection,
 /// which errors with "Only column references supported in SELECT".
 #[test]
-#[ignore = "case expression unsupported in SELECT list"]
 fn case_works_in_projection() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],

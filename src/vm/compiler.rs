@@ -173,6 +173,10 @@ pub struct SqlCompiler<'a> {
 
     /// Jumps awaiting resolution: (instruction address, target label).
     pending_jumps: Vec<(usize, Label)>,
+
+    /// Three-way `Jump`s awaiting resolution:
+    /// (instruction address, less, equal, greater).
+    pending_jumps_three: Vec<(usize, Label, Label, Label)>,
 }
 
 impl<'a> SqlCompiler<'a> {
@@ -187,6 +191,7 @@ impl<'a> SqlCompiler<'a> {
             current_outer_alias: None,
             label_addrs: Vec::new(),
             pending_jumps: Vec::new(),
+            pending_jumps_three: Vec::new(),
         }
     }
 
@@ -231,6 +236,21 @@ impl<'a> SqlCompiler<'a> {
         self.pending_jumps.push((addr, target));
     }
 
+    /// Emit a `Jump`: a three-way branch on the most recent `Compare`.
+    ///
+    /// All three destinations are labels, patched by `finish_labels`.
+    pub(crate) fn emit_jump_to_three(
+        &mut self,
+        less: Label,
+        equal: Label,
+        greater: Label,
+        comment: &str,
+    ) {
+        let addr = self.program.len();
+        self.emit(OpCode::Jump, -1, -1, -1, None, comment);
+        self.pending_jumps_three.push((addr, less, equal, greater));
+    }
+
     /// Patch every pending jump with its label's address.
     ///
     /// Called once when a program is finished. An unresolved label means a
@@ -246,6 +266,22 @@ impl<'a> SqlCompiler<'a> {
                 ))
             })?;
             self.patch_jump(addr, target);
+        }
+        for (addr, less, equal, greater) in std::mem::take(&mut self.pending_jumps_three) {
+            let resolve = |l: Label| -> SqawkResult<i64> {
+                self.label_addrs[l.0].map(|a| a as i64).ok_or_else(|| {
+                    SqawkError::InvalidSqlQuery(format!(
+                        "internal error: Jump at {} targets unresolved label {:?}",
+                        addr, l
+                    ))
+                })
+            };
+            let (p1, p2, p3) = (resolve(less)?, resolve(equal)?, resolve(greater)?);
+            if let Some(inst) = self.program.instructions.get_mut(addr) {
+                inst.p1 = p1;
+                inst.p2 = p2;
+                inst.p3 = p3;
+            }
         }
         self.label_addrs.clear();
         Ok(())
@@ -536,6 +572,7 @@ impl<'a> SqlCompiler<'a> {
         self.table_map.clear();
         self.label_addrs.clear();
         self.pending_jumps.clear();
+        self.pending_jumps_three.clear();
 
         // Parse the SQL statement
         let dialect = HiveDialect {};
