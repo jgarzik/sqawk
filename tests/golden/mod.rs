@@ -2002,3 +2002,103 @@ fn derived_table_does_not_outlive_its_statement() -> Result<(), Box<dyn std::err
         "not found",
     )
 }
+
+// ---------------------------------------------------------------------------
+// Compound JOIN conditions.
+//
+// The ON clause used to have its own small expression compiler that understood
+// a single top-level comparison, so `ON a = b AND c` was rejected even though
+// the same expression works in a WHERE. Join conditions now go through the
+// shared expression compiler with a multi-source name context.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn join_on_with_and() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT users.name, orders.id FROM users JOIN orders \
+         ON users.id = orders.user_id AND orders.id > 102",
+        "users.name,orders.id\nJohn,103\nJohn,105\nJane,104",
+    )
+}
+
+#[test]
+fn join_on_with_or() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT users.name, orders.id FROM users JOIN orders \
+         ON users.id = orders.user_id OR orders.id = 999",
+        "users.name,orders.id\nJohn,101\nJohn,103\nJohn,105\nJane,102\nJane,104",
+    )
+}
+
+#[test]
+fn left_join_with_compound_on_keeps_nullfill() -> Result<(), Box<dyn std::error::Error>> {
+    // The extra ON predicate narrows the match without turning the outer join
+    // into an inner one: Cara still appears with NULLs.
+    assert_query(
+        &["tests/data/customers.csv", "tests/data/purchases.csv"],
+        "SELECT customers.name, purchases.item FROM customers LEFT JOIN purchases \
+         ON customers.id = purchases.customer_id AND purchases.id > 10",
+        "customers.name,purchases.item\nAnn,Pen\nBen,Desk\nCara,NULL",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Multi-table WHERE expressiveness.
+//
+// The comma-join WHERE had its own condition compiler that understood only
+// AND, OR and the six comparisons over qualified columns and literals. It now
+// shares the expression compiler, with one name-resolution source per table.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn function_in_multi_table_where() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT users.name, orders.id FROM users, orders \
+         WHERE users.id = orders.user_id AND UPPER(users.name) = 'JOHN'",
+        "users.name,orders.id\nJohn,101\nJohn,103\nJohn,105",
+    )
+}
+
+#[test]
+fn arithmetic_in_multi_table_where() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT users.name, orders.id FROM users, orders \
+         WHERE users.id = orders.user_id AND orders.id - 100 > 3",
+        "users.name,orders.id\nJohn,105\nJane,104",
+    )
+}
+
+#[test]
+fn not_in_multi_table_where() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT users.name, orders.id FROM users, orders \
+         WHERE users.id = orders.user_id AND NOT (orders.id = 101)",
+        "users.name,orders.id\nJohn,103\nJohn,105\nJane,102\nJane,104",
+    )
+}
+
+#[test]
+fn unqualified_column_in_multi_table_where() -> Result<(), Box<dyn std::error::Error>> {
+    // `date` exists only in orders, so it resolves without a qualifier.
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT users.name, orders.id FROM users, orders \
+         WHERE users.id = orders.user_id AND date = '2023-01-15'",
+        "users.name,orders.id\nJohn,101",
+    )
+}
+
+#[test]
+fn function_in_join_on_clause() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT users.name, orders.id FROM users JOIN orders \
+         ON users.id = orders.user_id AND UPPER(users.name) = 'JANE'",
+        "users.name,orders.id\nJane,102\nJane,104",
+    )
+}

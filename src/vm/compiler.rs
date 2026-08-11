@@ -101,6 +101,14 @@ impl<'t> NameCtx<'t> {
         }
     }
 
+    /// A scope over several FROM sources, for joins.
+    pub(crate) fn multi(srcs: Vec<Src<'t>>) -> Self {
+        NameCtx {
+            srcs,
+            agg_bindings: Vec::new(),
+        }
+    }
+
     /// A scope with no FROM sources, for constant expressions.
     #[allow(dead_code)] // used by constant-expression contexts
     pub(crate) fn empty() -> Self {
@@ -409,95 +417,6 @@ impl<'a> SqlCompiler<'a> {
         if let Some(inst) = self.program.instructions.get_mut(addr) {
             inst.p2 = target as i64;
         }
-    }
-
-    /// Emit AND logic: result = left_reg && right_reg
-    /// Returns the register containing the result (1 if both true, 0 otherwise)
-    pub(crate) fn emit_and(&mut self, left_reg: i64, right_reg: i64) -> i64 {
-        let result_reg = self.allocate_register();
-
-        // Start with 0 (false)
-        self.emit(
-            OpCode::Integer,
-            0,
-            result_reg,
-            0,
-            None,
-            &format!("r[{}] = 0 (AND init)", result_reg),
-        );
-
-        // If left is 0, skip to end (result stays 0)
-        let skip_addr1 = self.program.len();
-        self.emit(OpCode::IfZ, left_reg, 0, 0, None, "Skip if left is false");
-
-        // If right is 0, skip to end (result stays 0)
-        let skip_addr2 = self.program.len();
-        self.emit(OpCode::IfZ, right_reg, 0, 0, None, "Skip if right is false");
-
-        // Both true, set result to 1
-        self.emit(
-            OpCode::Integer,
-            1,
-            result_reg,
-            0,
-            None,
-            &format!("r[{}] = 1 (AND true)", result_reg),
-        );
-
-        // Patch skip addresses to end
-        let end_addr = self.program.len();
-        self.patch_jump(skip_addr1, end_addr);
-        self.patch_jump(skip_addr2, end_addr);
-
-        result_reg
-    }
-
-    /// Emit OR logic: result = left_reg || right_reg
-    /// Returns the register containing the result (1 if either true, 0 otherwise)
-    pub(crate) fn emit_or(&mut self, left_reg: i64, right_reg: i64) -> i64 {
-        let result_reg = self.allocate_register();
-
-        // Start with 1 (optimistic - assume true)
-        self.emit(
-            OpCode::Integer,
-            1,
-            result_reg,
-            0,
-            None,
-            &format!("r[{}] = 1 (OR init)", result_reg),
-        );
-
-        // If left is non-zero, skip to end (result stays 1)
-        let skip_addr1 = self.program.len();
-        self.emit(OpCode::IfPos, left_reg, 0, 0, None, "Skip if left is true");
-
-        // If right is non-zero, skip to end (result stays 1)
-        let skip_addr2 = self.program.len();
-        self.emit(
-            OpCode::IfPos,
-            right_reg,
-            0,
-            0,
-            None,
-            "Skip if right is true",
-        );
-
-        // Both false, set result to 0
-        self.emit(
-            OpCode::Integer,
-            0,
-            result_reg,
-            0,
-            None,
-            &format!("r[{}] = 0 (OR false)", result_reg),
-        );
-
-        // Patch skip addresses to end
-        let end_addr = self.program.len();
-        self.patch_jump(skip_addr1, end_addr);
-        self.patch_jump(skip_addr2, end_addr);
-
-        result_reg
     }
 
     /// Emit a comparison operation and return the result register
@@ -5858,6 +5777,29 @@ impl<'a> SqlCompiler<'a> {
                 return self.code_expr(inner, ctx, Some(dest));
             }
 
+            // Literals resolve against nothing, so they are compiled here
+            // rather than delegated. The fallback needs a single FROM source
+            // and would otherwise reject a constant in a join condition --
+            // `ON a.x = b.y AND b.id > 102` failing on the `102`.
+            Expr::Value(ValueWithSpan { value, .. }) => {
+                let literal = match value {
+                    Value::Number(n, _) => match n.parse::<i64>() {
+                        Ok(i) => TableValue::Integer(i),
+                        Err(_) => match n.parse::<f64>() {
+                            Ok(f) => TableValue::Float(f),
+                            Err(_) => TableValue::String(n.clone().into()),
+                        },
+                    },
+                    Value::SingleQuotedString(v) | Value::DoubleQuotedString(v) => {
+                        TableValue::String(v.clone().into())
+                    }
+                    Value::Boolean(b) => TableValue::Boolean(*b),
+                    Value::Null => TableValue::Null,
+                    other => TableValue::String(other.to_string().into()),
+                };
+                self.emit_value_literal(dest, &literal)?;
+            }
+
             // An aggregate call in a position where aggregates have already
             // been computed: read the bound register rather than trying to
             // compile SUM as a scalar function.
@@ -5894,6 +5836,56 @@ impl<'a> SqlCompiler<'a> {
                     Some(format!("CONCAT:{}", right_reg)),
                     &format!("r[{}] = r[{}] || r[{}]", dest, left_reg, right_reg),
                 );
+            }
+
+            // Logical AND / OR, short-circuiting.
+            //
+            // The result register is initialized BEFORE the short-circuit
+            // test. Registers persist across loop iterations, so a jump that
+            // skips the initialization leaves this expression holding its
+            // verdict from the PREVIOUS row -- which is exactly how AND came
+            // to report true for a row failing both operands.
+            Expr::BinaryOp {
+                left,
+                op: op @ (BinaryOperator::And | BinaryOperator::Or),
+                right,
+            } => {
+                let is_and = matches!(op, BinaryOperator::And);
+                // AND starts false and is set true only if both hold; OR
+                // starts false and is set true as soon as either does.
+                self.emit(
+                    OpCode::Integer,
+                    0,
+                    dest,
+                    0,
+                    None,
+                    &format!("r[{}] = 0 ({:?} init)", dest, op),
+                );
+                let done = self.label();
+
+                let left_reg = self.code_expr(left, ctx, None)?;
+                if is_and {
+                    self.emit_jump_to(OpCode::IfZ, left_reg, done, 0, None, "AND: left false");
+                } else {
+                    let check_right = self.label();
+                    self.emit_jump_to(
+                        OpCode::IfZ,
+                        left_reg,
+                        check_right,
+                        0,
+                        None,
+                        "OR: left false, try right",
+                    );
+                    self.emit(OpCode::Integer, 1, dest, 0, None, "OR: left true");
+                    self.emit_jump_to(OpCode::Goto, 0, done, 0, None, "");
+                    self.resolve(check_right);
+                }
+
+                let right_reg = self.code_expr(right, ctx, None)?;
+                self.emit_jump_to(OpCode::IfZ, right_reg, done, 0, None, "right false");
+                self.emit(OpCode::Integer, 1, dest, 0, None, "both/either true");
+
+                self.resolve(done);
             }
 
             // Arithmetic and comparison operators, compiled here rather than
@@ -6053,24 +6045,86 @@ impl<'a> SqlCompiler<'a> {
     /// Extract the single `(table, cursor)` pair the not-yet-migrated code
     /// still expects.
     ///
-    /// Multi-source contexts are handled by the join compiler's own operand
-    /// paths for now; this errors rather than silently resolving against the
-    /// wrong table.
+    /// With one FROM source this is trivial. With several, the arms that have
+    /// not yet been migrated -- function calls above all -- still take a single
+    /// `(table, cursor)`, so the source is inferred from the column references
+    /// inside `expr`. A function almost always applies to columns of one
+    /// table, and when it genuinely spans two this errors rather than
+    /// resolving against an arbitrary one.
     fn legacy_single_source<'t>(
         &self,
         ctx: &NameCtx<'t>,
         expr: &Expr,
     ) -> SqawkResult<(&'t Table, usize)> {
         match ctx.srcs.len() {
-            1 => Ok((ctx.srcs[0].table, ctx.srcs[0].cursor as usize)),
-            0 => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Expression requires a FROM clause: {:?}",
+            1 => return Ok((ctx.srcs[0].table, ctx.srcs[0].cursor as usize)),
+            0 => {
+                return Err(SqawkError::UnsupportedSqlFeature(format!(
+                    "Expression requires a FROM clause: {:?}",
+                    expr
+                )))
+            }
+            _ => {}
+        }
+
+        let mut found: Option<usize> = None;
+        let mut ambiguous = false;
+        Self::for_each_column_ref(expr, &mut |qualifier, name| {
+            let idx = match qualifier {
+                Some(q) => ctx
+                    .srcs
+                    .iter()
+                    .position(|s| s.refname == q.to_ascii_lowercase()),
+                None => ctx.srcs.iter().position(|s| {
+                    s.table
+                        .column_metadata()
+                        .iter()
+                        .any(|c| c.name.eq_ignore_ascii_case(name))
+                }),
+            };
+            if let Some(i) = idx {
+                match found {
+                    Some(prev) if prev != i => ambiguous = true,
+                    _ => found = Some(i),
+                }
+            }
+        });
+
+        match (found, ambiguous) {
+            (Some(i), false) => Ok((ctx.srcs[i].table, ctx.srcs[i].cursor as usize)),
+            (_, true) => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Expression spans multiple tables: {:?}",
                 expr
             ))),
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Expression not supported across multiple tables: {:?}",
-                expr
-            ))),
+            (None, _) => Ok((ctx.srcs[0].table, ctx.srcs[0].cursor as usize)),
+        }
+    }
+
+    /// Visit every column reference in `expr` as `(qualifier, name)`.
+    fn for_each_column_ref(expr: &Expr, f: &mut impl FnMut(Option<&str>, &str)) {
+        match expr {
+            Expr::Identifier(ident) => f(None, &ident.value),
+            Expr::CompoundIdentifier(parts) if parts.len() >= 2 => f(
+                Some(&parts[parts.len() - 2].value),
+                &parts[parts.len() - 1].value,
+            ),
+            Expr::BinaryOp { left, right, .. } => {
+                Self::for_each_column_ref(left, f);
+                Self::for_each_column_ref(right, f);
+            }
+            Expr::UnaryOp { expr: inner, .. }
+            | Expr::Nested(inner)
+            | Expr::Cast { expr: inner, .. }
+            | Expr::IsNull(inner)
+            | Expr::IsNotNull(inner) => Self::for_each_column_ref(inner, f),
+            Expr::Function(func) => {
+                for arg in func_args(func) {
+                    if let FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) = arg {
+                        Self::for_each_column_ref(e, f);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
