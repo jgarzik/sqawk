@@ -87,6 +87,22 @@ fn classify_join(op: &JoinOperator) -> SqawkResult<(&'static str, Option<&JoinCo
     })
 }
 
+/// The name a query uses to refer to a FROM item: its alias if it has one,
+/// otherwise the table name.
+///
+/// SQL lets a join alias its inputs, and `FROM users u JOIN orders o ON
+/// u.id = o.user_id` must resolve `u` and `o`. Aliases already worked for a
+/// single table and for comma joins; explicit joins resolved against the table
+/// name alone, so any aliased explicit join failed with "Table 'u' not found".
+fn table_refname(factor: &sqlparser::ast::TableFactor, fallback: &str) -> String {
+    match factor {
+        sqlparser::ast::TableFactor::Table {
+            alias: Some(alias), ..
+        } => alias.name.value.to_ascii_lowercase(),
+        _ => fallback.to_ascii_lowercase(),
+    }
+}
+
 /// Resolved join projection: the left table's column indices, the right
 /// table's column indices, the output schema, and where each projected column
 /// lives as (side, index within that side) in SELECT-list order.
@@ -167,6 +183,10 @@ impl<'a> SqlCompiler<'a> {
             return Err(SqawkError::TableNotFound(right_table_name));
         }
 
+        // How the query refers to each side: alias if given, else table name.
+        let left_ref = table_refname(&table_with_joins.relation, &left_table_name);
+        let right_ref = table_refname(&join.relation, &right_table_name);
+
         // Check for CROSS JOIN - handle separately
         if matches!(&join.join_operator, JoinOperator::CrossJoin(_)) {
             return self.compile_cross_join(&left_table_name, &right_table_name, projection);
@@ -219,8 +239,8 @@ impl<'a> SqlCompiler<'a> {
             projection,
             left_table,
             right_table,
-            &left_table_name,
-            &right_table_name,
+            &left_ref,
+            &right_ref,
         )?;
 
         // Set result schema
@@ -339,12 +359,14 @@ impl<'a> SqlCompiler<'a> {
         self.emit_column_loads(inner_cursor as i64, &inner_cols, inner_start_reg, "inner");
 
         // Compile join condition
-        let condition_reg = self.compile_join_condition(
+        let condition_reg = self.compile_join_condition_with_refs(
             on_expr,
             left_table,
             right_table,
             left_cursor,
             right_cursor,
+            &left_ref,
+            &right_ref,
         )?;
 
         // If ON condition fails, skip to next inner iteration (placeholder - will be patched)
@@ -361,12 +383,14 @@ impl<'a> SqlCompiler<'a> {
         // Compile WHERE clause filtering if present
         let skip_where_addr = if let Some(where_expr) = where_clause {
             // Use compile_join_condition to handle table.column references in WHERE
-            let where_cond_reg = self.compile_join_condition(
+            let where_cond_reg = self.compile_join_condition_with_refs(
                 where_expr,
                 left_table,
                 right_table,
                 left_cursor,
                 right_cursor,
+                &left_ref,
+                &right_ref,
             )?;
 
             // If WHERE condition fails, skip to next inner iteration
@@ -534,12 +558,14 @@ impl<'a> SqlCompiler<'a> {
             self.emit_column_loads(left_cursor as i64, &left_cols, left_start_reg, "left");
 
             // Check join condition
-            let condition_reg2 = self.compile_join_condition(
+            let condition_reg2 = self.compile_join_condition_with_refs(
                 on_expr,
                 left_table,
                 right_table,
                 left_cursor,
                 right_cursor,
+                &left_ref,
+                &right_ref,
             )?;
 
             // If condition matches, mark it and skip to next right row
@@ -2230,7 +2256,7 @@ impl<'a> SqlCompiler<'a> {
         for (i, cond) in join_conditions.iter().enumerate() {
             // Use table_refs (aliases) for column resolution
             let cond_reg =
-                self.compile_multi_join_condition(cond, &table_refs, &table_start_regs)?;
+                self.compile_multi_join_condition(cond, &tables, &table_refs, &table_start_regs)?;
 
             // If condition fails, skip to next innermost iteration (placeholder)
             let skip_addr = self.program.len();
@@ -2376,17 +2402,13 @@ impl<'a> SqlCompiler<'a> {
     fn compile_multi_join_condition(
         &mut self,
         expr: &Expr,
-        table_names: &[String],
+        tables: &[&Table],
+        table_refs: &[String],
         table_start_regs: &[i64],
     ) -> SqawkResult<i64> {
-        let tables: Vec<&Table> = table_names
-            .iter()
-            .map(|n| self.database.get_table(n))
-            .collect::<SqawkResult<_>>()?;
-
         let srcs = tables
             .iter()
-            .zip(table_names.iter())
+            .zip(table_refs.iter())
             .zip(table_start_regs.iter())
             .enumerate()
             .map(|(i, ((table, name), base))| Src {

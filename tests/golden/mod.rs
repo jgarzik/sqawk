@@ -2182,3 +2182,56 @@ fn correlated_subquery_with_function_on_outer_column() -> Result<(), Box<dyn std
         "name\nDavid\nGrace",
     )
 }
+
+// ---------------------------------------------------------------------------
+// Table aliases in joins.
+//
+// Aliases worked for a single table and for comma joins, but explicit joins
+// resolved column qualifiers against the table name alone, so every aliased
+// explicit join failed with "Table 'u' not found" -- including all three join
+// examples in the user guide. No test covered an aliased join at all, which is
+// also how a later refactor came to pass aliases where table names were
+// expected without anything failing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn alias_in_inner_join() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT u.name, o.id FROM users u JOIN orders o ON u.id = o.user_id",
+        "u.name,o.id\nJohn,101\nJohn,103\nJohn,105\nJane,102\nJane,104",
+    )
+}
+
+#[test]
+fn alias_in_left_join() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/customers.csv", "tests/data/purchases.csv"],
+        "SELECT c.name, p.item FROM customers c LEFT JOIN purchases p ON c.id = p.customer_id",
+        "c.name,p.item\nAnn,Book\nAnn,Pen\nBen,Desk\nCara,NULL",
+    )
+}
+
+#[test]
+fn alias_in_three_table_join() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &[
+            "tests/data/users.csv",
+            "tests/data/orders.csv",
+            "tests/data/products.csv",
+        ],
+        "SELECT u.name, p.name FROM users u \
+         JOIN orders o ON u.id = o.user_id \
+         JOIN products p ON o.product_id = p.product_id",
+        "u.name,p.name\nJohn,Laptop\nJohn,Headphones\nJohn,Keyboard\nJane,Phone\nJane,Monitor",
+    )
+}
+
+#[test]
+fn alias_in_implicit_join() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT u.name, o.id FROM users u, orders o WHERE u.id = o.user_id",
+        "u.name,o.id\nJohn,101\nJohn,103\nJohn,105\nJane,102\nJane,104",
+    )
+}
