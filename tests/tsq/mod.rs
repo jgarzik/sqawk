@@ -30,8 +30,7 @@ fn generate(seed: u64, rows: usize) -> Result<tempfile::TempDir, Box<dyn std::er
 }
 
 fn read(dir: &Path, rel: &str) -> String {
-    fs::read_to_string(dir.join("out").join(rel))
-        .unwrap_or_else(|e| panic!("missing {rel}: {e}"))
+    fs::read_to_string(dir.join("out").join(rel)).unwrap_or_else(|e| panic!("missing {rel}: {e}"))
 }
 
 #[test]

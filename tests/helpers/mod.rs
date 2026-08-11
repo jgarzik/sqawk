@@ -249,7 +249,10 @@ pub fn run_with_write(
 
     let spec = format!("{}={}", table, dest.to_str().unwrap());
     let (_stdout, stderr, success) = run_sql(sql, &[&spec], &["--write"])?;
-    assert!(success, "write query failed\n  sql: {sql}\n  stderr: {stderr}");
+    assert!(
+        success,
+        "write query failed\n  sql: {sql}\n  stderr: {stderr}"
+    );
 
     Ok(normalize_output(&fs::read_to_string(&dest)?))
 }

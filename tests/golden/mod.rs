@@ -56,10 +56,7 @@ fn select_literal() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT 1",
-        concat!(
-            "col0",
-            "\n1",
-        ),
+        concat!("col0", "\n1",),
     )
 }
 
@@ -68,12 +65,7 @@ fn where_eq() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees WHERE department = 'Engineering'",
-        concat!(
-            "name",
-            "\nAlice",
-            "\nCharlie",
-            "\nFrank",
-        ),
+        concat!("name", "\nAlice", "\nCharlie", "\nFrank",),
     )
 }
 
@@ -82,12 +74,7 @@ fn where_gt() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees WHERE salary > 70000",
-        concat!(
-            "name",
-            "\nDavid",
-            "\nFrank",
-            "\nGrace",
-        ),
+        concat!("name", "\nDavid", "\nFrank", "\nGrace",),
     )
 }
 
@@ -96,12 +83,7 @@ fn where_and() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees WHERE salary > 60000 AND department = 'Engineering'",
-        concat!(
-            "name",
-            "\nAlice",
-            "\nCharlie",
-            "\nFrank",
-        ),
+        concat!("name", "\nAlice", "\nCharlie", "\nFrank",),
     )
 }
 
@@ -110,12 +92,7 @@ fn where_or() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees WHERE department = 'HR' OR department = 'Sales'",
-        concat!(
-            "name",
-            "\nDavid",
-            "\nGrace",
-            "\nHenry",
-        ),
+        concat!("name", "\nDavid", "\nGrace", "\nHenry",),
     )
 }
 
@@ -124,14 +101,7 @@ fn where_ne() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees WHERE department <> 'Engineering'",
-        concat!(
-            "name",
-            "\nBob",
-            "\nDavid",
-            "\nEve",
-            "\nGrace",
-            "\nHenry",
-        ),
+        concat!("name", "\nBob", "\nDavid", "\nEve", "\nGrace", "\nHenry",),
     )
 }
 
@@ -140,10 +110,7 @@ fn where_like() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees WHERE name LIKE 'A%'",
-        concat!(
-            "name",
-            "\nAlice",
-        ),
+        concat!("name", "\nAlice",),
     )
 }
 
@@ -170,10 +137,7 @@ fn where_ilike() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees WHERE name ILIKE 'a%'",
-        concat!(
-            "name",
-            "\nAlice",
-        ),
+        concat!("name", "\nAlice",),
     )
 }
 
@@ -182,13 +146,7 @@ fn where_between() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees WHERE age BETWEEN 30 AND 40",
-        concat!(
-            "name",
-            "\nAlice",
-            "\nCharlie",
-            "\nDavid",
-            "\nFrank",
-        ),
+        concat!("name", "\nAlice", "\nCharlie", "\nDavid", "\nFrank",),
     )
 }
 
@@ -197,13 +155,7 @@ fn where_not_between() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees WHERE age NOT BETWEEN 30 AND 40",
-        concat!(
-            "name",
-            "\nBob",
-            "\nEve",
-            "\nGrace",
-            "\nHenry",
-        ),
+        concat!("name", "\nBob", "\nEve", "\nGrace", "\nHenry",),
     )
 }
 
@@ -212,12 +164,7 @@ fn where_in_list() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees WHERE department IN ('HR', 'Sales')",
-        concat!(
-            "name",
-            "\nDavid",
-            "\nGrace",
-            "\nHenry",
-        ),
+        concat!("name", "\nDavid", "\nGrace", "\nHenry",),
     )
 }
 
@@ -226,14 +173,7 @@ fn where_not_in_list() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees WHERE department NOT IN ('HR', 'Sales')",
-        concat!(
-            "name",
-            "\nAlice",
-            "\nBob",
-            "\nCharlie",
-            "\nEve",
-            "\nFrank",
-        ),
+        concat!("name", "\nAlice", "\nBob", "\nCharlie", "\nEve", "\nFrank",),
     )
 }
 
@@ -242,10 +182,7 @@ fn where_is_null() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/nullable.csv"],
         "SELECT id FROM nullable WHERE score IS NULL",
-        concat!(
-            "id",
-            "\n2",
-        ),
+        concat!("id", "\n2",),
     )
 }
 
@@ -254,13 +191,7 @@ fn where_is_not_null() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/nullable.csv"],
         "SELECT id FROM nullable WHERE score IS NOT NULL",
-        concat!(
-            "id",
-            "\n1",
-            "\n3",
-            "\n4",
-            "\n5",
-        ),
+        concat!("id", "\n1", "\n3", "\n4", "\n5",),
     )
 }
 
@@ -326,12 +257,7 @@ fn limit() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees LIMIT 3",
-        concat!(
-            "name",
-            "\nAlice",
-            "\nBob",
-            "\nCharlie",
-        ),
+        concat!("name", "\nAlice", "\nBob", "\nCharlie",),
     )
 }
 
@@ -340,12 +266,7 @@ fn limit_offset() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees LIMIT 3 OFFSET 2",
-        concat!(
-            "name",
-            "\nCharlie",
-            "\nDavid",
-            "\nEve",
-        ),
+        concat!("name", "\nCharlie", "\nDavid", "\nEve",),
     )
 }
 
@@ -400,10 +321,7 @@ fn agg_count() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT COUNT(*) FROM employees",
-        concat!(
-            "COUNT",
-            "\n8",
-        ),
+        concat!("COUNT", "\n8",),
     )
 }
 
@@ -412,10 +330,7 @@ fn agg_sum() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT SUM(salary) FROM employees",
-        concat!(
-            "SUM",
-            "\n540000",
-        ),
+        concat!("SUM", "\n540000",),
     )
 }
 
@@ -424,10 +339,7 @@ fn agg_avg() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT AVG(salary) FROM employees",
-        concat!(
-            "AVG",
-            "\n67500",
-        ),
+        concat!("AVG", "\n67500",),
     )
 }
 
@@ -436,10 +348,7 @@ fn agg_min_max() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT MIN(salary), MAX(salary) FROM employees",
-        concat!(
-            "MIN,MAX",
-            "\n45000,90000",
-        ),
+        concat!("MIN,MAX", "\n45000,90000",),
     )
 }
 
@@ -448,10 +357,7 @@ fn agg_with_where() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT COUNT(*) FROM employees WHERE department = 'Engineering'",
-        concat!(
-            "COUNT",
-            "\n3",
-        ),
+        concat!("COUNT", "\n3",),
     )
 }
 
@@ -460,10 +366,7 @@ fn agg_alias() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT COUNT(*) AS n, SUM(salary) AS total FROM employees",
-        concat!(
-            "n,total",
-            "\n8,540000",
-        ),
+        concat!("n,total", "\n8,540000",),
     )
 }
 
@@ -702,10 +605,7 @@ fn subquery_scalar() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees WHERE salary = (SELECT MAX(salary) FROM employees)",
-        concat!(
-            "name",
-            "\nGrace",
-        ),
+        concat!("name", "\nGrace",),
     )
 }
 
@@ -714,11 +614,7 @@ fn subquery_in() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT name FROM users WHERE id IN (SELECT user_id FROM orders)",
-        concat!(
-            "name",
-            "\nJohn",
-            "\nJane",
-        ),
+        concat!("name", "\nJohn", "\nJane",),
     )
 }
 
@@ -1152,13 +1048,7 @@ fn case_in_where() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees WHERE CASE WHEN age > 30 THEN 1 ELSE 0 END = 1",
-        concat!(
-            "name",
-            "\nCharlie",
-            "\nDavid",
-            "\nFrank",
-            "\nGrace",
-        ),
+        concat!("name", "\nCharlie", "\nDavid", "\nFrank", "\nGrace",),
     )
 }
 
@@ -1167,12 +1057,7 @@ fn cast_in_where() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees WHERE CAST(salary AS INTEGER) > 70000",
-        concat!(
-            "name",
-            "\nDavid",
-            "\nFrank",
-            "\nGrace",
-        ),
+        concat!("name", "\nDavid", "\nFrank", "\nGrace",),
     )
 }
 
@@ -1194,7 +1079,6 @@ fn alias_column() -> Result<(), Box<dyn std::error::Error>> {
         ),
     )
 }
-
 
 // ---------------------------------------------------------------------------
 // Outer joins WITH unmatched rows on both sides.

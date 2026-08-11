@@ -1698,6 +1698,10 @@ mod compare_jump_not_tests {
             create_instruction(OpCode::ResultRow, 3, 1, 0, None, None),
             halt(),
         ]);
-        assert_eq!(row[0], Value::Integer(2), "NULL should compare equal to NULL");
+        assert_eq!(
+            row[0],
+            Value::Integer(2),
+            "NULL should compare equal to NULL"
+        );
     }
 }

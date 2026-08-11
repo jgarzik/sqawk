@@ -10,9 +10,9 @@
 //! affects an aggregate) belongs in the compiler proper.
 
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, CreateTableOptions, DuplicateTreatment, Expr, FromTable, Function,
-    FunctionArg, FunctionArguments, GroupByExpr, LimitClause, ObjectName, OrderBy, OrderByExpr,
-    OrderByKind, Query, SqlOption, TableObject, TableWithJoins,
+    Assignment, AssignmentTarget, CreateTableOptions, DuplicateTreatment, Expr, FromTable,
+    Function, FunctionArg, FunctionArguments, GroupByExpr, LimitClause, ObjectName, OrderBy,
+    OrderByExpr, OrderByKind, Query, SqlOption, TableObject, TableWithJoins,
 };
 
 use crate::error::{SqawkError, SqawkResult};
@@ -122,11 +122,9 @@ pub(crate) fn query_offset(query: &Query) -> Option<&Expr> {
 pub(crate) fn insert_target(table: &TableObject) -> SqawkResult<&ObjectName> {
     match table {
         TableObject::TableName(name) => Ok(name),
-        TableObject::TableFunction(_) | TableObject::TableQuery(_) => {
-            Err(SqawkError::UnsupportedSqlFeature(
-                "INSERT target must be a plain table name".into(),
-            ))
-        }
+        TableObject::TableFunction(_) | TableObject::TableQuery(_) => Err(
+            SqawkError::UnsupportedSqlFeature("INSERT target must be a plain table name".into()),
+        ),
     }
 }
 

@@ -2408,7 +2408,11 @@ impl<'a> VmEngine<'a> {
                 let src = self.get_register(inst.p1 as usize)?;
                 let out = match src {
                     Register::Null => Register::Null,
-                    other => Register::Integer(if Self::register_is_truthy(&other) { 0 } else { 1 }),
+                    other => Register::Integer(if Self::register_is_truthy(&other) {
+                        0
+                    } else {
+                        1
+                    }),
                 };
                 self.set_register(inst.p2 as usize, out)?;
                 Ok(ExecuteResult::Continue)
@@ -2475,7 +2479,10 @@ impl<'a> VmEngine<'a> {
                     .filter(|s| !s.is_empty())
                     .filter_map(|part| {
                         let (idx, dir) = part.split_once(':')?;
-                        Some((idx.trim().parse().ok()?, !dir.trim().eq_ignore_ascii_case("desc")))
+                        Some((
+                            idx.trim().parse().ok()?,
+                            !dir.trim().eq_ignore_ascii_case("desc"),
+                        ))
                     })
                     .collect();
 
@@ -2498,8 +2505,10 @@ impl<'a> VmEngine<'a> {
                     });
                     self.results = order.iter().map(|&i| self.results[i].clone()).collect();
                     if track {
-                        self.result_row_indices =
-                            order.iter().map(|&i| self.result_row_indices[i].clone()).collect();
+                        self.result_row_indices = order
+                            .iter()
+                            .map(|&i| self.result_row_indices[i].clone())
+                            .collect();
                     }
                 }
                 Ok(ExecuteResult::Continue)
@@ -3758,7 +3767,6 @@ impl<'a> VmEngine<'a> {
     /// hold both; and arithmetic already coerces this way, so `x + '1'` and
     /// `x > '1'` agree instead of disagreeing.
     fn sql_compare(a: &Register, b: &Register) -> Option<std::cmp::Ordering> {
-
         // Any NULL operand yields UNKNOWN.
         if matches!(a, Register::Null) || matches!(b, Register::Null) {
             return None;

@@ -17,11 +17,11 @@ enum MultiTableProjectionItem {
     Aggregate(i64, Option<(usize, usize)>),
 }
 
+use super::ast_compat::{func_args, group_by_exprs};
 use super::bytecode::{OpCode, ResultSchema};
 use super::compiler::{MultiTableProjection, SqlCompiler};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
-use super::ast_compat::{func_args, group_by_exprs};
 
 /// Classify a `JoinOperator` into sqawk's join kind plus its constraint.
 ///

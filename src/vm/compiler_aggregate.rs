@@ -4,11 +4,11 @@
 
 use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Select, SelectItem};
 
+use super::ast_compat::{func_args, func_is_distinct, group_by_exprs};
 use super::bytecode::{OpCode, ResultSchema, AGG_DISTINCT};
 use super::compiler::{NameCtx, SqlCompiler};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
-use super::ast_compat::{func_args, func_is_distinct, group_by_exprs};
 
 /// One column of a grouped result, in SELECT-list order.
 #[derive(Clone, Copy, Debug)]
@@ -196,10 +196,16 @@ impl<'a> SqlCompiler<'a> {
                 // It used to be dropped entirely -- func.distinct was never
                 // read -- so COUNT(DISTINCT department) counted rows.
                 let func_type = Self::agg_func_type(&name)
-                    | if func_is_distinct(func) { AGG_DISTINCT } else { 0 };
+                    | if func_is_distinct(func) {
+                        AGG_DISTINCT
+                    } else {
+                        0
+                    };
 
                 // Check for COUNT(*)
-                if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) = func_args(func).first() {
+                if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
+                    func_args(func).first()
+                {
                     // COUNT(*) - use -1 to indicate no column
                     return Ok(Some((func_type, -1)));
                 }
@@ -248,7 +254,6 @@ impl<'a> SqlCompiler<'a> {
         }
         schema
     }
-
 
     /// Emit one grouped output row: keys, finalized aggregates, HAVING, ResultRow.
     ///
@@ -771,16 +776,19 @@ impl<'a> SqlCompiler<'a> {
                 // is why it stayed hidden.
                 let name = func.name.to_string().to_uppercase();
                 let func_type = Self::agg_func_type(&name)
-                    | if func_is_distinct(func) { AGG_DISTINCT } else { 0 };
-
-                let wanted_col: Option<usize> =
-                    match func_args(func).first() {
-                        Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) => None,
-                        Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr))) => {
-                            Some(self.resolve_column_expr(arg_expr, table)?)
-                        }
-                        _ => None,
+                    | if func_is_distinct(func) {
+                        AGG_DISTINCT
+                    } else {
+                        0
                     };
+
+                let wanted_col: Option<usize> = match func_args(func).first() {
+                    Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) => None,
+                    Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr))) => {
+                        Some(self.resolve_column_expr(arg_expr, table)?)
+                    }
+                    _ => None,
+                };
 
                 for (i, (agg_func_type, agg_col)) in agg_info.iter().enumerate() {
                     if *agg_func_type == func_type && *agg_col == wanted_col {

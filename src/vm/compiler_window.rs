@@ -4,11 +4,11 @@
 
 use sqlparser::ast::{Expr, Select, SelectItem, Value, ValueWithSpan, WindowType};
 
+use super::ast_compat::{func_args, order_by_is_asc};
 use super::bytecode::{OpCode, ResultSchema};
 use super::compiler::SqlCompiler;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{DataType, Table};
-use super::ast_compat::{func_args, order_by_is_asc};
 
 impl<'a> SqlCompiler<'a> {
     pub(crate) fn compile_select_with_window(
@@ -377,8 +377,10 @@ impl<'a> SqlCompiler<'a> {
 
                                 // Get offset (default 1)
                                 let offset = if func_args(func).len() >= 2 {
-                                    if let Ok(Expr::Value(ValueWithSpan { value: Value::Number(n, _), .. })) =
-                                        self.extract_function_arg_expr(&func_args(func)[1])
+                                    if let Ok(Expr::Value(ValueWithSpan {
+                                        value: Value::Number(n, _),
+                                        ..
+                                    })) = self.extract_function_arg_expr(&func_args(func)[1])
                                     {
                                         n.parse::<i64>().unwrap_or(1)
                                     } else {

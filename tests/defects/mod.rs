@@ -14,7 +14,8 @@
 //! emitted, and passes regardless of row order.
 
 use crate::helpers::{
-    assert_after_write, assert_query, departments_csv, employees_csv, nullable_csv, orders_csv, users_csv,
+    assert_after_write, assert_query, departments_csv, employees_csv, nullable_csv, orders_csv,
+    users_csv,
 };
 
 // ---------------------------------------------------------------------------
@@ -505,8 +506,7 @@ fn group_by_order_by_avg_is_not_coincidental() -> Result<(), Box<dyn std::error:
 /// `SELECT name ...; SELECT COUNT(*) ...` emits the header `COUNT` above
 /// `Alice`, `Charlie`, `3`.
 #[test]
-fn multi_statement_output_has_per_statement_headers(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn multi_statement_output_has_per_statement_headers() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/people.csv"],
         "SELECT name FROM people WHERE age > 30; SELECT COUNT(*) FROM people",
