@@ -10,8 +10,8 @@ use super::ast_compat::{
 };
 use sqlparser::ast::{
     BinaryOperator, CaseWhen, DataType as SqlDataType, Expr, Function, FunctionArg,
-    FunctionArgExpr, Ident, ObjectName, Query, Select, SelectItem, SetExpr, SetOperator,
-    SetQuantifier, Statement, TableWithJoins, UnaryOperator, Value, ValueWithSpan,
+    FunctionArgExpr, Ident, JoinConstraint, ObjectName, Query, Select, SelectItem, SetExpr,
+    SetOperator, SetQuantifier, Statement, TableWithJoins, UnaryOperator, Value, ValueWithSpan,
 };
 use sqlparser::dialect::HiveDialect;
 use sqlparser::parser::Parser;
@@ -174,6 +174,19 @@ impl<'t> NameCtx<'t> {
         // single-table query can still say `employees.age` when the cursor was
         // opened under a different refname.
         self.resolve_unqualified(name)
+    }
+}
+
+/// Classify a join operator for the inner-join rewrite.
+///
+/// `Some(Some(c))` = inner join with constraint `c`; `Some(None)` = cross join;
+/// `None` = not rewritable (outer joins and the exotic forms).
+fn classify_join_for_rewrite(op: &sqlparser::ast::JoinOperator) -> Option<Option<&JoinConstraint>> {
+    use sqlparser::ast::JoinOperator as J;
+    match op {
+        J::Join(c) | J::Inner(c) => Some(Some(c)),
+        J::CrossJoin(_) => Some(None),
+        _ => None,
     }
 }
 
@@ -909,6 +922,69 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
+    /// Rewrite `A INNER JOIN B ON cond` into `FROM A, B WHERE cond`.
+    ///
+    /// The implicit (comma) join path already supports aggregates and GROUP BY;
+    /// the explicit-JOIN path does not, and rejects `COUNT(*)` in its
+    /// projection resolver. For an INNER join the two spellings mean the same
+    /// thing, so an aggregate query over an explicit join is answered by
+    /// handing it to the machinery that can already do it, rather than by
+    /// duplicating that machinery.
+    ///
+    /// Returns `None` when the rewrite does not apply: outer joins are NOT
+    /// equivalent to a comma join plus WHERE, since the WHERE would discard
+    /// exactly the NULL-extended rows the outer join exists to produce.
+    fn rewrite_inner_join_as_implicit(select: &Select) -> Option<Select> {
+        if select.from.len() != 1 {
+            return None;
+        }
+        let twj = &select.from[0];
+        if twj.joins.is_empty() {
+            return None;
+        }
+
+        let mut froms = vec![TableWithJoins {
+            relation: twj.relation.clone(),
+            joins: Vec::new(),
+        }];
+        let mut condition = select.selection.clone();
+
+        for join in &twj.joins {
+            let constraint = match classify_join_for_rewrite(&join.join_operator)? {
+                Some(c) => c,
+                // CROSS JOIN contributes a source but no condition.
+                None => {
+                    froms.push(TableWithJoins {
+                        relation: join.relation.clone(),
+                        joins: Vec::new(),
+                    });
+                    continue;
+                }
+            };
+            let on_expr = match constraint {
+                JoinConstraint::On(expr) => expr.clone(),
+                _ => return None,
+            };
+            froms.push(TableWithJoins {
+                relation: join.relation.clone(),
+                joins: Vec::new(),
+            });
+            condition = Some(match condition {
+                Some(existing) => Expr::BinaryOp {
+                    left: Box::new(existing),
+                    op: BinaryOperator::And,
+                    right: Box::new(on_expr),
+                },
+                None => on_expr,
+            });
+        }
+
+        let mut rewritten = select.clone();
+        rewritten.from = froms;
+        rewritten.selection = condition;
+        Some(rewritten)
+    }
+
     /// Compile a SELECT statement
     fn compile_select(&mut self, select: &Select) -> SqawkResult<()> {
         // `GROUP BY ALL` carries no key list, so it would otherwise look
@@ -955,6 +1031,16 @@ impl<'a> SqlCompiler<'a> {
 
             let table_with_joins = &select.from[0];
             if !table_with_joins.joins.is_empty() {
+                // An aggregate or GROUP BY over an explicit INNER join is
+                // answered by rewriting it to the equivalent comma join, whose
+                // path already supports both.
+                let needs_aggregation = !group_by_exprs(&select.group_by).is_empty()
+                    || self.has_aggregates(&select.projection);
+                if needs_aggregation {
+                    if let Some(rewritten) = Self::rewrite_inner_join_as_implicit(select) {
+                        return self.compile_select(&rewritten);
+                    }
+                }
                 self.compile_join(table_with_joins, &select.projection, &select.selection)?;
             } else {
                 // Check for GROUP BY, window functions, or aggregates
@@ -1058,6 +1144,15 @@ impl<'a> SqlCompiler<'a> {
 
         // Check for explicit JOINs (FROM table1 JOIN table2 ON ...)
         if !table_with_joins.joins.is_empty() {
+            // See compile_select: aggregates over an explicit INNER join are
+            // handled by rewriting to the comma-join form.
+            let needs_aggregation = !group_by_exprs(&select.group_by).is_empty()
+                || self.has_aggregates(&select.projection);
+            if needs_aggregation {
+                if let Some(rewritten) = Self::rewrite_inner_join_as_implicit(select) {
+                    return self.compile_select_with_post_processing(&rewritten, query);
+                }
+            }
             // A join emits rows directly rather than through the cursor-based
             // sorter, which is why ORDER BY used to be dropped here outright.
             // Sorting the finished result set works regardless of how many

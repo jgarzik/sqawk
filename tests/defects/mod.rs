@@ -525,7 +525,6 @@ fn multi_statement_output_has_per_statement_headers() -> Result<(), Box<dyn std:
 /// An aggregate over a join is rejected: the join projection resolver accepts
 /// only column references, so `COUNT(*)` never reaches the aggregate path.
 #[test]
-#[ignore = "aggregates are not supported over an explicit JOIN"]
 fn aggregate_over_join() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[users_csv(), orders_csv()],

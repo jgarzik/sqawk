@@ -1878,3 +1878,54 @@ fn multiple_unordered_window_aggregates() -> Result<(), Box<dyn std::error::Erro
          David,2,80000\nGrace,2,80000",
     )
 }
+
+// ---------------------------------------------------------------------------
+// Aggregates over joins.
+//
+// `A INNER JOIN B ON c` and `FROM A, B WHERE c` mean the same thing, and the
+// comma form already supported aggregates, so the explicit form is rewritten
+// to it. The rewrite is deliberately NOT applied to outer joins: moving the ON
+// condition into WHERE would discard exactly the NULL-extended rows an outer
+// join exists to produce.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn count_over_inner_join() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT COUNT(*) FROM users JOIN orders ON users.id = orders.user_id",
+        "COUNT\n5",
+    )
+}
+
+#[test]
+fn group_by_over_inner_join() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT users.name, COUNT(*) FROM users JOIN orders ON users.id = orders.user_id \
+         GROUP BY users.name",
+        "users.name,COUNT\nJane,2\nJohn,3",
+    )
+}
+
+#[test]
+fn inner_join_and_comma_join_agree() -> Result<(), Box<dyn std::error::Error>> {
+    // The rewrite's premise, pinned directly.
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT COUNT(*) FROM users, orders WHERE users.id = orders.user_id",
+        "COUNT\n5",
+    )
+}
+
+#[test]
+fn outer_join_aggregate_is_not_silently_rewritten() -> Result<(), Box<dyn std::error::Error>> {
+    // Must not answer as though it were an inner join: Cara has no purchase,
+    // so a LEFT JOIN has 4 rows where the rewritten inner form has 3. Erroring
+    // is acceptable; a wrong number is not.
+    assert_query_fails(
+        &["tests/data/customers.csv", "tests/data/purchases.csv"],
+        "SELECT COUNT(*) FROM customers LEFT JOIN purchases ON customers.id = purchases.customer_id",
+        "Unsupported",
+    )
+}
