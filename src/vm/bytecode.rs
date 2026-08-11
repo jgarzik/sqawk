@@ -276,6 +276,13 @@ pub struct Program {
     pub instructions: Vec<Instruction>,
     /// Schema for the result set (built at compile time)
     pub result_schema: ResultSchema,
+    /// Number of registers the compiler allocated for this program.
+    ///
+    /// The engine sizes its register file from this. It must not be inferred
+    /// from the instruction stream: p1/p2/p3 hold literals as often as they
+    /// hold register numbers (`Integer 999999 -> r` being the obvious case),
+    /// so scanning for the maximum both over- and under-estimates.
+    pub register_count: i64,
 }
 
 impl Default for Program {
@@ -289,6 +296,7 @@ impl Program {
         Self {
             instructions: Vec::with_capacity(DEFAULT_INSTRUCTION_CAPACITY),
             result_schema: ResultSchema::new(),
+            register_count: 0,
         }
     }
 

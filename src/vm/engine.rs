@@ -508,19 +508,29 @@ impl<'a> VmEngine<'a> {
         self.pending_modifications.clear();
         self.once_flags.clear();
 
-        // Allocate enough registers for the program
-        let max_reg = self
-            .program
-            .instructions
-            .iter()
-            .map(|i| i.p1.max(i.p2).max(i.p3))
-            .max()
-            .unwrap_or(10);
-
-        // Allocate a few extra registers just in case
-        // Cap max_reg to a reasonable value to avoid overflow (p1/p2/p3 sometimes contain values, not register numbers)
-        let max_reg = max_reg.min(10000);
-        self.registers = vec![Register::Null; (max_reg + 5) as usize];
+        // Size the register file from the compiler's allocation count.
+        //
+        // This used to be inferred as max(p1, p2, p3) over the instruction
+        // stream, capped at 10000. That was wrong in both directions: those
+        // operands hold literals as often as register numbers, so `Integer
+        // 999999 -> r` inflated the file to the cap, while a program that
+        // genuinely needed more than 10000 registers got a short one -- and
+        // Column errors on a short file rather than growing it.
+        //
+        // Hand-assembled test programs carry no count, so fall back to the old
+        // scan when register_count is 0 but instructions exist.
+        let reg_count = if self.program.register_count > 0 {
+            self.program.register_count
+        } else {
+            self.program
+                .instructions
+                .iter()
+                .map(|i| i.p1.max(i.p2).max(i.p3))
+                .max()
+                .unwrap_or(10)
+                .min(10000)
+        };
+        self.registers = vec![Register::Null; (reg_count + 5) as usize];
 
         // Reset transaction state
         self.transaction_state = TransactionState::None;

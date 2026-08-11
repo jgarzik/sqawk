@@ -394,6 +394,9 @@ impl<'a> SqlCompiler<'a> {
             instruction.comment = Some(format!("Start at {}", transaction_addr).into());
         }
 
+        // Hand the engine the real register high-water mark.
+        self.program.register_count = self.register_counter;
+
         Ok(self.program.clone())
     }
 
