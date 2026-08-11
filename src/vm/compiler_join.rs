@@ -2524,39 +2524,16 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// Compile a join condition expression
     /// Compile a two-table join condition through the shared expression
     /// compiler.
     ///
-    /// This was a private family of three functions -- a condition compiler
+    /// Qualifiers resolve against `left_ref`/`right_ref` -- the alias each side
+    /// was given, or its table name if it had none.
+    ///
+    /// This replaces a private family of three functions: a condition compiler
     /// that understood only a single top-level BinaryOp, and an operand
     /// compiler beneath it. So `ON a.x = b.y AND a.z = 1` was rejected, as was
     /// any function call in an ON clause, even though both work in a WHERE.
-    /// Going through `NameCtx` and `code_expr` gives join conditions the same
-    /// expression language as everywhere else.
-    fn compile_join_condition(
-        &mut self,
-        expr: &Expr,
-        left_table: &Table,
-        right_table: &Table,
-        left_cursor: usize,
-        right_cursor: usize,
-    ) -> SqawkResult<i64> {
-        let left_ref = left_table.name().to_string();
-        let right_ref = right_table.name().to_string();
-        self.compile_join_condition_with_refs(
-            expr,
-            left_table,
-            right_table,
-            left_cursor,
-            right_cursor,
-            &left_ref,
-            &right_ref,
-        )
-    }
-
-    /// As [`Self::compile_join_condition`], but with explicit table references
-    /// so aliases resolve.
     #[allow(clippy::too_many_arguments)]
     fn compile_join_condition_with_refs(
         &mut self,
