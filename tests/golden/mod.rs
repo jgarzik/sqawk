@@ -1411,3 +1411,86 @@ fn aggregate_distinct_variants() -> Result<(), Box<dyn std::error::Error>> {
         "SUM,SUM,COUNT,COUNT,MIN,MAX,AVG\n100,60,5,3,10,30,20",
     )
 }
+
+// ---------------------------------------------------------------------------
+// Expression position symmetry.
+//
+// SQL draws no distinction between an expression used as a filter and the same
+// expression used as a projected value, but sqawk had three parallel
+// expression compilers and each supported a different subset. These pin both
+// positions for the same node kinds so the two cannot drift apart again.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn case_as_projected_value() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name, CASE WHEN age > 30 THEN 'old' ELSE 'young' END FROM employees LIMIT 3",
+        "name,expr\nAlice,young\nBob,young\nCharlie,old",
+    )
+}
+
+#[test]
+fn cast_as_projected_value() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT CAST(salary AS TEXT) FROM employees LIMIT 2",
+        "expr\n70000\n55000",
+    )
+}
+
+#[test]
+fn is_null_as_projected_value() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/nullable.csv"],
+        "SELECT id, score IS NULL FROM nullable",
+        "id,expr\n1,0\n2,1\n3,0\n4,0\n5,0",
+    )
+}
+
+#[test]
+fn like_as_projected_value() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name, name LIKE 'A%' FROM employees LIMIT 2",
+        "name,expr\nAlice,1\nBob,0",
+    )
+}
+
+#[test]
+fn between_as_projected_value() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name, age BETWEEN 30 AND 40 FROM employees LIMIT 3",
+        "name,expr\nAlice,1\nBob,0\nCharlie,1",
+    )
+}
+
+#[test]
+fn trim_as_filter() -> Result<(), Box<dyn std::error::Error>> {
+    // TRIM/CEIL/FLOOR were handled only in the projection path, so they worked
+    // in a SELECT list and failed in WHERE -- the mirror image of SUBSTR.
+    assert_query(
+        &["tests/data/strings.csv"],
+        "SELECT id FROM strings WHERE TRIM(padded_text) = 'trimme'",
+        "id\n1",
+    )
+}
+
+#[test]
+fn ceil_as_filter() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees WHERE CEIL(salary) > 85000",
+        "name\nGrace",
+    )
+}
+
+#[test]
+fn concat_operator_as_filter() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees WHERE name || '!' = 'Alice!'",
+        "name\nAlice",
+    )
+}

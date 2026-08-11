@@ -992,27 +992,7 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Check if projection contains function expressions or computed expressions
-        let has_computed_expr = select.projection.iter().any(|item| {
-            let expr = match item {
-                SelectItem::UnnamedExpr(e) => Some(e),
-                SelectItem::ExprWithAlias { expr: e, .. } => Some(e),
-                _ => None,
-            };
-            if let Some(e) = expr {
-                matches!(
-                    e,
-                    Expr::Function(_)
-                        | Expr::Trim { .. }
-                        | Expr::Substring { .. }
-                        | Expr::BinaryOp { .. }
-                        | Expr::UnaryOp { .. }
-                        | Expr::Ceil { .. }
-                        | Expr::Floor { .. }
-                )
-            } else {
-                false
-            }
-        });
+        let has_computed_expr = Self::projection_needs_expr(&select.projection);
 
         // If we have functions/computed expressions and only LIMIT (no ORDER BY), use compile_table_scan
         // which handles function expressions properly
@@ -1936,29 +1916,7 @@ impl<'a> SqlCompiler<'a> {
         let table = self.database.get_table(&table_name).unwrap();
 
         // Check if projection contains function expressions or computed expressions
-        let has_function_expr = projection.iter().any(|item| {
-            let expr = match item {
-                SelectItem::UnnamedExpr(e) => Some(e),
-                SelectItem::ExprWithAlias { expr: e, .. } => Some(e),
-                _ => None,
-            };
-            if let Some(e) = expr {
-                matches!(
-                    e,
-                    Expr::Function(_)
-                        | Expr::Trim { .. }
-                        | Expr::Substring { .. }
-                        | Expr::Position { .. }
-                        | Expr::Overlay { .. }
-                        | Expr::BinaryOp { .. }
-                        | Expr::UnaryOp { .. }
-                        | Expr::Ceil { .. }
-                        | Expr::Floor { .. }
-                )
-            } else {
-                false
-            }
-        });
+        let has_function_expr = Self::projection_needs_expr(projection);
 
         // Build result schema with column names and types
         let schema = self.build_result_schema(projection, table);
@@ -2044,176 +2002,15 @@ impl<'a> SqlCompiler<'a> {
                         }
                     }
                     SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-                        match expr {
-                            Expr::Function(func) => {
-                                self.compile_function(func, table, cursor_idx, value_reg)?;
-                            }
-                            Expr::Trim {
-                                expr: trim_expr, ..
-                            } => {
-                                // Compile TRIM expression
-                                let src_reg = self.allocate_register();
-                                self.compile_where_operand(trim_expr, table, cursor_idx, src_reg)?;
-                                self.emit(
-                                    OpCode::StringFunc,
-                                    src_reg,
-                                    value_reg,
-                                    0,
-                                    Some("TRIM".to_string()),
-                                    &format!("r[{}] = TRIM(r[{}])", value_reg, src_reg),
-                                );
-                            }
-                            Expr::Substring {
-                                expr: sub_expr,
-                                substring_from,
-                                substring_for,
-                                ..
-                            } => {
-                                self.compile_substring(
-                                    sub_expr,
-                                    substring_from.as_deref(),
-                                    substring_for.as_deref(),
-                                    table,
-                                    cursor_idx,
-                                    value_reg,
-                                )?;
-                            }
-                            Expr::Identifier(ident) => {
-                                let col_name = ident.value.to_lowercase();
-                                let col_idx = table
-                                    .column_index(&col_name)
-                                    .ok_or_else(|| SqawkError::ColumnNotFound(col_name.clone()))?;
-                                self.emit(
-                                    OpCode::Column,
-                                    cursor_idx as i64,
-                                    col_idx as i64,
-                                    value_reg,
-                                    None,
-                                    &format!("r[{}] = column {}", value_reg, col_idx),
-                                );
-                            }
-                            Expr::CompoundIdentifier(parts) => {
-                                let col_name = parts
-                                    .last()
-                                    .map(|p| p.value.to_lowercase())
-                                    .unwrap_or_default();
-                                let col_idx = table
-                                    .column_index(&col_name)
-                                    .ok_or_else(|| SqawkError::ColumnNotFound(col_name.clone()))?;
-                                self.emit(
-                                    OpCode::Column,
-                                    cursor_idx as i64,
-                                    col_idx as i64,
-                                    value_reg,
-                                    None,
-                                    &format!("r[{}] = column {}", value_reg, col_idx),
-                                );
-                            }
-                            Expr::BinaryOp { left, op, right } => {
-                                // Handle arithmetic binary operators
-                                let left_reg = self.allocate_register();
-                                let right_reg = self.allocate_register();
-
-                                self.compile_where_operand(left, table, cursor_idx, left_reg)?;
-                                self.compile_where_operand(right, table, cursor_idx, right_reg)?;
-
-                                let opcode = match op {
-                                    BinaryOperator::Plus => OpCode::Add,
-                                    BinaryOperator::Minus => OpCode::Subtract,
-                                    BinaryOperator::Multiply => OpCode::Multiply,
-                                    BinaryOperator::Divide => OpCode::Divide,
-                                    BinaryOperator::Modulo => OpCode::Remainder,
-                                    _ => {
-                                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                                            "Unsupported binary operator in SELECT: {:?}",
-                                            op
-                                        )));
-                                    }
-                                };
-
-                                self.emit(
-                                    opcode,
-                                    left_reg,
-                                    right_reg,
-                                    value_reg,
-                                    None,
-                                    &format!(
-                                        "r[{}] = r[{}] {:?} r[{}]",
-                                        value_reg, left_reg, op, right_reg
-                                    ),
-                                );
-                            }
-                            Expr::UnaryOp { op, expr: inner } => {
-                                // Handle unary operators (e.g., -value)
-                                match op {
-                                    sqlparser::ast::UnaryOperator::Minus => {
-                                        let inner_reg = self.allocate_register();
-                                        self.compile_where_operand(
-                                            inner, table, cursor_idx, inner_reg,
-                                        )?;
-                                        // Negate using 0 - value (avoids Integer -1 special case)
-                                        let zero_reg = self.allocate_register();
-                                        self.emit(
-                                            OpCode::Integer,
-                                            0,
-                                            zero_reg,
-                                            0,
-                                            None,
-                                            &format!("r[{}] = 0", zero_reg),
-                                        );
-                                        self.emit(
-                                            OpCode::Subtract,
-                                            zero_reg,
-                                            inner_reg,
-                                            value_reg,
-                                            None,
-                                            &format!("r[{}] = -r[{}]", value_reg, inner_reg),
-                                        );
-                                    }
-                                    sqlparser::ast::UnaryOperator::Plus => {
-                                        self.compile_where_operand(
-                                            inner, table, cursor_idx, value_reg,
-                                        )?;
-                                    }
-                                    _ => {
-                                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                                            "Unsupported unary operator: {:?}",
-                                            op
-                                        )));
-                                    }
-                                }
-                            }
-                            Expr::Ceil { expr: inner, .. } => {
-                                let src_reg = self.allocate_register();
-                                self.compile_where_operand(inner, table, cursor_idx, src_reg)?;
-                                self.emit(
-                                    OpCode::MathFunc,
-                                    src_reg,
-                                    value_reg,
-                                    0,
-                                    Some("CEIL".to_string()),
-                                    &format!("r[{}] = CEIL(r[{}])", value_reg, src_reg),
-                                );
-                            }
-                            Expr::Floor { expr: inner, .. } => {
-                                let src_reg = self.allocate_register();
-                                self.compile_where_operand(inner, table, cursor_idx, src_reg)?;
-                                self.emit(
-                                    OpCode::MathFunc,
-                                    src_reg,
-                                    value_reg,
-                                    0,
-                                    Some("FLOOR".to_string()),
-                                    &format!("r[{}] = FLOOR(r[{}])", value_reg, src_reg),
-                                );
-                            }
-                            _ => {
-                                return Err(SqawkError::UnsupportedSqlFeature(format!(
-                                    "Unsupported expression in SELECT: {:?}",
-                                    expr
-                                )));
-                            }
-                        }
+                        // One expression compiler, as everywhere else. This was
+                        // a parallel implementation understanding Function,
+                        // Trim, Substring, Position, Overlay, BinaryOp, UnaryOp,
+                        // Ceil and Floor, and rejecting everything else -- so
+                        // IS NULL, LIKE, BETWEEN, IN and subqueries were
+                        // unusable in a projection despite being supported in
+                        // WHERE.
+                        let ctx = NameCtx::single(table, cursor_idx as i64);
+                        self.code_expr(expr, &ctx, Some(value_reg))?;
                     }
                     SelectItem::QualifiedWildcard(_, _) => {
                         for col_idx in 0..table.column_count() {
@@ -5898,6 +5695,76 @@ impl<'a> SqlCompiler<'a> {
                 );
             }
 
+            // TRIM / CEIL / FLOOR are their own Expr variants rather than
+            // Function calls. They were previously handled only inside the
+            // projection path, so they worked in a SELECT list and failed in
+            // WHERE -- the same asymmetry SUBSTR had.
+            Expr::Trim {
+                expr: inner,
+                trim_where: None,
+                trim_what: None,
+                ..
+            } => {
+                let src = self.code_expr(inner, ctx, None)?;
+                self.emit(
+                    OpCode::StringFunc,
+                    src,
+                    dest,
+                    0,
+                    Some("TRIM".to_string()),
+                    &format!("r[{}] = TRIM(r[{}])", dest, src),
+                );
+            }
+            Expr::Ceil { expr: inner, .. } => {
+                let src = self.code_expr(inner, ctx, None)?;
+                self.emit(
+                    OpCode::MathFunc,
+                    src,
+                    dest,
+                    0,
+                    Some("CEIL".to_string()),
+                    &format!("r[{}] = CEIL(r[{}])", dest, src),
+                );
+            }
+            Expr::Floor { expr: inner, .. } => {
+                let src = self.code_expr(inner, ctx, None)?;
+                self.emit(
+                    OpCode::MathFunc,
+                    src,
+                    dest,
+                    0,
+                    Some("FLOOR".to_string()),
+                    &format!("r[{}] = FLOOR(r[{}])", dest, src),
+                );
+            }
+
+            // Predicate-shaped expressions used as VALUES.
+            //
+            // These are compiled by the condition compiler, which is a third
+            // parallel path. Routing them here means `SELECT x IS NULL`,
+            // `SELECT name LIKE 'A%'` and `SELECT age BETWEEN 1 AND 2` work as
+            // projected values, not just as filters -- SQL makes no
+            // distinction between the two positions.
+            Expr::IsNull(_)
+            | Expr::IsNotNull(_)
+            | Expr::Like { .. }
+            | Expr::ILike { .. }
+            | Expr::Between { .. }
+            | Expr::InList { .. } => {
+                let (table, cursor) = self.legacy_single_source(ctx, expr)?;
+                let src = self.compile_where_condition(expr, table, cursor)?;
+                if src != dest {
+                    self.emit(
+                        OpCode::Copy,
+                        src,
+                        dest,
+                        0,
+                        None,
+                        &format!("r[{}] = r[{}]", dest, src),
+                    );
+                }
+            }
+
             // Everything else still goes through the original operand
             // compiler. Arms migrate out of it into the match above as the
             // pipeline work proceeds; routing through here first means every
@@ -6377,6 +6244,26 @@ impl<'a> SqlCompiler<'a> {
         // Use the last part of the object name as the table name
         // (schemas and catalogs are ignored for now)
         Ok(object_name_last(name))
+    }
+
+    /// Whether a projection item needs expression compilation rather than a
+    /// bare column load.
+    ///
+    /// Phrased as "not a plain column reference" rather than as an allowlist
+    /// of computed forms. The allowlists this replaces named nine expression
+    /// kinds and omitted CASE, CAST, IS NULL, LIKE, BETWEEN, IN and
+    /// subqueries, so those fell through to the column-index path and were
+    /// rejected with "Only column references supported in SELECT" -- even
+    /// though the expression compiler handles them. An allowlist has to be
+    /// updated every time an expression kind is added; this cannot drift.
+    fn projection_needs_expr(projection: &[SelectItem]) -> bool {
+        projection.iter().any(|item| {
+            let expr = match item {
+                SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => e,
+                _ => return false,
+            };
+            !matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_))
+        })
     }
 
     /// Resolve projection items to column indices
