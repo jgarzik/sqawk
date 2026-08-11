@@ -166,6 +166,7 @@ pub enum OpCode {
     Noop, // No operation
 
     // Set operations
+    SortResults, // Sort accumulated results. P4 = "col:asc,col:desc,..." over RESULT columns.
     Distinct,  // Remove duplicate rows from results
     Limit, // Limit results to P1 rows. P2 = offset (rows to skip, already applied). Post-processing opcode.
     Intersect, // Keep only rows that exist in both left and right result sets

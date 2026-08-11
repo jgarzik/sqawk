@@ -990,13 +990,13 @@ impl<'a> SqlCompiler<'a> {
 
         // Check for explicit JOINs (FROM table1 JOIN table2 ON ...)
         if !table_with_joins.joins.is_empty() {
-            // For multi-table JOINs with ORDER BY, compile the JOIN normally
-            // ORDER BY support for JOINs requires post-processing which isn't fully implemented
-            // For now, compile the JOIN and skip ORDER BY
-            if self.verbose && has_order_by {
-                eprintln!("Note: ORDER BY with explicit JOINs - compiling join without sort");
-            }
-            return self.compile_join(table_with_joins, &select.projection, &select.selection);
+            // A join emits rows directly rather than through the cursor-based
+            // sorter, which is why ORDER BY used to be dropped here outright.
+            // Sorting the finished result set works regardless of how many
+            // cursors produced it.
+            self.compile_join(table_with_joins, &select.projection, &select.selection)?;
+            self.emit_result_post_processing(select, query)?;
+            return Ok(());
         }
 
         // Get table and columns for ORDER BY resolution
@@ -1022,10 +1022,16 @@ impl<'a> SqlCompiler<'a> {
 
         if has_group_by || has_aggregates {
             if has_group_by {
-                return self.compile_select_with_group_by(select, table, &table_name);
+                self.compile_select_with_group_by(select, table, &table_name)?;
             } else {
-                return self.compile_select_with_aggregate(select, table, &table_name);
+                self.compile_select_with_aggregate(select, table, &table_name)?;
             }
+            // These paths emit rows directly rather than through the sorter,
+            // so ORDER BY and LIMIT are applied to the finished result set.
+            // `query` used to be in scope here and simply never passed on,
+            // which is why both were silently dropped on every grouped query.
+            self.emit_result_post_processing(select, query)?;
+            return Ok(());
         }
 
         // Check if projection contains function expressions or computed expressions
@@ -6301,6 +6307,113 @@ impl<'a> SqlCompiler<'a> {
             };
             !matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_))
         })
+    }
+
+    /// Emit post-processing ORDER BY / LIMIT / OFFSET over the result set.
+    ///
+    /// Used by the paths that produce rows without going through the
+    /// cursor-based sorter -- GROUP BY, plain aggregates and joins. Those
+    /// paths previously dropped ORDER BY and LIMIT on the floor: `query` was
+    /// simply never passed to them, and for joins the code said so outright
+    /// ("ORDER BY support for JOINs [...] isn't fully implemented. For now,
+    /// compile the JOIN and skip ORDER BY").
+    ///
+    /// ORDER BY keys are matched against the SELECT list, since after
+    /// aggregation the only columns that still exist are the projected ones.
+    fn emit_result_post_processing(
+        &mut self,
+        select: &Select,
+        query: &Query,
+    ) -> SqawkResult<()> {
+        // ORDER BY
+        let order_by = query_order_by(query);
+        if !order_by.is_empty() {
+            let mut keys: Vec<String> = Vec::with_capacity(order_by.len());
+            for ob in order_by {
+                let pos = Self::projection_position(&select.projection, &ob.expr).ok_or_else(
+                    || {
+                        SqawkError::InvalidSqlQuery(format!(
+                            "ORDER BY expression must appear in the SELECT list: {}",
+                            ob.expr
+                        ))
+                    },
+                )?;
+                keys.push(format!(
+                    "{}:{}",
+                    pos,
+                    if order_by_is_asc(ob) { "asc" } else { "desc" }
+                ));
+            }
+            let spec = keys.join(",");
+            self.emit(
+                OpCode::SortResults,
+                0,
+                0,
+                0,
+                Some(spec.clone()),
+                &format!("ORDER BY {}", spec),
+            );
+        }
+
+        // LIMIT / OFFSET
+        let limit = match query_limit(query) {
+            Some(e) => Some(Self::const_i64(e, "LIMIT")?),
+            None => None,
+        };
+        let offset = match query_offset(query) {
+            Some(e) => Self::const_i64(e, "OFFSET")?,
+            None => 0,
+        };
+        if limit.is_some() || offset > 0 {
+            self.emit(
+                OpCode::Limit,
+                limit.unwrap_or(i64::MAX),
+                offset,
+                0,
+                None,
+                &format!("Limit {:?} offset {}", limit, offset),
+            );
+        }
+        Ok(())
+    }
+
+    /// Position of `needle` within the SELECT list, if it appears there.
+    ///
+    /// Matches an alias by name, and otherwise compares the rendered
+    /// expression, so `ORDER BY COUNT(*)` finds `COUNT(*)` in the projection
+    /// and `ORDER BY department` finds a bare column.
+    fn projection_position(projection: &[SelectItem], needle: &Expr) -> Option<usize> {
+        let want = needle.to_string().to_ascii_lowercase();
+        for (i, item) in projection.iter().enumerate() {
+            let matches = match item {
+                SelectItem::UnnamedExpr(e) => e.to_string().to_ascii_lowercase() == want,
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    alias.value.to_ascii_lowercase() == want
+                        || expr.to_string().to_ascii_lowercase() == want
+                }
+                _ => false,
+            };
+            if matches {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Evaluate a LIMIT/OFFSET operand, which must be a constant.
+    fn const_i64(expr: &Expr, what: &str) -> SqawkResult<i64> {
+        match expr {
+            Expr::Value(ValueWithSpan {
+                value: Value::Number(n, _),
+                ..
+            }) => n.parse::<i64>().map_err(|_| {
+                SqawkError::InvalidSqlQuery(format!("Invalid {} value: {}", what, n))
+            }),
+            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Only constant {} supported",
+                what
+            ))),
+        }
     }
 
     /// Resolve projection items to column indices

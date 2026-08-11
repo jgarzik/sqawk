@@ -1562,3 +1562,69 @@ fn having_selects_between_same_type_aggregates() -> Result<(), Box<dyn std::erro
         "department,SUM,SUM\nEngineering,210000,97",
     )
 }
+
+// ---------------------------------------------------------------------------
+// ORDER BY / LIMIT over paths that emit rows directly rather than through the
+// cursor-based sorter: GROUP BY, plain aggregates, and joins.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn group_by_order_by_aggregate() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT department, COUNT(*) FROM employees GROUP BY department \
+         ORDER BY COUNT(*) DESC, department ASC",
+        "department,COUNT\nEngineering,3\nMarketing,2\nSales,2\nHR,1",
+    )
+}
+
+#[test]
+fn group_by_order_by_limit_together() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT department, SUM(salary) FROM employees GROUP BY department \
+         ORDER BY SUM(salary) DESC LIMIT 2",
+        "department,SUM\nEngineering,210000\nSales,170000",
+    )
+}
+
+#[test]
+fn group_by_order_by_offset() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT department, COUNT(*) FROM employees GROUP BY department \
+         ORDER BY department ASC LIMIT 2 OFFSET 1",
+        "department,COUNT\nHR,1\nMarketing,2",
+    )
+}
+
+#[test]
+fn join_order_by_descending() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT users.name, orders.id FROM users JOIN orders ON users.id = orders.user_id \
+         ORDER BY orders.id DESC",
+        "users.name,orders.id\nJohn,105\nJane,104\nJohn,103\nJane,102\nJohn,101",
+    )
+}
+
+#[test]
+fn join_order_by_with_limit() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT users.name, orders.id FROM users JOIN orders ON users.id = orders.user_id \
+         ORDER BY orders.id ASC LIMIT 2",
+        "users.name,orders.id\nJohn,101\nJane,102",
+    )
+}
+
+#[test]
+fn order_by_key_absent_from_select_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    // After aggregation only the projected columns still exist, so ordering by
+    // something else must be an error, not a silently ignored clause.
+    assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT department, COUNT(*) FROM employees GROUP BY department ORDER BY salary",
+        "must appear in the SELECT list",
+    )
+}

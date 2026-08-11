@@ -57,7 +57,6 @@ fn group_by_uses_all_key_columns() -> Result<(), Box<dyn std::error::Error>> {
 /// Defect 3a: `query` is never passed into the GROUP BY compiler
 /// (compiler.rs:760-766), so ORDER BY is silently dropped.
 #[test]
-#[ignore = "defect 3: ORDER BY dropped on GROUP BY"]
 fn order_by_applies_to_group_by() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
@@ -72,7 +71,6 @@ fn order_by_applies_to_group_by() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Defect 3b: same root cause -- LIMIT is silently dropped on GROUP BY.
 #[test]
-#[ignore = "defect 3: LIMIT dropped on GROUP BY"]
 fn limit_applies_to_group_by() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
@@ -162,7 +160,6 @@ fn join_respects_projection_order() -> Result<(), Box<dyn std::error::Error>> {
 /// Defect 4: ORDER BY is deliberately skipped on explicit JOINs
 /// (compiler.rs:729-737 -- "isn't fully implemented. For now [...] skip").
 #[test]
-#[ignore = "defect 4: ORDER BY dropped on JOIN"]
 fn order_by_applies_to_join() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[users_csv(), orders_csv()],
@@ -483,7 +480,6 @@ fn partition_aggregate_returns_partition_total() -> Result<(), Box<dyn std::erro
 /// avg_salary-descending order in this fixture. Pinned here as an exact-output
 /// test so the coincidence cannot hide a regression again.
 #[test]
-#[ignore = "defect 3: ORDER BY dropped on GROUP BY"]
 fn group_by_order_by_avg_is_not_coincidental() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[departments_csv()],

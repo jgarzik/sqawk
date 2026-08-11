@@ -2371,6 +2371,51 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Continue)
             }
 
+            OpCode::SortResults => {
+                // Sort the accumulated result rows.
+                //
+                // A post-processing opcode in the same family as Distinct and
+                // Limit: it runs over self.results after the producing loop has
+                // finished, so it is independent of how those rows were
+                // produced. That is what lets ORDER BY work over GROUP BY
+                // output and over joins, neither of which can feed the
+                // cursor-based sorter used by a plain table scan.
+                let spec = inst.p4.as_deref().unwrap_or("");
+                let keys: Vec<(usize, bool)> = spec
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|part| {
+                        let (idx, dir) = part.split_once(':')?;
+                        Some((idx.trim().parse().ok()?, !dir.trim().eq_ignore_ascii_case("desc")))
+                    })
+                    .collect();
+
+                if !keys.is_empty() {
+                    // Sort results and their index tracking together so the
+                    // two do not drift apart.
+                    let track = self.result_row_indices.len() == self.results.len();
+                    let mut order: Vec<usize> = (0..self.results.len()).collect();
+                    order.sort_by(|&a, &b| {
+                        for &(col, asc) in &keys {
+                            let va = self.results[a].get(col).unwrap_or(&Value::Null);
+                            let vb = self.results[b].get(col).unwrap_or(&Value::Null);
+                            let ord = compare_values(va, vb);
+                            let ord = if asc { ord } else { ord.reverse() };
+                            if ord != std::cmp::Ordering::Equal {
+                                return ord;
+                            }
+                        }
+                        std::cmp::Ordering::Equal
+                    });
+                    self.results = order.iter().map(|&i| self.results[i].clone()).collect();
+                    if track {
+                        self.result_row_indices =
+                            order.iter().map(|&i| self.result_row_indices[i].clone()).collect();
+                    }
+                }
+                Ok(ExecuteResult::Continue)
+            }
+
             OpCode::Distinct => {
                 // Remove duplicate rows from results
                 // This is used by UNION (without ALL) to deduplicate combined results
@@ -2405,18 +2450,34 @@ impl<'a> VmEngine<'a> {
                 let limit = inst.p1 as usize;
                 let offset = inst.p2 as usize;
 
+                // Index tracking is trimmed alongside the rows. It used to be
+                // left untouched, so after a post-processing LIMIT the two
+                // vectors disagreed and the debug validator reported a
+                // mismatch on every limited query.
+                let track = self.result_row_indices.len() == self.results.len();
+
                 // First apply OFFSET - skip first N rows
                 if offset > 0 && !self.results.is_empty() {
                     if offset >= self.results.len() {
                         self.results.clear();
+                        if track {
+                            self.result_row_indices.clear();
+                        }
                     } else {
                         self.results = self.results.drain(offset..).collect();
+                        if track {
+                            self.result_row_indices =
+                                self.result_row_indices.drain(offset..).collect();
+                        }
                     }
                 }
 
                 // Then apply LIMIT - truncate to N rows
                 if self.results.len() > limit {
                     self.results.truncate(limit);
+                    if track && self.result_row_indices.len() > limit {
+                        self.result_row_indices.truncate(limit);
+                    }
                 }
 
                 if self.verbose {
