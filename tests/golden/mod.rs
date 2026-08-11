@@ -1929,3 +1929,76 @@ fn outer_join_aggregate_is_not_silently_rewritten() -> Result<(), Box<dyn std::e
         "Unsupported",
     )
 }
+
+// ---------------------------------------------------------------------------
+// Derived tables.
+//
+// The compiler only knows how to open a cursor on a named table, so a subquery
+// in FROM is executed first and registered under its alias; the outer query
+// then sees an ordinary table. The registration lasts only for the statement.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn derived_table_filters() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM (SELECT name, salary FROM employees WHERE salary > 70000) t",
+        "name\nDavid\nFrank\nGrace",
+    )
+}
+
+#[test]
+fn aggregate_over_derived_table() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT COUNT(*) FROM (SELECT name FROM employees WHERE department = 'Engineering') t",
+        "COUNT\n3",
+    )
+}
+
+#[test]
+fn derived_table_over_group_by() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT * FROM (SELECT department, COUNT(*) FROM employees GROUP BY department) t",
+        "department,COUNT\nEngineering,3\nHR,1\nMarketing,2\nSales,2",
+    )
+}
+
+#[test]
+fn derived_table_exposes_inner_aliases() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT n FROM (SELECT name AS n FROM employees LIMIT 2) t",
+        "n\nAlice\nBob",
+    )
+}
+
+#[test]
+fn nested_derived_tables() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT x FROM (SELECT name AS x FROM (SELECT name FROM employees LIMIT 3) inner1) t",
+        "x\nAlice\nBob\nCharlie",
+    )
+}
+
+#[test]
+fn derived_table_alias_may_not_shadow_a_real_table() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM (SELECT name FROM employees) employees",
+        "shadows an existing table",
+    )
+}
+
+#[test]
+fn derived_table_does_not_outlive_its_statement() -> Result<(), Box<dyn std::error::Error>> {
+    // The alias is registered only for the statement that declares it, so a
+    // later statement must not see it.
+    assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM (SELECT name FROM employees) t; SELECT name FROM t",
+        "not found",
+    )
+}

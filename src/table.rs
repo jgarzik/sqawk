@@ -854,6 +854,14 @@ impl Table {
     /// Returns the name of the table as a string slice.
     /// This is useful for operations that need to access the table's name
     /// such as logging, error messages, or generating SQL output.
+    /// Rename the table.
+    ///
+    /// Used when a derived table is materialized and registered under its
+    /// alias, so the table reports the name the outer query refers to.
+    pub fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }

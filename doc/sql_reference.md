@@ -143,7 +143,14 @@ SELECT name FROM employees e
   WHERE salary > (SELECT AVG(salary) FROM employees WHERE department = e.department)
 ```
 
-Subqueries in `FROM` (derived tables) are not supported.
+```sql
+-- Derived table: a subquery in FROM, which must be given an alias
+SELECT name FROM (SELECT name, salary FROM employees WHERE salary > 70000) t
+SELECT COUNT(*) FROM (SELECT department FROM employees GROUP BY department) t
+```
+
+A derived table is materialized before the outer query runs and exists only for
+the statement that declares it. Its alias may not shadow a real table.
 
 ## Window Functions
 

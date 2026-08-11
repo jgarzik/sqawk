@@ -107,10 +107,20 @@ pub fn execute_vm(
     let mut affected_rows: usize = 0;
 
     for statement in &statements {
+        // PHASE 0: MATERIALIZE DERIVED TABLES.
+        //
+        // `FROM (SELECT ...) t` has no representation in the compiler, which
+        // only knows how to open a cursor on a named table. Rather than teach
+        // every FROM site about subqueries, each derived table is executed
+        // first and registered under its alias, and the statement is rewritten
+        // to reference that name. The compiler then sees an ordinary table.
+        let mut statement = statement.clone();
+        let derived = materialize_derived_tables(&mut statement, database, verbose)?;
+
         // PHASE 1: SQL -> BYTECODE, against the CURRENT database state.
         let program = {
             let mut compiler = compiler::SqlCompiler::new(database, verbose);
-            compiler.compile_statement_program(statement)?
+            compiler.compile_statement_program(&statement)?
         };
 
         if verbose {
@@ -134,6 +144,11 @@ pub fn execute_vm(
             affected_rows = applied.affected_rows;
         }
 
+        // Derived tables live only for the statement that declared them.
+        for name in derived {
+            database.remove_table(&name);
+        }
+
         if let Some(t) = result_table {
             tables.push(t);
         }
@@ -144,6 +159,98 @@ pub fn execute_vm(
         modified_tables,
         affected_rows,
     })
+}
+
+/// Execute every derived table in `statement`, register each under its alias,
+/// and rewrite the statement to reference the registered name.
+///
+/// Returns the names registered, so the caller can drop them once the
+/// statement finishes -- a derived table is scoped to the statement that
+/// declares it.
+fn materialize_derived_tables(
+    statement: &mut sqlparser::ast::Statement,
+    database: &mut Database,
+    verbose: bool,
+) -> SqawkResult<Vec<String>> {
+    let mut registered = Vec::new();
+    if let sqlparser::ast::Statement::Query(query) = statement {
+        materialize_in_query(query, database, verbose, &mut registered)?;
+    }
+    Ok(registered)
+}
+
+fn materialize_in_query(
+    query: &mut sqlparser::ast::Query,
+    database: &mut Database,
+    verbose: bool,
+    registered: &mut Vec<String>,
+) -> SqawkResult<()> {
+    if let sqlparser::ast::SetExpr::Select(select) = &mut *query.body {
+        for twj in &mut select.from {
+            materialize_in_factor(&mut twj.relation, database, verbose, registered)?;
+            for join in &mut twj.joins {
+                materialize_in_factor(&mut join.relation, database, verbose, registered)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn materialize_in_factor(
+    factor: &mut sqlparser::ast::TableFactor,
+    database: &mut Database,
+    verbose: bool,
+    registered: &mut Vec<String>,
+) -> SqawkResult<()> {
+    let (subquery, alias) = match factor {
+        sqlparser::ast::TableFactor::Derived {
+            subquery, alias, ..
+        } => (subquery.clone(), alias.clone()),
+        _ => return Ok(()),
+    };
+
+    // SQL requires a derived table to be named; without one there is nothing
+    // for the outer query to refer to.
+    let alias = alias.ok_or_else(|| {
+        SqawkError::InvalidSqlQuery("Subquery in FROM must have an alias".to_string())
+    })?;
+    let name = alias.name.value.to_ascii_lowercase();
+
+    if database.has_table(&name) {
+        return Err(SqawkError::InvalidSqlQuery(format!(
+            "Derived table alias '{}' shadows an existing table",
+            name
+        )));
+    }
+
+    // Nested derived tables are materialized innermost-first.
+    let mut inner = *subquery;
+    materialize_in_query(&mut inner, database, verbose, registered)?;
+
+    let inner_sql = inner.to_string();
+    let result = execute_vm(&inner_sql, database, verbose)?;
+    let mut table = result.tables.into_iter().next_back().ok_or_else(|| {
+        SqawkError::InvalidSqlQuery("Subquery in FROM produced no result".to_string())
+    })?;
+    table.set_name(name.clone());
+    database.add_table(name.clone(), table)?;
+    registered.push(name.clone());
+
+    *factor = sqlparser::ast::TableFactor::Table {
+        name: sqlparser::ast::ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
+            sqlparser::ast::Ident::new(name),
+        )]),
+        alias: None,
+        args: None,
+        with_hints: Vec::new(),
+        version: None,
+        partitions: Vec::new(),
+        with_ordinality: false,
+        json_path: None,
+        sample: None,
+        index_hints: Vec::new(),
+    };
+    Ok(())
 }
 
 /// Tables touched and rows affected by one statement's modifications.

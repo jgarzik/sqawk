@@ -1,8 +1,13 @@
 //! Red-list: the correctness defects found in the 2026-08 audit.
 //!
-//! Every test in this module encodes **correct** SQL behaviour and is
-//! `#[ignore]`d because sqawk currently gets it wrong. As each defect is fixed,
-//! remove that test's `#[ignore]` -- the red list shrinks monotonically.
+//! Every test in this module encodes **correct** SQL behaviour for a defect
+//! found in that audit. Each was `#[ignore]`d when written, because sqawk got
+//! it wrong, and un-ignored as it was fixed.
+//!
+//! As of this commit the red list is EMPTY: every test here passes, and they
+//! now serve as regression cover for the defects rather than as a to-do list.
+//! Add a new `#[ignore]`d test here when a defect is found, and remove the
+//! attribute when it is fixed.
 //!
 //! Run the red list with:
 //!     cargo test --test mod defects -- --ignored
@@ -442,7 +447,6 @@ fn update_preserves_row_order() -> Result<(), Box<dyn std::error::Error>> {
 /// Derived tables parse fine in sqlparser 0.36; `TableFactor::Derived` simply
 /// has no handler anywhere in the compiler.
 #[test]
-#[ignore = "derived table (subquery in FROM) unsupported"]
 fn derived_table_in_from() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
