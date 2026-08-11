@@ -120,3 +120,38 @@ fn test_repl_stats_command() {
     let status = process.wait().expect("Failed to wait for sqawk process");
     assert!(status.success(), "Process did not exit successfully");
 }
+
+/// `.version` must report the crate's actual version.
+///
+/// It was hardcoded to "0.1.1" while the crate was at 0.8.0, and nothing
+/// noticed because nothing asserted on it. Reading it from the manifest makes
+/// drift impossible; this test guards the reporting path itself.
+#[test]
+fn test_repl_version_matches_crate() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sqawk"))
+        .arg("-i")
+        .arg("tests/data/employees.csv")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to start sqawk");
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b".version\n.exit\n")
+        .expect("write");
+
+    let out = child.wait_with_output().expect("wait");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let expected = format!("Sqawk version {}", env!("CARGO_PKG_VERSION"));
+    assert!(
+        stdout.contains(&expected),
+        "expected `{expected}` in .version output, got:\n{stdout}"
+    );
+}

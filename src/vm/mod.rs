@@ -7,6 +7,12 @@
 //!
 //! For more information on this approach, see: https://www.sqlite.org/opcode.html
 
+/// The sqlparser version sqawk is built against.
+///
+/// Reported by the REPL's `.version`, since which SQL dialect version is in
+/// use is the single most useful thing to know when a statement is rejected.
+pub const SQLPARSER_VERSION: &str = "0.62";
+
 pub mod ast_compat;
 pub mod bytecode;
 pub mod compiler;

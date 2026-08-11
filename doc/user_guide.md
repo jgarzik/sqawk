@@ -180,13 +180,22 @@ This opens an interactive SQL prompt where you can:
 
 | Command | Description |
 |---------|-------------|
-| `.exit` or `.quit` | Exit the REPL |
-| `.help` | Display help information about available commands |
-| `.save [table]` | Immediately save changes to all modified tables or a specific table |
-| `.schema [table]` | Show schema for a specific table or all tables |
-| `.tables` | List all available tables |
-| `.verbose [on/off]` | Toggle verbose mode on/off |
-| `.write [on/off]` | Toggle write mode on/off (default is off) |
+| `.cd DIRECTORY` | Change the working directory |
+| `.changes [on\|off]` | Show the number of rows changed by each statement |
+| `.exit [CODE]` | Exit the REPL, optionally with an exit code |
+| `.help` | List the available commands |
+| `.load [TABLE=]FILE` | Load `FILE`, optionally under the name `TABLE` |
+| `.print STRING...` | Print a literal string |
+| `.quit` | Exit the REPL |
+| `.save [TABLE]` | Save changes to all modified tables, or just `TABLE` |
+| `.schema [TABLE]` | Show the schema for `TABLE`, or for every table |
+| `.show [WHAT]` | Show current settings and status |
+| `.stats [on\|off]` | Toggle statistics display |
+| `.tables [PATTERN]` | List tables, optionally matching a LIKE pattern |
+| `.version` | Show source, library and compiler versions |
+| `.write [on\|off]` | Toggle writing changes to files (default off) |
+
+`.help` inside the REPL always lists the authoritative set.
 
 **Example REPL Session:**
 

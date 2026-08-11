@@ -692,8 +692,12 @@ impl<'a> Repl<'a> {
     }
 
     /// Show version information
+    ///
+    /// Read from the manifest rather than written out, so it cannot drift.
+    /// This reported 0.1.1 for a long time while the crate was at 0.8.0.
     fn show_version(&self) -> Result<()> {
-        println!("Sqawk version 0.1.1");
+        println!("Sqawk version {}", env!("CARGO_PKG_VERSION"));
+        println!("sqlparser {}", crate::vm::SQLPARSER_VERSION);
         Ok(())
     }
 
