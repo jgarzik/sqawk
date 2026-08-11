@@ -14,7 +14,7 @@
 //! emitted, and passes regardless of row order.
 
 use crate::helpers::{
-    assert_query, departments_csv, employees_csv, nullable_csv, orders_csv, users_csv,
+    assert_after_write, assert_query, departments_csv, employees_csv, nullable_csv, orders_csv, users_csv,
 };
 
 // ---------------------------------------------------------------------------
@@ -386,17 +386,59 @@ fn order_by_expression() -> Result<(), Box<dyn std::error::Error>> {
 // Group 7: DML and FROM expressiveness
 // ---------------------------------------------------------------------------
 
-/// `compile_expr` has no `Identifier` arm, so a column cannot appear on the
-/// right-hand side of a SET.
+/// `compile_expr` had no `Identifier` arm, so a column could not appear on the
+/// right-hand side of a SET. Verified through writeback rather than a trailing
+/// SELECT, because `UPDATE ...; SELECT ...` in one invocation does not emit the
+/// SELECT's rows -- see `update_then_select_emits_the_select`.
 #[test]
-#[ignore = "UPDATE SET col = col + 1 unsupported"]
 fn update_set_from_column() -> Result<(), Box<dyn std::error::Error>> {
+    assert_after_write(
+        employees_csv(),
+        "employees",
+        "UPDATE employees SET salary = salary + 1",
+        "id,name,age,salary,department,role\n\
+         1,Alice,30,70001,Engineering,Developer\n\
+         2,Bob,25,55001,Marketing,Specialist\n\
+         3,Charlie,35,65001,Engineering,Manager\n\
+         4,David,40,80001,Sales,Director\n\
+         5,Eve,28,60001,Marketing,Analyst\n\
+         6,Frank,32,75001,Engineering,Developer\n\
+         7,Grace,45,90001,Sales,Director\n\
+         8,Henry,22,45001,HR,Intern",
+    )
+}
+
+/// An expression RHS combined with WHERE.
+#[test]
+fn update_set_expression_with_where() -> Result<(), Box<dyn std::error::Error>> {
+    assert_after_write(
+        employees_csv(),
+        "employees",
+        "UPDATE employees SET salary = salary * 2 WHERE department = 'HR'",
+        "id,name,age,salary,department,role\n\
+         1,Alice,30,70000,Engineering,Developer\n\
+         2,Bob,25,55000,Marketing,Specialist\n\
+         3,Charlie,35,65000,Engineering,Manager\n\
+         4,David,40,80000,Sales,Director\n\
+         5,Eve,28,60000,Marketing,Analyst\n\
+         6,Frank,32,75000,Engineering,Developer\n\
+         7,Grace,45,90000,Sales,Director\n\
+         8,Henry,22,90000,HR,Intern",
+    )
+}
+
+/// A DML statement followed by a SELECT in the same invocation emits only the
+/// header, dropping the SELECT's rows entirely. `SELECT; SELECT` works, so
+/// this is specific to a preceding DML statement.
+#[test]
+#[ignore = "UPDATE followed by SELECT emits no rows for the SELECT"]
+fn update_then_select_emits_the_select() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
-        "UPDATE employees SET salary = salary + 1; SELECT name, salary FROM employees LIMIT 2",
+        "UPDATE employees SET salary = 1 WHERE id = 1; SELECT name, salary FROM employees LIMIT 2",
         "name,salary\n\
-         Alice,70001\n\
-         Bob,55001",
+         Alice,1\n\
+         Bob,55000",
     )
 }
 

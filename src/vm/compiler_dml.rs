@@ -6,7 +6,7 @@ use sqlparser::ast::{Expr, Select, SelectItem, SetExpr, TableFactor};
 
 use super::ast_compat::assignment_column;
 use super::bytecode::OpCode;
-use super::compiler::SqlCompiler;
+use super::compiler::{NameCtx, SqlCompiler};
 use crate::error::{SqawkError, SqawkResult};
 
 impl<'a> SqlCompiler<'a> {
@@ -531,9 +531,18 @@ impl<'a> SqlCompiler<'a> {
             None
         };
 
-        // Apply assignments
+        // Apply assignments.
+        //
+        // The right-hand side is compiled in the row's scope, so a column may
+        // appear there: `SET salary = salary + 1`. compile_expr, which this
+        // used to call, has no Identifier arm at all and rejected it.
+        //
+        // Reading through a Column op against the cursor yields the ORIGINAL
+        // row value, which is the required semantics -- every RHS is evaluated
+        // against the row as it was before any assignment in this statement.
+        let update_ctx = NameCtx::single(table_ref, 0);
         for (col_idx, expr) in &assignment_map {
-            self.compile_expr_into_register(expr, base_reg + *col_idx)?;
+            self.code_expr(expr, &update_ctx, Some((base_reg + *col_idx) as i64))?;
         }
 
         // Delete old row and insert new row

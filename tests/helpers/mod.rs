@@ -230,6 +230,47 @@ fn normalize_output(s: &str) -> String {
         .to_string()
 }
 
+/// Run `sql` with `--write` against a private copy of `fixture`, and return the
+/// resulting file contents.
+///
+/// Needed because modifications are in-memory only without `--write`, and
+/// `UPDATE ...; SELECT ...` in a single invocation does not currently emit the
+/// SELECT's rows -- so writeback is the way to observe what a DML statement
+/// actually did.
+pub fn run_with_write(
+    fixture: &str,
+    table: &str,
+    sql: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let dir = create_temp_dir()?;
+    let src = PathBuf::from(fixture);
+    let dest = dir.path().join(src.file_name().unwrap());
+    fs::copy(&src, &dest)?;
+
+    let spec = format!("{}={}", table, dest.to_str().unwrap());
+    let (_stdout, stderr, success) = run_sql(sql, &[&spec], &["--write"])?;
+    assert!(success, "write query failed\n  sql: {sql}\n  stderr: {stderr}");
+
+    Ok(normalize_output(&fs::read_to_string(&dest)?))
+}
+
+/// Assert that `sql` run with `--write` leaves `fixture` with exactly
+/// `expected` contents.
+pub fn assert_after_write(
+    fixture: &str,
+    table: &str,
+    sql: &str,
+    expected: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_with_write(fixture, table, sql)?;
+    let want = normalize_output(expected);
+    assert_eq!(
+        actual, want,
+        "\n=== sql ===\n{sql}\n=== expected file ===\n{want}\n=== actual file ===\n{actual}\n"
+    );
+    Ok(())
+}
+
 /// Path to the nullable.csv fixture (contains empty fields -> NULL values).
 ///
 /// No other fixture in tests/data/ has an empty field, so nothing in the suite
