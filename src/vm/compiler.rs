@@ -1119,8 +1119,21 @@ impl<'a> SqlCompiler<'a> {
             let has_aggregates = self.has_aggregates(&select.projection);
 
             if has_group_by || has_aggregates {
-                // Multi-table query with GROUP BY or aggregates
-                return self.compile_implicit_join_with_group_by(select, query);
+                // Multi-table query with GROUP BY or aggregates. Like the
+                // single-table grouped path, this emits rows directly, so
+                // ORDER BY and LIMIT are applied to the finished result set --
+                // both were silently dropped here.
+                self.compile_implicit_join_with_group_by(select, query)?;
+                return self.emit_result_post_processing(select, query);
+            }
+
+            if !query_order_by(query).is_empty() {
+                // ORDER BY needs the whole result before it can sort, so the
+                // scan must NOT apply LIMIT as it goes -- doing so would keep
+                // the first N rows and then sort those, rather than the top N.
+                // Sorting and limiting both happen afterwards.
+                self.compile_implicit_join(select)?;
+                return self.emit_result_post_processing(select, query);
             }
 
             return self.compile_implicit_join_with_query(select, query);

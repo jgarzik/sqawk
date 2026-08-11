@@ -674,7 +674,10 @@ sqawk> .exit
 
 ## Working with Large Files
 
-Sqawk loads all data into memory, which provides excellent performance but requires consideration when working with large files:
+Sqawk holds a whole table at once. On-disk files are memory-mapped, so loading
+is zero-copy and read-only queries allocate almost nothing; a table is copied to
+the heap the first time it is modified. Either way the dataset must fit, which
+is worth planning for with large files:
 
 **Tips for handling large files:**
 
@@ -698,7 +701,7 @@ Sqawk loads all data into memory, which provides excellent performance but requi
 4. **Monitor memory usage**: Particularly when joining large tables, be aware of memory constraints
    ```sh
    # Using a more targeted join condition reduces memory requirements
-   sqawk -s "SELECT a.id, b.name FROM large_a INNER JOIN large_b ON a.id = b.id WHERE a.region = 'West'" large_a.csv large_b.csv
+   sqawk -s "SELECT a.id, b.name FROM large_a a INNER JOIN large_b b ON a.id = b.id WHERE a.region = 'West'" large_a.csv large_b.csv
    ```
 
 ## Troubleshooting

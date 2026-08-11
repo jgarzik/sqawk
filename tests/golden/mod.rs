@@ -2249,3 +2249,43 @@ fn explicit_window_frame_is_rejected() -> Result<(), Box<dyn std::error::Error>>
         "Explicit window frames",
     )
 }
+
+// ---------------------------------------------------------------------------
+// ORDER BY / LIMIT over multi-table queries.
+//
+// Both were silently dropped on grouped multi-table queries, and ORDER BY on
+// ungrouped comma joins. The scan there applies LIMIT as it goes, which is
+// only correct without ORDER BY -- otherwise it keeps the first N rows and
+// sorts those, rather than the top N.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn grouped_join_order_by_and_limit() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT u.name, COUNT(*) AS n FROM users u JOIN orders o ON u.id = o.user_id \
+         GROUP BY u.name ORDER BY n DESC LIMIT 1",
+        "u.name,n\nJohn,3",
+    )
+}
+
+#[test]
+fn implicit_join_order_by_takes_top_rows() -> Result<(), Box<dyn std::error::Error>> {
+    // The two highest order ids are 105 and 104. A LIMIT applied before the
+    // sort would return 101 and 102 instead.
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT u.name, o.id FROM users u, orders o WHERE u.id = o.user_id \
+         ORDER BY o.id DESC LIMIT 2",
+        "u.name,o.id\nJohn,105\nJane,104",
+    )
+}
+
+#[test]
+fn implicit_join_order_by_without_limit() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT u.name, o.id FROM users u, orders o WHERE u.id = o.user_id ORDER BY o.id DESC",
+        "u.name,o.id\nJohn,105\nJane,104\nJohn,103\nJane,102\nJohn,101",
+    )
+}
