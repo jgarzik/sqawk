@@ -306,7 +306,6 @@ fn column_resolution_is_case_insensitive() -> Result<(), Box<dyn std::error::Err
 /// error instead of evaluating to UNKNOWN and filtering the row out.
 /// `nullable.csv` row 2 has an empty `score`.
 #[test]
-#[ignore = "NULL comparison errors instead of yielding UNKNOWN"]
 fn null_comparison_yields_unknown() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[nullable_csv()],
@@ -335,7 +334,6 @@ fn null_never_equals_a_value() -> Result<(), Box<dyn std::error::Error>> {
 /// awk-like coercion: a string that parses as a number compares numerically.
 /// Matches what `arithmetic_op` already does, so `x + '1'` and `x > '1'` agree.
 #[test]
-#[ignore = "string/number comparison errors instead of coercing"]
 fn string_number_comparison_coerces() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],

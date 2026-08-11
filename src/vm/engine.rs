@@ -3620,76 +3620,87 @@ impl<'a> VmEngine<'a> {
     ///   - p3: destination register for result (1 for true, 0 for false)
     ///   - opcode: the comparison type (Lt, Le, Gt, Ge, Eq, Ne)
     fn execute_comparison(&mut self, inst: &Instruction) -> SqawkResult<ExecuteResult> {
+        use std::cmp::Ordering;
+
         let reg1 = self.get_register(inst.p1 as usize)?;
         let reg2 = self.get_register(inst.p2 as usize)?;
 
-        let result = match inst.opcode {
-            OpCode::Lt => {
-                self.compare_registers(&reg1, &reg2, |a, b| a < b, |a, b| a < b, |a, b| a < b)?
-            }
-            OpCode::Le => {
-                self.compare_registers(&reg1, &reg2, |a, b| a <= b, |a, b| a <= b, |a, b| a <= b)?
-            }
-            OpCode::Gt => {
-                self.compare_registers(&reg1, &reg2, |a, b| a > b, |a, b| a > b, |a, b| a > b)?
-            }
-            OpCode::Ge => {
-                self.compare_registers(&reg1, &reg2, |a, b| a >= b, |a, b| a >= b, |a, b| a >= b)?
-            }
-            OpCode::Eq => self.compare_registers_eq(&reg1, &reg2)?,
-            OpCode::Ne => !self.compare_registers_eq(&reg1, &reg2)?,
-            _ => {
-                return Err(SqawkError::VmError(format!(
-                    "Invalid comparison opcode: {:?}",
-                    inst.opcode
-                )))
+        // SQL three-valued logic: a comparison involving NULL is UNKNOWN, not
+        // an error and not false. The result register holds NULL for UNKNOWN.
+        //
+        // IfZ already treats a NULL register as zero, so every WHERE, HAVING
+        // and ON site rejects an UNKNOWN row without any control-flow change.
+        let result = match Self::sql_compare(&reg1, &reg2) {
+            None => Register::Null,
+            Some(ord) => {
+                let truth = match inst.opcode {
+                    OpCode::Lt => ord == Ordering::Less,
+                    OpCode::Le => ord != Ordering::Greater,
+                    OpCode::Gt => ord == Ordering::Greater,
+                    OpCode::Ge => ord != Ordering::Less,
+                    OpCode::Eq => ord == Ordering::Equal,
+                    OpCode::Ne => ord != Ordering::Equal,
+                    _ => {
+                        return Err(SqawkError::VmError(format!(
+                            "Invalid comparison opcode: {:?}",
+                            inst.opcode
+                        )))
+                    }
+                };
+                Register::Integer(if truth { 1 } else { 0 })
             }
         };
 
-        let result_value = Register::Integer(if result { 1 } else { 0 });
-        self.set_register(inst.p3 as usize, result_value)?;
+        self.set_register(inst.p3 as usize, result)?;
         Ok(ExecuteResult::Continue)
     }
 
-    /// Compare two registers for ordering operations (Lt, Le, Gt, Ge)
-    fn compare_registers<Fi, Ff, Fs>(
-        &self,
-        reg1: &Register,
-        reg2: &Register,
-        cmp_int: Fi,
-        cmp_float: Ff,
-        cmp_str: Fs,
-    ) -> SqawkResult<bool>
-    where
-        Fi: Fn(i64, i64) -> bool,
-        Ff: Fn(f64, f64) -> bool,
-        Fs: Fn(&str, &str) -> bool,
-    {
-        match (reg1, reg2) {
-            (Register::Integer(a), Register::Integer(b)) => Ok(cmp_int(*a, *b)),
-            (Register::Float(a), Register::Float(b)) => Ok(cmp_float(*a, *b)),
-            (Register::String(a), Register::String(b)) => Ok(cmp_str(a, b)),
-            (Register::Integer(a), Register::Float(b)) => Ok(cmp_float(*a as f64, *b)),
-            (Register::Float(a), Register::Integer(b)) => Ok(cmp_float(*a, *b as f64)),
-            _ => Err(SqawkError::VmError(format!(
-                "Cannot compare incompatible types: {:?} and {:?}",
-                reg1, reg2
-            ))),
-        }
-    }
+    /// SQL comparison of two registers.
+    ///
+    /// `None` means UNKNOWN, which is the result whenever either operand is
+    /// NULL -- including NULL against NULL. (Grouping and sorting need the
+    /// opposite, NULL equal to NULL, which is why the Compare opcode has its
+    /// own internal ordering rather than sharing this.)
+    ///
+    /// Mixed string/number operands are coerced when the string parses as a
+    /// number, and compared as text otherwise. This is the awk-shaped choice
+    /// rather than the SQLite one, for two reasons: a CSV column is untyped
+    /// text that sqawk guesses a type for PER CELL, so a single column can
+    /// hold both; and arithmetic already coerces this way, so `x + '1'` and
+    /// `x > '1'` agree instead of disagreeing.
+    fn sql_compare(a: &Register, b: &Register) -> Option<std::cmp::Ordering> {
 
-    /// Compare two registers for equality (Eq, Ne)
-    fn compare_registers_eq(&self, reg1: &Register, reg2: &Register) -> SqawkResult<bool> {
-        match (reg1, reg2) {
-            (Register::Integer(a), Register::Integer(b)) => Ok(a == b),
-            (Register::Float(a), Register::Float(b)) => Ok(a == b),
-            (Register::String(a), Register::String(b)) => Ok(a == b),
-            (Register::Boolean(a), Register::Boolean(b)) => Ok(a == b),
-            (Register::Null, Register::Null) => Ok(true),
-            (Register::Integer(a), Register::Float(b)) => Ok((*a as f64) == *b),
-            (Register::Float(a), Register::Integer(b)) => Ok(*a == (*b as f64)),
-            // Different types are not equal
-            _ => Ok(false),
+        // Any NULL operand yields UNKNOWN.
+        if matches!(a, Register::Null) || matches!(b, Register::Null) {
+            return None;
+        }
+
+        fn as_number(reg: &Register) -> Option<f64> {
+            match reg {
+                Register::Integer(i) => Some(*i as f64),
+                Register::Float(f) => Some(*f),
+                Register::Boolean(v) => Some(if *v { 1.0 } else { 0.0 }),
+                Register::String(s) => s.trim().parse::<f64>().ok(),
+                Register::Null => None,
+            }
+        }
+
+        match (a, b) {
+            // Integer against integer compares as i64, not through f64, so
+            // values above 2^53 stay exact.
+            (Register::Integer(x), Register::Integer(y)) => Some(x.cmp(y)),
+            (Register::String(x), Register::String(y)) => Some(x.cmp(y)),
+            (Register::Boolean(x), Register::Boolean(y)) => Some(x.cmp(y)),
+            _ => match (as_number(a), as_number(b)) {
+                (Some(x), Some(y)) => x.partial_cmp(&y),
+                // A string that does not parse as a number falls back to a
+                // textual comparison against the other side's rendering.
+                _ => {
+                    let x: Value = a.clone().into();
+                    let y: Value = b.clone().into();
+                    Some(x.to_string().cmp(&y.to_string()))
+                }
+            },
         }
     }
 

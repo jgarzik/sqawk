@@ -1628,3 +1628,71 @@ fn order_by_key_absent_from_select_is_rejected() -> Result<(), Box<dyn std::erro
         "must appear in the SELECT list",
     )
 }
+
+// ---------------------------------------------------------------------------
+// NULL semantics.
+//
+// The most consequential area for a CSV tool: empty fields are ubiquitous, and
+// a comparison against one used to raise "Cannot compare incompatible types:
+// Null and Integer(60)" and abort the query.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn null_comparison_filters_rather_than_erroring() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/nullable.csv"],
+        "SELECT name FROM nullable WHERE score > 60",
+        "name\nAlice\nCharlie\nEve",
+    )
+}
+
+#[test]
+fn null_is_not_equal_to_null() -> Result<(), Box<dyn std::error::Error>> {
+    // SQL equality over NULL is UNKNOWN, so no row qualifies -- even the rows
+    // where both sides are NULL.
+    assert_query(
+        &["tests/data/nullable.csv"],
+        "SELECT id FROM nullable WHERE score = grade",
+        "id",
+    )
+}
+
+#[test]
+fn null_excluded_by_negated_comparison_too() -> Result<(), Box<dyn std::error::Error>> {
+    // A NULL row satisfies neither `> 60` nor `<= 60`: UNKNOWN is not false.
+    assert_query(
+        &["tests/data/nullable.csv"],
+        "SELECT name FROM nullable WHERE score <= 60",
+        "name\nNULL",
+    )
+}
+
+#[test]
+fn aggregates_skip_nulls() -> Result<(), Box<dyn std::error::Error>> {
+    // COUNT(*) counts rows; COUNT(col) counts non-NULL values.
+    assert_query(
+        &["tests/data/nullable.csv"],
+        "SELECT COUNT(*), COUNT(score), SUM(score), AVG(score) FROM nullable",
+        "COUNT,COUNT,SUM,AVG\n5,4,300,75",
+    )
+}
+
+#[test]
+fn nulls_sort_first() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/nullable.csv"],
+        "SELECT id, score FROM nullable ORDER BY score",
+        "id,score\n2,NULL\n4,50\n3,70\n1,90\n5,90",
+    )
+}
+
+#[test]
+fn string_number_coercion_in_comparison() -> Result<(), Box<dyn std::error::Error>> {
+    // awk-shaped: a string that parses as a number compares numerically, so
+    // this agrees with arithmetic rather than silently matching nothing.
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees WHERE salary > '60000'",
+        "name\nAlice\nCharlie\nDavid\nFrank\nGrace",
+    )
+}
