@@ -452,6 +452,12 @@ pub struct VmEngine<'a> {
     #[allow(dead_code)]
     cursor_source_order: Vec<usize>,
 
+    /// Result of the most recent Compare, consumed by Jump.
+    ///
+    /// Mirrors SQLite, where OP_Compare leaves its verdict for a following
+    /// OP_Jump rather than materializing it into a register.
+    compare_flag: std::cmp::Ordering,
+
     /// Current transaction state (None, Active, Committed, or RolledBack)
     /// Tracks the lifecycle of a transaction and enforces proper operation sequencing
     transaction_state: TransactionState,
@@ -474,6 +480,7 @@ impl<'a> VmEngine<'a> {
             database,
             program: Program::new(),
             pc: 0,
+            compare_flag: std::cmp::Ordering::Equal,
             registers: Vec::with_capacity(DEFAULT_REGISTER_CAPACITY),
             cursors: HashMap::with_capacity(DEFAULT_CURSOR_CAPACITY),
             sorters: HashMap::with_capacity(DEFAULT_SORTER_CAPACITY),
@@ -2302,6 +2309,55 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Continue)
             }
 
+            OpCode::Not => {
+                // Logical negation with NULL propagation: NOT UNKNOWN is
+                // UNKNOWN, not true.
+                let src = self.get_register(inst.p1 as usize)?;
+                let out = match src {
+                    Register::Null => Register::Null,
+                    other => Register::Integer(if Self::register_is_truthy(&other) { 0 } else { 1 }),
+                };
+                self.set_register(inst.p2 as usize, out)?;
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Compare => {
+                // Pairwise-compare two register vectors of length P3, starting
+                // at P1 and P2, and stash the Ordering for the next Jump.
+                //
+                // Uses internal ordering (compare_values), where NULL == NULL.
+                // That is deliberate: this drives grouping and sorting, where
+                // NULL keys must group together, whereas SQL `=` must yield
+                // UNKNOWN for NULL. Keeping them separate is what lets the
+                // three-valued-logic change apply to Eq without breaking
+                // GROUP BY on a nullable key.
+                let lhs_start = inst.p1 as usize;
+                let rhs_start = inst.p2 as usize;
+                let count = inst.p3 as usize;
+
+                let mut ordering = std::cmp::Ordering::Equal;
+                for i in 0..count {
+                    let a: Value = self.get_register(lhs_start + i)?.into();
+                    let b: Value = self.get_register(rhs_start + i)?.into();
+                    ordering = compare_values(&a, &b);
+                    if ordering != std::cmp::Ordering::Equal {
+                        break;
+                    }
+                }
+                self.compare_flag = ordering;
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Jump => {
+                // Three-way branch on the last Compare.
+                let target = match self.compare_flag {
+                    std::cmp::Ordering::Less => inst.p1,
+                    std::cmp::Ordering::Equal => inst.p2,
+                    std::cmp::Ordering::Greater => inst.p3,
+                };
+                Ok(ExecuteResult::Jump(target as usize))
+            }
+
             // JumpIfTrue and JumpIfFalse have been replaced by SQLite-style opcodes:
             // - IfZ (jump if zero/false)
             // - IfPos (jump if positive)
@@ -3420,6 +3476,20 @@ impl<'a> VmEngine<'a> {
     ///
     /// # Returns
     /// The register value or an error if the index is out of bounds
+    /// Whether a register counts as true.
+    ///
+    /// Matches IfZ's notion of "zero" exactly, so `Not` and the conditional
+    /// jumps cannot disagree about what a value means.
+    fn register_is_truthy(reg: &Register) -> bool {
+        match reg {
+            Register::Integer(v) => *v != 0,
+            Register::Float(v) => *v != 0.0,
+            Register::String(v) => !v.is_empty(),
+            Register::Boolean(v) => *v,
+            Register::Null => false,
+        }
+    }
+
     fn get_register(&self, idx: usize) -> SqawkResult<Register> {
         if idx < self.registers.len() {
             Ok(self.registers[idx].clone())

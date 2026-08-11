@@ -1559,3 +1559,145 @@ mod comparison_tests {
         }
     }
 }
+
+/// Tests for the Not / Compare / Jump opcodes.
+///
+/// These exist to support the compiler unification: `Not` makes `NOT <expr>`
+/// expressible and replaces several hand-rolled inversions, while
+/// `Compare`/`Jump` make multi-column key comparison two instructions
+/// regardless of key width -- which is what GROUP BY needs in order to detect
+/// a group change across ALL key columns instead of only the first.
+mod compare_jump_not_tests {
+    use super::bytecode_tests::{create_instruction, execute_bytecode_program};
+    use super::*;
+
+    /// Run a program and return the single result row.
+    fn run_row(instructions: Vec<Instruction>) -> Vec<Value> {
+        let database = Database::new();
+        let table = execute_bytecode_program(instructions, &database)
+            .expect("program failed")
+            .expect("expected a result table");
+        assert_eq!(table.row_count(), 1, "expected exactly one result row");
+        table.rows()[0].clone()
+    }
+
+    fn init() -> Instruction {
+        create_instruction(OpCode::Init, 0, 1, 0, None, None)
+    }
+
+    fn halt() -> Instruction {
+        create_instruction(OpCode::Halt, 0, 0, 0, None, None)
+    }
+
+    #[test]
+    fn not_inverts_truthy_and_falsy() {
+        // r1 = 5 -> NOT r1 = 0 ; r3 = 0 -> NOT r3 = 1
+        let row = run_row(vec![
+            init(),
+            create_instruction(OpCode::Integer, 5, 1, 0, None, None),
+            create_instruction(OpCode::Not, 1, 2, 0, None, None),
+            create_instruction(OpCode::Integer, 0, 3, 0, None, None),
+            create_instruction(OpCode::Not, 3, 4, 0, None, None),
+            // Emit r2, r4 as a two-column row (registers must be contiguous).
+            create_instruction(OpCode::Copy, 2, 10, 0, None, None),
+            create_instruction(OpCode::Copy, 4, 11, 0, None, None),
+            create_instruction(OpCode::ResultRow, 10, 2, 0, None, None),
+            halt(),
+        ]);
+        assert_eq!(row[0], Value::Integer(0), "NOT 5 should be 0");
+        assert_eq!(row[1], Value::Integer(1), "NOT 0 should be 1");
+    }
+
+    #[test]
+    fn not_propagates_null() {
+        // NOT NULL must be NULL (SQL UNKNOWN), not true.
+        let row = run_row(vec![
+            init(),
+            create_instruction(OpCode::Null, 0, 1, 0, None, None),
+            create_instruction(OpCode::Not, 1, 2, 0, None, None),
+            create_instruction(OpCode::ResultRow, 2, 1, 0, None, None),
+            halt(),
+        ]);
+        assert_eq!(
+            row[0],
+            Value::Null,
+            "NOT NULL must stay NULL, not become true"
+        );
+    }
+
+    /// Build a program that compares two 2-register vectors and reports which
+    /// branch Jump takes: 1 = Less, 2 = Equal, 3 = Greater.
+    fn compare_branch(lhs: [i64; 2], rhs: [i64; 2]) -> Value {
+        let row = run_row(vec![
+            init(),
+            // lhs in r1,r2 ; rhs in r3,r4
+            create_instruction(OpCode::Integer, lhs[0], 1, 0, None, None),
+            create_instruction(OpCode::Integer, lhs[1], 2, 0, None, None),
+            create_instruction(OpCode::Integer, rhs[0], 3, 0, None, None),
+            create_instruction(OpCode::Integer, rhs[1], 4, 0, None, None),
+            // Compare r1..r2 against r3..r4 (2 columns)
+            create_instruction(OpCode::Compare, 1, 3, 2, None, None),
+            // Jump: less -> 7, equal -> 9, greater -> 11
+            create_instruction(OpCode::Jump, 7, 9, 11, None, None),
+            // 7: less
+            create_instruction(OpCode::Integer, 1, 5, 0, None, None),
+            create_instruction(OpCode::Goto, 0, 13, 0, None, None),
+            // 9: equal
+            create_instruction(OpCode::Integer, 2, 5, 0, None, None),
+            create_instruction(OpCode::Goto, 0, 13, 0, None, None),
+            // 11: greater
+            create_instruction(OpCode::Integer, 3, 5, 0, None, None),
+            create_instruction(OpCode::Goto, 0, 13, 0, None, None),
+            // 13: emit
+            create_instruction(OpCode::ResultRow, 5, 1, 0, None, None),
+            halt(),
+        ]);
+        row[0].clone()
+    }
+
+    #[test]
+    fn compare_jump_branches_three_ways() {
+        assert_eq!(compare_branch([1, 1], [1, 1]), Value::Integer(2), "equal");
+        assert_eq!(compare_branch([1, 1], [1, 2]), Value::Integer(1), "less");
+        assert_eq!(compare_branch([1, 2], [1, 1]), Value::Integer(3), "greater");
+    }
+
+    #[test]
+    fn compare_uses_all_key_columns() {
+        // The whole point: a difference in the SECOND column must be detected.
+        // The old single-Ne group-change check compared only the first, which
+        // is why multi-column GROUP BY collapsed to one key.
+        assert_ne!(
+            compare_branch([7, 1], [7, 2]),
+            Value::Integer(2),
+            "vectors differing only in the second column must not compare equal"
+        );
+    }
+
+    #[test]
+    fn compare_treats_nulls_as_equal() {
+        // Internal ordering, not SQL `=`: two NULL group keys must group
+        // together. SQL equality must yield UNKNOWN for NULL, which is exactly
+        // why Compare is a separate opcode from Eq.
+        let row = run_row(vec![
+            init(),
+            create_instruction(OpCode::Null, 0, 1, 0, None, None),
+            create_instruction(OpCode::Null, 0, 2, 0, None, None),
+            create_instruction(OpCode::Compare, 1, 2, 1, None, None),
+            create_instruction(OpCode::Jump, 5, 7, 9, None, None),
+            // 5: less
+            create_instruction(OpCode::Integer, 1, 3, 0, None, None),
+            create_instruction(OpCode::Goto, 0, 11, 0, None, None),
+            // 7: equal
+            create_instruction(OpCode::Integer, 2, 3, 0, None, None),
+            create_instruction(OpCode::Goto, 0, 11, 0, None, None),
+            // 9: greater
+            create_instruction(OpCode::Integer, 3, 3, 0, None, None),
+            create_instruction(OpCode::Goto, 0, 11, 0, None, None),
+            // 11: emit
+            create_instruction(OpCode::ResultRow, 3, 1, 0, None, None),
+            halt(),
+        ]);
+        assert_eq!(row[0], Value::Integer(2), "NULL should compare equal to NULL");
+    }
+}

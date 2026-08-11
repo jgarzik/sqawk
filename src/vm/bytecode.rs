@@ -123,6 +123,29 @@ pub enum OpCode {
     // Null operations
     IsNull, // Set P2 to 1 if P1 is NULL, 0 otherwise
 
+    // Logical negation
+    //
+    // Distinct from the comparison opcodes because it must propagate NULL:
+    // NOT NULL is NULL (UNKNOWN), not true. Replaces the several hand-rolled
+    // inversions used for NOT LIKE / NOT IN / IS NOT NULL and makes a bare
+    // `NOT <expr>` expressible at all.
+    Not, // P2 = NULL if P1 is NULL, else 1 if P1 is falsy, else 0
+
+    // Vector comparison, modelled on SQLite's OP_Compare / OP_Jump.
+    //
+    // Compare sets an internal flag from a pairwise comparison of two register
+    // vectors; Jump then branches three ways on that flag. Together they make
+    // multi-column key comparison two instructions regardless of key width,
+    // which is what GROUP BY needs to detect a group change across ALL key
+    // columns rather than just the first.
+    //
+    // These use INTERNAL ordering, not SQL comparison: NULL sorts equal to
+    // NULL, so a NULL group key groups with other NULL keys. SQL `=` must not
+    // behave that way, which is exactly why this is a separate opcode rather
+    // than a reuse of Eq.
+    Compare, // Compare P3 registers starting at P1 against P3 starting at P2
+    Jump,    // Branch on the last Compare: P1 if Less, P2 if Equal, P3 if Greater
+
     // Conditional jumps
     IfZ,   // Jump to P2 if register P1 contains 0
     IfPos, // Jump to P2 if register P1 is positive (> 0)
