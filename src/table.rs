@@ -854,6 +854,14 @@ impl Table {
     /// Returns the name of the table as a string slice.
     /// This is useful for operations that need to access the table's name
     /// such as logging, error messages, or generating SQL output.
+    /// Rename the table.
+    ///
+    /// Used when a derived table is materialized and registered under its
+    /// alias, so the table reports the name the outer query refers to.
+    pub fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -1020,6 +1028,26 @@ impl Table {
         self.storage.ensure_mutable();
         self.storage.replace_rows(new_rows);
         self.modified = true;
+    }
+
+    /// Replace a single row in place, preserving its position.
+    ///
+    /// Used by UPDATE. Expressing an update as delete-plus-insert appends the
+    /// new row, which reorders the table -- and with --write, the user's file.
+    pub fn replace_row(&mut self, row_index: usize, row: Row) -> SqawkResult<()> {
+        self.storage.ensure_mutable();
+        let rows = self.storage.rows_mut().ok_or_else(|| {
+            SqawkError::InvalidSqlQuery("Table storage is not mutable".to_string())
+        })?;
+        if row_index >= rows.len() {
+            return Err(SqawkError::InvalidSqlQuery(format!(
+                "Row index {} out of range for table '{}'",
+                row_index, self.name
+            )));
+        }
+        rows[row_index] = row;
+        self.modified = true;
+        Ok(())
     }
 
     /// Add a column to the table with a specified data type

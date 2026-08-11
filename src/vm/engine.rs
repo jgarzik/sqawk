@@ -5,7 +5,8 @@
 //! and the program counter during execution.
 
 use super::bytecode::{
-    Instruction, OpCode, Program, Register, AGG_AVG, AGG_COUNT, AGG_MAX, AGG_MIN, AGG_SUM,
+    Instruction, OpCode, Program, Register, AGG_AVG, AGG_COUNT, AGG_DISTINCT, AGG_MAX, AGG_MIN,
+    AGG_SUM, AGG_TYPE_MASK,
 };
 use crate::capacity::{
     DEFAULT_ACCUMULATOR_CAPACITY, DEFAULT_CURSOR_CAPACITY, DEFAULT_MODIFICATIONS_CAPACITY,
@@ -330,6 +331,9 @@ struct AggAccumulator {
     count: i64,
     /// Accumulated value (sum for SUM/AVG, min/max for MIN/MAX)
     value: Option<Value>,
+    /// Values already accumulated, for DISTINCT aggregates. `None` when the
+    /// aggregate is not DISTINCT, so the ordinary path allocates nothing.
+    seen: Option<std::collections::HashSet<String>>,
 }
 
 impl Sorter {
@@ -412,6 +416,16 @@ pub enum TableModification {
         table_name: String,
         row_index: usize,
     },
+    /// Replace a row in place, preserving its position.
+    ///
+    /// UPDATE used to be expressed as Delete plus Insert, and the insert
+    /// appends, so every updated row jumped to the end of the table -- and
+    /// with --write that reordering was written to the user's file.
+    Replace {
+        table_name: String,
+        row_index: usize,
+        row: Vec<Value>,
+    },
     CreateTable {
         table_name: String,
         columns: Vec<ColumnDef>,
@@ -452,6 +466,19 @@ pub struct VmEngine<'a> {
     #[allow(dead_code)]
     cursor_source_order: Vec<usize>,
 
+    /// Index into `results` at which each window partition begins.
+    ///
+    /// Recorded during the streaming window pass so a following WindowFinalize
+    /// can identify each partition's extent without needing the partition key
+    /// to be a projected column.
+    window_partition_starts: Vec<usize>,
+
+    /// Result of the most recent Compare, consumed by Jump.
+    ///
+    /// Mirrors SQLite, where OP_Compare leaves its verdict for a following
+    /// OP_Jump rather than materializing it into a register.
+    compare_flag: std::cmp::Ordering,
+
     /// Current transaction state (None, Active, Committed, or RolledBack)
     /// Tracks the lifecycle of a transaction and enforces proper operation sequencing
     transaction_state: TransactionState,
@@ -474,6 +501,8 @@ impl<'a> VmEngine<'a> {
             database,
             program: Program::new(),
             pc: 0,
+            compare_flag: std::cmp::Ordering::Equal,
+            window_partition_starts: Vec::new(),
             registers: Vec::with_capacity(DEFAULT_REGISTER_CAPACITY),
             cursors: HashMap::with_capacity(DEFAULT_CURSOR_CAPACITY),
             sorters: HashMap::with_capacity(DEFAULT_SORTER_CAPACITY),
@@ -507,20 +536,31 @@ impl<'a> VmEngine<'a> {
         self.cursor_source_order.clear();
         self.pending_modifications.clear();
         self.once_flags.clear();
+        self.window_partition_starts.clear();
 
-        // Allocate enough registers for the program
-        let max_reg = self
-            .program
-            .instructions
-            .iter()
-            .map(|i| i.p1.max(i.p2).max(i.p3))
-            .max()
-            .unwrap_or(10);
-
-        // Allocate a few extra registers just in case
-        // Cap max_reg to a reasonable value to avoid overflow (p1/p2/p3 sometimes contain values, not register numbers)
-        let max_reg = max_reg.min(10000);
-        self.registers = vec![Register::Null; (max_reg + 5) as usize];
+        // Size the register file from the compiler's allocation count.
+        //
+        // This used to be inferred as max(p1, p2, p3) over the instruction
+        // stream, capped at 10000. That was wrong in both directions: those
+        // operands hold literals as often as register numbers, so `Integer
+        // 999999 -> r` inflated the file to the cap, while a program that
+        // genuinely needed more than 10000 registers got a short one -- and
+        // Column errors on a short file rather than growing it.
+        //
+        // Hand-assembled test programs carry no count, so fall back to the old
+        // scan when register_count is 0 but instructions exist.
+        let reg_count = if self.program.register_count > 0 {
+            self.program.register_count
+        } else {
+            self.program
+                .instructions
+                .iter()
+                .map(|i| i.p1.max(i.p2).max(i.p3))
+                .max()
+                .unwrap_or(10)
+                .min(10000)
+        };
+        self.registers = vec![Register::Null; (reg_count + 5) as usize];
 
         // Reset transaction state
         self.transaction_state = TransactionState::None;
@@ -774,6 +814,43 @@ impl<'a> VmEngine<'a> {
                         "InsertRow: queued insert of {} columns into cursor {}",
                         col_count, cursor_idx
                     );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::UpdateRow => {
+                // Replace the current row at cursor P1 with registers
+                // P2..P2+P3, keeping its position in the table.
+                let cursor_idx = inst.p1 as usize;
+                let base_reg = inst.p2 as usize;
+                let col_count = inst.p3 as usize;
+
+                let (table_name, row_idx) = if let Some(cursor) = self.cursors.get(&cursor_idx) {
+                    (cursor.table_name().to_string(), cursor.current_row_index())
+                } else {
+                    return Err(SqawkError::VmError(format!(
+                        "Invalid cursor for UpdateRow: {}",
+                        cursor_idx
+                    )));
+                };
+
+                let table_name = inst
+                    .p4
+                    .as_deref()
+                    .map(|s| s.to_string())
+                    .unwrap_or(table_name);
+
+                if let Some(idx) = row_idx {
+                    let mut row = Vec::with_capacity(col_count);
+                    for i in 0..col_count {
+                        row.push(Value::from(self.get_register(base_reg + i)?));
+                    }
+                    self.pending_modifications.push(TableModification::Replace {
+                        table_name,
+                        row_index: idx,
+                        row,
+                    });
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1486,6 +1563,11 @@ impl<'a> VmEngine<'a> {
                     }
                 };
 
+                if partition_changed {
+                    // The row about to be emitted starts a new partition.
+                    self.window_partition_starts.push(self.results.len());
+                }
+
                 // Check if order value changed (for RANK)
                 let prev_ord_val = self.get_register(prev_ord_reg)?;
                 let order_changed = if is_first_row {
@@ -1659,6 +1741,34 @@ impl<'a> VmEngine<'a> {
                     );
                 }
 
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::WindowFinalize => {
+                // Give every row of a partition that partition's FINAL window
+                // value, which for an unordered frame is the partition total.
+                //
+                // The streaming pass accumulates as it goes, so without this a
+                // window aggregate with PARTITION BY and no ORDER BY returns a
+                // RUNNING total. SQL defines the frame in that case as the
+                // whole partition, so every row should see the same value.
+                let col = inst.p1 as usize;
+                let starts = self.window_partition_starts.clone();
+                for (i, &start) in starts.iter().enumerate() {
+                    let end = starts.get(i + 1).copied().unwrap_or(self.results.len());
+                    if end == 0 || start >= end {
+                        continue;
+                    }
+                    let final_value = match self.results[end - 1].get(col) {
+                        Some(v) => v.clone(),
+                        None => continue,
+                    };
+                    for row in &mut self.results[start..end] {
+                        if col < row.len() {
+                            row[col] = final_value.clone();
+                        }
+                    }
+                }
                 Ok(ExecuteResult::Continue)
             }
 
@@ -2292,12 +2402,115 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Continue)
             }
 
+            OpCode::Not => {
+                // Logical negation with NULL propagation: NOT UNKNOWN is
+                // UNKNOWN, not true.
+                let src = self.get_register(inst.p1 as usize)?;
+                let out = match src {
+                    Register::Null => Register::Null,
+                    other => Register::Integer(if Self::register_is_truthy(&other) {
+                        0
+                    } else {
+                        1
+                    }),
+                };
+                self.set_register(inst.p2 as usize, out)?;
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Compare => {
+                // Pairwise-compare two register vectors of length P3, starting
+                // at P1 and P2, and stash the Ordering for the next Jump.
+                //
+                // Uses internal ordering (compare_values), where NULL == NULL.
+                // That is deliberate: this drives grouping and sorting, where
+                // NULL keys must group together, whereas SQL `=` must yield
+                // UNKNOWN for NULL. Keeping them separate is what lets the
+                // three-valued-logic change apply to Eq without breaking
+                // GROUP BY on a nullable key.
+                let lhs_start = inst.p1 as usize;
+                let rhs_start = inst.p2 as usize;
+                let count = inst.p3 as usize;
+
+                let mut ordering = std::cmp::Ordering::Equal;
+                for i in 0..count {
+                    let a: Value = self.get_register(lhs_start + i)?.into();
+                    let b: Value = self.get_register(rhs_start + i)?.into();
+                    ordering = compare_values(&a, &b);
+                    if ordering != std::cmp::Ordering::Equal {
+                        break;
+                    }
+                }
+                self.compare_flag = ordering;
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::Jump => {
+                // Three-way branch on the last Compare.
+                let target = match self.compare_flag {
+                    std::cmp::Ordering::Less => inst.p1,
+                    std::cmp::Ordering::Equal => inst.p2,
+                    std::cmp::Ordering::Greater => inst.p3,
+                };
+                Ok(ExecuteResult::Jump(target as usize))
+            }
+
             // JumpIfTrue and JumpIfFalse have been replaced by SQLite-style opcodes:
             // - IfZ (jump if zero/false)
             // - IfPos (jump if positive)
             // - IfNeg (jump if negative)
             OpCode::Noop => {
                 // No operation
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::SortResults => {
+                // Sort the accumulated result rows.
+                //
+                // A post-processing opcode in the same family as Distinct and
+                // Limit: it runs over self.results after the producing loop has
+                // finished, so it is independent of how those rows were
+                // produced. That is what lets ORDER BY work over GROUP BY
+                // output and over joins, neither of which can feed the
+                // cursor-based sorter used by a plain table scan.
+                let spec = inst.p4.as_deref().unwrap_or("");
+                let keys: Vec<(usize, bool)> = spec
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|part| {
+                        let (idx, dir) = part.split_once(':')?;
+                        Some((
+                            idx.trim().parse().ok()?,
+                            !dir.trim().eq_ignore_ascii_case("desc"),
+                        ))
+                    })
+                    .collect();
+
+                if !keys.is_empty() {
+                    // Sort results and their index tracking together so the
+                    // two do not drift apart.
+                    let track = self.result_row_indices.len() == self.results.len();
+                    let mut order: Vec<usize> = (0..self.results.len()).collect();
+                    order.sort_by(|&a, &b| {
+                        for &(col, asc) in &keys {
+                            let va = self.results[a].get(col).unwrap_or(&Value::Null);
+                            let vb = self.results[b].get(col).unwrap_or(&Value::Null);
+                            let ord = compare_values(va, vb);
+                            let ord = if asc { ord } else { ord.reverse() };
+                            if ord != std::cmp::Ordering::Equal {
+                                return ord;
+                            }
+                        }
+                        std::cmp::Ordering::Equal
+                    });
+                    self.results = order.iter().map(|&i| self.results[i].clone()).collect();
+                    if track {
+                        self.result_row_indices = order
+                            .iter()
+                            .map(|&i| self.result_row_indices[i].clone())
+                            .collect();
+                    }
+                }
                 Ok(ExecuteResult::Continue)
             }
 
@@ -2335,18 +2548,34 @@ impl<'a> VmEngine<'a> {
                 let limit = inst.p1 as usize;
                 let offset = inst.p2 as usize;
 
+                // Index tracking is trimmed alongside the rows. It used to be
+                // left untouched, so after a post-processing LIMIT the two
+                // vectors disagreed and the debug validator reported a
+                // mismatch on every limited query.
+                let track = self.result_row_indices.len() == self.results.len();
+
                 // First apply OFFSET - skip first N rows
                 if offset > 0 && !self.results.is_empty() {
                     if offset >= self.results.len() {
                         self.results.clear();
+                        if track {
+                            self.result_row_indices.clear();
+                        }
                     } else {
                         self.results = self.results.drain(offset..).collect();
+                        if track {
+                            self.result_row_indices =
+                                self.result_row_indices.drain(offset..).collect();
+                        }
                     }
                 }
 
                 // Then apply LIMIT - truncate to N rows
                 if self.results.len() > limit {
                     self.results.truncate(limit);
+                    if track && self.result_row_indices.len() > limit {
+                        self.result_row_indices.truncate(limit);
+                    }
                 }
 
                 if self.verbose {
@@ -2860,7 +3089,8 @@ impl<'a> VmEngine<'a> {
                 // P1 = function type (0=COUNT, 1=SUM, 2=AVG, 3=MIN, 4=MAX)
                 // P2 = value register
                 // P3 = accumulator register (used as key for accumulator storage)
-                let func_type = inst.p1;
+                let func_type = inst.p1 & AGG_TYPE_MASK;
+                let is_distinct = inst.p1 & AGG_DISTINCT != 0;
                 let value_reg = inst.p2 as usize;
                 let acc_reg = inst.p3 as usize;
 
@@ -2882,6 +3112,11 @@ impl<'a> VmEngine<'a> {
                             func_type,
                             count: 0,
                             value: None,
+                            seen: if is_distinct {
+                                Some(std::collections::HashSet::new())
+                            } else {
+                                None
+                            },
                         },
                     );
                     // Mark the register as non-Null to indicate accumulator is active
@@ -2893,7 +3128,26 @@ impl<'a> VmEngine<'a> {
                     func_type,
                     count: 0,
                     value: None,
+                    seen: if is_distinct {
+                        Some(std::collections::HashSet::new())
+                    } else {
+                        None
+                    },
                 });
+
+                // DISTINCT: ignore a value already accumulated for this group.
+                // NULLs are not tracked -- every aggregate already skips them.
+                if is_distinct {
+                    if let Some(val) = value.as_ref() {
+                        if !matches!(val, Value::Null) {
+                            let key = format!("{:?}", val);
+                            let seen = acc.seen.get_or_insert_with(Default::default);
+                            if !seen.insert(key) {
+                                return Ok(ExecuteResult::Continue);
+                            }
+                        }
+                    }
+                }
 
                 match func_type {
                     AGG_COUNT => {
@@ -3410,6 +3664,20 @@ impl<'a> VmEngine<'a> {
     ///
     /// # Returns
     /// The register value or an error if the index is out of bounds
+    /// Whether a register counts as true.
+    ///
+    /// Matches IfZ's notion of "zero" exactly, so `Not` and the conditional
+    /// jumps cannot disagree about what a value means.
+    fn register_is_truthy(reg: &Register) -> bool {
+        match reg {
+            Register::Integer(v) => *v != 0,
+            Register::Float(v) => *v != 0.0,
+            Register::String(v) => !v.is_empty(),
+            Register::Boolean(v) => *v,
+            Register::Null => false,
+        }
+    }
+
     fn get_register(&self, idx: usize) -> SqawkResult<Register> {
         if idx < self.registers.len() {
             Ok(self.registers[idx].clone())
@@ -3450,76 +3718,86 @@ impl<'a> VmEngine<'a> {
     ///   - p3: destination register for result (1 for true, 0 for false)
     ///   - opcode: the comparison type (Lt, Le, Gt, Ge, Eq, Ne)
     fn execute_comparison(&mut self, inst: &Instruction) -> SqawkResult<ExecuteResult> {
+        use std::cmp::Ordering;
+
         let reg1 = self.get_register(inst.p1 as usize)?;
         let reg2 = self.get_register(inst.p2 as usize)?;
 
-        let result = match inst.opcode {
-            OpCode::Lt => {
-                self.compare_registers(&reg1, &reg2, |a, b| a < b, |a, b| a < b, |a, b| a < b)?
-            }
-            OpCode::Le => {
-                self.compare_registers(&reg1, &reg2, |a, b| a <= b, |a, b| a <= b, |a, b| a <= b)?
-            }
-            OpCode::Gt => {
-                self.compare_registers(&reg1, &reg2, |a, b| a > b, |a, b| a > b, |a, b| a > b)?
-            }
-            OpCode::Ge => {
-                self.compare_registers(&reg1, &reg2, |a, b| a >= b, |a, b| a >= b, |a, b| a >= b)?
-            }
-            OpCode::Eq => self.compare_registers_eq(&reg1, &reg2)?,
-            OpCode::Ne => !self.compare_registers_eq(&reg1, &reg2)?,
-            _ => {
-                return Err(SqawkError::VmError(format!(
-                    "Invalid comparison opcode: {:?}",
-                    inst.opcode
-                )))
+        // SQL three-valued logic: a comparison involving NULL is UNKNOWN, not
+        // an error and not false. The result register holds NULL for UNKNOWN.
+        //
+        // IfZ already treats a NULL register as zero, so every WHERE, HAVING
+        // and ON site rejects an UNKNOWN row without any control-flow change.
+        let result = match Self::sql_compare(&reg1, &reg2) {
+            None => Register::Null,
+            Some(ord) => {
+                let truth = match inst.opcode {
+                    OpCode::Lt => ord == Ordering::Less,
+                    OpCode::Le => ord != Ordering::Greater,
+                    OpCode::Gt => ord == Ordering::Greater,
+                    OpCode::Ge => ord != Ordering::Less,
+                    OpCode::Eq => ord == Ordering::Equal,
+                    OpCode::Ne => ord != Ordering::Equal,
+                    _ => {
+                        return Err(SqawkError::VmError(format!(
+                            "Invalid comparison opcode: {:?}",
+                            inst.opcode
+                        )))
+                    }
+                };
+                Register::Integer(if truth { 1 } else { 0 })
             }
         };
 
-        let result_value = Register::Integer(if result { 1 } else { 0 });
-        self.set_register(inst.p3 as usize, result_value)?;
+        self.set_register(inst.p3 as usize, result)?;
         Ok(ExecuteResult::Continue)
     }
 
-    /// Compare two registers for ordering operations (Lt, Le, Gt, Ge)
-    fn compare_registers<Fi, Ff, Fs>(
-        &self,
-        reg1: &Register,
-        reg2: &Register,
-        cmp_int: Fi,
-        cmp_float: Ff,
-        cmp_str: Fs,
-    ) -> SqawkResult<bool>
-    where
-        Fi: Fn(i64, i64) -> bool,
-        Ff: Fn(f64, f64) -> bool,
-        Fs: Fn(&str, &str) -> bool,
-    {
-        match (reg1, reg2) {
-            (Register::Integer(a), Register::Integer(b)) => Ok(cmp_int(*a, *b)),
-            (Register::Float(a), Register::Float(b)) => Ok(cmp_float(*a, *b)),
-            (Register::String(a), Register::String(b)) => Ok(cmp_str(a, b)),
-            (Register::Integer(a), Register::Float(b)) => Ok(cmp_float(*a as f64, *b)),
-            (Register::Float(a), Register::Integer(b)) => Ok(cmp_float(*a, *b as f64)),
-            _ => Err(SqawkError::VmError(format!(
-                "Cannot compare incompatible types: {:?} and {:?}",
-                reg1, reg2
-            ))),
+    /// SQL comparison of two registers.
+    ///
+    /// `None` means UNKNOWN, which is the result whenever either operand is
+    /// NULL -- including NULL against NULL. (Grouping and sorting need the
+    /// opposite, NULL equal to NULL, which is why the Compare opcode has its
+    /// own internal ordering rather than sharing this.)
+    ///
+    /// Mixed string/number operands are coerced when the string parses as a
+    /// number, and compared as text otherwise. This is the awk-shaped choice
+    /// rather than the SQLite one, for two reasons: a CSV column is untyped
+    /// text that sqawk guesses a type for PER CELL, so a single column can
+    /// hold both; and arithmetic already coerces this way, so `x + '1'` and
+    /// `x > '1'` agree instead of disagreeing.
+    fn sql_compare(a: &Register, b: &Register) -> Option<std::cmp::Ordering> {
+        // Any NULL operand yields UNKNOWN.
+        if matches!(a, Register::Null) || matches!(b, Register::Null) {
+            return None;
         }
-    }
 
-    /// Compare two registers for equality (Eq, Ne)
-    fn compare_registers_eq(&self, reg1: &Register, reg2: &Register) -> SqawkResult<bool> {
-        match (reg1, reg2) {
-            (Register::Integer(a), Register::Integer(b)) => Ok(a == b),
-            (Register::Float(a), Register::Float(b)) => Ok(a == b),
-            (Register::String(a), Register::String(b)) => Ok(a == b),
-            (Register::Boolean(a), Register::Boolean(b)) => Ok(a == b),
-            (Register::Null, Register::Null) => Ok(true),
-            (Register::Integer(a), Register::Float(b)) => Ok((*a as f64) == *b),
-            (Register::Float(a), Register::Integer(b)) => Ok(*a == (*b as f64)),
-            // Different types are not equal
-            _ => Ok(false),
+        fn as_number(reg: &Register) -> Option<f64> {
+            match reg {
+                Register::Integer(i) => Some(*i as f64),
+                Register::Float(f) => Some(*f),
+                Register::Boolean(v) => Some(if *v { 1.0 } else { 0.0 }),
+                Register::String(s) => s.trim().parse::<f64>().ok(),
+                Register::Null => None,
+            }
+        }
+
+        match (a, b) {
+            // Integer against integer compares as i64, not through f64, so
+            // values above 2^53 stay exact.
+            (Register::Integer(x), Register::Integer(y)) => Some(x.cmp(y)),
+            (Register::String(x), Register::String(y)) => Some(x.cmp(y)),
+            (Register::Boolean(x), Register::Boolean(y)) => Some(x.cmp(y)),
+            _ => match (as_number(a), as_number(b)) {
+                (Some(x), Some(y)) => x.partial_cmp(&y),
+                // A string that does not parse as a number falls back to a
+                // textual comparison against the other side's rendering.
+                _ => {
+                    let x: Value = a.clone().into();
+                    let y: Value = b.clone().into();
+                    Some(x.to_string().cmp(&y.to_string()))
+                }
+            },
         }
     }
 

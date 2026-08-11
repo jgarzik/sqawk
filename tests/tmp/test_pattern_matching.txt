@@ -1,5 +1,0 @@
-.load tests/data/animals.csv
-.tables
-.tables sa
-.tables an
-.exit

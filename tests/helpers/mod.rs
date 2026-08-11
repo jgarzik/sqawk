@@ -139,6 +139,169 @@ fn run_test_case_with_file(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Exact-output helpers
+//
+// The `contains`-based assertions above are substring matches: a test expecting
+// "Engineering,3" still passes when three extra wrong rows are emitted, and
+// passes regardless of row order. Every defect in the step-0 red list survived
+// the suite for exactly that reason.
+//
+// The helpers below assert the *complete* stdout -- every row, in order. Use
+// these for new tests.
+// ---------------------------------------------------------------------------
+
+/// Run `sql` against `files` and return (stdout, stderr, success) verbatim.
+///
+/// Each entry in `files` is passed to sqawk as-is, so both `path.csv` and
+/// `name=path.csv` forms work.
+pub fn run_sql(
+    sql: &str,
+    files: &[&str],
+    extra_args: &[&str],
+) -> Result<(String, String, bool), Box<dyn std::error::Error>> {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s").arg(sql);
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    for file in files {
+        cmd.arg(file);
+    }
+
+    let output = cmd.output()?;
+    Ok((
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.success(),
+    ))
+}
+
+/// Assert that `sql` over `files` produces exactly `expected` on stdout.
+///
+/// Both sides are trimmed of leading/trailing blank lines and of trailing
+/// whitespace on each line, so tests can use indented raw strings. Everything
+/// else -- row content, column order, row order, row count -- must match.
+pub fn assert_query(
+    files: &[&str],
+    sql: &str,
+    expected: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (stdout, stderr, success) = run_sql(sql, files, &[])?;
+    assert!(
+        success,
+        "query failed unexpectedly\n  sql: {sql}\n  stderr: {stderr}"
+    );
+
+    let actual = normalize_output(&stdout);
+    let want = normalize_output(expected);
+    assert_eq!(
+        actual, want,
+        "\n=== query ===\n{sql}\n=== expected ===\n{want}\n=== actual ===\n{actual}\n"
+    );
+    Ok(())
+}
+
+/// Assert that `sql` over `files` fails, with `expected_err` appearing in stderr.
+pub fn assert_query_fails(
+    files: &[&str],
+    sql: &str,
+    expected_err: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (stdout, stderr, success) = run_sql(sql, files, &[])?;
+    assert!(
+        !success,
+        "query unexpectedly succeeded\n  sql: {sql}\n  stdout: {stdout}"
+    );
+    assert!(
+        stderr.contains(expected_err),
+        "\n=== query ===\n{sql}\n=== expected stderr to contain ===\n{expected_err}\n=== actual stderr ===\n{stderr}\n"
+    );
+    Ok(())
+}
+
+/// Trim trailing whitespace per line and drop leading/trailing blank lines.
+fn normalize_output(s: &str) -> String {
+    s.lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_matches('\n')
+        .to_string()
+}
+
+/// Run `sql` with `--write` against a private copy of `fixture`, and return the
+/// resulting file contents.
+///
+/// Needed because modifications are in-memory only without `--write`, and
+/// `UPDATE ...; SELECT ...` in a single invocation does not currently emit the
+/// SELECT's rows -- so writeback is the way to observe what a DML statement
+/// actually did.
+pub fn run_with_write(
+    fixture: &str,
+    table: &str,
+    sql: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let dir = create_temp_dir()?;
+    let src = PathBuf::from(fixture);
+    let dest = dir.path().join(src.file_name().unwrap());
+    fs::copy(&src, &dest)?;
+
+    let spec = format!("{}={}", table, dest.to_str().unwrap());
+    let (_stdout, stderr, success) = run_sql(sql, &[&spec], &["--write"])?;
+    assert!(
+        success,
+        "write query failed\n  sql: {sql}\n  stderr: {stderr}"
+    );
+
+    Ok(normalize_output(&fs::read_to_string(&dest)?))
+}
+
+/// Assert that `sql` run with `--write` leaves `fixture` with exactly
+/// `expected` contents.
+pub fn assert_after_write(
+    fixture: &str,
+    table: &str,
+    sql: &str,
+    expected: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_with_write(fixture, table, sql)?;
+    let want = normalize_output(expected);
+    assert_eq!(
+        actual, want,
+        "\n=== sql ===\n{sql}\n=== expected file ===\n{want}\n=== actual file ===\n{actual}\n"
+    );
+    Ok(())
+}
+
+/// Path to the nullable.csv fixture (contains empty fields -> NULL values).
+///
+/// No other fixture in tests/data/ has an empty field, so nothing in the suite
+/// currently exercises a NULL flowing into a comparison.
+pub fn nullable_csv() -> &'static str {
+    "tests/data/nullable.csv"
+}
+
+/// Path to employees.csv as a plain &str, for the exact-output helpers.
+pub fn employees_csv() -> &'static str {
+    "tests/data/employees.csv"
+}
+
+/// Path to departments.csv as a plain &str, for the exact-output helpers.
+pub fn departments_csv() -> &'static str {
+    "tests/data/departments.csv"
+}
+
+/// Path to users.csv as a plain &str, for the exact-output helpers.
+pub fn users_csv() -> &'static str {
+    "tests/data/users.csv"
+}
+
+/// Path to orders.csv as a plain &str, for the exact-output helpers.
+pub fn orders_csv() -> &'static str {
+    "tests/data/orders.csv"
+}
+
 /// Helper function to create a temp directory for tests, respecting CARGO_TARGET_TMPDIR if set
 pub fn create_temp_dir() -> Result<TempDir, Box<dyn std::error::Error>> {
     if let Ok(cargo_target_tmpdir) = env::var("CARGO_TARGET_TMPDIR") {

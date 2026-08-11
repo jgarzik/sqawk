@@ -452,10 +452,11 @@ impl<'a> Repl<'a> {
         } else if self.show_changes {
             // For non-SELECT statements that don't return rows (INSERT, UPDATE, DELETE)
             // Try to display the number of affected rows if show_changes is enabled
+            // Reported even when zero. With `.changes on` a statement that
+            // matched nothing otherwise produced no output at all, leaving it
+            // ambiguous whether it had run.
             if let Ok(affected_rows) = self.executor.get_affected_row_count() {
-                if affected_rows > 0 {
-                    println!("{} rows affected", affected_rows);
-                }
+                println!("{} rows affected", affected_rows);
             }
         }
 
@@ -692,8 +693,12 @@ impl<'a> Repl<'a> {
     }
 
     /// Show version information
+    ///
+    /// Read from the manifest rather than written out, so it cannot drift.
+    /// This reported 0.1.1 for a long time while the crate was at 0.8.0.
     fn show_version(&self) -> Result<()> {
-        println!("Sqawk version 0.1.1");
+        println!("Sqawk version {}", env!("CARGO_PKG_VERSION"));
+        println!("sqlparser {}", crate::vm::SQLPARSER_VERSION);
         Ok(())
     }
 

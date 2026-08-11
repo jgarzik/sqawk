@@ -140,23 +140,21 @@ fn main() -> Result<()> {
             .execute(sql)
             .with_context(|| format!("Failed to execute SQL: {sql}"))?;
 
-        // Step 4: Output results to stdout (for SELECT queries)
-        match result {
-            // For SELECT queries that return data
-            Some(table) => {
-                if config.verbose() {
-                    let row_count = table.row_count();
-                    println!("Query returned {row_count} rows");
-                }
-                // Print the result table in delimiter-separated format
-                table.print_to_stdout()?;
+        // Step 4: Output results to stdout (for SELECT queries).
+        //
+        // One result set per statement, each with its own header. They used to
+        // share a single buffer and schema, so `SELECT a; SELECT b` printed
+        // every row under the last statement's header.
+        for table in &result {
+            if config.verbose() {
+                let row_count = table.row_count();
+                println!("Query returned {row_count} rows");
             }
-            // For statements that don't return data (UPDATE, DELETE, INSERT)
-            None => {
-                if config.verbose() {
-                    println!("Query executed successfully (no results to display)");
-                }
-            }
+            // Print the result table in delimiter-separated format
+            table.print_to_stdout()?;
+        }
+        if result.is_empty() && config.verbose() {
+            println!("Query executed successfully (no results to display)");
         }
     }
 

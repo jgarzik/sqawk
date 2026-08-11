@@ -24,6 +24,17 @@ pub const AGG_MIN: i64 = 3;
 /// MAX aggregate function type
 pub const AGG_MAX: i64 = 4;
 
+/// Flag bit OR-ed into an AggStep/AggFinal function type to request DISTINCT.
+///
+/// Carried as a flag rather than as five extra constants so that DISTINCT
+/// composes with every aggregate: `COUNT(DISTINCT x)`, `SUM(DISTINCT x)` and
+/// the rest all use the same mechanism. Mask with `AGG_TYPE_MASK` to recover
+/// the base function.
+pub const AGG_DISTINCT: i64 = 0x100;
+
+/// Mask selecting the base aggregate function out of a function-type word.
+pub const AGG_TYPE_MASK: i64 = 0xFF;
+
 /// A column in a result schema
 #[derive(Debug, Clone)]
 pub struct ResultColumn {
@@ -90,6 +101,7 @@ pub enum OpCode {
     Column,    // Read column value into register
     InsertRow, // Insert row from registers P2..P2+P3 into cursor P1
     DeleteRow, // Delete current row at cursor P1
+    UpdateRow, // Replace current row at cursor P1 with registers P2..P2+P3 IN PLACE
 
     // Data manipulation
     Integer,   // Load integer constant
@@ -123,6 +135,29 @@ pub enum OpCode {
     // Null operations
     IsNull, // Set P2 to 1 if P1 is NULL, 0 otherwise
 
+    // Logical negation
+    //
+    // Distinct from the comparison opcodes because it must propagate NULL:
+    // NOT NULL is NULL (UNKNOWN), not true. Replaces the several hand-rolled
+    // inversions used for NOT LIKE / NOT IN / IS NOT NULL and makes a bare
+    // `NOT <expr>` expressible at all.
+    Not, // P2 = NULL if P1 is NULL, else 1 if P1 is falsy, else 0
+
+    // Vector comparison, modelled on SQLite's OP_Compare / OP_Jump.
+    //
+    // Compare sets an internal flag from a pairwise comparison of two register
+    // vectors; Jump then branches three ways on that flag. Together they make
+    // multi-column key comparison two instructions regardless of key width,
+    // which is what GROUP BY needs to detect a group change across ALL key
+    // columns rather than just the first.
+    //
+    // These use INTERNAL ordering, not SQL comparison: NULL sorts equal to
+    // NULL, so a NULL group key groups with other NULL keys. SQL `=` must not
+    // behave that way, which is exactly why this is a separate opcode rather
+    // than a reuse of Eq.
+    Compare, // Compare P3 registers starting at P1 against P3 starting at P2
+    Jump,    // Branch on the last Compare: P1 if Less, P2 if Equal, P3 if Greater
+
     // Conditional jumps
     IfZ,   // Jump to P2 if register P1 contains 0
     IfPos, // Jump to P2 if register P1 is positive (> 0)
@@ -132,7 +167,8 @@ pub enum OpCode {
     Noop, // No operation
 
     // Set operations
-    Distinct,  // Remove duplicate rows from results
+    SortResults, // Sort accumulated results. P4 = "col:asc,col:desc,..." over RESULT columns.
+    Distinct,    // Remove duplicate rows from results
     Limit, // Limit results to P1 rows. P2 = offset (rows to skip, already applied). Post-processing opcode.
     Intersect, // Keep only rows that exist in both left and right result sets
     Except, // Keep only rows from left that don't exist in right result set
@@ -198,6 +234,8 @@ pub enum OpCode {
     // Window function operations
     WindowAggStep, // P1 = func type, P2 = value reg, P3 = accum reg, P4 = window spec. Step window aggregate.
     WindowValue,   // P1 = accum reg, P2 = dest reg, P3 = func type. Get current window value.
+    WindowFinalize, // P1 = result column index. Give every row of a partition that partition's
+                   // final window value, which for an unordered frame is the partition total.
 }
 
 /// A SQL VM instruction with opcode and parameters
@@ -276,6 +314,13 @@ pub struct Program {
     pub instructions: Vec<Instruction>,
     /// Schema for the result set (built at compile time)
     pub result_schema: ResultSchema,
+    /// Number of registers the compiler allocated for this program.
+    ///
+    /// The engine sizes its register file from this. It must not be inferred
+    /// from the instruction stream: p1/p2/p3 hold literals as often as they
+    /// hold register numbers (`Integer 999999 -> r` being the obvious case),
+    /// so scanning for the maximum both over- and under-estimates.
+    pub register_count: i64,
 }
 
 impl Default for Program {
@@ -289,6 +334,7 @@ impl Program {
         Self {
             instructions: Vec::with_capacity(DEFAULT_INSTRUCTION_CAPACITY),
             result_schema: ResultSchema::new(),
+            register_count: 0,
         }
     }
 

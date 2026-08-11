@@ -30,7 +30,15 @@ Tables maintain an internal mapping of column names to their indices for efficie
 - **Rows**: Represented as vectors of values with one element per column
 - **Columns**: Identified by name, with automatic type inference based on content
 - **Schema**: Dynamically determined from the file's header row
-- **Column Types**: Column types are not explicitly declared but inferred at runtime
+- **Column Types**: Not declared; inferred at runtime **per value**, so a single
+  column may hold integers, floats and text
+- **NULL**: An empty field reads as NULL. Comparisons follow SQL three-valued
+  logic, so a comparison involving NULL is UNKNOWN and its row is filtered out
+  rather than raising an error. Sorting and grouping treat NULL as equal to
+  NULL, which SQL comparison must not — the two use separate paths deliberately
+- **Coercion**: A comparison mixing a number and a string converts the string
+  when it parses as a number, and compares textually otherwise. See
+  [SQL Reference](sql_reference.md) for the exact rules
 
 ### Table Lifecycle
 
@@ -59,14 +67,43 @@ The `Table` struct represents an in-memory table with:
 - Methods for accessing and manipulating rows
 - Projection capabilities (selecting subsets of columns)
 
-### SQL Executor
+### SQL Execution: a bytecode VM
 
-The `SqlExecutor` implements SQL parsing and execution:
-- Uses `sqlparser` crate to parse SQL statements
-- Converts parsed AST to operations on in-memory tables
-- Handles WHERE clause evaluation
-- Maintains a set of modified table names (`modified_tables`) to track changes
-- Provides `save_modified_tables()` method that only writes back tables that were actually modified
+SQL is not interpreted against the tables directly. It is compiled to bytecode
+and run on a register virtual machine, following SQLite's architecture:
+
+1. **Parse** — the `sqlparser` crate produces an AST
+2. **Compile** — `vm::compiler` lowers the AST to a bytecode program
+3. **Execute** — `vm::engine` runs that program against table cursors
+
+`SqlExecutor` is a thin wrapper over this pipeline: it forwards to the VM,
+tracks which tables were modified, and provides `save_modified_tables()`, which
+writes back only tables that actually changed.
+
+The compiler has one recursive expression compiler, `code_expr` (the analogue
+of SQLite's `sqlite3ExprCode`), used from every position an expression can
+appear: the SELECT list, WHERE, HAVING, ORDER BY, SET clauses, join conditions,
+function arguments and correlated subqueries. Name resolution is carried
+separately in a `NameCtx`, which models the visible FROM sources, whether a
+column lives behind a cursor or in an already-loaded register, and the
+inner/outer scopes a correlated subquery needs. A node supported in one
+position is therefore supported in all of them.
+
+### Statement Execution Model
+
+A script is parsed once, then each statement is compiled and executed on its
+own, with its modifications applied before the next statement compiles. Two
+consequences follow:
+
+- Each statement produces its own result set, with its own column schema. They
+  are not merged.
+- A statement observes the database as the previous one left it, which is what
+  `CREATE TABLE t; INSERT INTO t ...; SELECT * FROM t` requires.
+
+A subquery in `FROM` (a derived table) is materialized before its enclosing
+statement compiles: the subquery runs, its result is registered under the
+alias, and the statement is rewritten to reference that name. The registration
+lasts only for that statement.
 
 ### File Handlers
 
@@ -152,6 +189,11 @@ The storage backend is selected automatically based on the data source:
 - **Stdin/pipes**: Uses traditional in-memory storage
 - **Write operations**: Mmap tables convert to memory on first modification
 
+### Row Identity Across Updates
+
+UPDATE replaces a row in place rather than deleting and re-appending it, so a
+table keeps its row order and `--write` does not reorder the user's file.
+
 ### Write Operation Behavior
 
 When a table with mmap storage is modified (INSERT, UPDATE, DELETE):
@@ -197,9 +239,15 @@ The database engine supports combining data from multiple tables through SQL-sta
 
 ### Join Syntax
 
-- **ON constraints**: Supported for specifying join conditions (`JOIN t2 ON t1.id = t2.id`)
-- **USING constraints**: Not supported
+- **ON constraints**: Supported, and the condition is a full expression, not
+  just a single comparison: `ON a.id = b.id AND UPPER(a.name) = 'X'`
+- **Table aliases**: Supported (`FROM users u JOIN orders o ON u.id = o.user_id`)
+- **USING / NATURAL**: Not supported
 - **Multi-table joins**: Supports chaining 3+ tables in a single query
+- **Aggregates over joins**: Supported for inner joins, which are rewritten to
+  the equivalent comma join. Deliberately NOT applied to outer joins, since
+  moving the ON condition into WHERE would discard the NULL-extended rows an
+  outer join exists to produce
 
 ### Technical Implementation
 
@@ -213,9 +261,16 @@ The database engine supports combining data from multiple tables through SQL-sta
 The database engine has several architectural limitations:
 
 - **No Index Structure**: All operations perform full table scans
-- **No Transaction Support**: Operations are applied immediately with no rollback capability
-- **Schema Flexibility**: Types are inferred rather than enforced
+- **No Transaction Support**: A statement's modifications are applied once it
+  completes; there is no BEGIN/COMMIT and no rollback across statements
+- **Schema Flexibility**: Types are inferred per value rather than enforced
 - **No Constraints System**: Referential integrity not enforced
+- **Whole-dataset residency**: A table must fit in memory, or be addressable
+  via mmap
+
+Unsupported SQL of note: CTEs (`WITH`), explicit window frames
+(`ROWS BETWEEN ...`), `USING`/`NATURAL` joins, and aggregates over outer
+joins.
 
 ---
 

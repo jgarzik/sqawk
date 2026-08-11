@@ -4,12 +4,44 @@
 
 use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Select, SelectItem};
 
-use super::bytecode::{OpCode, ResultSchema};
-use super::compiler::SqlCompiler;
+use super::ast_compat::{func_args, func_is_distinct, group_by_exprs};
+use super::bytecode::{OpCode, ResultSchema, AGG_DISTINCT};
+use super::compiler::{NameCtx, SqlCompiler};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
 
+/// One column of a grouped result, in SELECT-list order.
+#[derive(Clone, Copy, Debug)]
+enum GroupOut {
+    /// The n-th GROUP BY key.
+    Key(usize),
+    /// The n-th aggregate.
+    Agg(usize),
+}
+
 impl<'a> SqlCompiler<'a> {
+    /// Collect every aggregate call within `expr`, in order of appearance.
+    ///
+    /// Detection used to look only at the top level, so `SUM(salary) + 1` was
+    /// not recognised as an aggregate query at all and fell through to the
+    /// plain table-scan path, where SUM is not a known scalar function.
+    fn collect_aggregates<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
+        if Self::is_aggregate_call(expr) {
+            out.push(expr);
+            return;
+        }
+        match expr {
+            Expr::BinaryOp { left, right, .. } => {
+                Self::collect_aggregates(left, out);
+                Self::collect_aggregates(right, out);
+            }
+            Expr::UnaryOp { expr: inner, .. }
+            | Expr::Nested(inner)
+            | Expr::Cast { expr: inner, .. } => Self::collect_aggregates(inner, out),
+            _ => {}
+        }
+    }
+
     pub(crate) fn compile_select_with_aggregate(
         &mut self,
         select: &Select,
@@ -59,20 +91,23 @@ impl<'a> SqlCompiler<'a> {
             );
         }
 
-        // For each aggregate in the projection, emit AggStep
-        let mut acc_regs = Vec::new();
+        // Gather every aggregate appearing anywhere in the projection, then
+        // step each one per row.
+        let mut agg_calls: Vec<&Expr> = Vec::new();
         for item in &select.projection {
-            match item {
-                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-                    if let Some((func_type, col_reg)) =
-                        self.compile_aggregate_step(expr, table, cursor_idx)?
-                    {
-                        let acc_reg = self.allocate_register();
-                        acc_regs.push((acc_reg, func_type));
-                        self.emit(OpCode::AggStep, func_type, col_reg, acc_reg, None, "");
-                    }
-                }
-                _ => {}
+            if let SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } = item {
+                Self::collect_aggregates(expr, &mut agg_calls);
+            }
+        }
+
+        let mut acc_regs = Vec::new();
+        for call in &agg_calls {
+            if let Some((func_type, col_reg)) =
+                self.compile_aggregate_step(call, table, cursor_idx)?
+            {
+                let acc_reg = self.allocate_register();
+                acc_regs.push(acc_reg);
+                self.emit(OpCode::AggStep, func_type, col_reg, acc_reg, None, "");
             }
         }
 
@@ -94,25 +129,48 @@ impl<'a> SqlCompiler<'a> {
             inst.p2 = after_loop as i64;
         }
 
-        // Finalize aggregates and output result
-        let result_start_reg = self.allocate_registers(acc_regs.len());
-
-        for (i, (acc_reg, _)) in acc_regs.iter().enumerate() {
+        // Finalize each aggregate into its own register.
+        let agg_start_reg = self.allocate_registers(acc_regs.len().max(1));
+        for (i, acc_reg) in acc_regs.iter().enumerate() {
             self.emit(
                 OpCode::AggFinal,
                 *acc_reg,
-                result_start_reg + i as i64,
+                agg_start_reg + i as i64,
                 0,
                 None,
                 "",
             );
         }
 
+        // Bind them by call text, then compile each projection item as an
+        // ordinary expression. That is what makes `SUM(salary) + 1` work: the
+        // arithmetic is compiled by the shared expression compiler, which
+        // resolves the inner SUM to its finalized register.
+        let mut ctx = NameCtx::single(table, cursor_idx);
+        for (i, call) in agg_calls.iter().enumerate() {
+            ctx.agg_bindings
+                .push((NameCtx::agg_key(call), agg_start_reg + i as i64));
+        }
+
+        let out_items: Vec<&Expr> = select
+            .projection
+            .iter()
+            .filter_map(|item| match item {
+                SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => Some(e),
+                _ => None,
+            })
+            .collect();
+
+        let result_start_reg = self.allocate_registers(out_items.len().max(1));
+        for (i, expr) in out_items.iter().enumerate() {
+            self.code_expr(expr, &ctx, Some(result_start_reg + i as i64))?;
+        }
+
         // Output result row
         self.emit(
             OpCode::ResultRow,
             result_start_reg,
-            acc_regs.len() as i64,
+            out_items.len() as i64,
             0,
             None,
             "",
@@ -134,28 +192,36 @@ impl<'a> SqlCompiler<'a> {
         match expr {
             Expr::Function(func) => {
                 let name = func.name.to_string().to_uppercase();
-                let func_type = Self::agg_func_type(&name);
+                // DISTINCT rides along as a flag bit on the function type.
+                // It used to be dropped entirely -- func.distinct was never
+                // read -- so COUNT(DISTINCT department) counted rows.
+                let func_type = Self::agg_func_type(&name)
+                    | if func_is_distinct(func) {
+                        AGG_DISTINCT
+                    } else {
+                        0
+                    };
 
                 // Check for COUNT(*)
-                if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) = func.args.first() {
+                if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
+                    func_args(func).first()
+                {
                     // COUNT(*) - use -1 to indicate no column
                     return Ok(Some((func_type, -1)));
                 }
 
-                // Get the column argument
+                // Compile the argument as a full expression.
+                //
+                // This used to call resolve_column_expr, which yields a column
+                // INDEX and so only accepts a bare column reference --
+                // `SUM(salary + age)` was rejected with "Only column
+                // references supported in SELECT". An aggregate argument is
+                // an ordinary expression evaluated once per row.
                 if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr))) =
-                    func.args.first()
+                    func_args(func).first()
                 {
-                    let col_idx = self.resolve_column_expr(arg_expr, table)?;
-                    let col_reg = self.allocate_register();
-                    self.emit(
-                        OpCode::Column,
-                        cursor_idx,
-                        col_idx as i64,
-                        col_reg,
-                        None,
-                        "",
-                    );
+                    let ctx = NameCtx::single(table, cursor_idx);
+                    let col_reg = self.code_expr(arg_expr, &ctx, None)?;
                     return Ok(Some((func_type, col_reg)));
                 }
 
@@ -189,6 +255,91 @@ impl<'a> SqlCompiler<'a> {
         schema
     }
 
+    /// Emit one grouped output row: keys, finalized aggregates, HAVING, ResultRow.
+    ///
+    /// Written once and called from both flush points -- the group-change flush
+    /// inside the drain loop and the final flush after it. Those were
+    /// copy-pasted duplicates, which is how HAVING came to be applied slightly
+    /// differently in each.
+    ///
+    /// Values are emitted in PROJECTION order. The result block used to be laid
+    /// out positionally as [group keys.., aggregates..] while the schema was
+    /// built from the SELECT list, so `SELECT COUNT(*), department ... GROUP BY
+    /// department` printed the header `COUNT,department` above the values
+    /// `Engineering,3`. Emitting through out_plan makes header and value order
+    /// the same by construction, and means a group key that is not projected
+    /// contributes no column instead of a phantom `col1`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_group_flush(
+        &mut self,
+        select: &Select,
+        table: &Table,
+        out_plan: &[GroupOut],
+        group_col_indices: &[usize],
+        agg_info: &[(i64, Option<usize>)],
+        group_key_reg: i64,
+        acc_base_reg: i64,
+        result_start_reg: i64,
+    ) -> SqawkResult<()> {
+        // Finalize every accumulator into its slot in the internal
+        // [keys.., aggs..] block, which HAVING resolves against.
+        for i in 0..agg_info.len() {
+            self.emit(
+                OpCode::AggFinal,
+                acc_base_reg + i as i64,
+                result_start_reg + group_col_indices.len() as i64 + i as i64,
+                0,
+                None,
+                "",
+            );
+        }
+        for i in 0..group_col_indices.len() {
+            self.emit(
+                OpCode::Copy,
+                group_key_reg + i as i64,
+                result_start_reg + i as i64,
+                0,
+                None,
+                "",
+            );
+        }
+
+        // HAVING gates the row, and is evaluated against the internal block.
+        let after_row = self.label();
+        if let Some(having_expr) = &select.having {
+            let having_reg = self.compile_having_condition(
+                having_expr,
+                table,
+                group_col_indices,
+                agg_info,
+                result_start_reg,
+                group_key_reg,
+            )?;
+            self.emit_jump_to(OpCode::IfZ, having_reg, after_row, 0, None, "HAVING failed");
+        }
+
+        // Gather into a contiguous block in projection order and emit.
+        let out_start = self.allocate_registers(out_plan.len().max(1));
+        for (i, slot) in out_plan.iter().enumerate() {
+            let src = match slot {
+                GroupOut::Key(k) => result_start_reg + *k as i64,
+                GroupOut::Agg(a) => result_start_reg + group_col_indices.len() as i64 + *a as i64,
+            };
+            self.emit(OpCode::Copy, src, out_start + i as i64, 0, None, "");
+        }
+        self.emit(
+            OpCode::ResultRow,
+            out_start,
+            out_plan.len() as i64,
+            0,
+            None,
+            "",
+        );
+
+        self.resolve(after_row);
+        Ok(())
+    }
+
     /// Compile a SELECT with GROUP BY
     pub(crate) fn compile_select_with_group_by(
         &mut self,
@@ -201,7 +352,7 @@ impl<'a> SqlCompiler<'a> {
 
         // Determine GROUP BY column indices
         let mut group_col_indices: Vec<usize> = Vec::new();
-        for expr in select.group_by.iter() {
+        for expr in group_by_exprs(&select.group_by).iter() {
             match expr {
                 Expr::Identifier(ident) => {
                     let col_name = ident.value.to_lowercase();
@@ -238,12 +389,12 @@ impl<'a> SqlCompiler<'a> {
                         if matches!(name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX") {
                             let func_type = Self::agg_func_type(&name);
                             if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
-                                func.args.first()
+                                func_args(func).first()
                             {
                                 agg_info.push((func_type, None));
                             } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(
                                 arg_expr,
-                            ))) = func.args.first()
+                            ))) = func_args(func).first()
                             {
                                 let col_idx = self.resolve_column_expr(arg_expr, table)?;
                                 agg_info.push((func_type, Some(col_idx)));
@@ -253,6 +404,45 @@ impl<'a> SqlCompiler<'a> {
                 }
                 _ => {}
             }
+        }
+
+        // Map each projected item to the group key or aggregate it names, in
+        // SELECT-list order. Emitting through this is what keeps the values
+        // aligned with the header the schema builder produces.
+        let mut out_plan: Vec<GroupOut> = Vec::with_capacity(select.projection.len());
+        let mut agg_seen = 0usize;
+        for item in &select.projection {
+            let expr = match item {
+                SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => e,
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Only expressions are supported in a GROUP BY projection".into(),
+                    ))
+                }
+            };
+            if Self::is_aggregate_call(expr) {
+                out_plan.push(GroupOut::Agg(agg_seen));
+                agg_seen += 1;
+                continue;
+            }
+            // Otherwise it must name a GROUP BY key: in a grouped query no
+            // other column has a single well-defined value per row.
+            let col_idx = self.resolve_column_expr(expr, table).map_err(|_| {
+                SqawkError::InvalidSqlQuery(format!(
+                    "'{}' must appear in GROUP BY or be used in an aggregate",
+                    expr
+                ))
+            })?;
+            let key_pos = group_col_indices
+                .iter()
+                .position(|c| *c == col_idx)
+                .ok_or_else(|| {
+                    SqawkError::InvalidSqlQuery(format!(
+                        "'{}' must appear in GROUP BY or be used in an aggregate",
+                        expr
+                    ))
+                })?;
+            out_plan.push(GroupOut::Key(key_pos));
         }
 
         // Build result schema with column names and types
@@ -296,6 +486,26 @@ impl<'a> SqlCompiler<'a> {
         self.emit(OpCode::Rewind, cursor_idx, 0, 0, None, "");
 
         let loop_start = self.program.len();
+
+        // WHERE filtering.
+        //
+        // This function never read select.selection, so WHERE was silently
+        // ignored on EVERY grouped query: `... WHERE salary > 60000 GROUP BY
+        // department` returned all departments with unfiltered counts. Filter
+        // before feeding the sorter so excluded rows never reach an
+        // accumulator.
+        let next_label = self.label();
+        if let Some(where_expr) = &select.selection {
+            let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
+            self.emit_jump_to(
+                OpCode::IfZ,
+                cond_reg,
+                next_label,
+                0,
+                None,
+                "Skip row if WHERE is false",
+            );
+        }
 
         // Allocate registers for row data
         let row_start_reg = self.allocate_registers(total_cols);
@@ -341,6 +551,7 @@ impl<'a> SqlCompiler<'a> {
         );
 
         // Next row
+        self.resolve(next_label);
         self.emit(OpCode::Next, cursor_idx, loop_start as i64, 0, None, "");
 
         let after_scan = self.program.len();
@@ -391,72 +602,44 @@ impl<'a> SqlCompiler<'a> {
         let first_row_jump_addr = self.program.len();
         self.emit(OpCode::IfPos, first_row_reg, 0, 0, None, "");
 
-        // Compare first group column with saved group key
-        let cmp_reg = self.allocate_register();
-        self.emit(OpCode::Ne, row_start_reg, group_key_reg, cmp_reg, None, "");
-
-        // If group NOT changed (cmp_reg is 0), skip output and go to step aggregates
-        let skip_output_addr = self.program.len();
-        self.emit(OpCode::IfZ, cmp_reg, 0, 0, None, "");
-
-        // Group changed - output previous group
-        // Copy group key to result
-        for i in 0..group_col_indices.len() {
-            self.emit(
-                OpCode::Copy,
-                group_key_reg + i as i64,
-                result_start_reg + i as i64,
-                0,
-                None,
-                "",
-            );
-        }
-
-        // Finalize aggregates
-        for (i, _) in agg_info.iter().enumerate() {
-            let dest_reg = result_start_reg + group_col_indices.len() as i64 + i as i64;
-            self.emit(
-                OpCode::AggFinal,
-                acc_base_reg + i as i64,
-                dest_reg,
-                0,
-                None,
-                "",
-            );
-        }
-
-        // Apply HAVING filter if present
-        let mut having_skip_addr: Option<usize> = None;
-        if let Some(having_expr) = &select.having {
-            let having_reg = self.compile_having_condition(
-                having_expr,
-                &group_col_indices,
-                &agg_info,
-                result_start_reg,
-                group_key_reg,
-            )?;
-            // If HAVING condition is false (0), skip ResultRow
-            having_skip_addr = Some(self.program.len());
-            self.emit(OpCode::IfZ, having_reg, 0, 0, None, "");
-        }
-
-        // Output result row
+        // Compare ALL group key columns against the saved key.
+        //
+        // This was a single `Ne` against column 0, so `GROUP BY department,
+        // role` grouped on department alone and reported whichever role
+        // happened to arrive first. Compare/Jump handles the whole key vector
+        // in two instructions regardless of width, and treats NULL as equal to
+        // NULL so NULL keys group together rather than starting a new group on
+        // every row.
         self.emit(
-            OpCode::ResultRow,
-            result_start_reg,
-            (group_col_indices.len() + agg_info.len()) as i64,
-            0,
+            OpCode::Compare,
+            row_start_reg,
+            group_key_reg,
+            group_col_indices.len() as i64,
             None,
-            "",
+            "Compare group key vector",
         );
+        // Equal -> same group, skip the flush. Less/Greater -> group changed.
+        let flush_label = self.label();
+        let skip_output_label = self.label();
+        self.emit_jump_to_three(
+            flush_label,
+            skip_output_label,
+            flush_label,
+            "Group changed?",
+        );
+        self.resolve(flush_label);
 
-        // Patch HAVING skip jump if present
-        if let Some(addr) = having_skip_addr {
-            let after_result = self.program.len();
-            if let Some(inst) = self.program.instructions.get_mut(addr) {
-                inst.p2 = after_result as i64;
-            }
-        }
+        // Group changed - output the group just completed.
+        self.emit_group_flush(
+            select,
+            table,
+            &out_plan,
+            &group_col_indices,
+            &agg_info,
+            group_key_reg,
+            acc_base_reg,
+            result_start_reg,
+        )?;
 
         // Reset accumulators for new group
         for (i, _) in agg_info.iter().enumerate() {
@@ -486,13 +669,8 @@ impl<'a> SqlCompiler<'a> {
         // Clear first row flag
         self.emit(OpCode::Integer, 0, first_row_reg, 0, None, "");
 
-        // === Step aggregates section (skip output jumps here) ===
-        let step_agg_addr = self.program.len();
-
-        // Patch skip output jump
-        if let Some(inst) = self.program.instructions.get_mut(skip_output_addr) {
-            inst.p2 = step_agg_addr as i64;
-        }
+        // === Step aggregates section (same-group rows jump here) ===
+        self.resolve(skip_output_label);
 
         // Step aggregates for current row
         for (i, (func_type, _)) in agg_info.iter().enumerate() {
@@ -517,64 +695,17 @@ impl<'a> SqlCompiler<'a> {
             "",
         );
 
-        // Output final group
-        // Copy group key to result
-        for i in 0..group_col_indices.len() {
-            self.emit(
-                OpCode::Copy,
-                group_key_reg + i as i64,
-                result_start_reg + i as i64,
-                0,
-                None,
-                "",
-            );
-        }
-
-        // Finalize aggregates
-        for (i, _) in agg_info.iter().enumerate() {
-            let dest_reg = result_start_reg + group_col_indices.len() as i64 + i as i64;
-            self.emit(
-                OpCode::AggFinal,
-                acc_base_reg + i as i64,
-                dest_reg,
-                0,
-                None,
-                "",
-            );
-        }
-
-        // Apply HAVING filter for final group if present
-        let mut final_having_skip_addr: Option<usize> = None;
-        if let Some(having_expr) = &select.having {
-            let having_reg = self.compile_having_condition(
-                having_expr,
-                &group_col_indices,
-                &agg_info,
-                result_start_reg,
-                group_key_reg,
-            )?;
-            // If HAVING condition is false (0), skip ResultRow
-            final_having_skip_addr = Some(self.program.len());
-            self.emit(OpCode::IfZ, having_reg, 0, 0, None, "");
-        }
-
-        // Output final result row
-        self.emit(
-            OpCode::ResultRow,
+        // Output the final group, which no group-change ever flushed.
+        self.emit_group_flush(
+            select,
+            table,
+            &out_plan,
+            &group_col_indices,
+            &agg_info,
+            group_key_reg,
+            acc_base_reg,
             result_start_reg,
-            (group_col_indices.len() + agg_info.len()) as i64,
-            0,
-            None,
-            "",
-        );
-
-        // Patch final HAVING skip jump if present
-        if let Some(addr) = final_having_skip_addr {
-            let after_result = self.program.len();
-            if let Some(inst) = self.program.instructions.get_mut(addr) {
-                inst.p2 = after_result as i64;
-            }
-        }
+        )?;
 
         // Close cursor
         self.emit(OpCode::Close, cursor_idx, 0, 0, None, "");
@@ -584,9 +715,11 @@ impl<'a> SqlCompiler<'a> {
 
     /// Compile a HAVING condition and return the register containing the result (1 or 0)
     /// agg_result_regs maps aggregate function signatures to their result registers
+    #[allow(clippy::too_many_arguments)]
     fn compile_having_condition(
         &mut self,
         having_expr: &Expr,
+        table: &Table,
         group_col_indices: &[usize],
         agg_info: &[(i64, Option<usize>)],
         result_start_reg: i64,
@@ -596,6 +729,7 @@ impl<'a> SqlCompiler<'a> {
             Expr::BinaryOp { left, op, right } => {
                 let left_reg = self.compile_having_operand(
                     left,
+                    table,
                     group_col_indices,
                     agg_info,
                     result_start_reg,
@@ -603,6 +737,7 @@ impl<'a> SqlCompiler<'a> {
                 )?;
                 let right_reg = self.compile_having_operand(
                     right,
+                    table,
                     group_col_indices,
                     agg_info,
                     result_start_reg,
@@ -618,9 +753,11 @@ impl<'a> SqlCompiler<'a> {
     }
 
     /// Compile an operand in a HAVING condition
+    #[allow(clippy::too_many_arguments)]
     fn compile_having_operand(
         &mut self,
         expr: &Expr,
+        table: &Table,
         group_col_indices: &[usize],
         agg_info: &[(i64, Option<usize>)],
         result_start_reg: i64,
@@ -628,14 +765,33 @@ impl<'a> SqlCompiler<'a> {
     ) -> SqawkResult<i64> {
         match expr {
             Expr::Function(func) => {
-                // Find the aggregate function in agg_info and return its result register
+                // Match the aggregate on BOTH its function type and its
+                // argument column.
+                //
+                // This used to compare func_type alone, so with two aggregates
+                // of the same kind -- `SELECT department, SUM(salary),
+                // SUM(age) ... HAVING SUM(age) > 60` -- HAVING bound to
+                // SUM(salary), whichever appeared first, and filtered on
+                // entirely the wrong column. MIN vs MAX bound correctly, which
+                // is why it stayed hidden.
                 let name = func.name.to_string().to_uppercase();
-                let func_type = Self::agg_func_type(&name);
+                let func_type = Self::agg_func_type(&name)
+                    | if func_is_distinct(func) {
+                        AGG_DISTINCT
+                    } else {
+                        0
+                    };
 
-                // Find matching aggregate in agg_info by function type
-                for (i, (agg_func_type, _)) in agg_info.iter().enumerate() {
-                    if *agg_func_type == func_type {
-                        // Found matching aggregate - copy its result to a new register
+                let wanted_col: Option<usize> = match func_args(func).first() {
+                    Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) => None,
+                    Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr))) => {
+                        Some(self.resolve_column_expr(arg_expr, table)?)
+                    }
+                    _ => None,
+                };
+
+                for (i, (agg_func_type, agg_col)) in agg_info.iter().enumerate() {
+                    if *agg_func_type == func_type && *agg_col == wanted_col {
                         let agg_result_reg =
                             result_start_reg + group_col_indices.len() as i64 + i as i64;
                         let reg = self.allocate_register();
@@ -645,24 +801,46 @@ impl<'a> SqlCompiler<'a> {
                 }
 
                 Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Aggregate function in HAVING not found in SELECT: {}",
-                    name
+                    "Aggregate in HAVING must also appear in SELECT: {}",
+                    expr
                 )))
             }
-            Expr::Value(value) => {
-                let reg = self.allocate_register();
-                if let sqlparser::ast::Value::Number(n, _) = value {
-                    if let Ok(i) = n.parse::<i64>() {
-                        self.emit(OpCode::Integer, i, reg, 0, None, "");
-                    }
-                }
-                Ok(reg)
+            Expr::Value(_) => {
+                // Compile the literal through the shared expression compiler.
+                //
+                // This arm used to handle Value::Number only, and silently
+                // emitted NOTHING for anything else -- so `HAVING department =
+                // 'Sales'` compared the group key against an uninitialized
+                // register and matched no group.
+                self.code_expr(expr, &NameCtx::single(table, 0), None)
             }
-            Expr::Identifier(_) => {
-                // GROUP BY column reference - copy from first group key register
-                // (simplified - for multi-column GROUP BY would need column name matching)
+            Expr::Identifier(ident) => {
+                // A GROUP BY key referenced in HAVING. This used to copy
+                // group_key_reg unconditionally -- the FIRST key column --
+                // whatever name was written, so any reference to a later key
+                // silently filtered on the first one.
+                let col_name = ident.value.to_ascii_lowercase();
+                let col_idx = table
+                    .column_index(&col_name)
+                    .ok_or_else(|| SqawkError::ColumnNotFound(col_name.clone()))?;
+                let key_pos = group_col_indices
+                    .iter()
+                    .position(|c| *c == col_idx)
+                    .ok_or_else(|| {
+                        SqawkError::InvalidSqlQuery(format!(
+                            "Column '{}' in HAVING must appear in GROUP BY",
+                            ident.value
+                        ))
+                    })?;
                 let reg = self.allocate_register();
-                self.emit(OpCode::Copy, group_key_reg, reg, 0, None, "");
+                self.emit(
+                    OpCode::Copy,
+                    group_key_reg + key_pos as i64,
+                    reg,
+                    0,
+                    None,
+                    "",
+                );
                 Ok(reg)
             }
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(

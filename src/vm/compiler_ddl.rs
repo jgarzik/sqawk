@@ -3,9 +3,10 @@
 //! This module extends SqlCompiler with DDL statement compilation methods.
 
 use sqlparser::ast::{
-    AlterTableOperation, ObjectName, ObjectType, SelectItem, SetExpr, TableFactor, Value,
+    AlterTableOperation, ObjectName, ObjectType, SelectItem, SetExpr, TableFactor,
 };
 
+use super::ast_compat::sql_option_key_value;
 use super::bytecode::OpCode;
 use super::compiler::SqlCompiler;
 use crate::error::{SqawkError, SqawkResult};
@@ -429,10 +430,10 @@ impl<'a> SqlCompiler<'a> {
 
         // Extract delimiter from WITH options
         let delimiter = with_options.iter().find_map(|opt| {
-            if opt.name.value.to_lowercase() == "delimiter" {
-                if let Value::SingleQuotedString(s) = &opt.value {
-                    return Some(s.clone());
-                }
+            let (key, value) = sql_option_key_value(opt)?;
+            if key.to_lowercase() == "delimiter" {
+                // `value` is rendered SQL, so a string literal arrives quoted.
+                return Some(value.trim_matches('\'').to_string());
             }
             None
         });

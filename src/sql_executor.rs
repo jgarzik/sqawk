@@ -69,8 +69,10 @@ impl<'a> SqlExecutor<'a> {
     /// * `sql` - SQL statement to execute
     ///
     /// # Returns
-    /// * `SqawkResult<Option<Table>>` - Result of the operation, possibly containing a table
-    pub fn execute(&mut self, sql: &str) -> SqawkResult<Option<crate::table::Table>> {
+    /// * One result table per statement that produced rows, in order. A
+    ///   multi-statement script yields one result set per statement; they are
+    ///   deliberately NOT merged, since each has its own column schema.
+    pub fn execute(&mut self, sql: &str) -> SqawkResult<Vec<crate::table::Table>> {
         if self.config.verbose() {
             println!("Executing SQL: {}", sql);
         }
@@ -86,18 +88,15 @@ impl<'a> SqlExecutor<'a> {
         // Track affected rows from the last statement
         self.affected_rows = result.affected_rows;
 
-        // Set delimiter on result table to match config (for consistent output format)
-        let table = match result.table {
-            Some(mut t) => {
-                if let Some(delim) = self.config.field_separator() {
-                    t.set_delimiter(delim);
-                }
-                Some(t)
+        // Set delimiter on each result table to match config
+        let mut tables = result.tables;
+        if let Some(delim) = self.config.field_separator() {
+            for t in &mut tables {
+                t.set_delimiter(delim.clone());
             }
-            None => None,
-        };
+        }
 
-        Ok(table)
+        Ok(tables)
     }
 
     /// Save all modified tables back to their source files
@@ -198,7 +197,9 @@ impl<'a> SqlExecutor<'a> {
     pub fn execute_sql(&mut self, sql: &str) -> Result<Option<ResultSet>> {
         let result = self.execute(sql)?;
 
-        Ok(result.map(|table| ResultSet {
+        // The REPL shows one result set at a time; a multi-statement line
+        // reports the last statement's.
+        Ok(result.last().map(|table| ResultSet {
             columns: table.columns().to_vec(),
             rows: table.rows_as_strings(),
         }))

@@ -3,8 +3,8 @@
 //! This module extends SqlCompiler with JOIN compilation methods.
 
 use sqlparser::ast::{
-    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, JoinConstraint, JoinOperator, Query,
-    Select, SelectItem, TableWithJoins, Value,
+    Expr, FunctionArg, FunctionArgExpr, JoinConstraint, JoinOperator, Query, Select, SelectItem,
+    TableWithJoins,
 };
 
 /// Represents an item in a multi-table aggregate projection
@@ -16,12 +16,132 @@ enum MultiTableProjectionItem {
     Aggregate(i64, Option<(usize, usize)>),
 }
 
+use super::ast_compat::{func_args, group_by_exprs};
 use super::bytecode::{OpCode, ResultSchema};
-use super::compiler::{MultiTableProjection, SqlCompiler};
+use super::compiler::{MultiTableProjection, NameCtx, SqlCompiler, Src};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
 
+/// Classify a `JoinOperator` into sqawk's join kind plus its constraint.
+///
+/// This is the single place where `JoinOperator` is destructured, and the match
+/// is deliberately EXHAUSTIVE -- no `_` arm. sqlparser treats any AST change as
+/// breaking, and `JoinOperator` gains variants across versions: newer releases
+/// parse a plain `LEFT JOIN` as `Left` rather than `LeftOuter`, reserving
+/// `LeftOuter` for the explicit `LEFT OUTER JOIN` spelling. Behind a catch-all
+/// that rename turns every `LEFT JOIN` in the suite into a runtime error (or,
+/// worse, silently into an INNER JOIN); with an exhaustive match it is a
+/// compile error that names the site.
+///
+/// `CrossJoin` returns `None` for its constraint -- callers handle it before
+/// asking for an ON expression.
+fn classify_join(op: &JoinOperator) -> SqawkResult<(&'static str, Option<&JoinConstraint>)> {
+    Ok(match op {
+        // A bare `JOIN ... ON` is an INNER JOIN. sqlparser distinguishes the
+        // spelling (`Join` vs `Inner`); SQL does not.
+        JoinOperator::Join(c) | JoinOperator::Inner(c) => ("INNER", Some(c)),
+        // Likewise `LEFT JOIN` and `LEFT OUTER JOIN` are the same operation,
+        // as are the RIGHT pair. sqlparser reserves the `*Outer` variants for
+        // the explicit OUTER spelling.
+        JoinOperator::Left(c) | JoinOperator::LeftOuter(c) => ("LEFT", Some(c)),
+        JoinOperator::Right(c) | JoinOperator::RightOuter(c) => ("RIGHT", Some(c)),
+        JoinOperator::FullOuter(c) => ("FULL", Some(c)),
+        JoinOperator::CrossJoin(_) => ("CROSS", None),
+        JoinOperator::Semi(_) | JoinOperator::LeftSemi(_) | JoinOperator::RightSemi(_) => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "SEMI JOIN not supported".into(),
+            ))
+        }
+        JoinOperator::Anti(_) | JoinOperator::LeftAnti(_) | JoinOperator::RightAnti(_) => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "ANTI JOIN not supported".into(),
+            ))
+        }
+        JoinOperator::CrossApply => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "CROSS APPLY not supported".into(),
+            ))
+        }
+        JoinOperator::OuterApply => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "OUTER APPLY not supported".into(),
+            ))
+        }
+        JoinOperator::AsOf { .. } => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "ASOF JOIN not supported".into(),
+            ))
+        }
+        // MySQL optimizer hint: semantically a plain INNER JOIN, but it also
+        // forces a join order. Rejected rather than silently ignoring the hint.
+        JoinOperator::StraightJoin(_) => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "STRAIGHT_JOIN not supported".into(),
+            ))
+        }
+        JoinOperator::ArrayJoin | JoinOperator::LeftArrayJoin | JoinOperator::InnerArrayJoin => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "ARRAY JOIN not supported".into(),
+            ))
+        }
+    })
+}
+
+/// The name a query uses to refer to a FROM item: its alias if it has one,
+/// otherwise the table name.
+///
+/// SQL lets a join alias its inputs, and `FROM users u JOIN orders o ON
+/// u.id = o.user_id` must resolve `u` and `o`. Aliases already worked for a
+/// single table and for comma joins; explicit joins resolved against the table
+/// name alone, so any aliased explicit join failed with "Table 'u' not found".
+fn table_refname(factor: &sqlparser::ast::TableFactor, fallback: &str) -> String {
+    match factor {
+        sqlparser::ast::TableFactor::Table {
+            alias: Some(alias), ..
+        } => alias.name.value.to_ascii_lowercase(),
+        _ => fallback.to_ascii_lowercase(),
+    }
+}
+
+/// Resolved join projection: the left table's column indices, the right
+/// table's column indices, the output schema, and where each projected column
+/// lives as (side, index within that side) in SELECT-list order.
+type JoinProjection = (Vec<usize>, Vec<usize>, ResultSchema, Vec<(usize, usize)>);
+
 impl<'a> SqlCompiler<'a> {
+    /// Emit a join result row in SELECT-list order.
+    ///
+    /// Join registers are laid out left-table columns then right-table
+    /// columns, but the schema is built in projection order, so emitting the
+    /// raw block put values under the wrong headers whenever the SELECT list
+    /// interleaved the tables: `SELECT orders.id, users.name` printed the
+    /// header `orders.id,users.name` above the values `John,101`.
+    fn emit_join_result_row(
+        &mut self,
+        out_plan: &[(usize, usize)],
+        left_start_reg: i64,
+        left_len: usize,
+        comment: &str,
+    ) {
+        let out = self.allocate_registers(out_plan.len().max(1));
+        for (i, (side, idx)) in out_plan.iter().enumerate() {
+            let src = if *side == 0 {
+                left_start_reg + *idx as i64
+            } else {
+                left_start_reg + left_len as i64 + *idx as i64
+            };
+            self.emit(OpCode::Copy, src, out + i as i64, 0, None, "");
+        }
+        self.emit(
+            OpCode::ResultRow,
+            out,
+            out_plan.len() as i64,
+            0,
+            None,
+            comment,
+        );
+    }
+
     pub(crate) fn compile_join(
         &mut self,
         table_with_joins: &TableWithJoins,
@@ -63,22 +183,23 @@ impl<'a> SqlCompiler<'a> {
             return Err(SqawkError::TableNotFound(right_table_name));
         }
 
+        // How the query refers to each side: alias if given, else table name.
+        let left_ref = table_refname(&table_with_joins.relation, &left_table_name);
+        let right_ref = table_refname(&join.relation, &right_table_name);
+
         // Check for CROSS JOIN - handle separately
-        if matches!(&join.join_operator, JoinOperator::CrossJoin) {
+        if matches!(&join.join_operator, JoinOperator::CrossJoin(_)) {
             return self.compile_cross_join(&left_table_name, &right_table_name, projection);
         }
 
-        // Determine join type and constraint
-        let (join_type, join_condition) = match &join.join_operator {
-            JoinOperator::LeftOuter(constraint) => ("LEFT", constraint),
-            JoinOperator::RightOuter(constraint) => ("RIGHT", constraint),
-            JoinOperator::FullOuter(constraint) => ("FULL", constraint),
-            JoinOperator::Inner(constraint) => ("INNER", constraint),
-            JoinOperator::CrossJoin => unreachable!("Handled above"),
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Unsupported join type".into(),
-                ))
+        // Determine join type and constraint. See `classify_join`.
+        let (join_type, join_condition) = match classify_join(&join.join_operator)? {
+            ("CROSS", _) => unreachable!("Handled above"),
+            (kind, Some(constraint)) => (kind, constraint),
+            (kind, None) => {
+                return Err(SqawkError::UnsupportedSqlFeature(format!(
+                    "{kind} JOIN without a constraint is not supported"
+                )))
             }
         };
 
@@ -114,12 +235,12 @@ impl<'a> SqlCompiler<'a> {
         let right_table = self.database.get_table(&right_table_name)?;
 
         // Determine which columns to output based on projection
-        let (left_cols, right_cols, schema) = self.resolve_join_projection(
+        let (left_cols, right_cols, schema, out_plan) = self.resolve_join_projection(
             projection,
             left_table,
             right_table,
-            &left_table_name,
-            &right_table_name,
+            &left_ref,
+            &right_ref,
         )?;
 
         // Set result schema
@@ -238,12 +359,14 @@ impl<'a> SqlCompiler<'a> {
         self.emit_column_loads(inner_cursor as i64, &inner_cols, inner_start_reg, "inner");
 
         // Compile join condition
-        let condition_reg = self.compile_join_condition(
+        let condition_reg = self.compile_join_condition_with_refs(
             on_expr,
             left_table,
             right_table,
             left_cursor,
             right_cursor,
+            &left_ref,
+            &right_ref,
         )?;
 
         // If ON condition fails, skip to next inner iteration (placeholder - will be patched)
@@ -260,12 +383,14 @@ impl<'a> SqlCompiler<'a> {
         // Compile WHERE clause filtering if present
         let skip_where_addr = if let Some(where_expr) = where_clause {
             // Use compile_join_condition to handle table.column references in WHERE
-            let where_cond_reg = self.compile_join_condition(
+            let where_cond_reg = self.compile_join_condition_with_refs(
                 where_expr,
                 left_table,
                 right_table,
                 left_cursor,
                 right_cursor,
+                &left_ref,
+                &right_ref,
             )?;
 
             // If WHERE condition fails, skip to next inner iteration
@@ -294,12 +419,10 @@ impl<'a> SqlCompiler<'a> {
         );
 
         // Output combined row (matched)
-        self.emit(
-            OpCode::ResultRow,
+        self.emit_join_result_row(
+            &out_plan,
             left_start_reg,
-            (left_cols.len() + right_cols.len()) as i64,
-            0,
-            None,
+            left_cols.len(),
             "Output matched row",
         );
 
@@ -331,14 +454,18 @@ impl<'a> SqlCompiler<'a> {
         // LEFT JOIN: outer=left, inner=right, fill right with NULL
         // RIGHT JOIN: outer=right, inner=left, fill left with NULL
         if join_type == "LEFT" || join_type == "RIGHT" || join_type == "FULL" {
-            // Check match flag - if match found (non-zero), skip NULL row output
-            // If no match (zero), continue to NullRow
-            // Jump calculation: IfPos (current), NullRow (+1), ResultRow (+2), Next outer (+3)
-            // So if match found, skip to +3 (Next outer)
-            self.emit(
+            // If a match was found, skip the NULL-filled row entirely.
+            //
+            // This was a hand-counted `program.len() + 3` justified by a
+            // comment enumerating the three instructions that followed. The
+            // count silently stopped being 3 the moment the result row needed
+            // more than one instruction to emit, so the jump landed inside the
+            // block it was supposed to skip and produced spurious NULL rows.
+            let skip_null_row = self.label();
+            self.emit_jump_to(
                 OpCode::IfPos,
                 match_reg,
-                (self.program.len() + 3) as i64,
+                skip_null_row,
                 0,
                 None,
                 "Skip NULL row if match found",
@@ -355,14 +482,13 @@ impl<'a> SqlCompiler<'a> {
             );
 
             // Output row with NULLs
-            self.emit(
-                OpCode::ResultRow,
+            self.emit_join_result_row(
+                &out_plan,
                 left_start_reg,
-                (left_cols.len() + right_cols.len()) as i64,
-                0,
-                None,
+                left_cols.len(),
                 "Output outer row with NULLs for inner",
             );
+            self.resolve(skip_null_row);
         }
 
         // Next outer
@@ -432,20 +558,23 @@ impl<'a> SqlCompiler<'a> {
             self.emit_column_loads(left_cursor as i64, &left_cols, left_start_reg, "left");
 
             // Check join condition
-            let condition_reg2 = self.compile_join_condition(
+            let condition_reg2 = self.compile_join_condition_with_refs(
                 on_expr,
                 left_table,
                 right_table,
                 left_cursor,
                 right_cursor,
+                &left_ref,
+                &right_ref,
             )?;
 
             // If condition matches, mark it and skip to next right row
             // IfZ skips over MarkMatch if condition is false
-            self.emit(
+            let skip_mark = self.label();
+            self.emit_jump_to(
                 OpCode::IfZ,
                 condition_reg2,
-                (self.program.len() + 2) as i64,
+                skip_mark,
                 0,
                 None,
                 "Skip if condition false",
@@ -460,6 +589,7 @@ impl<'a> SqlCompiler<'a> {
                 None,
                 "Mark that right row has a match",
             );
+            self.resolve(skip_mark);
 
             // Next left (continue checking)
             self.emit(
@@ -475,10 +605,11 @@ impl<'a> SqlCompiler<'a> {
 
             // After checking all left rows: if no match, output right row with NULLs for left
             // If match found (IfPos), skip to next right row
-            self.emit(
+            let skip_null_left = self.label();
+            self.emit_jump_to(
                 OpCode::IfPos,
                 match_reg,
-                (self.program.len() + 3) as i64,
+                skip_null_left,
                 0,
                 None,
                 "Skip if right row had a match",
@@ -495,14 +626,13 @@ impl<'a> SqlCompiler<'a> {
             );
 
             // Output row with NULLs for left
-            self.emit(
-                OpCode::ResultRow,
+            self.emit_join_result_row(
+                &out_plan,
                 left_start_reg,
-                (left_cols.len() + right_cols.len()) as i64,
-                0,
-                None,
+                left_cols.len(),
                 "Output unmatched right row with NULLs",
             );
+            self.resolve(skip_null_left);
 
             // Next right row
             self.emit(
@@ -598,7 +728,7 @@ impl<'a> SqlCompiler<'a> {
         let right_table = self.database.get_table(right_table_name)?;
 
         // Determine which columns to output based on projection
-        let (left_cols, right_cols, schema) = self.resolve_join_projection(
+        let (left_cols, right_cols, schema, out_plan) = self.resolve_join_projection(
             projection,
             left_table,
             right_table,
@@ -670,12 +800,10 @@ impl<'a> SqlCompiler<'a> {
         self.emit_column_loads(right_cursor as i64, &right_cols, right_start_reg, "right");
 
         // Output combined row
-        self.emit(
-            OpCode::ResultRow,
+        self.emit_join_result_row(
+            &out_plan,
             left_start_reg,
-            (left_cols.len() + right_cols.len()) as i64,
-            0,
-            None,
+            left_cols.len(),
             "Output cross join row",
         );
 
@@ -966,7 +1094,7 @@ impl<'a> SqlCompiler<'a> {
 
         // Determine GROUP BY column references
         let mut group_col_refs: Vec<(usize, usize)> = Vec::new(); // (table_idx, col_idx)
-        for expr in select.group_by.iter() {
+        for expr in group_by_exprs(&select.group_by).iter() {
             let (tbl_idx, col_idx) = self.resolve_multi_table_column(expr, &tables, &table_refs)?;
             group_col_refs.push((tbl_idx, col_idx));
         }
@@ -991,11 +1119,11 @@ impl<'a> SqlCompiler<'a> {
                     if matches!(name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX") {
                         let func_type = Self::agg_func_type(&name);
                         let col_ref = if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
-                            func.args.first()
+                            func_args(func).first()
                         {
                             None // COUNT(*)
                         } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr))) =
-                            func.args.first()
+                            func_args(func).first()
                         {
                             let (tbl_idx, col_idx) =
                                 self.resolve_multi_table_column(arg_expr, &tables, &table_refs)?;
@@ -1935,144 +2063,37 @@ impl<'a> SqlCompiler<'a> {
     }
 
     /// Compile a WHERE condition for multi-table joins
+    /// Compile a WHERE condition spanning several tables.
+    ///
+    /// Delegates to the shared expression compiler with one name-resolution
+    /// source per table. Cursor `i` reads `tables[i]`, which is how the
+    /// implicit-join loop opens them.
+    ///
+    /// This replaces a private condition/operand pair that understood only
+    /// AND, OR and the six comparisons over compound identifiers and literals.
+    /// Anything else -- a function call, arithmetic, IS NULL -- was rejected in
+    /// a multi-table WHERE while working in a single-table one.
     fn compile_multi_table_condition(
         &mut self,
         expr: &Expr,
         tables: &[&Table],
         table_names: &[String],
     ) -> SqawkResult<i64> {
-        match expr {
-            Expr::BinaryOp { left, op, right } => {
-                match op {
-                    BinaryOperator::And => {
-                        let left_reg =
-                            self.compile_multi_table_condition(left, tables, table_names)?;
-                        let right_reg =
-                            self.compile_multi_table_condition(right, tables, table_names)?;
-                        Ok(self.emit_and(left_reg, right_reg))
-                    }
-                    BinaryOperator::Or => {
-                        let left_reg =
-                            self.compile_multi_table_condition(left, tables, table_names)?;
-                        let right_reg =
-                            self.compile_multi_table_condition(right, tables, table_names)?;
-                        Ok(self.emit_or(left_reg, right_reg))
-                    }
-                    // Comparison operators
-                    BinaryOperator::Eq
-                    | BinaryOperator::NotEq
-                    | BinaryOperator::Lt
-                    | BinaryOperator::LtEq
-                    | BinaryOperator::Gt
-                    | BinaryOperator::GtEq => {
-                        let left_reg = self.allocate_register();
-                        let right_reg = self.allocate_register();
-                        self.compile_multi_table_operand(left, tables, table_names, left_reg)?;
-                        self.compile_multi_table_operand(right, tables, table_names, right_reg)?;
-                        self.emit_comparison(op, left_reg, right_reg)
-                    }
-                    _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                        "Unsupported binary operator in multi-table WHERE: {:?}",
-                        op
-                    ))),
-                }
-            }
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported expression type in multi-table WHERE: {:?}",
-                expr
-            ))),
-        }
+        let srcs = tables
+            .iter()
+            .zip(table_names.iter())
+            .enumerate()
+            .map(|(i, (table, name))| Src {
+                cursor: i as i64,
+                reg_base: None,
+                table,
+                refname: name.to_ascii_lowercase(),
+            })
+            .collect();
+        let ctx = NameCtx::multi(srcs);
+        self.code_expr(expr, &ctx, None)
     }
 
-    /// Compile an operand for a multi-table condition (column ref or literal)
-    fn compile_multi_table_operand(
-        &mut self,
-        expr: &Expr,
-        tables: &[&Table],
-        table_names: &[String],
-        target_reg: i64,
-    ) -> SqawkResult<()> {
-        match expr {
-            Expr::CompoundIdentifier(parts) => {
-                if parts.len() == 2 {
-                    let tbl_name = &parts[0].value;
-                    let col_name = &parts[1].value;
-
-                    // Find which table this column belongs to
-                    for (i, table_name) in table_names.iter().enumerate() {
-                        if tbl_name.eq_ignore_ascii_case(table_name) {
-                            let columns = tables[i].columns();
-                            if let Some(col_idx) = columns
-                                .iter()
-                                .position(|c| c.eq_ignore_ascii_case(col_name))
-                            {
-                                self.emit(
-                                    OpCode::Column,
-                                    i as i64,
-                                    col_idx as i64,
-                                    target_reg,
-                                    None,
-                                    &format!("r[{}] = {}.{}", target_reg, table_name, col_name),
-                                );
-                                return Ok(());
-                            } else {
-                                return Err(SqawkError::ColumnNotFound(col_name.clone()));
-                            }
-                        }
-                    }
-                    Err(SqawkError::TableNotFound(tbl_name.clone()))
-                } else {
-                    Err(SqawkError::UnsupportedSqlFeature(format!(
-                        "Compound identifier with {} parts not supported",
-                        parts.len()
-                    )))
-                }
-            }
-            Expr::Value(value) => {
-                match value {
-                    Value::Number(num, _) => {
-                        if let Ok(int_val) = num.parse::<i64>() {
-                            self.emit(
-                                OpCode::Integer,
-                                int_val,
-                                target_reg,
-                                0,
-                                None,
-                                &format!("r[{}] = {}", target_reg, int_val),
-                            );
-                        } else {
-                            return Err(SqawkError::UnsupportedSqlFeature(format!(
-                                "Non-integer literal: {}",
-                                num
-                            )));
-                        }
-                    }
-                    Value::SingleQuotedString(s) => {
-                        self.emit(
-                            OpCode::String,
-                            0,
-                            target_reg,
-                            0,
-                            Some(s.clone()),
-                            &format!("r[{}] = '{}'", target_reg, s),
-                        );
-                    }
-                    _ => {
-                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                            "Unsupported literal type: {:?}",
-                            value
-                        )));
-                    }
-                }
-                Ok(())
-            }
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported operand type in multi-table condition: {:?}",
-                expr
-            ))),
-        }
-    }
-    /// Compile a multi-table JOIN (3+ tables)
     pub(crate) fn compile_multi_join(
         &mut self,
         table_with_joins: &TableWithJoins,
@@ -2117,9 +2138,12 @@ impl<'a> SqlCompiler<'a> {
                 }
             };
 
-            // Only support INNER JOIN for multi-table joins
-            match &join.join_operator {
-                JoinOperator::Inner(JoinConstraint::On(expr)) => {
+            // Only support INNER JOIN for multi-table joins. Routed through
+            // `classify_join` so a new/renamed JoinOperator variant is a
+            // compile error here too, rather than silently falling into the
+            // "Only INNER JOIN" error arm.
+            match classify_join(&join.join_operator)? {
+                ("INNER", Some(JoinConstraint::On(expr))) => {
                     join_conditions.push(expr);
                 }
                 _ => {
@@ -2232,7 +2256,7 @@ impl<'a> SqlCompiler<'a> {
         for (i, cond) in join_conditions.iter().enumerate() {
             // Use table_refs (aliases) for column resolution
             let cond_reg =
-                self.compile_multi_join_condition(cond, &table_refs, &table_start_regs)?;
+                self.compile_multi_join_condition(cond, &tables, &table_refs, &table_start_regs)?;
 
             // If condition fails, skip to next innermost iteration (placeholder)
             let skip_addr = self.program.len();
@@ -2367,112 +2391,37 @@ impl<'a> SqlCompiler<'a> {
         Ok(())
     }
 
-    /// Compile a join condition for multi-table joins
+    /// Compile a join condition for multi-table joins.
+    ///
+    /// Here every table's columns have already been loaded into registers, so
+    /// a column reference is a register offset rather than a cursor read. That
+    /// is what `Src::reg_base` models, which lets this share the expression
+    /// compiler with the cursor-based paths instead of carrying its own
+    /// condition/operand pair -- one that understood a single top-level
+    /// comparison and nothing else.
     fn compile_multi_join_condition(
         &mut self,
         expr: &Expr,
-        table_names: &[String],
+        tables: &[&Table],
+        table_refs: &[String],
         table_start_regs: &[i64],
     ) -> SqawkResult<i64> {
-        match expr {
-            Expr::BinaryOp { left, op, right } => {
-                let left_reg =
-                    self.compile_multi_join_operand(left, table_names, table_start_regs)?;
-                let right_reg =
-                    self.compile_multi_join_operand(right, table_names, table_start_regs)?;
-                self.emit_comparison(op, left_reg, right_reg)
-            }
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported multi-join condition: {:?}",
-                expr
-            ))),
-        }
+        let srcs = tables
+            .iter()
+            .zip(table_refs.iter())
+            .zip(table_start_regs.iter())
+            .enumerate()
+            .map(|(i, ((table, name), base))| Src {
+                cursor: i as i64,
+                reg_base: Some(*base),
+                table,
+                refname: name.to_ascii_lowercase(),
+            })
+            .collect();
+        let ctx = NameCtx::multi(srcs);
+        self.code_expr(expr, &ctx, None)
     }
 
-    /// Compile an operand for multi-table join conditions
-    fn compile_multi_join_operand(
-        &mut self,
-        expr: &Expr,
-        table_names: &[String],
-        table_start_regs: &[i64],
-    ) -> SqawkResult<i64> {
-        match expr {
-            Expr::CompoundIdentifier(parts) => {
-                if parts.len() == 2 {
-                    let table_alias = parts[0].value.to_lowercase();
-                    let col_name = parts[1].value.to_lowercase();
-
-                    // Find which table this refers to
-                    for (i, name) in table_names.iter().enumerate() {
-                        if name.to_lowercase() == table_alias {
-                            let table = self.database.get_table(name)?;
-                            if let Some(col_idx) = table.column_index(&col_name) {
-                                // The column value should already be loaded in register
-                                let reg = table_start_regs[i] + col_idx as i64;
-                                return Ok(reg);
-                            }
-                        }
-                    }
-                }
-                Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Could not resolve column reference: {:?}",
-                    expr
-                )))
-            }
-            Expr::Identifier(ident) => {
-                // Unqualified column name - search all tables
-                let col_name = ident.value.to_lowercase();
-                for (i, name) in table_names.iter().enumerate() {
-                    let table = self.database.get_table(name)?;
-                    if let Some(col_idx) = table.column_index(&col_name) {
-                        let reg = table_start_regs[i] + col_idx as i64;
-                        return Ok(reg);
-                    }
-                }
-                Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Could not find column: {}",
-                    col_name
-                )))
-            }
-            Expr::Value(val) => {
-                let reg = self.allocate_register();
-                match val {
-                    sqlparser::ast::Value::Number(n, _) => {
-                        if let Ok(i) = n.parse::<i64>() {
-                            self.emit(OpCode::Integer, i, reg, 0, None, "Load constant");
-                        } else {
-                            return Err(SqawkError::UnsupportedSqlFeature(
-                                "Only integer constants supported".into(),
-                            ));
-                        }
-                    }
-                    sqlparser::ast::Value::SingleQuotedString(s) => {
-                        self.emit(
-                            OpCode::String,
-                            0,
-                            reg,
-                            0,
-                            Some(s.clone()),
-                            "Load string constant",
-                        );
-                    }
-                    _ => {
-                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                            "Unsupported value type: {:?}",
-                            val
-                        )))
-                    }
-                }
-                Ok(reg)
-            }
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported operand in multi-join: {:?}",
-                expr
-            ))),
-        }
-    }
-
-    /// Resolve projection for join - returns (left_col_indices, right_col_indices, schema)
     fn resolve_join_projection(
         &self,
         projection: &[SelectItem],
@@ -2480,7 +2429,7 @@ impl<'a> SqlCompiler<'a> {
         right_table: &Table,
         left_table_name: &str,
         right_table_name: &str,
-    ) -> SqawkResult<(Vec<usize>, Vec<usize>, ResultSchema)> {
+    ) -> SqawkResult<JoinProjection> {
         let tables: Vec<&Table> = vec![left_table, right_table];
         let table_names: Vec<&str> = vec![left_table_name, right_table_name];
 
@@ -2488,7 +2437,15 @@ impl<'a> SqlCompiler<'a> {
         for item in projection {
             if matches!(item, SelectItem::Wildcard(_)) {
                 let (table_cols, schema) = Self::build_wildcard_schema(&tables, &table_names);
-                return Ok((table_cols[0].clone(), table_cols[1].clone(), schema));
+                // Wildcard output IS left-then-right, so the plan is the
+                // identity over that layout.
+                let plan = table_cols[0]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| (0usize, i))
+                    .chain(table_cols[1].iter().enumerate().map(|(i, _)| (1usize, i)))
+                    .collect();
+                return Ok((table_cols[0].clone(), table_cols[1].clone(), schema, plan));
             }
         }
 
@@ -2496,6 +2453,11 @@ impl<'a> SqlCompiler<'a> {
         let mut left_cols = Vec::new();
         let mut right_cols = Vec::new();
         let mut schema = ResultSchema::new();
+        // Where each projected column lives: (side, index within that side).
+        // Registers are laid out left-then-right, but the SELECT list may name
+        // them in any order, so the emission order has to be recorded rather
+        // than assumed.
+        let mut out_plan: Vec<(usize, usize)> = Vec::with_capacity(projection.len());
 
         for item in projection {
             let (tbl_name, col_name, output_name) = match item {
@@ -2519,8 +2481,10 @@ impl<'a> SqlCompiler<'a> {
             let (tbl_idx, col_idx) =
                 Self::find_column_in_tables(&tbl_name, &col_name, &tables, &table_names)?;
             if tbl_idx == 0 {
+                out_plan.push((0, left_cols.len()));
                 left_cols.push(col_idx);
             } else {
+                out_plan.push((1, right_cols.len()));
                 right_cols.push(col_idx);
             }
             schema.add_column(
@@ -2529,7 +2493,7 @@ impl<'a> SqlCompiler<'a> {
             );
         }
 
-        Ok((left_cols, right_cols, schema))
+        Ok((left_cols, right_cols, schema, out_plan))
     }
 
     /// Extract table and column name from a compound identifier (e.g., users.name)
@@ -2560,29 +2524,16 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// Compile a join condition expression
-    fn compile_join_condition(
-        &mut self,
-        expr: &Expr,
-        left_table: &Table,
-        right_table: &Table,
-        left_cursor: usize,
-        right_cursor: usize,
-    ) -> SqawkResult<i64> {
-        // Use table names as references (no aliases)
-        let left_ref = left_table.name().to_string();
-        let right_ref = right_table.name().to_string();
-        self.compile_join_condition_with_refs(
-            expr,
-            left_table,
-            right_table,
-            left_cursor,
-            right_cursor,
-            &left_ref,
-            &right_ref,
-        )
-    }
-
+    /// Compile a two-table join condition through the shared expression
+    /// compiler.
+    ///
+    /// Qualifiers resolve against `left_ref`/`right_ref` -- the alias each side
+    /// was given, or its table name if it had none.
+    ///
+    /// This replaces a private family of three functions: a condition compiler
+    /// that understood only a single top-level BinaryOp, and an operand
+    /// compiler beneath it. So `ON a.x = b.y AND a.z = 1` was rejected, as was
+    /// any function call in an ON clause, even though both work in a WHERE.
     #[allow(clippy::too_many_arguments)]
     fn compile_join_condition_with_refs(
         &mut self,
@@ -2594,163 +2545,21 @@ impl<'a> SqlCompiler<'a> {
         left_ref: &str,
         right_ref: &str,
     ) -> SqawkResult<i64> {
-        // Handle a.col = b.col style conditions
-        match expr {
-            Expr::BinaryOp { left, op, right } => {
-                let left_reg = self.compile_join_operand_with_refs(
-                    left,
-                    left_table,
-                    right_table,
-                    left_cursor,
-                    right_cursor,
-                    left_ref,
-                    right_ref,
-                )?;
-                let right_reg = self.compile_join_operand_with_refs(
-                    right,
-                    left_table,
-                    right_table,
-                    left_cursor,
-                    right_cursor,
-                    left_ref,
-                    right_ref,
-                )?;
-                self.emit_comparison(op, left_reg, right_reg)
-            }
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported join condition expression: {:?}",
-                expr
-            ))),
-        }
-    }
-
-    /// Compile a join operand with explicit table references (aliases or names)
-    #[allow(clippy::too_many_arguments)]
-    fn compile_join_operand_with_refs(
-        &mut self,
-        expr: &Expr,
-        left_table: &Table,
-        right_table: &Table,
-        left_cursor: usize,
-        right_cursor: usize,
-        left_ref: &str,
-        right_ref: &str,
-    ) -> SqawkResult<i64> {
-        match expr {
-            Expr::CompoundIdentifier(parts) => {
-                // Handle table.column syntax
-                if parts.len() == 2 {
-                    let table_alias = parts[0].value.to_lowercase();
-                    let col_name = parts[1].value.to_lowercase();
-
-                    // Try to find column in left or right table
-                    // Check against table references (which may be aliases)
-                    let left_ref_lower = left_ref.to_lowercase();
-                    let right_ref_lower = right_ref.to_lowercase();
-
-                    if table_alias == left_ref_lower {
-                        if let Some(col_idx) = left_table.column_index(&col_name) {
-                            let reg = self.allocate_register();
-                            self.emit(
-                                OpCode::Column,
-                                left_cursor as i64,
-                                col_idx as i64,
-                                reg,
-                                None,
-                                &format!("Load {}.{} for join", table_alias, col_name),
-                            );
-                            return Ok(reg);
-                        }
-                    } else if table_alias == right_ref_lower {
-                        if let Some(col_idx) = right_table.column_index(&col_name) {
-                            let reg = self.allocate_register();
-                            self.emit(
-                                OpCode::Column,
-                                right_cursor as i64,
-                                col_idx as i64,
-                                reg,
-                                None,
-                                &format!("Load {}.{} for join", table_alias, col_name),
-                            );
-                            return Ok(reg);
-                        }
-                    }
-
-                    Err(SqawkError::UnsupportedSqlFeature(format!(
-                        "Column {}.{} not found in join tables",
-                        table_alias, col_name
-                    )))
-                } else {
-                    Err(SqawkError::UnsupportedSqlFeature(
-                        "Expected table.column in join condition".into(),
-                    ))
-                }
-            }
-            Expr::Identifier(ident) => {
-                // Unqualified column name - try to find in either table
-                let col_name = ident.value.to_lowercase();
-
-                // Try left table first
-                if let Some(col_idx) = left_table.column_index(&col_name) {
-                    let reg = self.allocate_register();
-                    self.emit(
-                        OpCode::Column,
-                        left_cursor as i64,
-                        col_idx as i64,
-                        reg,
-                        None,
-                        &format!("Load {} from left for join", col_name),
-                    );
-                    return Ok(reg);
-                }
-
-                // Try right table
-                if let Some(col_idx) = right_table.column_index(&col_name) {
-                    let reg = self.allocate_register();
-                    self.emit(
-                        OpCode::Column,
-                        right_cursor as i64,
-                        col_idx as i64,
-                        reg,
-                        None,
-                        &format!("Load {} from right for join", col_name),
-                    );
-                    return Ok(reg);
-                }
-
-                Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Column {} not found in either join table",
-                    col_name
-                )))
-            }
-            Expr::Value(val) => {
-                // Literal value in join condition
-                let reg = self.allocate_register();
-                match val {
-                    Value::Number(n, _) => {
-                        if let Ok(i) = n.parse::<i64>() {
-                            self.emit(OpCode::Integer, i, reg, 0, None, "Load literal for join");
-                        }
-                    }
-                    Value::SingleQuotedString(s) => {
-                        self.emit(
-                            OpCode::String,
-                            0,
-                            reg,
-                            0,
-                            Some(s.clone()),
-                            "Load string literal for join",
-                        );
-                    }
-                    _ => {}
-                }
-                Ok(reg)
-            }
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported join operand: {:?}",
-                expr
-            ))),
-        }
+        let ctx = NameCtx::multi(vec![
+            Src {
+                cursor: left_cursor as i64,
+                reg_base: None,
+                table: left_table,
+                refname: left_ref.to_ascii_lowercase(),
+            },
+            Src {
+                cursor: right_cursor as i64,
+                reg_base: None,
+                table: right_table,
+                refname: right_ref.to_ascii_lowercase(),
+            },
+        ]);
+        self.code_expr(expr, &ctx, None)
     }
 
     /// Resolve a column expression to (table_idx, col_idx) for multi-table queries

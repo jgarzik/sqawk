@@ -74,5 +74,58 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
       - name: Build
         run: cargo build --verbose
+      # Serialized like the Linux jobs. The REPL tests spawn the binary as a
+      # subprocess and several tests share fixtures under tests/data/, so
+      # running them in parallel here made macOS and Windows flaky in a way
+      # Linux never showed.
       - name: Run tests
         run: cargo test --verbose
+        env:
+          RUST_TEST_THREADS: 1
+
+  lint:
+    name: Format and Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-lint-
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  msrv:
+    name: Minimum Supported Rust Version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to the rust-version declared in Cargo.toml. That field claimed
+      # 1.70 for a long time while the dependency tree had moved well past it,
+      # because nothing ever checked.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-msrv-
+      # Library and binaries only: rust-version is a promise to consumers, and
+      # dev-dependencies are not part of it.
+      - name: Check build at MSRV
+        run: cargo check --verbose

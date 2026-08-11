@@ -50,9 +50,21 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
 
 ### VM Module (`src/vm/`)
 
-- `bytecode.rs`: Defines bytecode instruction set
-- `compiler.rs`: Compiles SQL AST to bytecode
+- `bytecode.rs`: Bytecode instruction set and register/program types
+- `compiler.rs`: SQL AST to bytecode. Holds `code_expr`, the single expression
+  compiler (the analogue of SQLite's `sqlite3ExprCode`) used from the SELECT
+  list, WHERE, HAVING, ORDER BY and SET clauses alike, plus `NameCtx`, which
+  carries the FROM sources a name can resolve against
+- `compiler_aggregate.rs`: aggregates, GROUP BY, HAVING
+- `compiler_join.rs`: joins
+- `compiler_dml.rs`: INSERT / UPDATE / DELETE
+- `compiler_ddl.rs`: CREATE / DROP / ALTER / TRUNCATE
+- `compiler_window.rs`: window functions
+- `ast_compat.rs`: thin accessors normalizing sqlparser AST shapes
 - `engine.rs`: Executes bytecode instructions
+
+Each statement is compiled and executed separately, so a statement observes the
+effects of the ones before it.
 
 ### File Handling
 
@@ -62,9 +74,10 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
 
 ### SQL Features
 
-- `aggregate.rs`: COUNT, SUM, AVG, MIN, MAX functions
-- `join.rs`: Cross join and INNER JOIN implementations
-- `string_functions.rs`: UPPER, LOWER, TRIM, SUBSTR, REPLACE
+Expression compilation, including all scalar and string functions, lives in
+`src/vm/compiler.rs` behind `code_expr`. Aggregates are compiled in
+`src/vm/compiler_aggregate.rs` and executed by the `AggStep`/`AggFinal`
+opcodes; `src/aggregate.rs` retains only the function-name lookup.
 
 ### Safe Writeback Model
 
@@ -78,5 +91,16 @@ Tests are in `tests/` organized by functionality:
 - `delimiter/`, `csv_handler/`, `string_functions/`, `repl/`
 - `helpers/`: Test utilities
 - `common.rs`: Shared test helpers including REPL script runner
+
+Two suites carry the correctness contract:
+
+- `tests/golden/`: exact-output characterization tests. They assert the
+  COMPLETE stdout -- every row, in order -- via `assert_query`. The rest of the
+  suite uses `predicate::str::contains`, which is substring matching: a test
+  expecting `"Engineering,3"` passes even when extra wrong rows are emitted and
+  regardless of row order. Prefer `assert_query` for new tests.
+- `tests/defects/`: `#[ignore]`d tests encoding CORRECT behaviour for known
+  defects. Run with `cargo test --test mod defects -- --ignored`. Remove the
+  `#[ignore]` when a defect is fixed; the list only shrinks.
 
 Tests use `assert_cmd` for CLI testing and `tempfile` for temporary test data.

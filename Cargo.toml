@@ -10,13 +10,24 @@ homepage = "https://github.com/jgarzik/sqawk"
 readme = "README.md"
 keywords = ["csv", "tsv", "sql", "delimited", "awk"]
 categories = ["command-line-utilities", "text-processing", "parser-implementations"]
-# Minimum version of Rust required
-rust-version = "1.70.0"
-exclude = ["tests/", "doc/", ".github/", "CLAUDE.md"]
+# Minimum supported Rust version.
+#
+# Verified by building with that toolchain, not inferred. The binding
+# constraints are transitive: `home` (via rustyline) and `psm` (via
+# sqlparser -> recursive -> stacker) both require 1.88.
+rust-version = "1.88"
+exclude = [
+    "tests/",
+    "doc/",
+    ".github/",
+    "CLAUDE.md",
+    "generated-icon.png",
+    ".replit",
+]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-sqlparser = "0.36"
+sqlparser = "0.62"
 csv = "1"
 anyhow = "1"
 regex = "1"

@@ -125,6 +125,63 @@ SELECT * FROM t1
   JOIN t3 ON t2.id = t3.t2_id
 ```
 
+## Subqueries
+
+```sql
+-- Scalar subquery
+SELECT name FROM employees WHERE salary = (SELECT MAX(salary) FROM employees)
+
+-- IN / NOT IN
+SELECT name FROM users WHERE id IN (SELECT user_id FROM orders)
+SELECT name FROM users WHERE id NOT IN (SELECT user_id FROM orders)
+
+-- EXISTS / NOT EXISTS
+SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)
+
+-- Correlated: the inner query references the outer row
+SELECT name FROM employees e
+  WHERE salary > (SELECT AVG(salary) FROM employees WHERE department = e.department)
+```
+
+```sql
+-- Derived table: a subquery in FROM, which must be given an alias
+SELECT name FROM (SELECT name, salary FROM employees WHERE salary > 70000) t
+SELECT COUNT(*) FROM (SELECT department FROM employees GROUP BY department) t
+```
+
+A derived table is materialized before the outer query runs and exists only for
+the statement that declares it. Its alias may not shadow a real table.
+
+## Window Functions
+
+```sql
+SELECT name, ROW_NUMBER() OVER (ORDER BY salary DESC) FROM employees
+SELECT name, RANK()       OVER (ORDER BY department) FROM employees
+SELECT name, DENSE_RANK() OVER (ORDER BY department) FROM employees
+SELECT name, LAG(salary)  OVER (ORDER BY salary) FROM employees
+SELECT name, LEAD(salary) OVER (ORDER BY salary) FROM employees
+
+-- Aggregates over a window
+SELECT name, SUM(salary) OVER (PARTITION BY department) FROM employees
+```
+
+Supported functions: `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`, `LEAD`, and the
+aggregates `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`.
+
+The frame follows the standard: **without** `ORDER BY` in the `OVER` clause the
+frame is the whole partition, so every row sees the partition total; **with**
+`ORDER BY` the frame grows row by row, giving a running value.
+
+```sql
+-- 210000 on every Engineering row
+SELECT name, SUM(salary) OVER (PARTITION BY department) FROM employees
+
+-- 65000, 135000, 210000 across the Engineering rows
+SELECT name, SUM(salary) OVER (PARTITION BY department ORDER BY salary) FROM employees
+```
+
+Explicit frame clauses (`ROWS BETWEEN ...`) are not supported.
+
 ## Set Operations
 
 ```sql
@@ -190,6 +247,28 @@ ALTER TABLE name ADD COLUMN col_name TYPE
 ```sql
 TRUNCATE TABLE name
 ```
+
+## NULL handling
+
+An empty field reads as NULL.
+
+Comparison follows SQL three-valued logic: any comparison involving NULL is
+UNKNOWN, and a row whose `WHERE` evaluates to UNKNOWN is not returned. This
+means a NULL row satisfies neither `x > 5` nor `x <= 5`, and `NULL = NULL` is
+UNKNOWN rather than true. Use `IS NULL` / `IS NOT NULL` to test for NULL.
+
+Aggregates skip NULLs: `COUNT(*)` counts rows while `COUNT(col)` counts
+non-NULL values. `ORDER BY` sorts NULLs first.
+
+## Type coercion
+
+Values are typed per cell as they are read, so one column may hold integers,
+floats and text.
+
+When a comparison mixes a number and a string, the string is converted to a
+number if it parses as one, and the two are compared textually otherwise. This
+matches arithmetic, so `x + '1'` and `x > '1'` agree — awk-like rather than
+strict SQL, which suits untyped delimited input.
 
 ## Writeback
 

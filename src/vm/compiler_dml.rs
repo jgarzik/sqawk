@@ -4,8 +4,9 @@
 
 use sqlparser::ast::{Expr, Select, SelectItem, SetExpr, TableFactor};
 
+use super::ast_compat::assignment_column;
 use super::bytecode::OpCode;
-use super::compiler::SqlCompiler;
+use super::compiler::{NameCtx, SqlCompiler};
 use crate::error::{SqawkError, SqawkResult};
 
 impl<'a> SqlCompiler<'a> {
@@ -464,13 +465,7 @@ impl<'a> SqlCompiler<'a> {
         let mut assignment_map: Vec<(usize, &Expr)> = Vec::new();
         for assignment in assignments {
             // Handle different column identifier formats
-            let col_name = if !assignment.id.is_empty() {
-                assignment.id[0].value.clone()
-            } else {
-                return Err(SqawkError::InvalidSqlQuery(
-                    "Invalid assignment target".to_string(),
-                ));
-            };
+            let col_name = assignment_column(assignment)?;
 
             let col_idx = table_ref
                 .column_index(&col_name)
@@ -536,27 +531,34 @@ impl<'a> SqlCompiler<'a> {
             None
         };
 
-        // Apply assignments
+        // Apply assignments.
+        //
+        // The right-hand side is compiled in the row's scope, so a column may
+        // appear there: `SET salary = salary + 1`. compile_expr, which this
+        // used to call, has no Identifier arm at all and rejected it.
+        //
+        // Reading through a Column op against the cursor yields the ORIGINAL
+        // row value, which is the required semantics -- every RHS is evaluated
+        // against the row as it was before any assignment in this statement.
+        let update_ctx = NameCtx::single(table_ref, 0);
         for (col_idx, expr) in &assignment_map {
-            self.compile_expr_into_register(expr, base_reg + *col_idx)?;
+            self.code_expr(expr, &update_ctx, Some((base_reg + *col_idx) as i64))?;
         }
 
-        // Delete old row and insert new row
+        // Replace the row in place.
+        //
+        // This was DeleteRow followed by InsertRow, and the insert appends, so
+        // every updated row jumped to the end of the table -- persisted to the
+        // user's file under --write. UpdateRow keeps the row where it is, and
+        // it also makes the affected-row count exact instead of inferred from
+        // matching insert and delete tallies.
         self.emit(
-            OpCode::DeleteRow,
-            0,
-            0,
-            0,
-            Some(table_name.clone()),
-            "Delete old row",
-        );
-        self.emit(
-            OpCode::InsertRow,
+            OpCode::UpdateRow,
             0,
             base_reg as i64,
             column_count as i64,
             Some(table_name.clone()),
-            "Insert updated row",
+            "Replace row in place",
         );
 
         // Patch skip if present

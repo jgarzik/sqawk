@@ -12,6 +12,11 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 - **Joins** - INNER, LEFT, RIGHT, FULL OUTER, and CROSS joins with ON conditions
 - **Aggregates** - COUNT, SUM, AVG, MIN, MAX with GROUP BY support
 - **Functions** - String (UPPER, LOWER, SUBSTR, REPLACE, etc.), math (ABS, ROUND, etc.), date/time
+- **Subqueries** - Scalar, `IN (SELECT ...)`, and `EXISTS`, including correlated
+- **Set Operations** - UNION, UNION ALL, INTERSECT, EXCEPT
+- **Window Functions** - ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD, and aggregates with `OVER (PARTITION BY ... ORDER BY ...)`
+- **DDL** - CREATE TABLE, CREATE TABLE AS SELECT, DROP, ALTER TABLE ADD COLUMN, TRUNCATE
+- **Expressions** - CASE, CAST, COALESCE, NULLIF, BETWEEN, IN, LIKE/ILIKE, `||`, arithmetic
 - **File Formats** - CSV, TSV, and custom delimiters; headerless files via `--tabledef`
 - **Safe by Default** - Files unchanged unless `--write` flag is specified
 - **Interactive REPL** - Explore data interactively with `-i` flag
@@ -37,6 +42,29 @@ sqawk -s "SELECT department, AVG(salary) FROM employees GROUP BY department" emp
 # Modify and save
 sqawk -s "UPDATE data SET status = 'archived' WHERE year < 2020" data.csv --write
 ```
+
+## `tsq` - test data generator
+
+`cargo install sqawk` also installs `tsq`, which generates deterministic
+multi-table CSV data plus a corpus of SQL queries for exercising sqawk.
+
+```sh
+tsq --seed 42 --rows 1000 --output-dir /tmp/sqawk-test
+sqawk -s "SELECT * FROM customers LIMIT 10" /tmp/sqawk-test/data/customers.csv
+```
+
+It writes `data/` (customers, products, orders, order_items, reviews, with
+realistic foreign-key relationships), `queries/` (numbered `.sql` files
+covering selects, joins, aggregates, subqueries and window functions),
+`verify/run_verification.sh`, and a `metadata.json` recording the seed and row
+counts. The same seed always produces the same data.
+
+| Option | Meaning |
+| --- | --- |
+| `-s`, `--seed` | Seed for reproducible generation; a random one is printed if omitted |
+| `-r`, `--rows` | Base customer row count; other tables scale proportionally (default 100000) |
+| `-o`, `--output-dir` | Where to write the generated tree (required) |
+| `-v`, `--verbose` | Show generation progress |
 
 ## Documentation
 

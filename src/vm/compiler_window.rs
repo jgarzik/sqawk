@@ -2,8 +2,9 @@
 //!
 //! This module extends SqlCompiler with window function compilation methods.
 
-use sqlparser::ast::{Expr, Select, SelectItem, Value, WindowType};
+use sqlparser::ast::{Expr, Select, SelectItem, Value, ValueWithSpan, WindowType};
 
+use super::ast_compat::{func_args, order_by_is_asc};
 use super::bytecode::{OpCode, ResultSchema};
 use super::compiler::SqlCompiler;
 use crate::error::{SqawkError, SqawkResult};
@@ -280,9 +281,9 @@ impl<'a> SqlCompiler<'a> {
                     {
                         if func.name.to_string().to_uppercase() == *func_name && func.over.is_some()
                         {
-                            if !func.args.is_empty() {
+                            if !func_args(func).is_empty() {
                                 if let Ok(Expr::Identifier(ident)) =
-                                    self.extract_function_arg_expr(&func.args[0])
+                                    self.extract_function_arg_expr(&func_args(func)[0])
                                 {
                                     if let Some(src_idx) = table.column_index(&ident.value) {
                                         agg_col_pos =
@@ -355,9 +356,9 @@ impl<'a> SqlCompiler<'a> {
                             let p4 = if func_name == "LAG" || func_name == "LEAD" {
                                 // LAG/LEAD(column, offset, default)
                                 // Get column position in ephemeral cursor
-                                let col_pos = if !func.args.is_empty() {
+                                let col_pos = if !func_args(func).is_empty() {
                                     if let Ok(Expr::Identifier(ident)) =
-                                        self.extract_function_arg_expr(&func.args[0])
+                                        self.extract_function_arg_expr(&func_args(func)[0])
                                     {
                                         if let Some(src_idx) = table.column_index(&ident.value) {
                                             base_columns
@@ -375,9 +376,11 @@ impl<'a> SqlCompiler<'a> {
                                 };
 
                                 // Get offset (default 1)
-                                let offset = if func.args.len() >= 2 {
-                                    if let Ok(Expr::Value(Value::Number(n, _))) =
-                                        self.extract_function_arg_expr(&func.args[1])
+                                let offset = if func_args(func).len() >= 2 {
+                                    if let Ok(Expr::Value(ValueWithSpan {
+                                        value: Value::Number(n, _),
+                                        ..
+                                    })) = self.extract_function_arg_expr(&func_args(func)[1])
                                     {
                                         n.parse::<i64>().unwrap_or(1)
                                     } else {
@@ -489,6 +492,49 @@ impl<'a> SqlCompiler<'a> {
             inst.p2 = after_output as i64;
         }
 
+        // An aggregate window with PARTITION BY and no ORDER BY has the whole
+        // partition as its frame, so every row must see the partition total.
+        // The streaming pass produces a RUNNING total, whose value at the last
+        // row of each partition IS the total -- back-fill from there.
+        //
+        // With an ORDER BY the running total is the correct answer, so this is
+        // emitted only when the window is unordered.
+        if order_cols.is_empty() && !partition_cols.is_empty() {
+            let agg_output_positions: Vec<usize> = select
+                .projection
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| {
+                    matches!(
+                        item,
+                        SelectItem::UnnamedExpr(Expr::Function(f))
+                            | SelectItem::ExprWithAlias {
+                                expr: Expr::Function(f),
+                                ..
+                            } if f.over.is_some()
+                                && matches!(
+                                    f.name.to_string().to_uppercase().as_str(),
+                                    "SUM" | "COUNT" | "AVG" | "MIN" | "MAX"
+                                )
+                    )
+                })
+                .map(|(i, _)| i)
+                .collect();
+
+            // One per aggregate window column: finalizing only the first left
+            // any others showing a running value.
+            for pos in agg_output_positions {
+                self.emit(
+                    OpCode::WindowFinalize,
+                    pos as i64,
+                    0,
+                    0,
+                    None,
+                    "Give every row its partition's final window value",
+                );
+            }
+        }
+
         // Halt
         self.emit(OpCode::Halt, 0, 0, 0, None, "");
 
@@ -514,9 +560,9 @@ impl<'a> SqlCompiler<'a> {
                             window_funcs.push((name, func.over.clone()));
 
                             // If it's an aggregate window function, add argument column
-                            if !func.args.is_empty() {
+                            if !func_args(func).is_empty() {
                                 if let Ok(Expr::Identifier(ident)) =
-                                    self.extract_function_arg_expr(&func.args[0])
+                                    self.extract_function_arg_expr(&func_args(func)[0])
                                 {
                                     if let Some(col_idx) = table.column_index(&ident.value) {
                                         if !base_columns.contains(&col_idx) {
@@ -562,6 +608,17 @@ impl<'a> SqlCompiler<'a> {
         let mut order_asc = Vec::new();
 
         if let Some(WindowType::WindowSpec(spec)) = window_type {
+            // An explicit frame is parsed but not implemented. Accepting it
+            // silently returns the default frame's answer -- `ROWS BETWEEN 1
+            // PRECEDING AND CURRENT ROW` produced a running total over the
+            // whole partition rather than a two-row sliding window -- so it is
+            // rejected instead. A clear error beats a plausible wrong number.
+            if spec.window_frame.is_some() {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Explicit window frames (ROWS/RANGE BETWEEN) are not supported".into(),
+                ));
+            }
+
             // Extract PARTITION BY columns
             for expr in &spec.partition_by {
                 if let Expr::Identifier(ident) = expr {
@@ -576,7 +633,7 @@ impl<'a> SqlCompiler<'a> {
                 if let Expr::Identifier(ident) = &order_expr.expr {
                     if let Some(col_idx) = table.column_index(&ident.value) {
                         order_cols.push(col_idx);
-                        order_asc.push(order_expr.asc.unwrap_or(true));
+                        order_asc.push(order_by_is_asc(order_expr));
                     }
                 }
             }
