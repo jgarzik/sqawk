@@ -545,22 +545,20 @@ impl<'a> SqlCompiler<'a> {
             self.code_expr(expr, &update_ctx, Some((base_reg + *col_idx) as i64))?;
         }
 
-        // Delete old row and insert new row
+        // Replace the row in place.
+        //
+        // This was DeleteRow followed by InsertRow, and the insert appends, so
+        // every updated row jumped to the end of the table -- persisted to the
+        // user's file under --write. UpdateRow keeps the row where it is, and
+        // it also makes the affected-row count exact instead of inferred from
+        // matching insert and delete tallies.
         self.emit(
-            OpCode::DeleteRow,
-            0,
-            0,
-            0,
-            Some(table_name.clone()),
-            "Delete old row",
-        );
-        self.emit(
-            OpCode::InsertRow,
+            OpCode::UpdateRow,
             0,
             base_reg as i64,
             column_count as i64,
             Some(table_name.clone()),
-            "Insert updated row",
+            "Replace row in place",
         );
 
         // Patch skip if present

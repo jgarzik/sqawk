@@ -174,6 +174,10 @@ fn apply_modifications(
     let mut insert_counts_by_table: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
 
+    // Rows replaced in place by UPDATE, per table.
+    let mut replace_counts_by_table: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
     // First pass: collect deletions and apply non-delete modifications
     for modification in modifications {
         match modification {
@@ -181,6 +185,19 @@ fn apply_modifications(
                 let table = database.get_table_mut(&table_name)?;
                 table.add_row(row)?;
                 *insert_counts_by_table
+                    .entry(table_name.clone())
+                    .or_insert(0) += 1;
+                modified_tables.insert(table_name);
+            }
+            engine::TableModification::Replace {
+                table_name,
+                row_index,
+                row,
+            } => {
+                let table = database.get_table_mut(&table_name)?;
+                table.replace_row(row_index, row)?;
+                // Tallied per table and reported once, not once per row.
+                *replace_counts_by_table
                     .entry(table_name.clone())
                     .or_insert(0) += 1;
                 modified_tables.insert(table_name);
@@ -318,6 +335,13 @@ fn apply_modifications(
             if verbose {
                 eprintln!("Deleted {} rows", delete_count);
             }
+        }
+    }
+
+    for (_table, count) in replace_counts_by_table {
+        affected_rows += count;
+        if verbose {
+            eprintln!("Updated {} rows", count);
         }
     }
 

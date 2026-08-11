@@ -430,7 +430,6 @@ fn update_then_select_emits_the_select() -> Result<(), Box<dyn std::error::Error
 /// it touches jumps to the end of the table. This is not merely cosmetic: with
 /// --write the reordering is persisted to the user's file.
 #[test]
-#[ignore = "UPDATE moves modified rows to the end of the table"]
 fn update_preserves_row_order() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],

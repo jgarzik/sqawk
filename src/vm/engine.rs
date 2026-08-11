@@ -416,6 +416,16 @@ pub enum TableModification {
         table_name: String,
         row_index: usize,
     },
+    /// Replace a row in place, preserving its position.
+    ///
+    /// UPDATE used to be expressed as Delete plus Insert, and the insert
+    /// appends, so every updated row jumped to the end of the table -- and
+    /// with --write that reordering was written to the user's file.
+    Replace {
+        table_name: String,
+        row_index: usize,
+        row: Vec<Value>,
+    },
     CreateTable {
         table_name: String,
         columns: Vec<ColumnDef>,
@@ -795,6 +805,43 @@ impl<'a> VmEngine<'a> {
                         "InsertRow: queued insert of {} columns into cursor {}",
                         col_count, cursor_idx
                     );
+                }
+
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::UpdateRow => {
+                // Replace the current row at cursor P1 with registers
+                // P2..P2+P3, keeping its position in the table.
+                let cursor_idx = inst.p1 as usize;
+                let base_reg = inst.p2 as usize;
+                let col_count = inst.p3 as usize;
+
+                let (table_name, row_idx) = if let Some(cursor) = self.cursors.get(&cursor_idx) {
+                    (cursor.table_name().to_string(), cursor.current_row_index())
+                } else {
+                    return Err(SqawkError::VmError(format!(
+                        "Invalid cursor for UpdateRow: {}",
+                        cursor_idx
+                    )));
+                };
+
+                let table_name = inst
+                    .p4
+                    .as_deref()
+                    .map(|s| s.to_string())
+                    .unwrap_or(table_name);
+
+                if let Some(idx) = row_idx {
+                    let mut row = Vec::with_capacity(col_count);
+                    for i in 0..col_count {
+                        row.push(Value::from(self.get_register(base_reg + i)?));
+                    }
+                    self.pending_modifications.push(TableModification::Replace {
+                        table_name,
+                        row_index: idx,
+                        row,
+                    });
                 }
 
                 Ok(ExecuteResult::Continue)

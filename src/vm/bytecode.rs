@@ -101,6 +101,7 @@ pub enum OpCode {
     Column,    // Read column value into register
     InsertRow, // Insert row from registers P2..P2+P3 into cursor P1
     DeleteRow, // Delete current row at cursor P1
+    UpdateRow, // Replace current row at cursor P1 with registers P2..P2+P3 IN PLACE
 
     // Data manipulation
     Integer,   // Load integer constant

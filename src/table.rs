@@ -1022,6 +1022,26 @@ impl Table {
         self.modified = true;
     }
 
+    /// Replace a single row in place, preserving its position.
+    ///
+    /// Used by UPDATE. Expressing an update as delete-plus-insert appends the
+    /// new row, which reorders the table -- and with --write, the user's file.
+    pub fn replace_row(&mut self, row_index: usize, row: Row) -> SqawkResult<()> {
+        self.storage.ensure_mutable();
+        let rows = self.storage.rows_mut().ok_or_else(|| {
+            SqawkError::InvalidSqlQuery("Table storage is not mutable".to_string())
+        })?;
+        if row_index >= rows.len() {
+            return Err(SqawkError::InvalidSqlQuery(format!(
+                "Row index {} out of range for table '{}'",
+                row_index, self.name
+            )));
+        }
+        rows[row_index] = row;
+        self.modified = true;
+        Ok(())
+    }
+
     /// Add a column to the table with a specified data type
     #[cfg(test)]
     pub fn add_column(&mut self, name: String, data_type_str: String) {

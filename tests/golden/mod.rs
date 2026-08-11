@@ -1275,6 +1275,7 @@ fn outer_join_full_nullfill() -> Result<(), Box<dyn std::error::Error>> {
 // accepted (or a supported one start being refused).
 // ---------------------------------------------------------------------------
 
+use crate::helpers::assert_after_write;
 use crate::helpers::assert_query_fails;
 
 #[test]
@@ -1920,5 +1921,26 @@ fn create_table_then_insert_then_select() -> Result<(), Box<dyn std::error::Erro
         &["tests/data/people.csv"],
         "CREATE TABLE t (a INTEGER, b TEXT); INSERT INTO t VALUES (1, 'x'); SELECT * FROM t",
         "a,b\n1,x",
+    )
+}
+
+#[test]
+fn update_writeback_preserves_row_order() -> Result<(), Box<dyn std::error::Error>> {
+    // UPDATE replaces rows in place. Expressed as delete-plus-insert it
+    // appended, so a partial update rewrote the user's file in a different
+    // order. Updating the FIRST row is the case that exposes it.
+    assert_after_write(
+        "tests/data/employees.csv",
+        "employees",
+        "UPDATE employees SET salary = 1 WHERE id = 1",
+        "id,name,age,salary,department,role\n\
+         1,Alice,30,1,Engineering,Developer\n\
+         2,Bob,25,55000,Marketing,Specialist\n\
+         3,Charlie,35,65000,Engineering,Manager\n\
+         4,David,40,80000,Sales,Director\n\
+         5,Eve,28,60000,Marketing,Analyst\n\
+         6,Frank,32,75000,Engineering,Developer\n\
+         7,Grace,45,90000,Sales,Director\n\
+         8,Henry,22,45000,HR,Intern",
     )
 }
