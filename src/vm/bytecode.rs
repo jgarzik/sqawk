@@ -233,7 +233,8 @@ pub enum OpCode {
 
     // Window function operations
     WindowAggStep, // P1 = func type, P2 = value reg, P3 = accum reg, P4 = window spec. Step window aggregate.
-    WindowValue,   // P1 = accum reg, P2 = dest reg, P3 = func type. Get current window value.
+    WindowValue,
+    WindowFinalize, // Back-fill result column P1 with each partition's final value   // P1 = accum reg, P2 = dest reg, P3 = func type. Get current window value.
 }
 
 /// A SQL VM instruction with opcode and parameters

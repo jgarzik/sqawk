@@ -466,6 +466,13 @@ pub struct VmEngine<'a> {
     #[allow(dead_code)]
     cursor_source_order: Vec<usize>,
 
+    /// Index into `results` at which each window partition begins.
+    ///
+    /// Recorded during the streaming window pass so a following WindowFinalize
+    /// can identify each partition's extent without needing the partition key
+    /// to be a projected column.
+    window_partition_starts: Vec<usize>,
+
     /// Result of the most recent Compare, consumed by Jump.
     ///
     /// Mirrors SQLite, where OP_Compare leaves its verdict for a following
@@ -495,6 +502,7 @@ impl<'a> VmEngine<'a> {
             program: Program::new(),
             pc: 0,
             compare_flag: std::cmp::Ordering::Equal,
+            window_partition_starts: Vec::new(),
             registers: Vec::with_capacity(DEFAULT_REGISTER_CAPACITY),
             cursors: HashMap::with_capacity(DEFAULT_CURSOR_CAPACITY),
             sorters: HashMap::with_capacity(DEFAULT_SORTER_CAPACITY),
@@ -528,6 +536,7 @@ impl<'a> VmEngine<'a> {
         self.cursor_source_order.clear();
         self.pending_modifications.clear();
         self.once_flags.clear();
+        self.window_partition_starts.clear();
 
         // Size the register file from the compiler's allocation count.
         //
@@ -1554,6 +1563,11 @@ impl<'a> VmEngine<'a> {
                     }
                 };
 
+                if partition_changed {
+                    // The row about to be emitted starts a new partition.
+                    self.window_partition_starts.push(self.results.len());
+                }
+
                 // Check if order value changed (for RANK)
                 let prev_ord_val = self.get_register(prev_ord_reg)?;
                 let order_changed = if is_first_row {
@@ -1727,6 +1741,34 @@ impl<'a> VmEngine<'a> {
                     );
                 }
 
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::WindowFinalize => {
+                // Give every row of a partition that partition's FINAL window
+                // value, which for an unordered frame is the partition total.
+                //
+                // The streaming pass accumulates as it goes, so without this a
+                // window aggregate with PARTITION BY and no ORDER BY returns a
+                // RUNNING total. SQL defines the frame in that case as the
+                // whole partition, so every row should see the same value.
+                let col = inst.p1 as usize;
+                let starts = self.window_partition_starts.clone();
+                for (i, &start) in starts.iter().enumerate() {
+                    let end = starts.get(i + 1).copied().unwrap_or(self.results.len());
+                    if end == 0 || start >= end {
+                        continue;
+                    }
+                    let final_value = match self.results[end - 1].get(col) {
+                        Some(v) => v.clone(),
+                        None => continue,
+                    };
+                    for row in &mut self.results[start..end] {
+                        if col < row.len() {
+                            row[col] = final_value.clone();
+                        }
+                    }
+                }
                 Ok(ExecuteResult::Continue)
             }
 

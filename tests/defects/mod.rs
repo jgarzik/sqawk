@@ -458,7 +458,6 @@ fn derived_table_in_from() -> Result<(), Box<dyn std::error::Error>> {
 /// Defect 8: an aggregate OVER (PARTITION BY x) with no ORDER BY must return
 /// the *partition total* on every row, not a running total.
 #[test]
-#[ignore = "defect 8: PARTITION BY without ORDER BY returns running total"]
 fn partition_aggregate_returns_partition_total() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],

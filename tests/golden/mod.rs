@@ -1944,3 +1944,53 @@ fn update_writeback_preserves_row_order() -> Result<(), Box<dyn std::error::Erro
          8,Henry,22,45000,HR,Intern",
     )
 }
+
+// ---------------------------------------------------------------------------
+// Window frames.
+//
+// An aggregate window with PARTITION BY and no ORDER BY has the whole
+// partition as its frame, so every row sees the partition total. With an
+// ORDER BY the frame grows row by row and a running total is correct. The
+// streaming implementation produced a running total in both cases.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unordered_window_gives_partition_totals() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name, SUM(salary) OVER (PARTITION BY department) FROM employees",
+        "name,SUM\n\
+         Alice,210000\nCharlie,210000\nFrank,210000\n\
+         Henry,45000\n\
+         Bob,115000\nEve,115000\n\
+         David,170000\nGrace,170000",
+    )
+}
+
+#[test]
+fn ordered_window_keeps_running_totals() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name, SUM(salary) OVER (PARTITION BY department ORDER BY salary) FROM employees",
+        "name,SUM\n\
+         Charlie,65000\nAlice,135000\nFrank,210000\n\
+         Henry,45000\n\
+         Bob,55000\nEve,115000\n\
+         David,80000\nGrace,170000",
+    )
+}
+
+#[test]
+fn multiple_unordered_window_aggregates() -> Result<(), Box<dyn std::error::Error>> {
+    // Every aggregate window column is finalized, not just the first.
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name, COUNT(salary) OVER (PARTITION BY department), \
+         MIN(salary) OVER (PARTITION BY department) FROM employees",
+        "name,COUNT,MIN\n\
+         Alice,3,65000\nCharlie,3,65000\nFrank,3,65000\n\
+         Henry,1,45000\n\
+         Bob,2,55000\nEve,2,55000\n\
+         David,2,80000\nGrace,2,80000",
+    )
+}

@@ -490,6 +490,49 @@ impl<'a> SqlCompiler<'a> {
             inst.p2 = after_output as i64;
         }
 
+        // An aggregate window with PARTITION BY and no ORDER BY has the whole
+        // partition as its frame, so every row must see the partition total.
+        // The streaming pass produces a RUNNING total, whose value at the last
+        // row of each partition IS the total -- back-fill from there.
+        //
+        // With an ORDER BY the running total is the correct answer, so this is
+        // emitted only when the window is unordered.
+        if order_cols.is_empty() && !partition_cols.is_empty() {
+            let agg_output_positions: Vec<usize> = select
+                .projection
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| {
+                    matches!(
+                        item,
+                        SelectItem::UnnamedExpr(Expr::Function(f))
+                            | SelectItem::ExprWithAlias {
+                                expr: Expr::Function(f),
+                                ..
+                            } if f.over.is_some()
+                                && matches!(
+                                    f.name.to_string().to_uppercase().as_str(),
+                                    "SUM" | "COUNT" | "AVG" | "MIN" | "MAX"
+                                )
+                    )
+                })
+                .map(|(i, _)| i)
+                .collect();
+
+            // One per aggregate window column: finalizing only the first left
+            // any others showing a running value.
+            for pos in agg_output_positions {
+                self.emit(
+                    OpCode::WindowFinalize,
+                    pos as i64,
+                    0,
+                    0,
+                    None,
+                    "Give every row its partition's final window value",
+                );
+            }
+        }
+
         // Halt
         self.emit(OpCode::Halt, 0, 0, 0, None, "");
 
