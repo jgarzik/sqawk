@@ -1,0 +1,68 @@
+src/vm/mod.rs
+Comment on lines +147 to +151
+        let applied = apply_modifications(database, modifications, verbose)?;
+        modified_tables.extend(applied.modified_tables);
+        if applied.affected_rows > 0 {
+            affected_rows = applied.affected_rows;
+        }
+Copilot commented now
+Copilot
+Copilot
+AI
+1m ago
+Medium
+affected_rows is only updated when applied.affected_rows > 0. This means a DML statement that affects 0 rows (e.g., UPDATE ... WHERE matches nothing) will incorrectly keep the previous non-zero count, so .changes/row-change reporting can be wrong.
+
+Suggested changeset 1 (1)
+src/vm/mod.rs
+Copilot uses AI. Check for mistakes.
+@jgarzik	Reply...
+tests/tsq/mod.rs
+Comment on lines +113 to +117
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("40"),
+        "expected 40 customers, got: {stdout}"
+    );
+Copilot commented now
+Copilot
+Copilot
+AI
+1m ago
+Low
+This test uses stdout.contains("40"), which can produce false positives (e.g. output 140 would still pass). Given the repository guidance to prefer exact-output assertions for new coverage, this should assert the full result more precisely.
+
+Suggested changeset 1 (1)
+tests/tsq/mod.rs
+Original file line number	Diff line number	Diff line change
+         String::from_utf8_lossy(&output.stderr)
+     );
+     let stdout = String::from_utf8_lossy(&output.stdout);
+     assert!(
+         stdout.contains("40"),
+     let lines: Vec<&str> = stdout.lines().collect();
+     assert_eq!(
+         lines,
+         ["COUNT", "40"],
+         "expected 40 customers, got: {stdout}"
+     );
+     Ok(())
+Copilot generated this review using guidance from repository custom instructions.
+@jgarzik	Reply...
+src/vm/bytecode.rs
+Comment on lines 234 to +237
+    // Window function operations
+    WindowAggStep, // P1 = func type, P2 = value reg, P3 = accum reg, P4 = window spec. Step window aggregate.
+    WindowValue,   // P1 = accum reg, P2 = dest reg, P3 = func type. Get current window value.
+    WindowValue,
+    WindowFinalize, // Back-fill result column P1 with each partition's final value   // P1 = accum reg, P2 = dest reg, P3 = func type. Get current window value.
+Copilot commented now
+Copilot
+Copilot
+AI
+1m ago
+Low
+The inline comment for WindowFinalize appears to be copy/pasted from WindowValue and describes the wrong operands, which makes the opcode contract unclear for future changes.
+
+Copilot uses AI. Check for mistakes.
+

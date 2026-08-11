@@ -110,10 +110,13 @@ fn sqawk_can_query_the_generated_data() -> Result<(), Box<dyn std::error::Error>
         "sqawk could not read tsq output: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // Exact output, not a substring: `contains("40")` also passes on 140.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("40"),
-        "expected 40 customers, got: {stdout}"
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines,
+        ["COUNT", "40"],
+        "expected exactly 40 customers, got: {stdout}"
     );
     Ok(())
 }

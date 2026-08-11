@@ -146,7 +146,18 @@ pub fn execute_vm(
         // PHASE 3: APPLY MODIFICATIONS before the next statement compiles.
         let applied = apply_modifications(database, modifications, verbose)?;
         modified_tables.extend(applied.modified_tables);
-        if applied.affected_rows > 0 {
+
+        // A DML statement reports its own count, INCLUDING zero.
+        //
+        // Guarding on `applied.affected_rows > 0` conflated two different
+        // things: a statement that was not DML at all (a SELECT contributes no
+        // modifications), and a DML statement that matched no rows. The latter
+        // then inherited the previous statement's count, so
+        // `UPDATE ... WHERE <matches 3>; UPDATE ... WHERE <matches nothing>`
+        // reported 3 rows affected instead of 0.
+        //
+        // Which statements count is the same set SQL's `changes()` uses.
+        if is_row_counting_dml(&statement) {
             affected_rows = applied.affected_rows;
         }
 
@@ -257,6 +268,19 @@ fn materialize_in_factor(
         index_hints: Vec::new(),
     };
     Ok(())
+}
+
+/// Whether a statement's affected-row count is meaningful to report.
+///
+/// The INSERT/UPDATE/DELETE family, matching what SQL's `changes()` covers. A
+/// SELECT or DDL statement leaves the previous count alone rather than
+/// resetting it to zero.
+fn is_row_counting_dml(statement: &sqlparser::ast::Statement) -> bool {
+    use sqlparser::ast::Statement;
+    matches!(
+        statement,
+        Statement::Insert(_) | Statement::Update(_) | Statement::Delete(_)
+    )
 }
 
 /// Tables touched and rows affected by one statement's modifications.

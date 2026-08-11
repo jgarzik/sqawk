@@ -155,3 +155,54 @@ fn test_repl_version_matches_crate() {
         "expected `{expected}` in .version output, got:\n{stdout}"
     );
 }
+
+/// A DML statement that matches nothing must report 0, not inherit the
+/// previous statement's count.
+///
+/// The affected-row count was only overwritten when the new count was non-zero,
+/// which conflated "this statement was not DML" with "this DML matched no
+/// rows". So `UPDATE <matches 3>; UPDATE <matches nothing>` reported 3.
+#[test]
+fn test_repl_zero_row_update_reports_zero() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let dir = crate::helpers::create_temp_dir().expect("temp dir");
+    let src = std::path::PathBuf::from("tests/data/employees.csv");
+    let dest = dir.path().join("employees.csv");
+    std::fs::copy(&src, &dest).expect("copy fixture");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sqawk"))
+        .arg("-i")
+        .arg(format!("employees={}", dest.to_str().unwrap()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to start sqawk");
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(
+            b".changes on\n\
+              UPDATE employees SET salary = 1 WHERE department = 'Engineering';\n\
+              UPDATE employees SET salary = 2 WHERE department = 'NoSuchDept';\n\
+              .exit\n",
+        )
+        .expect("write");
+
+    let out = child.wait_with_output().expect("wait");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let counts: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.ends_with("rows affected"))
+        .collect();
+
+    assert_eq!(
+        counts,
+        ["3 rows affected", "0 rows affected"],
+        "second UPDATE matched nothing and must report 0, got:\n{stdout}"
+    );
+}

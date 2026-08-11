@@ -452,10 +452,11 @@ impl<'a> Repl<'a> {
         } else if self.show_changes {
             // For non-SELECT statements that don't return rows (INSERT, UPDATE, DELETE)
             // Try to display the number of affected rows if show_changes is enabled
+            // Reported even when zero. With `.changes on` a statement that
+            // matched nothing otherwise produced no output at all, leaving it
+            // ambiguous whether it had run.
             if let Ok(affected_rows) = self.executor.get_affected_row_count() {
-                if affected_rows > 0 {
-                    println!("{} rows affected", affected_rows);
-                }
+                println!("{} rows affected", affected_rows);
             }
         }
 

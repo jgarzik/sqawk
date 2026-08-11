@@ -233,8 +233,9 @@ pub enum OpCode {
 
     // Window function operations
     WindowAggStep, // P1 = func type, P2 = value reg, P3 = accum reg, P4 = window spec. Step window aggregate.
-    WindowValue,
-    WindowFinalize, // Back-fill result column P1 with each partition's final value   // P1 = accum reg, P2 = dest reg, P3 = func type. Get current window value.
+    WindowValue,   // P1 = accum reg, P2 = dest reg, P3 = func type. Get current window value.
+    WindowFinalize, // P1 = result column index. Give every row of a partition that partition's
+                   // final window value, which for an unordered frame is the partition total.
 }
 
 /// A SQL VM instruction with opcode and parameters
