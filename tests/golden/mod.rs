@@ -1696,3 +1696,37 @@ fn string_number_coercion_in_comparison() -> Result<(), Box<dyn std::error::Erro
         "name\nAlice\nCharlie\nDavid\nFrank\nGrace",
     )
 }
+
+#[test]
+fn group_by_aggregate_before_key() -> Result<(), Box<dyn std::error::Error>> {
+    // Values follow the SELECT list, not the internal [keys.., aggs..] layout.
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT COUNT(*), SUM(salary), department FROM employees GROUP BY department",
+        "COUNT,SUM,department\n\
+         3,210000,Engineering\n\
+         1,45000,HR\n\
+         2,115000,Marketing\n\
+         2,170000,Sales",
+    )
+}
+
+#[test]
+fn group_by_key_repeated_in_projection() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT department, COUNT(*), department FROM employees GROUP BY department LIMIT 2",
+        "department,COUNT,department\nEngineering,3,Engineering\nHR,1,HR",
+    )
+}
+
+#[test]
+fn group_by_non_key_column_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    // A column that is neither a group key nor inside an aggregate has no
+    // single value per group; it must be an error rather than an arbitrary pick.
+    assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT department, name FROM employees GROUP BY department",
+        "must appear in GROUP BY",
+    )
+}

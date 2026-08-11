@@ -6708,6 +6708,20 @@ impl<'a> SqlCompiler<'a> {
         false
     }
 
+    /// Whether `expr` is directly an aggregate call.
+    ///
+    /// A free function so the grouped-projection planner can use it without a
+    /// compiler borrow.
+    pub(crate) fn is_aggregate_call(expr: &Expr) -> bool {
+        match expr {
+            Expr::Function(func) if func.over.is_none() => {
+                let name = func.name.to_string().to_uppercase();
+                matches!(name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX")
+            }
+            _ => false,
+        }
+    }
+
     /// Check if an expression is or contains an aggregate function
     fn is_aggregate_expr(&self, expr: &Expr) -> bool {
         match expr {

@@ -10,6 +10,15 @@ use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
 use super::ast_compat::{func_args, func_is_distinct, group_by_exprs};
 
+/// One column of a grouped result, in SELECT-list order.
+#[derive(Clone, Copy, Debug)]
+enum GroupOut {
+    /// The n-th GROUP BY key.
+    Key(usize),
+    /// The n-th aggregate.
+    Agg(usize),
+}
+
 impl<'a> SqlCompiler<'a> {
     pub(crate) fn compile_select_with_aggregate(
         &mut self,
@@ -194,6 +203,92 @@ impl<'a> SqlCompiler<'a> {
         schema
     }
 
+
+    /// Emit one grouped output row: keys, finalized aggregates, HAVING, ResultRow.
+    ///
+    /// Written once and called from both flush points -- the group-change flush
+    /// inside the drain loop and the final flush after it. Those were
+    /// copy-pasted duplicates, which is how HAVING came to be applied slightly
+    /// differently in each.
+    ///
+    /// Values are emitted in PROJECTION order. The result block used to be laid
+    /// out positionally as [group keys.., aggregates..] while the schema was
+    /// built from the SELECT list, so `SELECT COUNT(*), department ... GROUP BY
+    /// department` printed the header `COUNT,department` above the values
+    /// `Engineering,3`. Emitting through out_plan makes header and value order
+    /// the same by construction, and means a group key that is not projected
+    /// contributes no column instead of a phantom `col1`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_group_flush(
+        &mut self,
+        select: &Select,
+        table: &Table,
+        out_plan: &[GroupOut],
+        group_col_indices: &[usize],
+        agg_info: &[(i64, Option<usize>)],
+        group_key_reg: i64,
+        acc_base_reg: i64,
+        result_start_reg: i64,
+    ) -> SqawkResult<()> {
+        // Finalize every accumulator into its slot in the internal
+        // [keys.., aggs..] block, which HAVING resolves against.
+        for i in 0..agg_info.len() {
+            self.emit(
+                OpCode::AggFinal,
+                acc_base_reg + i as i64,
+                result_start_reg + group_col_indices.len() as i64 + i as i64,
+                0,
+                None,
+                "",
+            );
+        }
+        for i in 0..group_col_indices.len() {
+            self.emit(
+                OpCode::Copy,
+                group_key_reg + i as i64,
+                result_start_reg + i as i64,
+                0,
+                None,
+                "",
+            );
+        }
+
+        // HAVING gates the row, and is evaluated against the internal block.
+        let after_row = self.label();
+        if let Some(having_expr) = &select.having {
+            let having_reg = self.compile_having_condition(
+                having_expr,
+                table,
+                group_col_indices,
+                agg_info,
+                result_start_reg,
+                group_key_reg,
+            )?;
+            self.emit_jump_to(OpCode::IfZ, having_reg, after_row, 0, None, "HAVING failed");
+        }
+
+        // Gather into a contiguous block in projection order and emit.
+        let out_start = self.allocate_registers(out_plan.len().max(1));
+        for (i, slot) in out_plan.iter().enumerate() {
+            let src = match slot {
+                GroupOut::Key(k) => result_start_reg + *k as i64,
+                GroupOut::Agg(a) => result_start_reg + group_col_indices.len() as i64 + *a as i64,
+            };
+            self.emit(OpCode::Copy, src, out_start + i as i64, 0, None, "");
+        }
+        self.emit(
+            OpCode::ResultRow,
+            out_start,
+            out_plan.len() as i64,
+            0,
+            None,
+            "",
+        );
+
+        self.resolve(after_row);
+        Ok(())
+    }
+
     /// Compile a SELECT with GROUP BY
     pub(crate) fn compile_select_with_group_by(
         &mut self,
@@ -258,6 +353,45 @@ impl<'a> SqlCompiler<'a> {
                 }
                 _ => {}
             }
+        }
+
+        // Map each projected item to the group key or aggregate it names, in
+        // SELECT-list order. Emitting through this is what keeps the values
+        // aligned with the header the schema builder produces.
+        let mut out_plan: Vec<GroupOut> = Vec::with_capacity(select.projection.len());
+        let mut agg_seen = 0usize;
+        for item in &select.projection {
+            let expr = match item {
+                SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => e,
+                _ => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Only expressions are supported in a GROUP BY projection".into(),
+                    ))
+                }
+            };
+            if Self::is_aggregate_call(expr) {
+                out_plan.push(GroupOut::Agg(agg_seen));
+                agg_seen += 1;
+                continue;
+            }
+            // Otherwise it must name a GROUP BY key: in a grouped query no
+            // other column has a single well-defined value per row.
+            let col_idx = self.resolve_column_expr(expr, table).map_err(|_| {
+                SqawkError::InvalidSqlQuery(format!(
+                    "'{}' must appear in GROUP BY or be used in an aggregate",
+                    expr
+                ))
+            })?;
+            let key_pos = group_col_indices
+                .iter()
+                .position(|c| *c == col_idx)
+                .ok_or_else(|| {
+                    SqawkError::InvalidSqlQuery(format!(
+                        "'{}' must appear in GROUP BY or be used in an aggregate",
+                        expr
+                    ))
+                })?;
+            out_plan.push(GroupOut::Key(key_pos));
         }
 
         // Build result schema with column names and types
@@ -444,65 +578,17 @@ impl<'a> SqlCompiler<'a> {
         );
         self.resolve(flush_label);
 
-        // Group changed - output previous group
-        // Copy group key to result
-        for i in 0..group_col_indices.len() {
-            self.emit(
-                OpCode::Copy,
-                group_key_reg + i as i64,
-                result_start_reg + i as i64,
-                0,
-                None,
-                "",
-            );
-        }
-
-        // Finalize aggregates
-        for (i, _) in agg_info.iter().enumerate() {
-            let dest_reg = result_start_reg + group_col_indices.len() as i64 + i as i64;
-            self.emit(
-                OpCode::AggFinal,
-                acc_base_reg + i as i64,
-                dest_reg,
-                0,
-                None,
-                "",
-            );
-        }
-
-        // Apply HAVING filter if present
-        let mut having_skip_addr: Option<usize> = None;
-        if let Some(having_expr) = &select.having {
-            let having_reg = self.compile_having_condition(
-                having_expr,
-                table,
-                &group_col_indices,
-                &agg_info,
-                result_start_reg,
-                group_key_reg,
-            )?;
-            // If HAVING condition is false (0), skip ResultRow
-            having_skip_addr = Some(self.program.len());
-            self.emit(OpCode::IfZ, having_reg, 0, 0, None, "");
-        }
-
-        // Output result row
-        self.emit(
-            OpCode::ResultRow,
+        // Group changed - output the group just completed.
+        self.emit_group_flush(
+            select,
+            table,
+            &out_plan,
+            &group_col_indices,
+            &agg_info,
+            group_key_reg,
+            acc_base_reg,
             result_start_reg,
-            (group_col_indices.len() + agg_info.len()) as i64,
-            0,
-            None,
-            "",
-        );
-
-        // Patch HAVING skip jump if present
-        if let Some(addr) = having_skip_addr {
-            let after_result = self.program.len();
-            if let Some(inst) = self.program.instructions.get_mut(addr) {
-                inst.p2 = after_result as i64;
-            }
-        }
+        )?;
 
         // Reset accumulators for new group
         for (i, _) in agg_info.iter().enumerate() {
@@ -558,65 +644,17 @@ impl<'a> SqlCompiler<'a> {
             "",
         );
 
-        // Output final group
-        // Copy group key to result
-        for i in 0..group_col_indices.len() {
-            self.emit(
-                OpCode::Copy,
-                group_key_reg + i as i64,
-                result_start_reg + i as i64,
-                0,
-                None,
-                "",
-            );
-        }
-
-        // Finalize aggregates
-        for (i, _) in agg_info.iter().enumerate() {
-            let dest_reg = result_start_reg + group_col_indices.len() as i64 + i as i64;
-            self.emit(
-                OpCode::AggFinal,
-                acc_base_reg + i as i64,
-                dest_reg,
-                0,
-                None,
-                "",
-            );
-        }
-
-        // Apply HAVING filter for final group if present
-        let mut final_having_skip_addr: Option<usize> = None;
-        if let Some(having_expr) = &select.having {
-            let having_reg = self.compile_having_condition(
-                having_expr,
-                table,
-                &group_col_indices,
-                &agg_info,
-                result_start_reg,
-                group_key_reg,
-            )?;
-            // If HAVING condition is false (0), skip ResultRow
-            final_having_skip_addr = Some(self.program.len());
-            self.emit(OpCode::IfZ, having_reg, 0, 0, None, "");
-        }
-
-        // Output final result row
-        self.emit(
-            OpCode::ResultRow,
+        // Output the final group, which no group-change ever flushed.
+        self.emit_group_flush(
+            select,
+            table,
+            &out_plan,
+            &group_col_indices,
+            &agg_info,
+            group_key_reg,
+            acc_base_reg,
             result_start_reg,
-            (group_col_indices.len() + agg_info.len()) as i64,
-            0,
-            None,
-            "",
-        );
-
-        // Patch final HAVING skip jump if present
-        if let Some(addr) = final_having_skip_addr {
-            let after_result = self.program.len();
-            if let Some(inst) = self.program.instructions.get_mut(addr) {
-                inst.p2 = after_result as i64;
-            }
-        }
+        )?;
 
         // Close cursor
         self.emit(OpCode::Close, cursor_idx, 0, 0, None, "");

@@ -110,7 +110,6 @@ fn count_distinct_deduplicates() -> Result<(), Box<dyn std::error::Error>> {
 /// so headers and values disagree. Currently prints `COUNT,department` over
 /// `Engineering,3`.
 #[test]
-#[ignore = "defect A: GROUP BY values misaligned with headers"]
 fn group_by_respects_projection_order() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
@@ -126,7 +125,6 @@ fn group_by_respects_projection_order() -> Result<(), Box<dyn std::error::Error>
 /// Defect A (second symptom): a GROUP BY key that is not in the projection
 /// still emits a phantom output column, currently named `col1`.
 #[test]
-#[ignore = "defect A: phantom column for non-projected group key"]
 fn group_by_emits_only_projected_columns() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
