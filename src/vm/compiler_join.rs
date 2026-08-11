@@ -88,7 +88,45 @@ fn classify_join(op: &JoinOperator) -> SqawkResult<(&'static str, Option<&JoinCo
     })
 }
 
+/// Resolved join projection: the left table's column indices, the right
+/// table's column indices, the output schema, and where each projected column
+/// lives as (side, index within that side) in SELECT-list order.
+type JoinProjection = (Vec<usize>, Vec<usize>, ResultSchema, Vec<(usize, usize)>);
+
 impl<'a> SqlCompiler<'a> {
+    /// Emit a join result row in SELECT-list order.
+    ///
+    /// Join registers are laid out left-table columns then right-table
+    /// columns, but the schema is built in projection order, so emitting the
+    /// raw block put values under the wrong headers whenever the SELECT list
+    /// interleaved the tables: `SELECT orders.id, users.name` printed the
+    /// header `orders.id,users.name` above the values `John,101`.
+    fn emit_join_result_row(
+        &mut self,
+        out_plan: &[(usize, usize)],
+        left_start_reg: i64,
+        left_len: usize,
+        comment: &str,
+    ) {
+        let out = self.allocate_registers(out_plan.len().max(1));
+        for (i, (side, idx)) in out_plan.iter().enumerate() {
+            let src = if *side == 0 {
+                left_start_reg + *idx as i64
+            } else {
+                left_start_reg + left_len as i64 + *idx as i64
+            };
+            self.emit(OpCode::Copy, src, out + i as i64, 0, None, "");
+        }
+        self.emit(
+            OpCode::ResultRow,
+            out,
+            out_plan.len() as i64,
+            0,
+            None,
+            comment,
+        );
+    }
+
     pub(crate) fn compile_join(
         &mut self,
         table_with_joins: &TableWithJoins,
@@ -178,7 +216,7 @@ impl<'a> SqlCompiler<'a> {
         let right_table = self.database.get_table(&right_table_name)?;
 
         // Determine which columns to output based on projection
-        let (left_cols, right_cols, schema) = self.resolve_join_projection(
+        let (left_cols, right_cols, schema, out_plan) = self.resolve_join_projection(
             projection,
             left_table,
             right_table,
@@ -358,12 +396,10 @@ impl<'a> SqlCompiler<'a> {
         );
 
         // Output combined row (matched)
-        self.emit(
-            OpCode::ResultRow,
+        self.emit_join_result_row(
+            &out_plan,
             left_start_reg,
-            (left_cols.len() + right_cols.len()) as i64,
-            0,
-            None,
+            left_cols.len(),
             "Output matched row",
         );
 
@@ -395,14 +431,18 @@ impl<'a> SqlCompiler<'a> {
         // LEFT JOIN: outer=left, inner=right, fill right with NULL
         // RIGHT JOIN: outer=right, inner=left, fill left with NULL
         if join_type == "LEFT" || join_type == "RIGHT" || join_type == "FULL" {
-            // Check match flag - if match found (non-zero), skip NULL row output
-            // If no match (zero), continue to NullRow
-            // Jump calculation: IfPos (current), NullRow (+1), ResultRow (+2), Next outer (+3)
-            // So if match found, skip to +3 (Next outer)
-            self.emit(
+            // If a match was found, skip the NULL-filled row entirely.
+            //
+            // This was a hand-counted `program.len() + 3` justified by a
+            // comment enumerating the three instructions that followed. The
+            // count silently stopped being 3 the moment the result row needed
+            // more than one instruction to emit, so the jump landed inside the
+            // block it was supposed to skip and produced spurious NULL rows.
+            let skip_null_row = self.label();
+            self.emit_jump_to(
                 OpCode::IfPos,
                 match_reg,
-                (self.program.len() + 3) as i64,
+                skip_null_row,
                 0,
                 None,
                 "Skip NULL row if match found",
@@ -419,14 +459,13 @@ impl<'a> SqlCompiler<'a> {
             );
 
             // Output row with NULLs
-            self.emit(
-                OpCode::ResultRow,
+            self.emit_join_result_row(
+                &out_plan,
                 left_start_reg,
-                (left_cols.len() + right_cols.len()) as i64,
-                0,
-                None,
+                left_cols.len(),
                 "Output outer row with NULLs for inner",
             );
+            self.resolve(skip_null_row);
         }
 
         // Next outer
@@ -506,10 +545,11 @@ impl<'a> SqlCompiler<'a> {
 
             // If condition matches, mark it and skip to next right row
             // IfZ skips over MarkMatch if condition is false
-            self.emit(
+            let skip_mark = self.label();
+            self.emit_jump_to(
                 OpCode::IfZ,
                 condition_reg2,
-                (self.program.len() + 2) as i64,
+                skip_mark,
                 0,
                 None,
                 "Skip if condition false",
@@ -524,6 +564,7 @@ impl<'a> SqlCompiler<'a> {
                 None,
                 "Mark that right row has a match",
             );
+            self.resolve(skip_mark);
 
             // Next left (continue checking)
             self.emit(
@@ -539,10 +580,11 @@ impl<'a> SqlCompiler<'a> {
 
             // After checking all left rows: if no match, output right row with NULLs for left
             // If match found (IfPos), skip to next right row
-            self.emit(
+            let skip_null_left = self.label();
+            self.emit_jump_to(
                 OpCode::IfPos,
                 match_reg,
-                (self.program.len() + 3) as i64,
+                skip_null_left,
                 0,
                 None,
                 "Skip if right row had a match",
@@ -559,14 +601,13 @@ impl<'a> SqlCompiler<'a> {
             );
 
             // Output row with NULLs for left
-            self.emit(
-                OpCode::ResultRow,
+            self.emit_join_result_row(
+                &out_plan,
                 left_start_reg,
-                (left_cols.len() + right_cols.len()) as i64,
-                0,
-                None,
+                left_cols.len(),
                 "Output unmatched right row with NULLs",
             );
+            self.resolve(skip_null_left);
 
             // Next right row
             self.emit(
@@ -662,7 +703,7 @@ impl<'a> SqlCompiler<'a> {
         let right_table = self.database.get_table(right_table_name)?;
 
         // Determine which columns to output based on projection
-        let (left_cols, right_cols, schema) = self.resolve_join_projection(
+        let (left_cols, right_cols, schema, out_plan) = self.resolve_join_projection(
             projection,
             left_table,
             right_table,
@@ -734,12 +775,10 @@ impl<'a> SqlCompiler<'a> {
         self.emit_column_loads(right_cursor as i64, &right_cols, right_start_reg, "right");
 
         // Output combined row
-        self.emit(
-            OpCode::ResultRow,
+        self.emit_join_result_row(
+            &out_plan,
             left_start_reg,
-            (left_cols.len() + right_cols.len()) as i64,
-            0,
-            None,
+            left_cols.len(),
             "Output cross join row",
         );
 
@@ -2547,7 +2586,7 @@ impl<'a> SqlCompiler<'a> {
         right_table: &Table,
         left_table_name: &str,
         right_table_name: &str,
-    ) -> SqawkResult<(Vec<usize>, Vec<usize>, ResultSchema)> {
+    ) -> SqawkResult<JoinProjection> {
         let tables: Vec<&Table> = vec![left_table, right_table];
         let table_names: Vec<&str> = vec![left_table_name, right_table_name];
 
@@ -2555,7 +2594,15 @@ impl<'a> SqlCompiler<'a> {
         for item in projection {
             if matches!(item, SelectItem::Wildcard(_)) {
                 let (table_cols, schema) = Self::build_wildcard_schema(&tables, &table_names);
-                return Ok((table_cols[0].clone(), table_cols[1].clone(), schema));
+                // Wildcard output IS left-then-right, so the plan is the
+                // identity over that layout.
+                let plan = table_cols[0]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| (0usize, i))
+                    .chain(table_cols[1].iter().enumerate().map(|(i, _)| (1usize, i)))
+                    .collect();
+                return Ok((table_cols[0].clone(), table_cols[1].clone(), schema, plan));
             }
         }
 
@@ -2563,6 +2610,11 @@ impl<'a> SqlCompiler<'a> {
         let mut left_cols = Vec::new();
         let mut right_cols = Vec::new();
         let mut schema = ResultSchema::new();
+        // Where each projected column lives: (side, index within that side).
+        // Registers are laid out left-then-right, but the SELECT list may name
+        // them in any order, so the emission order has to be recorded rather
+        // than assumed.
+        let mut out_plan: Vec<(usize, usize)> = Vec::with_capacity(projection.len());
 
         for item in projection {
             let (tbl_name, col_name, output_name) = match item {
@@ -2586,8 +2638,10 @@ impl<'a> SqlCompiler<'a> {
             let (tbl_idx, col_idx) =
                 Self::find_column_in_tables(&tbl_name, &col_name, &tables, &table_names)?;
             if tbl_idx == 0 {
+                out_plan.push((0, left_cols.len()));
                 left_cols.push(col_idx);
             } else {
+                out_plan.push((1, right_cols.len()));
                 right_cols.push(col_idx);
             }
             schema.add_column(
@@ -2596,7 +2650,7 @@ impl<'a> SqlCompiler<'a> {
             );
         }
 
-        Ok((left_cols, right_cols, schema))
+        Ok((left_cols, right_cols, schema, out_plan))
     }
 
     /// Extract table and column name from a compound identifier (e.g., users.name)

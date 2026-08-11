@@ -141,7 +141,6 @@ fn group_by_emits_only_projected_columns() -> Result<(), Box<dyn std::error::Err
 /// while the schema is built in SELECT order. Currently prints header
 /// `orders.id,users.name` over values `John,101` -- swapped.
 #[test]
-#[ignore = "defect B: JOIN values misaligned with headers"]
 fn join_respects_projection_order() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[users_csv(), orders_csv()],

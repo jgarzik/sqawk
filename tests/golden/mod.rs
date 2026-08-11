@@ -1730,3 +1730,51 @@ fn group_by_non_key_column_is_rejected() -> Result<(), Box<dyn std::error::Error
         "must appear in GROUP BY",
     )
 }
+
+// ---------------------------------------------------------------------------
+// Join projection order.
+//
+// Join registers are laid out left-table columns then right-table columns. The
+// SELECT list may name them in any order, so these pin the reversed and
+// interleaved cases -- including on outer joins, where the NULL-filled row
+// must follow the same order.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn join_projection_reversed() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/users.csv", "tests/data/orders.csv"],
+        "SELECT orders.id, users.name FROM users JOIN orders ON users.id = orders.user_id",
+        "orders.id,users.name\n101,John\n103,John\n105,John\n102,Jane\n104,Jane",
+    )
+}
+
+#[test]
+fn left_join_reversed_projection_nullfill() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/customers.csv", "tests/data/purchases.csv"],
+        "SELECT purchases.item, customers.name FROM customers LEFT JOIN purchases \
+         ON customers.id = purchases.customer_id",
+        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\nNULL,Cara",
+    )
+}
+
+#[test]
+fn right_join_reversed_projection_nullfill() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/customers.csv", "tests/data/purchases.csv"],
+        "SELECT purchases.item, customers.name FROM customers RIGHT JOIN purchases \
+         ON customers.id = purchases.customer_id",
+        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\nOrphan,NULL",
+    )
+}
+
+#[test]
+fn full_join_reversed_projection_nullfill() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/customers.csv", "tests/data/purchases.csv"],
+        "SELECT purchases.item, customers.name FROM customers FULL JOIN purchases \
+         ON customers.id = purchases.customer_id",
+        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\nNULL,Cara\nOrphan,NULL",
+    )
+}
