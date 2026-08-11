@@ -64,6 +64,10 @@ mod output; // Tests for stdout and file output (atomic writes)
 mod repl; // Tests for interactive REPL functionality with pre-generated input
 mod string_functions; // Tests for string functions (UPPER, LOWER, TRIM, SUBSTR, REPLACE)
 
+// Audit (2026-08): correctness work
+mod defects; // Red list -- #[ignore]d tests encoding CORRECT behaviour for known defects
+mod golden; // Characterization tests -- exact-output pins on behaviour that is right today
+
 // Support modules
 mod helpers; // Test helpers and utilities
 

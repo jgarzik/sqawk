@@ -1,0 +1,5 @@
+id,customer_id,item
+10,1,Book
+11,1,Pen
+12,2,Desk
+13,99,Orphan

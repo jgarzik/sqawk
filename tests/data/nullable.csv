@@ -1,0 +1,6 @@
+id,name,score,grade
+1,Alice,90,A
+2,Bob,,B
+3,Charlie,70,
+4,,50,D
+5,Eve,90,A
