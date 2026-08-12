@@ -157,8 +157,10 @@ This ensures that TSV files remain TSV, colon-separated files remain colon-separ
 
 Sqawk supports two primary output modes:
 
-1. **Stdout Output**: Query results (SELECT) are written to standard output using the source table's delimiter
-2. **File Writeback**: Modified tables (via INSERT, UPDATE, DELETE) are written back to their source files when `--write` is specified
+1. **Stdout Output**: Query results (SELECT) are written to standard output using
+   the `-F` delimiter, or comma when `-F` was not given. This is independent of
+   the delimiter a source table was parsed with
+2. **File Writeback**: Modified tables (via INSERT, UPDATE, DELETE) are written back to their source files when `--write` is specified, preserving that file's delimiter
 
 For stdout output, the data is streamed directly without buffering concerns. For file writeback, the atomic write pattern described above is used.
 
@@ -166,10 +168,11 @@ For stdout output, the data is streamed directly without buffering concerns. For
 
 Sqawk supports multiple storage backends for table row data, enabling efficient handling of different data sources:
 
-### Memory Storage (Default for stdin)
+### Memory Storage
 
 The `MemoryStorage` backend stores all row data in heap-allocated memory:
-- Used when reading from stdin or pipes
+- Used for tables with no backing file (`CREATE TABLE`, `CREATE TABLE AS
+  SELECT`), and for any mmap table after its first modification
 - All string values are owned (heap-allocated)
 - Supports all operations including INSERT, UPDATE, DELETE
 - Data is mutable throughout the session
@@ -186,8 +189,15 @@ The `MmapStorage` backend uses memory-mapped files for zero-copy access:
 
 The storage backend is selected automatically based on the data source:
 - **On-disk files**: Uses mmap for zero-copy loading
-- **Stdin/pipes**: Uses traditional in-memory storage
+- **Tables created by DDL**: Uses in-memory storage; there is no file to map
 - **Write operations**: Mmap tables convert to memory on first modification
+
+Standard input (the `-` operand) is not seekable and cannot be mapped directly,
+so it is spooled to a temporary file and then loaded by the ordinary mmap path.
+The temp file handle is held for the run's duration, because the mmap borrows
+from it. The resulting table is then detached from that path, so `--write` has
+no target and reports the table as unwritable rather than rewriting a temp file
+that is about to be deleted.
 
 ### Row Identity Across Updates
 

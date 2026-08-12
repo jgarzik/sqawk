@@ -293,6 +293,29 @@ impl<'a> Cursor<'a> {
     }
 }
 
+/// Round `num` to `digits` places after the decimal point.
+///
+/// Negative `digits` rounds to the left of the point, so
+/// `round_to(1234.5, -2)` is `1200.0`. A magnitude large enough to push the
+/// scale factor out of f64 range leaves the value alone: at that many digits
+/// it is already exact.
+fn round_to(num: f64, digits: i64) -> f64 {
+    if digits == 0 {
+        return num.round();
+    }
+    // Outside this range the scale factor is not representable, and the value
+    // is already exact at that many digits either way.
+    if !(-308..=308).contains(&digits) {
+        return num;
+    }
+    let factor = 10f64.powi(digits as i32);
+    let scaled = num * factor;
+    if !scaled.is_finite() {
+        return num;
+    }
+    scaled.round() / factor
+}
+
 /// Compare two Values for ordering
 fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
@@ -1221,9 +1244,39 @@ impl<'a> VmEngine<'a> {
                     }
                 };
 
+                // P3 holds the register with ROUND's precision, or -1 when the
+                // call had no second argument. Every emit site passes -1 for
+                // the functions that take no precision; the name is checked
+                // too so that neither convention alone has to be right.
+                let precision = if func_name == "ROUND" && inst.p3 >= 0 {
+                    match self.get_register(inst.p3 as usize)? {
+                        Register::Integer(i) => Some(i),
+                        Register::Float(f) => Some(f as i64),
+                        // A precision that is not a number is a mistake in the
+                        // query, not a request to round to 0 places.
+                        Register::String(s) => match s.trim().parse::<i64>() {
+                            Ok(i) => Some(i),
+                            Err(_) => {
+                                return Err(SqawkError::InvalidSqlQuery(format!(
+                                    "ROUND precision must be a number, got '{}'",
+                                    s
+                                )));
+                            }
+                        },
+                        Register::Boolean(b) => Some(b as i64),
+                        Register::Null => {
+                            // NULL precision yields NULL, as for the value.
+                            self.set_register(dest_reg, Register::Null)?;
+                            return Ok(ExecuteResult::Continue);
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 let result = match func_name {
                     "ABS" => num.abs(),
-                    "ROUND" => num.round(),
+                    "ROUND" => round_to(num, precision.unwrap_or(0)),
                     "CEIL" | "CEILING" => num.ceil(),
                     "FLOOR" => num.floor(),
                     _ => {

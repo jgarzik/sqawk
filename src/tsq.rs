@@ -65,7 +65,17 @@ fn default_seed() -> u64 {
 // ============================================================================
 
 #[derive(Parser, Debug)]
-#[clap(name = "tsq", about = "Test SQL Query Generator for sqawk")]
+#[clap(
+    name = "tsq",
+    version,
+    about = "Test SQL Query Generator for sqawk",
+    long_about = "Generates deterministic multi-table CSV data plus a corpus of SQL \
+                  queries for exercising sqawk.\n\n\
+                  Writes data/ (customers, products, orders, order_items, reviews with \
+                  foreign-key relationships), queries/ (numbered .sql files), \
+                  verify/run_verification.sh, and metadata.json. The same seed always \
+                  produces the same data."
+)]
 struct Args {
     /// Random seed for reproducible generation (prints seed if not specified)
     #[clap(long, short = 's')]
@@ -2079,7 +2089,7 @@ fn write_metadata(base_path: &Path, seed: u64, rows: usize, v: &VerificationData
     "order_items": {},
     "reviews": {}
   }},
-  "tsq_version": "0.1.0"
+  "tsq_version": "{}"
 }}
 "#,
         seed,
@@ -2088,7 +2098,8 @@ fn write_metadata(base_path: &Path, seed: u64, rows: usize, v: &VerificationData
         v.product_count,
         v.order_count,
         v.order_item_count,
-        v.review_count
+        v.review_count,
+        env!("CARGO_PKG_VERSION")
     );
 
     let mut file = File::create(base_path.join("metadata.json"))?;

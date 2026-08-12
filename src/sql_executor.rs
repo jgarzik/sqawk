@@ -110,18 +110,30 @@ impl<'a> SqlExecutor<'a> {
     /// Only tables that have been modified will be saved, preserving the original
     /// files if no changes were made.
     ///
+    /// Every table is checked for a writeback target before any of them is
+    /// written. An unwritable table (one read from standard input, say) used
+    /// to surface on its own turn in the loop, after an arbitrary number of
+    /// real source files had already been rewritten -- and since
+    /// `modified_tables` is a `HashSet`, which ones varied between runs of the
+    /// same command. Sorting makes the writes themselves ordered too.
+    ///
     /// # Returns
     /// * `Ok(usize)` - Number of tables saved
     /// * `Err` if any error occurs during saving
     pub fn save_modified_tables(&self) -> Result<usize> {
-        let mut count = 0;
-        for table_name in &self.modified_tables {
-            // Use the file handler to write the table back to its source file
-            self.file_handler.save_table(table_name)?;
-            count += 1;
+        let mut names: Vec<&String> = self.modified_tables.iter().collect();
+        names.sort();
+
+        for table_name in &names {
+            self.file_handler.check_table_writable(table_name)?;
         }
 
-        Ok(count)
+        for table_name in &names {
+            // Use the file handler to write the table back to its source file
+            self.file_handler.save_table(table_name)?;
+        }
+
+        Ok(names.len())
     }
 
     /// Check if a specific table has been modified

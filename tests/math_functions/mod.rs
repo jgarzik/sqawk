@@ -87,3 +87,137 @@ fn test_floor() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+/// ROUND with an explicit precision argument.
+///
+/// The second argument used to be parsed and then silently dropped, so
+/// `ROUND(3.14159, 2)` returned `3` rather than `3.14`.
+#[test]
+fn test_round_precision() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT ROUND(3.14159, 2) AS a, ROUND(2.71828, 3) AS b, ROUND(1.005, 0) AS c \
+         FROM employees LIMIT 1",
+        concat!("a,b,c", "\n3.14,2.718,1"),
+    )
+}
+
+/// A zero or absent precision must keep the original whole-number behaviour.
+#[test]
+fn test_round_precision_zero_matches_one_arg() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT ROUND(3.7) AS a, ROUND(3.7, 0) AS b FROM employees LIMIT 1",
+        concat!("a,b", "\n4,4"),
+    )
+}
+
+/// Negative precision rounds to the left of the decimal point.
+#[test]
+fn test_round_negative_precision() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT ROUND(1234.5, -2) AS a FROM employees LIMIT 1",
+        concat!("a", "\n1200"),
+    )
+}
+
+/// Precision applies to a column value, not just a literal.
+#[test]
+fn test_round_precision_on_column() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name, ROUND(salary / 7.0, 2) AS share FROM employees LIMIT 3",
+        concat!(
+            "name,share",
+            "\nAlice,10000",
+            "\nBob,7857.14",
+            "\nCharlie,9285.71",
+        ),
+    )
+}
+
+/// A precision argument is only meaningful for ROUND; the other math
+/// functions take exactly one argument and must say so rather than ignore it.
+#[test]
+fn test_math_func_rejects_extra_argument() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT ABS(-5, 2) FROM employees",
+        "ABS takes exactly one argument",
+    )
+}
+
+/// The arity check must hold on the no-FROM compile path too.
+///
+/// `SELECT ABS(-5, 2)` used to return 5 while `SELECT ABS(-5, 2) FROM t`
+/// errored: expression compilation has two entry points, and only one of
+/// them validated argument counts.
+#[test]
+fn test_math_func_arity_enforced_without_from() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT ABS(-5, 2)",
+        "ABS takes exactly one argument",
+    )?;
+    crate::helpers::assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT ROUND(3.14159, 2, 9)",
+        "ROUND takes at most two arguments",
+    )
+}
+
+/// ROUND's precision still works on the no-FROM path.
+///
+/// Headers are col0/col1 rather than the aliases: `AS` is dropped when there
+/// is no FROM clause. That is a separate, pre-existing quirk -- what this
+/// test pins is the values.
+#[test]
+fn test_round_precision_without_from() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT ROUND(3.14159, 2) AS a, ROUND(1234.5, -2) AS b",
+        concat!("col0,col1", "\n3.14,1200"),
+    )
+}
+
+/// CEIL/FLOOR are lowered by sqlparser to Expr::Ceil/Expr::Floor rather than
+/// Expr::Function, so they bypassed the arity check entirely: CEIL(1.2, 3)
+/// returned 2 while the CEILING spelling of the same call errored.
+#[test]
+fn test_ceil_floor_reject_scale_argument() -> Result<(), Box<dyn std::error::Error>> {
+    for sql in [
+        "SELECT CEIL(1.2, 3) FROM employees",
+        "SELECT FLOOR(1.7, 3) FROM employees",
+        "SELECT CEIL(1.2, 3)",
+        "SELECT FLOOR(1.7, 3)",
+    ] {
+        crate::helpers::assert_query_fails(
+            &["tests/data/employees.csv"],
+            sql,
+            "takes exactly one argument",
+        )?;
+    }
+    Ok(())
+}
+
+/// A precision that is not a number must be reported, not treated as 0.
+#[test]
+fn test_round_rejects_non_numeric_precision() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT ROUND(3.14159, 'two') FROM employees",
+        "precision",
+    )
+}
+
+/// Two ROUND calls differing only in precision must not collapse to one
+/// column name, which would make the second column unaddressable.
+#[test]
+fn test_round_precision_distinguishes_column_names() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT ROUND(3.14159, 1), ROUND(3.14159, 3) FROM employees LIMIT 1",
+        concat!("ROUND(expr, 1),ROUND(expr, 3)", "\n3.1,3.142"),
+    )
+}

@@ -227,3 +227,35 @@ fn test_repl_save_command() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+/// `.tables` used to iterate a HashMap, so the listing came out in a
+/// different order from one run to the next.
+#[test]
+fn table_listing_order_is_deterministic() {
+    let mut seen: Option<String> = None;
+    for _ in 0..8 {
+        let out = assert_cmd::cargo::cargo_bin_cmd!("sqawk")
+            .args([
+                "-i",
+                "tests/data/employees.csv",
+                "tests/data/users.csv",
+                "tests/data/orders.csv",
+            ])
+            .write_stdin(".tables\n.exit\n")
+            .output()
+            .expect("failed to run sqawk");
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        match &seen {
+            None => seen = Some(stdout),
+            Some(first) => assert_eq!(first, &stdout, "`.tables` listing differed between runs"),
+        }
+    }
+
+    let listing = seen.expect("no runs recorded");
+    let names: Vec<&str> = listing
+        .lines()
+        .map(str::trim)
+        .filter(|l| ["employees", "orders", "users"].contains(l))
+        .collect();
+    assert_eq!(names, vec!["employees", "orders", "users"]);
+}

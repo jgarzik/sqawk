@@ -87,13 +87,39 @@ CASE expr WHEN val THEN result [WHEN ...] [ELSE default] END
 | Function | Description |
 |----------|-------------|
 | `ABS(n)` | Absolute value |
-| `ROUND(n)` | Round to nearest integer |
+| `ROUND(n [, d])` | Round to `d` decimal places, or to the nearest integer |
 | `CEIL(n)`, `CEILING(n)` | Round up |
 | `FLOOR(n)` | Round down |
+
+`ROUND(3.14159, 2)` is `3.14`. A negative `d` rounds to the left of the decimal
+point, so `ROUND(1234.5, -2)` is `1200`. A `d` that is not a number is an error
+rather than a silent `0`. `ABS`, `CEIL`, `CEILING` and `FLOOR` take exactly one
+argument and reject a second.
+
+A result that lands on a whole number prints without a decimal part, as
+everywhere else in sqawk: `ROUND(2.0, 2)` is `2`, matching `AVG` and plain
+arithmetic rather than SQL's `2.0`.
 
 ### Arithmetic
 
 `+`, `-`, `*`, `/`, `%` (modulo)
+
+### Conditional and Conversion
+
+| Expression | Description |
+|------------|-------------|
+| `CAST(expr AS TYPE)` | Convert to `INTEGER`, `REAL`, `TEXT`, `BOOLEAN` |
+| `COALESCE(a, b, ...)` | First non-NULL argument |
+| `NULLIF(a, b)` | NULL when `a = b`, otherwise `a` |
+| `a \|\| b` | String concatenation |
+
+### Result Column Names
+
+An expression without `AS` is named after its function -- `COUNT`, `SUM`,
+`ROUND(expr)`, `COALESCE(expr)` -- and a bare `CAST` or arithmetic expression
+is named `expr`. `ROUND` includes its precision, so `ROUND(salary, 2)` is named
+`ROUND(salary, 2)` and two roundings of one column to different precisions stay
+addressable. Use `AS` whenever the header is consumed downstream.
 
 ### Date/Time Functions
 
@@ -205,6 +231,18 @@ INSERT INTO table SELECT ... FROM other_table
 UPDATE table SET col1 = val1 [, col2 = val2, ...]
 [WHERE condition]
 ```
+
+`UPDATE ... FROM other_table` is not supported and is accepted without effect.
+To pull a value from another table, use a correlated subquery in the SET
+expression -- it must select an aggregate:
+
+```sql
+UPDATE data SET category =
+    (SELECT MAX(category) FROM lookup WHERE lookup.code = data.code)
+```
+
+A correlated scalar subquery selecting a bare column is rejected with
+*"Correlated scalar subquery must select an aggregate function"*.
 
 ## DELETE
 

@@ -100,6 +100,20 @@ fn main() -> Result<()> {
     // Note: table definitions are now handled by Database directly
     let mut file_handler = FileHandler::new(&config, &mut database);
 
+    // The REPL reads its commands from stdin, so it cannot also consume stdin
+    // as table data: whichever got there first would starve the other.
+    if args.interactive
+        && args.files.iter().any(|spec| {
+            // Same split as parse_file_spec: table name is before the first '='.
+            spec.split_once('=').map_or(spec.as_str(), |(_, path)| path) == file_handler::STDIN_SPEC
+        })
+    {
+        anyhow::bail!(
+            "cannot read a table from standard input in interactive mode: \
+             the REPL reads its own commands from stdin"
+        );
+    }
+
     // Step 2b: Load all specified files into in-memory tables
     // Each file can specify its table name with table_name=file_path syntax
     for file_spec in &args.files {
@@ -115,6 +129,12 @@ fn main() -> Result<()> {
         for table_name in file_handler.table_names() {
             println!("Table '{table_name}' loaded");
         }
+    }
+
+    // The REPL is about to take ownership of stdin for its command stream, so
+    // no later `.load -` may consume it.
+    if args.interactive {
+        file_handler.disable_stdin();
     }
 
     // Step 3: Create SQL executor
