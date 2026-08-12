@@ -18,6 +18,7 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 - **DDL** - CREATE TABLE, CREATE TABLE AS SELECT, DROP, ALTER TABLE ADD COLUMN, TRUNCATE
 - **Expressions** - CASE, CAST, COALESCE, NULLIF, BETWEEN, IN, LIKE/ILIKE, `||`, arithmetic
 - **File Formats** - CSV, TSV, and custom delimiters; headerless files via `--tabledef`
+- **Pipelines** - Reads standard input with a `-` file operand
 - **Safe by Default** - Files unchanged unless `--write` flag is specified
 - **Interactive REPL** - Explore data interactively with `-i` flag
 
@@ -26,6 +27,9 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 ```sh
 cargo install sqawk
 ```
+
+This installs two binaries: `sqawk` and [`tsq`](#tsq---test-data-generator).
+Requires Rust 1.88 or newer.
 
 ## Quick Examples
 
@@ -41,6 +45,9 @@ sqawk -s "SELECT department, AVG(salary) FROM employees GROUP BY department" emp
 
 # Modify and save
 sqawk -s "UPDATE data SET status = 'archived' WHERE year < 2020" data.csv --write
+
+# Read standard input as the table "stdin"
+cat employees.csv | sqawk -s "SELECT name FROM stdin WHERE salary > 70000" -
 ```
 
 ## `tsq` - test data generator

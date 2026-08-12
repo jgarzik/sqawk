@@ -21,6 +21,7 @@
    - [Help (--help)](#help---help)
 5. [Working with Files](#working-with-files)
    - [File Format Support](#file-format-support)
+   - [Reading Standard Input](#reading-standard-input)
    - [Table Naming](#table-naming)
    - [Handling Multiple Files](#handling-multiple-files)
    - [File Writeback Behavior](#file-writeback-behavior)
@@ -90,8 +91,12 @@ To build from source:
 ### Installation Notes
 
 - Sqawk is designed to work on Linux, macOS, and Windows systems where Rust is supported
-- The binary is self-contained with no runtime dependencies
-- After installation, the `sqawk` command should be available in your PATH
+- Building requires Rust 1.88 or newer
+- The binaries are self-contained with no runtime dependencies
+- Installing the crate provides **two** commands: `sqawk`, and `tsq`, a
+  generator of deterministic multi-table CSV data and SQL queries for
+  exercising sqawk. Run `tsq --help`, or see the
+  [project README](../README.md#tsq---test-data-generator)
 
 ## Getting Started
 
@@ -100,12 +105,14 @@ To build from source:
 The basic structure of a Sqawk command is:
 
 ```
-sqawk [OPTIONS] [FILES]
+sqawk [OPTIONS] <FILES>...
 ```
 
 Where:
 - `OPTIONS` include SQL statements and other flags
-- `FILES` are the delimiter-separated files to process
+- `FILES` are the delimiter-separated files to process. At least one is
+  required. Each may be written as `[table_name=]file_path`, and a path of `-`
+  reads [standard input](#reading-standard-input)
 
 ### Your First Sqawk Command
 
@@ -201,42 +208,47 @@ This opens an interactive SQL prompt where you can:
 
 ```
 $ sqawk -i employees.csv sales.csv
-
-Sqawk SQL Shell
-Enter SQL statements or .help for available commands.
+Welcome to Sqawk interactive mode!
+Enter SQL statements or commands, terminate with ';'.
+Type .help for available commands.
 sqawk> SELECT name, department FROM employees WHERE salary > 70000;
 name,department
 Alice,Engineering
 Charlie,Engineering
 
 sqawk> .tables
-employees sales
+Tables:
+  employees
+  sales
 
 sqawk> .schema employees
 CREATE TABLE employees (
-  id INTEGER,
+  id TEXT,
   name TEXT,
   department TEXT,
-  salary INTEGER
+  salary TEXT
 );
 
-sqawk> .write on
-Write mode enabled. Changes will be saved to files.
+sqawk> .changes on
+Changes display enabled
 
 sqawk> UPDATE employees SET salary = salary * 1.1 WHERE department = 'Engineering';
-Updated 2 rows
+2 rows affected
+Changes not saved: use .write to save changes to files
 
-sqawk> .write off
-Write mode disabled. Changes will not be saved to files.
-
-sqawk> UPDATE sales SET amount = amount * 0.9 WHERE date = '2023-12-15';
-Updated 5 rows
-
-sqawk> .save sales
-Changes saved to table 'sales'
+sqawk> .save employees
+Changes saved to table 'employees'
 
 sqawk> .exit
 ```
+
+Two things in that transcript are worth calling out:
+
+- `.schema` reports every column as `TEXT`. Loaded files carry no declared
+  schema -- types are inferred per value at comparison time, not per column, so
+  there is no column type for `.schema` to report. See
+  [Type coercion](sql_reference.md#type-coercion).
+- Row counts are only printed after `.changes on`; the default is off.
 
 The interactive mode is particularly useful for:
 - Exploring datasets without writing multiple commands
@@ -271,10 +283,14 @@ sqawk -F '|' -s "SELECT * FROM logs" logs.txt
 ```
 
 Notes on field separators:
-- The default separator is comma (,) for CSV files
-- For files with .tsv extension, tab is used as the default separator
+- Files ending in `.csv` default to comma; **any other extension defaults to
+  tab**, `.tsv` and `.txt` alike. A comma-separated `.txt` file therefore needs
+  an explicit `-F,`. A file with no extension at all defaults to comma
 - Common separators include tab (`\t`), comma (`,`), colon (`:`), and pipe (`|`)
-- The specified separator is also used when writing back to files
+- `-F` applies to every input file in the invocation, not per file
+- The input separator is preserved when writing a table back with `--write`
+- Query results on stdout use `-F` when it is given, and comma otherwise --
+  reading a tab-separated file without `-F` prints comma-separated results
 
 ### Table Definition Option (--tabledef)
 
@@ -340,9 +356,9 @@ Sqawk supports various delimiter-separated file formats:
 
 File format detection follows these rules:
 1. If a specific delimiter is provided with `-F`, it's used regardless of file extension
-2. Files with `.csv` extension use comma as the default delimiter
-3. Files with `.tsv` extension use tab as the default delimiter
-4. Other file extensions default to comma unless specified otherwise
+2. Files with a `.csv` extension use comma as the default delimiter
+3. Files with **any other** extension -- `.tsv`, `.txt`, `.log` -- default to tab
+4. Files with **no** extension default to comma, as does standard input
 
 #### Comment Support
 
@@ -361,17 +377,23 @@ Comment support is useful for:
 - Temporarily excluding rows from processing
 - Adding version information or data provenance details
 
-#### Error Recovery Options
+#### Rows With The Wrong Field Count
 
-When processing CSV or other delimiter-separated files, Sqawk provides options for handling malformed rows:
+A row whose field count does not match the header is reconciled to the header
+rather than rejected. There is no flag for this and no strict mode:
 
-- **Strict Mode** (Default): Malformed rows (those with too few or too many fields) cause an error
-- **Recovery Mode**: Available through certain command line options, enabling Sqawk to:
-  - Skip malformed rows entirely
-  - Pad malformed rows with NULL values if they have too few fields
-  - Truncate malformed rows if they have too many fields
+- A row with **too few** fields is padded with NULL
+- A row with **too many** fields is truncated to the header width
 
-This error recovery capability is essential when working with imperfect data sources where strict format conformance isn't guaranteed.
+```csv
+a,b,c
+1,2        # loads as 1, 2, NULL
+1,2,3,4    # loads as 1, 2, 3
+```
+
+This keeps imperfect data sources usable, but it is silent: nothing warns that
+a row was padded or truncated. If a query returns unexpected NULLs in the last
+columns, check the input for short rows.
 
 ### Defining Schemas with CREATE TABLE
 
@@ -473,8 +495,12 @@ Use the `--write` flag to save changes to the specified location:
 ```sh
 sqawk -s "CREATE TABLE data (id INT, value FLOAT) LOCATION './output.csv';
           INSERT INTO data VALUES (1, 10.5), (2, 20.7);
-          SELECT * FROM data;" --write
+          SELECT * FROM data;" seed.csv --write
 ```
+
+Note the trailing `seed.csv`. At least one input file is always required, even
+when every table in the query is created by the statement itself; `sqawk` with
+no file operand exits with a usage error.
 
 ### Table Naming
 
@@ -524,9 +550,27 @@ Sqawk follows a safe-by-default approach to file modification:
 Example of safe write behavior:
 
 ```sh
-# This only writes back changes to data.csv, not to lookup.csv which was only read
-sqawk -s "UPDATE data SET category = lookup.category FROM lookup WHERE data.code = lookup.code" -s "SELECT * FROM data" data.csv lookup.csv --write
+# Only data.csv is rewritten; lookup.csv was read by the SELECT but never modified
+sqawk -s "DELETE FROM data WHERE code NOT IN (SELECT code FROM lookup)" \
+      -s "SELECT * FROM data" \
+      data.csv lookup.csv --write
 ```
+
+`UPDATE ... FROM other_table` is **not** supported, and is silently accepted
+without doing anything -- no error, no rows changed. A cross-table update has
+to go through a correlated subquery in the SET expression, which must select an
+aggregate:
+
+```sh
+sqawk -s "UPDATE data SET category =
+            (SELECT MAX(category) FROM lookup WHERE lookup.code = data.code)" \
+      data.csv lookup.csv --write
+```
+
+The `MAX()` is not cosmetic: a correlated scalar subquery that selects a bare
+column is rejected with *"Correlated scalar subquery must select an aggregate
+function"*. Wrapping the column in `MAX` picks the single matching value when
+the lookup key is unique.
 
 ## Examples
 
@@ -641,9 +685,45 @@ sqawk -s "SELECT * FROM data WHERE region = 'North'" data.csv > north_data.csv
 # Deduplicate to new file
 sqawk -s "SELECT DISTINCT * FROM data" data.csv > deduped.csv
 
-# Convert delimiter (CSV to TSV)
-sqawk -s "SELECT * FROM data" data.csv | sqawk -F, -s "SELECT * FROM stdin" > data.tsv
+# Convert TSV to CSV: a .tsv is parsed as tab-separated, and stdout falls back
+# to comma because -F was not given
+sqawk -s "SELECT * FROM data" data.tsv > data.csv
 ```
+
+The output delimiter is whatever `-F` says, and comma when `-F` is absent. It
+does not follow the input file's delimiter, which is what makes the conversion
+above work.
+
+### Reading Standard Input
+
+A file operand of `-` reads standard input, so sqawk can sit in the middle of a
+pipeline:
+
+```sh
+# Bare "-" loads stdin as a table called "stdin"
+cat employees.csv | sqawk -s "SELECT name FROM stdin WHERE salary > 70000" -
+
+# Name it explicitly with table_name=-
+curl -s https://example.com/data.csv |
+    sqawk -s "SELECT COUNT(*) FROM remote" remote=-
+
+# stdin mixes freely with files on disk
+cat orders.csv | sqawk -s "SELECT u.name, o.total
+                           FROM stdin o JOIN users u ON u.id = o.user_id" \
+                       - users.csv
+```
+
+Points to note:
+
+- Piped input is treated as **comma-separated**, matching what sqawk writes to
+  stdout, so `sqawk ... | sqawk ... -` round-trips. `-F` overrides it
+- Standard input can only be read once; a second `-` is an error
+- `--tabledef` works on stdin exactly as on a file, keyed by the table name
+  (`--tabledef=stdin:col1,col2` for a bare `-`)
+- A stdin table has no file to write back to. `--write` on one is an error
+  rather than a silent no-op; redirect the query's output instead
+- `-` cannot be combined with `-i`, since the REPL reads its own commands from
+  standard input
 
 ### Interactive REPL Session
 
@@ -653,13 +733,19 @@ sqawk -i sales.csv customers.csv
 
 ```
 sqawk> .tables
-customers sales
+Tables:
+  customers
+  sales
 
 sqawk> .schema sales
-CREATE TABLE sales (id INTEGER, customer_id INTEGER, amount FLOAT);
+CREATE TABLE sales (
+  id TEXT,
+  customer_id TEXT,
+  amount TEXT
+);
 
 sqawk> SELECT COUNT(*) FROM sales;
-count
+COUNT
 1250
 
 sqawk> SELECT c.name, SUM(s.amount) AS total
@@ -668,9 +754,13 @@ sqawk> SELECT c.name, SUM(s.amount) AS total
 name,total
 Enterprise Corp,58750.25
 Acme Inc,45620.75
+Globex,31004.10
 
 sqawk> .exit
 ```
+
+An unaliased aggregate takes the function's name as its column header --
+`COUNT`, `SUM`, `AVG` -- so use `AS` when the header matters downstream.
 
 ## Working with Large Files
 
