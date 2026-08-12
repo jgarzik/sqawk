@@ -21,11 +21,20 @@ use clap::Parser;
 ///
 /// The CLI follows the philosophy of being non-destructive by default,
 /// requiring an explicit flag to modify input files.
+// `long_about` is set explicitly. Without it clap derives the long help from
+// this struct's doc comment, which is written for maintainers and read as
+// nonsense in `sqawk --help`.
 #[derive(Parser, Debug)]
 #[clap(
     author,
     version,
-    about = "SQL-based processor for delimiter-separated files"
+    about = "SQL-based processor for delimiter-separated files",
+    long_about = "sqawk runs SQL against delimiter-separated files (CSV, TSV, etc.).\n\n\
+                  Each input file is loaded as an in-memory table named after the file, \
+                  or after the name given as [table_name=]file_path. Statements run in \
+                  the order given, and each one sees the effects of those before it.\n\n\
+                  Input files are never modified unless --write is given, and then only \
+                  the tables an INSERT, UPDATE or DELETE actually changed."
 )]
 pub struct SqawkArgs {
     /// SQL statements to execute
@@ -55,9 +64,13 @@ pub struct SqawkArgs {
     /// If no table name is specified, the base filename (without extension)
     /// is used as the table name in SQL queries.
     /// Example: users=data/people.csv or just data/products.csv
+    ///
+    /// A path of `-` reads standard input, as the table `stdin` or under the
+    /// name given as `table_name=-`. Piped input is treated as comma-separated
+    /// unless -F says otherwise, and cannot be written back with --write.
     #[clap(
         required = true,
-        help = "Input files to process as [table_name=]file_path"
+        help = "Input files to process as [table_name=]file_path ('-' for stdin)"
     )]
     pub files: Vec<String>,
 

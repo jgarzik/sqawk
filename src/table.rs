@@ -946,6 +946,15 @@ impl Table {
         self.file_path.as_ref()
     }
 
+    /// Detach this table from its backing file.
+    ///
+    /// Used for tables read from standard input: the data was spooled through
+    /// a temporary file to be parsed, but that file is not a writeback target,
+    /// so the table must not claim it as its source.
+    pub fn detach_file_path(&mut self) {
+        self.file_path = None;
+    }
+
     /// Get the delimiter for this table
     ///
     /// Returns the delimiter used for this table.

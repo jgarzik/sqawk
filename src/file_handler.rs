@@ -18,6 +18,12 @@ use crate::storage::mmap::MmapStorage;
 use crate::storage::Storage;
 use crate::table::Table;
 
+/// File operand that names standard input rather than a path on disk.
+pub const STDIN_SPEC: &str = "-";
+
+/// Table name given to a bare `-` operand.
+pub const STDIN_TABLE: &str = "stdin";
+
 /// Enum representing different file formats supported by sqawk
 #[derive(Debug, Clone, Copy)]
 pub enum FileFormat {
@@ -51,6 +57,18 @@ pub struct FileHandler {
 
     /// Application configuration for global settings like verbosity and field separators
     config: AppConfig,
+
+    /// Standard input, spooled to a temporary file.
+    ///
+    /// Stdin is not seekable and cannot be mmap'd, so a `-` operand is copied
+    /// to a temp file and then loaded by the ordinary path. The handle is kept
+    /// here because dropping it deletes the file, which an mmap'd table is
+    /// still reading from. At most one `-` operand is accepted per run.
+    stdin_spool: Option<tempfile::NamedTempFile>,
+
+    /// Name of the table loaded from `-`, if any. Only used to explain why
+    /// `--write` cannot save it.
+    stdin_table: Option<String>,
 }
 
 // Add safety implementation for the raw pointer to Database
@@ -73,7 +91,33 @@ impl FileHandler {
             // SAFETY: The caller must ensure that the database outlives this FileHandler
             database: database as *mut Database,
             config: config.clone(),
+            stdin_spool: None,
+            stdin_table: None,
         }
+    }
+
+    /// Copy standard input to a temporary file and return its path.
+    ///
+    /// The `.csv` suffix is deliberate: it makes format detection treat piped
+    /// input as comma-separated, which matches what sqawk itself writes to
+    /// stdout, so `sqawk ... | sqawk ... -` round-trips. `-F` still overrides.
+    fn spool_stdin(&mut self) -> SqawkResult<PathBuf> {
+        if self.stdin_spool.is_some() {
+            return Err(SqawkError::InvalidFileSpec(
+                "standard input can only be read once; '-' was given more than once".to_string(),
+            ));
+        }
+
+        let mut spool = tempfile::Builder::new()
+            .prefix("sqawk-stdin-")
+            .suffix(".csv")
+            .tempfile()?;
+        std::io::copy(&mut std::io::stdin().lock(), spool.as_file_mut())?;
+        spool.as_file_mut().sync_all()?;
+
+        let path = spool.path().to_path_buf();
+        self.stdin_spool = Some(spool);
+        Ok(path)
     }
 
     /// Get a mutable reference to the database
@@ -116,7 +160,28 @@ impl FileHandler {
     pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<Option<(String, String)>> {
         // Parse file spec to get table name and file path
         let (table_name, file_path) = self.parse_file_spec(file_spec)?;
-        let file_path_str = file_path.to_string_lossy().to_string();
+
+        // A "-" operand is replaced by the temp file stdin was spooled into,
+        // so everything below loads it as an ordinary file. `from_stdin` then
+        // detaches that path again, because the temp file is not somewhere
+        // --write may ever write back to.
+        let from_stdin = file_path == Path::new(STDIN_SPEC);
+        let (file_spec, file_path) = if from_stdin {
+            let spooled = self.spool_stdin()?;
+            (
+                format!("{}={}", table_name, spooled.to_string_lossy()),
+                spooled,
+            )
+        } else {
+            (file_spec.to_string(), file_path)
+        };
+        let file_spec = file_spec.as_str();
+
+        let file_path_str = if from_stdin {
+            STDIN_SPEC.to_string()
+        } else {
+            file_path.to_string_lossy().to_string()
+        };
 
         // First, check if the table already exists in the database
         // This could happen if it was defined through CLI table definitions (--tabledef)
@@ -198,6 +263,14 @@ impl FileHandler {
             self.load_file_regular(file_spec, &format, &predefined_columns)?
         };
 
+        // Drop the spool path so the table has no writeback target: --write
+        // must never rewrite the temp file standing in for stdin.
+        let mut table = table;
+        if from_stdin {
+            table.detach_file_path();
+            self.stdin_table = Some(table_name.clone());
+        }
+
         // Now that we have the table, we can update the database without borrowing conflicts
         {
             // Create a new scope for database operations
@@ -264,13 +337,16 @@ impl FileHandler {
             // Strip the '=' from the file path
             let file_path = &file_path[1..];
 
-            // Validate that the file exists
+            // "-" names standard input, which has nothing on disk to check for.
             let path = PathBuf::from(file_path);
-            if !path.exists() {
+            if file_path != STDIN_SPEC && !path.exists() {
                 return Err(SqawkError::FileNotFound(file_path.to_string()));
             }
 
             Ok((table_name.to_string(), path))
+        } else if file_spec == STDIN_SPEC {
+            // A bare "-" reads standard input into a table called "stdin".
+            Ok((STDIN_TABLE.to_string(), PathBuf::from(STDIN_SPEC)))
         } else {
             // No explicit table name, use the file name without extension
             let path = PathBuf::from(file_spec);
@@ -391,6 +467,14 @@ impl FileHandler {
                         table.columns().join(","),
                         table.delimiter()
                     );
+                }
+
+                if self.stdin_table.as_deref() == Some(table_name) {
+                    return Err(SqawkError::InvalidFileSpec(format!(
+                        "table '{}' was read from standard input and cannot be written back; \
+                         redirect the results instead",
+                        table_name
+                    )));
                 }
 
                 // For tables created with CREATE TABLE, the file path should be set
