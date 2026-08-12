@@ -267,6 +267,56 @@ fn classify_join_for_rewrite(op: &sqlparser::ast::JoinOperator) -> Option<Option
     }
 }
 
+/// Validate the argument count of a math function (ABS, ROUND, CEIL,
+/// CEILING, FLOOR).
+///
+/// Shared because expressions reach the `MathFunc` opcode through two entry
+/// points -- `code_expr`'s `compile_func_math` and the older `compile_expr`,
+/// which handles a SELECT list with no FROM clause. When only the first
+/// validated arity, `SELECT ABS(-5, 2)` quietly returned 5 while
+/// `SELECT ABS(-5, 2) FROM t` errored.
+fn check_math_func_arity(func_name: &str, arg_count: usize) -> SqawkResult<()> {
+    if arg_count == 0 {
+        return Err(SqawkError::InvalidSqlQuery(format!(
+            "{} requires one argument",
+            func_name
+        )));
+    }
+
+    // ROUND is the only one of these taking an optional precision argument.
+    let max_args = if func_name == "ROUND" { 2 } else { 1 };
+    if arg_count > max_args {
+        return Err(SqawkError::InvalidSqlQuery(if max_args == 1 {
+            format!("{} takes exactly one argument", func_name)
+        } else {
+            format!("{} takes at most two arguments", func_name)
+        }));
+    }
+
+    Ok(())
+}
+
+/// Reject a scale or TO-datetime argument on CEIL/FLOOR.
+///
+/// sqlparser lowers `CEIL`/`FLOOR` to [`sqlparser::ast::Expr::Ceil`] and
+/// [`sqlparser::ast::Expr::Floor`] rather than `Expr::Function`, carrying any
+/// second argument in `field` instead of an argument list. They therefore miss
+/// [`check_math_func_arity`] entirely, and `CEIL(1.2, 3)` used to return 2
+/// while the `CEILING(1.2, 3)` spelling of the same call was rejected.
+fn check_ceil_floor_field(
+    func_name: &str,
+    field: &sqlparser::ast::CeilFloorKind,
+) -> SqawkResult<()> {
+    use sqlparser::ast::{CeilFloorKind, DateTimeField};
+    match field {
+        CeilFloorKind::DateTimeField(DateTimeField::NoDateTime) => Ok(()),
+        _ => Err(SqawkError::InvalidSqlQuery(format!(
+            "{} takes exactly one argument",
+            func_name
+        ))),
+    }
+}
+
 /// SQL statement compiler that generates bytecode for the VM engine
 pub struct SqlCompiler<'a> {
     /// The database containing tables
@@ -2023,12 +2073,7 @@ impl<'a> SqlCompiler<'a> {
 
                 match func_name.as_str() {
                     "ABS" | "ROUND" | "CEIL" | "CEILING" | "FLOOR" => {
-                        if func_args(func).is_empty() {
-                            return Err(SqawkError::InvalidSqlQuery(format!(
-                                "{} requires one argument",
-                                func_name
-                            )));
-                        }
+                        check_math_func_arity(&func_name, func_args(func).len())?;
                         let arg_expr = self.extract_function_arg_expr(&func_args(func)[0])?;
                         let src_reg = self.compile_expr(&arg_expr)?;
                         // P3 is the register holding ROUND's precision; -1
@@ -2087,8 +2132,9 @@ impl<'a> SqlCompiler<'a> {
                     }
                 }
             }
-            sqlparser::ast::Expr::Ceil { expr, .. } => {
+            sqlparser::ast::Expr::Ceil { expr, field } => {
                 // CEIL is a special expression type in sqlparser
+                check_ceil_floor_field("CEIL", field)?;
                 let src_reg = self.compile_expr(expr)?;
                 self.emit(
                     OpCode::MathFunc,
@@ -2099,8 +2145,9 @@ impl<'a> SqlCompiler<'a> {
                     &format!("r[{}] = CEIL(r[{}])", result_reg, src_reg),
                 );
             }
-            sqlparser::ast::Expr::Floor { expr, .. } => {
+            sqlparser::ast::Expr::Floor { expr, field } => {
                 // FLOOR is a special expression type in sqlparser
+                check_ceil_floor_field("FLOOR", field)?;
                 let src_reg = self.compile_expr(expr)?;
                 self.emit(
                     OpCode::MathFunc,
@@ -5438,23 +5485,7 @@ impl<'a> SqlCompiler<'a> {
         target_reg: i64,
     ) -> SqawkResult<()> {
         let args = func_args(func);
-        if args.is_empty() {
-            return Err(SqawkError::InvalidSqlQuery(format!(
-                "{} requires one argument",
-                func_name
-            )));
-        }
-
-        // ROUND is the only one of these that takes an optional second
-        // argument. The others used to accept and silently drop extras.
-        let max_args = if func_name == "ROUND" { 2 } else { 1 };
-        if args.len() > max_args {
-            return Err(SqawkError::InvalidSqlQuery(if max_args == 1 {
-                format!("{} takes exactly one argument", func_name)
-            } else {
-                format!("{} takes at most two arguments", func_name)
-            }));
-        }
+        check_math_func_arity(func_name, args.len())?;
 
         let expr = self.extract_function_arg_expr(&args[0])?;
         let src_reg = self.allocate_register();
@@ -6042,7 +6073,8 @@ impl<'a> SqlCompiler<'a> {
                     &format!("r[{}] = TRIM(r[{}])", dest, src),
                 );
             }
-            Expr::Ceil { expr: inner, .. } => {
+            Expr::Ceil { expr: inner, field } => {
+                check_ceil_floor_field("CEIL", field)?;
                 let src = self.code_expr(inner, ctx, None)?;
                 self.emit(
                     OpCode::MathFunc,
@@ -6053,7 +6085,8 @@ impl<'a> SqlCompiler<'a> {
                     &format!("r[{}] = CEIL(r[{}])", dest, src),
                 );
             }
-            Expr::Floor { expr: inner, .. } => {
+            Expr::Floor { expr: inner, field } => {
+                check_ceil_floor_field("FLOOR", field)?;
                 let src = self.code_expr(inner, ctx, None)?;
                 self.emit(
                     OpCode::MathFunc,
@@ -6958,6 +6991,23 @@ impl<'a> SqlCompiler<'a> {
                 } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr))) =
                     func_args(func).first()
                 {
+                    // ROUND's precision has to appear in the name, or
+                    // `SELECT ROUND(a, 1), ROUND(a, 3)` yields two columns
+                    // both called `ROUND(a)` and the second is unaddressable.
+                    // The precision is rendered from the AST rather than named
+                    // recursively, so a literal shows as `1` not `expr`.
+                    if func_name == "ROUND" {
+                        if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(prec))) =
+                            func_args(func).get(1)
+                        {
+                            return format!(
+                                "{}({}, {})",
+                                func_name,
+                                self.get_column_name_from_expr(arg_expr),
+                                prec
+                            );
+                        }
+                    }
                     format!(
                         "{}({})",
                         func_name,

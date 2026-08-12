@@ -145,3 +145,76 @@ fn missing_file_still_errors() {
     assert!(!ok, "expected a missing file to fail");
     assert!(stderr.contains("nope.csv"), "unexpected stderr: {stderr}");
 }
+
+/// Empty piped input used to reach the compiler with a zero-column table and
+/// panic on `result_regs[0]`. An empty pipe is routine for `-`.
+#[test]
+fn empty_stdin_errors_rather_than_panicking() {
+    let (_, stderr, ok) = run_with_stdin(&["-s", "SELECT * FROM stdin", "-"], "");
+    assert!(!ok, "expected empty stdin to be an error");
+    assert!(
+        !stderr.contains("panicked"),
+        "sqawk panicked on empty stdin: {stderr}"
+    );
+    assert!(
+        stderr.contains("no header row"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+/// Rejecting the stdin table must happen before anything is written, or an
+/// unrelated source file is rewritten or not depending on HashSet order.
+#[test]
+fn stdin_write_rejection_leaves_other_files_untouched() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = crate::helpers::create_temp_dir()?;
+    let other =
+        crate::helpers::create_custom_csv(temp.path(), "other.csv", "id,name\n1,Alice\n2,Bob\n")?;
+    let before = std::fs::read_to_string(&other)?;
+
+    // Run repeatedly: the old failure was nondeterministic, driven by the
+    // iteration order of the modified-table set.
+    for _ in 0..8 {
+        let (_, stderr, ok) = run_with_stdin(
+            &[
+                "-s",
+                "DELETE FROM stdin WHERE id = 1",
+                "-s",
+                "DELETE FROM other WHERE id = 1",
+                "-",
+                other.to_str().unwrap(),
+                "--write",
+            ],
+            "id,name\n1,Zed\n",
+        );
+        assert!(!ok, "expected --write on a stdin table to fail");
+        assert!(
+            stderr.contains("read from standard input"),
+            "unexpected stderr: {stderr}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&other)?,
+            before,
+            "other.csv was rewritten despite the run failing"
+        );
+    }
+    Ok(())
+}
+
+/// The REPL reads its commands from stdin, so `.load -` would swallow the
+/// rest of the command stream. The startup guard did not cover it.
+#[test]
+fn repl_load_dash_is_rejected() {
+    let (stdout, _, _) = run_with_stdin(
+        &["-i", "tests/data/employees.csv"],
+        ".load -\n.tables\n.exit\n",
+    );
+    assert!(
+        !stdout.contains("Loaded table 'stdin'"),
+        "`.load -` consumed the REPL command stream: {stdout}"
+    );
+    // The commands after `.load -` must still run.
+    assert!(
+        stdout.contains("employees"),
+        "`.tables` after `.load -` did not run: {stdout}"
+    );
+}

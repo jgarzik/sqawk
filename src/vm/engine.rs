@@ -303,10 +303,12 @@ fn round_to(num: f64, digits: i64) -> f64 {
     if digits == 0 {
         return num.round();
     }
-    let factor = 10f64.powi(digits.clamp(-308, 308) as i32);
-    if factor == 0.0 || !factor.is_finite() {
+    // Outside this range the scale factor is not representable, and the value
+    // is already exact at that many digits either way.
+    if !(-308..=308).contains(&digits) {
         return num;
     }
+    let factor = 10f64.powi(digits as i32);
     let scaled = num * factor;
     if !scaled.is_finite() {
         return num;
@@ -1243,14 +1245,24 @@ impl<'a> VmEngine<'a> {
                 };
 
                 // P3 holds the register with ROUND's precision, or -1 when the
-                // call had no second argument. Only ROUND has a second
-                // argument, and the CEIL/FLOOR emit sites leave P3 at 0, so
-                // the name must gate this as well as the -1 sentinel.
+                // call had no second argument. Every emit site passes -1 for
+                // the functions that take no precision; the name is checked
+                // too so that neither convention alone has to be right.
                 let precision = if func_name == "ROUND" && inst.p3 >= 0 {
                     match self.get_register(inst.p3 as usize)? {
                         Register::Integer(i) => Some(i),
                         Register::Float(f) => Some(f as i64),
-                        Register::String(s) => Some(s.parse::<i64>().unwrap_or(0)),
+                        // A precision that is not a number is a mistake in the
+                        // query, not a request to round to 0 places.
+                        Register::String(s) => match s.trim().parse::<i64>() {
+                            Ok(i) => Some(i),
+                            Err(_) => {
+                                return Err(SqawkError::InvalidSqlQuery(format!(
+                                    "ROUND precision must be a number, got '{}'",
+                                    s
+                                )));
+                            }
+                        },
                         Register::Boolean(b) => Some(b as i64),
                         Register::Null => {
                             // NULL precision yields NULL, as for the value.

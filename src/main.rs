@@ -131,6 +131,12 @@ fn main() -> Result<()> {
         }
     }
 
+    // The REPL is about to take ownership of stdin for its command stream, so
+    // no later `.load -` may consume it.
+    if args.interactive {
+        file_handler.disable_stdin();
+    }
+
     // Step 3: Create SQL executor
     // The executor maintains state across statements, allowing multi-statement operations
     let mut sql_executor = SqlExecutor::new(&mut database, &mut file_handler, &config);

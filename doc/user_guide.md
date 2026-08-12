@@ -395,6 +395,10 @@ This keeps imperfect data sources usable, but it is silent: nothing warns that
 a row was padded or truncated. If a query returns unexpected NULLs in the last
 columns, check the input for short rows.
 
+Completely empty input is a different matter. The first line is the header, so
+a file or pipe with no content has no column names and is rejected with *"has
+no header row"* rather than loading an unusable table.
+
 ### Defining Schemas with CREATE TABLE
 
 While Sqawk automatically infers types from input files, you can explicitly define table schemas using the CREATE TABLE statement. This is useful for:
@@ -722,8 +726,9 @@ Points to note:
   (`--tabledef=stdin:col1,col2` for a bare `-`)
 - A stdin table has no file to write back to. `--write` on one is an error
   rather than a silent no-op; redirect the query's output instead
-- `-` cannot be combined with `-i`, since the REPL reads its own commands from
-  standard input
+- `-` cannot be combined with `-i`, and `.load -` inside the REPL is refused
+  for the same reason: the REPL reads its own commands from standard input,
+  and reading a table from it would swallow the rest of the session
 
 ### Interactive REPL Session
 

@@ -69,6 +69,10 @@ pub struct FileHandler {
     /// Name of the table loaded from `-`, if any. Only used to explain why
     /// `--write` cannot save it.
     stdin_table: Option<String>,
+
+    /// Whether `-` may still be read. The REPL clears this: it reads its own
+    /// commands from stdin, so a `.load -` would swallow the command stream.
+    stdin_available: bool,
 }
 
 // Add safety implementation for the raw pointer to Database
@@ -93,7 +97,19 @@ impl FileHandler {
             config: config.clone(),
             stdin_spool: None,
             stdin_table: None,
+            stdin_available: true,
         }
+    }
+
+    /// Refuse any further `-` operand.
+    ///
+    /// Called when entering interactive mode: the REPL reads its commands from
+    /// standard input, so `.load -` would consume the rest of the script (or
+    /// block until Ctrl-D on a terminal) and the queued commands would never
+    /// run. main.rs rejects `-` among the startup operands with a clearer
+    /// message; this covers every path that reaches the loader afterwards.
+    pub fn disable_stdin(&mut self) {
+        self.stdin_available = false;
     }
 
     /// Copy standard input to a temporary file and return its path.
@@ -102,6 +118,12 @@ impl FileHandler {
     /// input as comma-separated, which matches what sqawk itself writes to
     /// stdout, so `sqawk ... | sqawk ... -` round-trips. `-F` still overrides.
     fn spool_stdin(&mut self) -> SqawkResult<PathBuf> {
+        if !self.stdin_available {
+            return Err(SqawkError::InvalidFileSpec(
+                "cannot read standard input here: the REPL reads its own commands from stdin"
+                    .to_string(),
+            ));
+        }
         if self.stdin_spool.is_some() {
             return Err(SqawkError::InvalidFileSpec(
                 "standard input can only be read once; '-' was given more than once".to_string(),
@@ -112,8 +134,11 @@ impl FileHandler {
             .prefix("sqawk-stdin-")
             .suffix(".csv")
             .tempfile()?;
+        // No sync_all: this file is deleted at exit, io::copy writes straight
+        // to the File with no user-space buffer, and the mmap below reads
+        // through the page cache. Forcing durability would just add a full
+        // flush of the whole pipe before the first query runs.
         std::io::copy(&mut std::io::stdin().lock(), spool.as_file_mut())?;
-        spool.as_file_mut().sync_all()?;
 
         let path = spool.path().to_path_buf();
         self.stdin_spool = Some(spool);
@@ -263,6 +288,16 @@ impl FileHandler {
             self.load_file_regular(file_spec, &format, &predefined_columns)?
         };
 
+        // A source with no header row yields a table with no columns, which
+        // the compiler cannot project from -- it indexed result_regs[0] and
+        // panicked. Empty input is routine for a pipe, so say what is wrong.
+        if table.columns().is_empty() {
+            return Err(SqawkError::InvalidFileSpec(format!(
+                "'{}' has no header row: expected a first line of column names",
+                file_path_str
+            )));
+        }
+
         // Drop the spool path so the table has no writeback target: --write
         // must never rewrite the temp file standing in for stdin.
         let mut table = table;
@@ -406,6 +441,32 @@ impl FileHandler {
         db.table_count()
     }
 
+    /// Explain why `table_name` has no writeback target.
+    fn unwritable_table_error(&self, table_name: &str) -> SqawkError {
+        if self.stdin_table.as_deref() == Some(table_name) {
+            return SqawkError::InvalidFileSpec(format!(
+                "table '{}' was read from standard input and cannot be written back; \
+                 redirect the results instead",
+                table_name
+            ));
+        }
+
+        // For tables created with CREATE TABLE, the file path should be set
+        SqawkError::NoFilePath(table_name.to_string())
+    }
+
+    /// Report whether `table_name` could be written back, without writing it.
+    ///
+    /// Lets a caller reject the whole writeback up front instead of failing
+    /// part-way through and leaving some source files rewritten and others not.
+    pub fn check_table_writable(&self, table_name: &str) -> SqawkResult<()> {
+        let table = self.get_table(table_name)?;
+        if table.file_path().is_none() {
+            return Err(self.unwritable_table_error(table_name));
+        }
+        Ok(())
+    }
+
     /// Check if a table exists
     ///
     /// # Arguments
@@ -469,16 +530,7 @@ impl FileHandler {
                     );
                 }
 
-                if self.stdin_table.as_deref() == Some(table_name) {
-                    return Err(SqawkError::InvalidFileSpec(format!(
-                        "table '{}' was read from standard input and cannot be written back; \
-                         redirect the results instead",
-                        table_name
-                    )));
-                }
-
-                // For tables created with CREATE TABLE, the file path should be set
-                return Err(SqawkError::NoFilePath(table_name.to_string()));
+                return Err(self.unwritable_table_error(table_name));
             }
         };
 
