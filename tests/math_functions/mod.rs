@@ -87,3 +87,63 @@ fn test_floor() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+/// ROUND with an explicit precision argument.
+///
+/// The second argument used to be parsed and then silently dropped, so
+/// `ROUND(3.14159, 2)` returned `3` rather than `3.14`.
+#[test]
+fn test_round_precision() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT ROUND(3.14159, 2) AS a, ROUND(2.71828, 3) AS b, ROUND(1.005, 0) AS c \
+         FROM employees LIMIT 1",
+        concat!("a,b,c", "\n3.14,2.718,1"),
+    )
+}
+
+/// A zero or absent precision must keep the original whole-number behaviour.
+#[test]
+fn test_round_precision_zero_matches_one_arg() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT ROUND(3.7) AS a, ROUND(3.7, 0) AS b FROM employees LIMIT 1",
+        concat!("a,b", "\n4,4"),
+    )
+}
+
+/// Negative precision rounds to the left of the decimal point.
+#[test]
+fn test_round_negative_precision() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT ROUND(1234.5, -2) AS a FROM employees LIMIT 1",
+        concat!("a", "\n1200"),
+    )
+}
+
+/// Precision applies to a column value, not just a literal.
+#[test]
+fn test_round_precision_on_column() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name, ROUND(salary / 7.0, 2) AS share FROM employees LIMIT 3",
+        concat!(
+            "name,share",
+            "\nAlice,10000",
+            "\nBob,7857.14",
+            "\nCharlie,9285.71",
+        ),
+    )
+}
+
+/// A precision argument is only meaningful for ROUND; the other math
+/// functions take exactly one argument and must say so rather than ignore it.
+#[test]
+fn test_math_func_rejects_extra_argument() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT ABS(-5, 2) FROM employees",
+        "ABS takes exactly one argument",
+    )
+}

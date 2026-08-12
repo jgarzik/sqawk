@@ -2031,11 +2031,20 @@ impl<'a> SqlCompiler<'a> {
                         }
                         let arg_expr = self.extract_function_arg_expr(&func_args(func)[0])?;
                         let src_reg = self.compile_expr(&arg_expr)?;
+                        // P3 is the register holding ROUND's precision; -1
+                        // means the call had no second argument. Zero would
+                        // name register 0, so it must not be used as "none".
+                        let prec_reg = if func_name == "ROUND" && func_args(func).len() > 1 {
+                            let prec_expr = self.extract_function_arg_expr(&func_args(func)[1])?;
+                            self.compile_expr(&prec_expr)?
+                        } else {
+                            -1
+                        };
                         self.emit(
                             OpCode::MathFunc,
                             src_reg,
                             result_reg,
-                            0,
+                            prec_reg,
                             Some(func_name.clone()),
                             &format!("r[{}] = {}(r[{}])", result_reg, func_name, src_reg),
                         );
@@ -2085,7 +2094,7 @@ impl<'a> SqlCompiler<'a> {
                     OpCode::MathFunc,
                     src_reg,
                     result_reg,
-                    0,
+                    -1,
                     Some("CEIL".to_string()),
                     &format!("r[{}] = CEIL(r[{}])", result_reg, src_reg),
                 );
@@ -2097,7 +2106,7 @@ impl<'a> SqlCompiler<'a> {
                     OpCode::MathFunc,
                     src_reg,
                     result_reg,
-                    0,
+                    -1,
                     Some("FLOOR".to_string()),
                     &format!("r[{}] = FLOOR(r[{}])", result_reg, src_reg),
                 );
@@ -5428,27 +5437,59 @@ impl<'a> SqlCompiler<'a> {
         ctx: &NameCtx<'_>,
         target_reg: i64,
     ) -> SqawkResult<()> {
-        if func_args(func).is_empty() {
+        let args = func_args(func);
+        if args.is_empty() {
             return Err(SqawkError::InvalidSqlQuery(format!(
                 "{} requires one argument",
                 func_name
             )));
         }
 
-        let expr = self.extract_function_arg_expr(&func_args(func)[0])?;
+        // ROUND is the only one of these that takes an optional second
+        // argument. The others used to accept and silently drop extras.
+        let max_args = if func_name == "ROUND" { 2 } else { 1 };
+        if args.len() > max_args {
+            return Err(SqawkError::InvalidSqlQuery(if max_args == 1 {
+                format!("{} takes exactly one argument", func_name)
+            } else {
+                format!("{} takes at most two arguments", func_name)
+            }));
+        }
+
+        let expr = self.extract_function_arg_expr(&args[0])?;
         let src_reg = self.allocate_register();
 
         // Compile the argument
         self.code_expr_into(&expr, ctx, src_reg)?;
+
+        // P3 carries the register holding ROUND's precision, or -1 when the
+        // call has no second argument.
+        let (prec_reg, desc) = if args.len() == 2 {
+            let prec_expr = self.extract_function_arg_expr(&args[1])?;
+            let reg = self.allocate_register();
+            self.code_expr_into(&prec_expr, ctx, reg)?;
+            (
+                reg,
+                format!(
+                    "r[{}] = {}(r[{}], r[{}])",
+                    target_reg, func_name, src_reg, reg
+                ),
+            )
+        } else {
+            (
+                -1,
+                format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg),
+            )
+        };
 
         // Emit MathFunc opcode
         self.emit(
             OpCode::MathFunc,
             src_reg,
             target_reg,
-            0,
+            prec_reg,
             Some(func_name.to_string()),
-            &format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg),
+            &desc,
         );
 
         Ok(())
@@ -6007,7 +6048,7 @@ impl<'a> SqlCompiler<'a> {
                     OpCode::MathFunc,
                     src,
                     dest,
-                    0,
+                    -1,
                     Some("CEIL".to_string()),
                     &format!("r[{}] = CEIL(r[{}])", dest, src),
                 );
@@ -6018,7 +6059,7 @@ impl<'a> SqlCompiler<'a> {
                     OpCode::MathFunc,
                     src,
                     dest,
-                    0,
+                    -1,
                     Some("FLOOR".to_string()),
                     &format!("r[{}] = FLOOR(r[{}])", dest, src),
                 );

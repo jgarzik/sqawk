@@ -293,6 +293,27 @@ impl<'a> Cursor<'a> {
     }
 }
 
+/// Round `num` to `digits` places after the decimal point.
+///
+/// Negative `digits` rounds to the left of the point, so
+/// `round_to(1234.5, -2)` is `1200.0`. A magnitude large enough to push the
+/// scale factor out of f64 range leaves the value alone: at that many digits
+/// it is already exact.
+fn round_to(num: f64, digits: i64) -> f64 {
+    if digits == 0 {
+        return num.round();
+    }
+    let factor = 10f64.powi(digits.clamp(-308, 308) as i32);
+    if factor == 0.0 || !factor.is_finite() {
+        return num;
+    }
+    let scaled = num * factor;
+    if !scaled.is_finite() {
+        return num;
+    }
+    scaled.round() / factor
+}
+
 /// Compare two Values for ordering
 fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
@@ -1221,9 +1242,29 @@ impl<'a> VmEngine<'a> {
                     }
                 };
 
+                // P3 holds the register with ROUND's precision, or -1 when the
+                // call had no second argument. Only ROUND has a second
+                // argument, and the CEIL/FLOOR emit sites leave P3 at 0, so
+                // the name must gate this as well as the -1 sentinel.
+                let precision = if func_name == "ROUND" && inst.p3 >= 0 {
+                    match self.get_register(inst.p3 as usize)? {
+                        Register::Integer(i) => Some(i),
+                        Register::Float(f) => Some(f as i64),
+                        Register::String(s) => Some(s.parse::<i64>().unwrap_or(0)),
+                        Register::Boolean(b) => Some(b as i64),
+                        Register::Null => {
+                            // NULL precision yields NULL, as for the value.
+                            self.set_register(dest_reg, Register::Null)?;
+                            return Ok(ExecuteResult::Continue);
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 let result = match func_name {
                     "ABS" => num.abs(),
-                    "ROUND" => num.round(),
+                    "ROUND" => round_to(num, precision.unwrap_or(0)),
                     "CEIL" | "CEILING" => num.ceil(),
                     "FLOOR" => num.floor(),
                     _ => {
