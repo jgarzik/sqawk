@@ -99,10 +99,16 @@ impl Database {
 
     /// Get the names of all tables in the database
     ///
+    /// Sorted, because the backing store is a `HashMap`: without this the
+    /// order varied between runs, which reached the user through `.tables`,
+    /// `.schema` with no argument, and verbose load output.
+    ///
     /// # Returns
-    /// * Vector of table names
+    /// * Vector of table names, in ascending name order
     pub fn table_names(&self) -> Vec<String> {
-        self.tables.keys().cloned().collect()
+        let mut names: Vec<String> = self.tables.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Get the number of tables in the database
