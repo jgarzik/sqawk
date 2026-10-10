@@ -43,7 +43,10 @@ jobs:
       # cfg(unix) branches whose non-unix side is otherwise never linted.
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+      # Run even when Clippy failed, so a lint (often a new one from a stable
+      # toolchain release) does not hide the test results on every OS.
       - name: Test
+        if: ${{ !cancelled() }}
         run: cargo test --locked
 
   test-release:
