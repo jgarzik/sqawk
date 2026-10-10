@@ -81,10 +81,16 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      # Pinned to the rust-version declared in Cargo.toml. That field claimed
+      # Read from the rust-version declared in Cargo.toml. That field claimed
       # 1.70 for a long time while the dependency tree had moved well past it,
-      # because nothing ever checked.
-      - uses: dtolnay/rust-toolchain@1.88
+      # because nothing ever checked. Not pinned as @1.88: Dependabot would
+      # propose bumping that ref to toolchains that do not exist yet.
+      - name: Read rust-version
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@v2
       # Library and binaries only: rust-version is a promise to consumers, and
       # dev-dependencies are not part of it.
