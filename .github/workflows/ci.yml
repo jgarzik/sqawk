@@ -5,17 +5,23 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Weekly, so breakage from a new stable toolchain shows up on main rather
+  # than on whatever PR comes next. GitHub Actions cron is UTC.
+  schedule:
+    - cron: "0 5 * * 0"
 
 permissions:
   contents: read
 
+# PR runs share a group per branch and cancel superseded runs. Every other run
+# gets its own group: a shared group on main would cancel queued pushes.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# CARGO_TERM_COLOR and CARGO_INCREMENTAL are set by dtolnay/rust-toolchain and
+# Swatinem/rust-cache.
 env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
   # Serialized everywhere. The REPL tests spawn the binary as a subprocess and
   # several tests share fixtures under tests/data/, so running them in parallel
@@ -39,9 +45,15 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # Per OS, not just Linux: src/tsq.rs and src/storage/mmap.rs have
-      # cfg(unix) branches whose non-unix side is otherwise never linted.
+      # Without dev-dependencies, which cargo test and clippy --all-targets
+      # merge in: this is the feature set users actually build.
+      - name: Build
+        run: cargo build --locked
+      # On Windows too, not just Linux: src/tsq.rs and src/storage/mmap.rs have
+      # cfg(unix) branches whose non-unix side is otherwise never linted. macOS
+      # is unix like Linux, so it adds nothing.
       - name: Clippy
+        if: runner.os != 'macOS'
         run: cargo clippy --locked --all-targets -- -D warnings
       # Run even when Clippy failed, so a lint (often a new one from a stable
       # toolchain release) does not hide the test results on every OS.
