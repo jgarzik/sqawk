@@ -10,7 +10,8 @@
 //! the `updates` branch), of the `v1_review_2026_10` submodule (findings of
 //! the 2026-10 v1-readiness review) and of the `doc_review_2026_10`
 //! submodule (code defects found by the 2026-10 documentation review). All
-//! serve as regression cover. Add a new `#[ignore]`d test when a defect is
+//! serve as regression cover. The `schema_2026_10` submodule holds the
+//! `CREATE TABLE ... LOCATION` over an existing file defect. Add a new `#[ignore]`d test when a defect is
 //! found, and remove the attribute when it is fixed.
 //!
 //! Run the red list with:
@@ -25,6 +26,7 @@
 mod audit_2026_10;
 mod code_review_2026_10;
 mod doc_review_2026_10;
+mod schema_2026_10;
 mod v1_review_2026_10;
 
 use crate::helpers::{
