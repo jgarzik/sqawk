@@ -146,6 +146,25 @@ fn text(s: String) -> SqawkResult<Register> {
     Ok(Register::String(s))
 }
 
+/// The longest string a function may build, in bytes: SQLite's default
+/// SQLITE_MAX_LENGTH. Lengths are checked BEFORE allocating, so a request
+/// for ten gigabytes is an error rather than an allocation failure.
+pub(crate) const MAX_LENGTH: usize = 1_000_000_000;
+
+/// SQLite's error for a result longer than [`MAX_LENGTH`].
+pub(crate) fn too_big() -> SqawkError {
+    SqawkError::InvalidSqlQuery("string or blob too big".into())
+}
+
+/// Ok if a result of `len` bytes is within [`MAX_LENGTH`].
+fn check_len(len: usize) -> SqawkResult<()> {
+    if len > MAX_LENGTH {
+        Err(too_big())
+    } else {
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Strings
 // ---------------------------------------------------------------------------
@@ -223,7 +242,8 @@ fn substr(a: &[Register]) -> SqawkResult<Register> {
     };
     let negative_len = p2 < 0;
     if negative_len {
-        p2 = -p2;
+        // -i64::MIN does not fit; i64::MAX already covers the whole string.
+        p2 = p2.checked_neg().unwrap_or(i64::MAX);
     }
     if p1 < 0 {
         p1 += n;
@@ -256,7 +276,12 @@ fn replace(a: &[Register]) -> SqawkResult<Register> {
     if from.is_empty() {
         return text(s);
     }
-    text(s.replace(&from, &text_of(&a[2])))
+    let to = text_of(&a[2]);
+    if to.len() > from.len() {
+        let grow = (to.len() - from.len()).saturating_mul(s.matches(&from).count());
+        check_len(s.len().saturating_add(grow))?;
+    }
+    text(s.replace(&from, &to))
 }
 
 /// INSTR(haystack, needle): 1-based character position of the first
@@ -280,6 +305,7 @@ fn concat(a: &[Register]) -> SqawkResult<Register> {
             out.push_str(&text_of(r));
         }
     }
+    check_len(out.len())?;
     text(out)
 }
 
@@ -294,6 +320,9 @@ fn concat_ws(a: &[Register]) -> SqawkResult<Register> {
         .filter(|r| !matches!(r, Register::Null))
         .map(text_of)
         .collect();
+    let len = parts.iter().map(String::len).sum::<usize>()
+        + sep.len().saturating_mul(parts.len().saturating_sub(1));
+    check_len(len)?;
     text(parts.join(&sep))
 }
 
@@ -301,7 +330,9 @@ fn concat_ws(a: &[Register]) -> SqawkResult<Register> {
 fn concat_op(a: &[Register]) -> SqawkResult<Register> {
     null_in_null_out!(a);
     let mut s = text_of(&a[0]);
-    s.push_str(&text_of(&a[1]));
+    let t = text_of(&a[1]);
+    check_len(s.len() + t.len())?;
+    s.push_str(&t);
     text(s)
 }
 
@@ -347,7 +378,18 @@ fn pad(a: &[Register], on_left: bool) -> SqawkResult<Register> {
     if s.len() >= len || fill.is_empty() {
         return text(s.iter().take(len).collect());
     }
-    let padding: String = fill.iter().cycle().take(len - s.len()).collect();
+    // The result's size in bytes, before building it.
+    let n = len - s.len();
+    let fill_bytes: usize = fill.iter().map(|c| c.len_utf8()).sum();
+    let rest: usize = fill[..n % fill.len()].iter().map(|c| c.len_utf8()).sum();
+    let body_bytes: usize = s.iter().map(|c| c.len_utf8()).sum();
+    check_len(
+        (n / fill.len())
+            .saturating_mul(fill_bytes)
+            .saturating_add(rest)
+            .saturating_add(body_bytes),
+    )?;
+    let padding: String = fill.iter().cycle().take(n).collect();
     let body: String = s.iter().collect();
     text(if on_left {
         padding + &body
@@ -369,8 +411,10 @@ fn hex(a: &[Register]) -> SqawkResult<Register> {
     if matches!(a[0], Register::Null) {
         return text(String::new());
     }
-    let mut out = String::new();
-    for b in text_of(&a[0]).bytes() {
+    let src = text_of(&a[0]);
+    check_len(src.len().saturating_mul(2))?;
+    let mut out = String::with_capacity(src.len() * 2);
+    for b in src.bytes() {
         out.push_str(&format!("{:02X}", b));
     }
     text(out)
@@ -423,20 +467,24 @@ fn printf(a: &[Register]) -> SqawkResult<Register> {
             }
             chars.next();
         }
-        let mut width = 0usize;
-        while let Some(d) = chars.peek().and_then(|c| c.to_digit(10)) {
-            width = width * 10 + d as usize;
-            chars.next();
-        }
+        // Width and precision saturate while parsed; either one past the
+        // length limit could only build a string that is too big.
+        let mut number = |chars: &mut std::iter::Peekable<std::str::Chars>| {
+            let mut n = 0usize;
+            while let Some(d) = chars.peek().and_then(|c| c.to_digit(10)) {
+                n = n.saturating_mul(10).saturating_add(d as usize);
+                chars.next();
+            }
+            n
+        };
+        let width = number(&mut chars);
         let mut precision: Option<usize> = None;
         if chars.peek() == Some(&'.') {
             chars.next();
-            let mut p = 0usize;
-            while let Some(d) = chars.peek().and_then(|c| c.to_digit(10)) {
-                p = p * 10 + d as usize;
-                chars.next();
-            }
-            precision = Some(p);
+            precision = Some(number(&mut chars));
+        }
+        if width > MAX_LENGTH || precision.is_some_and(|p| p > MAX_LENGTH) {
+            return Err(too_big());
         }
         let conv = match chars.next() {
             Some(c) => c,
@@ -467,9 +515,10 @@ fn printf(a: &[Register]) -> SqawkResult<Register> {
                 let p = precision.unwrap_or(6);
                 let mag = v.abs();
                 let digits = match conv {
+                    _ if mag.is_infinite() => "Inf".to_string(),
                     // Round half away from zero first, as SQLite does
                     // (Rust's formatting rounds half to even).
-                    'f' | 'F' => format!("{:.*}", p, round_decimal(mag, p as i64)),
+                    'f' | 'F' => c_fixed(round_decimal(mag, p as i64), p),
                     'e' => c_exp(mag, p, false),
                     'E' => c_exp(mag, p, true),
                     _ => c_general(mag, p.max(1), conv == 'G'),
@@ -514,6 +563,7 @@ fn printf(a: &[Register]) -> SqawkResult<Register> {
             }
         };
         let len = body.chars().count();
+        check_len(out.len().saturating_add(body.len().max(width)))?;
         if len >= width {
             out.push_str(&body);
         } else if left {
@@ -535,43 +585,61 @@ fn printf(a: &[Register]) -> SqawkResult<Register> {
     text(out)
 }
 
+/// Fractional digits beyond which a finite f64's exact decimal expansion
+/// has only zeros (it needs at most 1074), and below Rust's formatting limit
+/// on precision (u16::MAX).
+const EXACT_DIGITS: usize = 1100;
+
+/// `v` with `p` digits after the point. Rust's formatting cannot take a
+/// precision above u16::MAX, so digits past [`EXACT_DIGITS`], which are all
+/// zeros, are appended rather than formatted.
+fn c_fixed(v: f64, p: usize) -> String {
+    let mut s = format!("{:.*}", p.min(EXACT_DIGITS), v);
+    s.extend(std::iter::repeat_n('0', p.saturating_sub(EXACT_DIGITS)));
+    s
+}
+
 /// C's `%e`: one digit, point, `p` digits, `e`, sign, at least two exponent digits.
 fn c_exp(v: f64, p: usize, upper: bool) -> String {
-    let s = format!("{:.*e}", p, v);
+    let s = format!("{:.*e}", p.min(EXACT_DIGITS), v);
     let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
     let e: i32 = exp.parse().unwrap_or(0);
-    let out = format!(
-        "{}e{}{:02}",
-        mant,
-        if e < 0 { '-' } else { '+' },
-        e.unsigned_abs()
-    );
-    if upper {
-        out.to_uppercase()
-    } else {
-        out
-    }
+    let zeros = p.saturating_sub(EXACT_DIGITS);
+    let mut out = String::with_capacity(mant.len() + zeros + 5);
+    out.push_str(mant);
+    out.extend(std::iter::repeat_n('0', zeros));
+    out.push(if upper { 'E' } else { 'e' });
+    out.push(if e < 0 { '-' } else { '+' });
+    out.push_str(&format!("{:02}", e.unsigned_abs()));
+    out
 }
 
 /// C's `%g` with precision `p` (significant digits), trailing zeros removed.
+/// As in C, the exponent that decides between fixed and exponent form is the
+/// one AFTER rounding to `p` digits: 999999.5 is `1e+06`, not `1000000`.
 fn c_general(v: f64, p: usize, upper: bool) -> String {
     if v == 0.0 {
         return "0".into();
     }
-    let e = v.log10().floor() as i32;
-    let strip = |s: String| {
+    // Digits past the exact expansion are zeros, which `%g` strips anyway.
+    let p = p.min(EXACT_DIGITS);
+    let strip = |s: &str| {
         if s.contains('.') {
             s.trim_end_matches('0').trim_end_matches('.').to_string()
         } else {
-            s
+            s.to_string()
         }
     };
-    if e < -4 || e >= p as i32 {
-        let s = c_exp(v, p - 1, upper);
-        let (m, rest) = s.split_at(s.find(['e', 'E']).unwrap_or(s.len()));
-        format!("{}{}", strip(m.to_string()), rest)
+    let e_form = c_exp(v, p - 1, upper);
+    let at = e_form.find(['e', 'E']).unwrap_or(e_form.len());
+    let x: i32 = e_form[at..]
+        .get(1..)
+        .and_then(|e| e.parse().ok())
+        .unwrap_or(0);
+    if x < -4 || x >= p as i32 {
+        format!("{}{}", strip(&e_form[..at]), &e_form[at..])
     } else {
-        strip(format!("{:.*}", (p as i32 - 1 - e).max(0) as usize, v))
+        strip(&format!("{:.*}", (p as i32 - 1 - x) as usize, v))
     }
 }
 

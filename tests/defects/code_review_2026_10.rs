@@ -72,7 +72,6 @@ fn assert_write_back(
 /// overflows the add (a panic in debug). SQLite rejects a count beyond each
 /// unit's limit, so the result is NULL.
 #[test]
-#[ignore]
 fn date_modifier_huge_day_count_is_null() -> TestResult {
     one(
         "SELECT date('2024-01-01', '+1e300 days') AS a, \
@@ -88,7 +87,6 @@ fn date_modifier_huge_day_count_is_null() -> TestResult {
 /// modifier may step outside 0000-9999 if a later one steps back in.
 /// sqawk checked after every modifier and returned NULL.
 #[test]
-#[ignore]
 fn date_range_is_checked_after_all_modifiers() -> TestResult {
     one(
         "SELECT date('9999-12-31', '+1 day', '-1 day') AS a, \
@@ -103,7 +101,6 @@ fn date_range_is_checked_after_all_modifiers() -> TestResult {
 
 /// `p.m + k` / `p.y + k` are unchecked. SQLite: NULL.
 #[test]
-#[ignore]
 fn date_modifier_huge_month_count_is_null() -> TestResult {
     one(
         "SELECT date('2024-01-01', '+9223372036854775807 months') AS a, \
@@ -121,7 +118,6 @@ fn date_modifier_huge_month_count_is_null() -> TestResult {
 /// Width parsing `width * 10 + d` overflows usize. SQLite returns NULL here
 /// (its result is too big); sqawk gives a clean error.
 #[test]
-#[ignore]
 fn printf_huge_width_is_clean_error() -> TestResult {
     one_fails(
         "SELECT printf('%99999999999999999999d', 1) AS p FROM one",
@@ -133,7 +129,6 @@ fn printf_huge_width_is_clean_error() -> TestResult {
 /// ("Formatting argument out of range"), in release builds too. SQLite
 /// wraps the precision to 31 bits and prints `1`; sqawk gives a clean error.
 #[test]
-#[ignore]
 fn printf_huge_precision_is_clean_error() -> TestResult {
     one_fails(
         "SELECT printf('%.2147483648f', 1.0) AS p FROM one",
@@ -144,7 +139,6 @@ fn printf_huge_precision_is_clean_error() -> TestResult {
 /// A precision or width above u16::MAX but well within the length limit
 /// works, as in SQLite.
 #[test]
-#[ignore]
 fn printf_large_precision_works() -> TestResult {
     one(
         "SELECT length(printf('%.70000f', 1.0)) AS f, \
@@ -153,6 +147,17 @@ fn printf_large_precision_works() -> TestResult {
          printf('%.70000g', 0.5) AS g, \
          length(printf('%70000d', 1)) AS w FROM one",
         "f,e,t,g,w\n70002,70006,0e+00,0.5,70000",
+    )
+}
+
+/// Found while fixing finding 3: an infinite real printed as `inf` with
+/// `%f` and as `infe+00` with `%e` / `%g`. SQLite prints `Inf`.
+#[test]
+fn printf_infinity_prints_inf() -> TestResult {
+    one(
+        "SELECT printf('%f|%e|%g|%5.1f|%G', 1e308 * 10, -1e308 * 10, 1e308 * 10, \
+         1e308 * 10, 1e308 * 10) AS p FROM one",
+        "p\nInf|-Inf|Inf|  Inf|Inf",
     )
 }
 
@@ -275,7 +280,6 @@ fn insert_goes_before_trailing_comments() -> TestResult {
 
 /// `p2 = -p2` overflows for i64::MIN. SQLite returns ''.
 #[test]
-#[ignore]
 fn substr_min_length_does_not_overflow() -> TestResult {
     one(
         "SELECT substr('hello', 1, -9223372036854775808) || '|' || \
@@ -291,7 +295,6 @@ fn substr_min_length_does_not_overflow() -> TestResult {
 
 /// `format!("{:?}")` makes Integer(1) and Float(1.0) distinct.
 #[test]
-#[ignore]
 fn count_distinct_integer_equals_real() -> TestResult {
     one(
         "SELECT COUNT(DISTINCT x) AS c FROM (SELECT 1 AS x UNION ALL SELECT 1.0) t",
@@ -301,7 +304,6 @@ fn count_distinct_integer_equals_real() -> TestResult {
 
 /// The same for SUM, AVG and GROUP_CONCAT.
 #[test]
-#[ignore]
 fn sum_avg_group_concat_distinct_integer_equals_real() -> TestResult {
     one(
         "SELECT SUM(DISTINCT x) AS s, AVG(DISTINCT x) AS a, GROUP_CONCAT(DISTINCT x) AS g \
@@ -323,7 +325,6 @@ fn count_distinct_text_differs_from_integer() -> TestResult {
 /// GROUP BY must agree with DISTINCT: 1 and 1.0 are one group, text '1'
 /// another (numbers sort before text). sqawk merged all three.
 #[test]
-#[ignore]
 fn group_by_text_differs_from_integer() -> TestResult {
     one(
         "SELECT x, COUNT(*) AS c FROM \
@@ -339,7 +340,6 @@ fn group_by_text_differs_from_integer() -> TestResult {
 /// C (and SQLite) choose between fixed and exponent form by the exponent
 /// AFTER rounding to P significant digits.
 #[test]
-#[ignore]
 fn printf_g_exponent_after_rounding() -> TestResult {
     one(
         "SELECT printf('%g', 999999.5) AS a, printf('%g', 9.9999996) AS b, \
@@ -358,7 +358,6 @@ fn printf_g_exponent_after_rounding() -> TestResult {
 /// SQLite adds the whole months/years on the calendar, then the fraction as
 /// 30-day months / 365-day years.
 #[test]
-#[ignore]
 fn fractional_month_and_year_modifiers() -> TestResult {
     one(
         "SELECT datetime('2024-01-01', '+1.5 months') AS a, \
@@ -383,7 +382,6 @@ fn fractional_month_and_year_modifiers() -> TestResult {
 /// allocation failure abort). Results are capped at SQLite's default
 /// SQLITE_MAX_LENGTH, 1,000,000,000 bytes: "string or blob too big".
 #[test]
-#[ignore]
 fn lpad_rpad_huge_length_is_clean_error() -> TestResult {
     one_fails(
         "SELECT lpad('a', 10000000000) AS p FROM one",
@@ -397,7 +395,6 @@ fn lpad_rpad_huge_length_is_clean_error() -> TestResult {
 
 /// Just over the cap is refused before anything is allocated.
 #[test]
-#[ignore]
 fn lpad_just_over_the_cap_is_clean_error() -> TestResult {
     one_fails(
         "SELECT length(lpad('a', 1000000001)) AS p FROM one",
@@ -407,7 +404,6 @@ fn lpad_just_over_the_cap_is_clean_error() -> TestResult {
 
 /// printf width is capped the same way.
 #[test]
-#[ignore]
 fn printf_width_over_the_cap_is_clean_error() -> TestResult {
     one_fails(
         "SELECT length(printf('%10000000000d', 1)) AS p FROM one",
@@ -418,7 +414,6 @@ fn printf_width_over_the_cap_is_clean_error() -> TestResult {
 /// REPLACE growth: 50,000 matches each replaced by 20,001 bytes is just over
 /// 1e9 bytes from inputs of a few tens of kilobytes.
 #[test]
-#[ignore]
 fn replace_growth_over_the_cap_is_clean_error() -> TestResult {
     one_fails(
         "SELECT length(replace(rpad('', 50000, 'a'), 'a', rpad('', 20001, 'b'))) AS p FROM one",

@@ -8,7 +8,7 @@ use super::bytecode::{
     Register, AGG_AVG, AGG_COUNT, AGG_DISTINCT, AGG_GROUP_CONCAT, AGG_MAX, AGG_MIN, AGG_SUM,
     AGG_TOTAL, AGG_TYPE_MASK,
 };
-use super::engine::compare_values;
+use super::engine::{compare_values, row_key, RowKey};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Value;
 
@@ -41,9 +41,11 @@ pub(super) struct AggAccumulator {
     best: Option<Value>,
     /// GROUP_CONCAT.
     text: Option<String>,
-    /// Values already accumulated, for DISTINCT aggregates. `None` when the
-    /// aggregate is not DISTINCT, so the ordinary path allocates nothing.
-    seen: Option<HashSet<String>>,
+    /// Values already accumulated, for DISTINCT aggregates, keyed as SELECT
+    /// DISTINCT keys them (1 and 1.0 are one value; text '1' another). `None`
+    /// when the aggregate is not DISTINCT, so the ordinary path allocates
+    /// nothing.
+    seen: Option<HashSet<RowKey>>,
 }
 
 /// SUM / AVG operand: numbers as they are, numeric text as its number.
@@ -76,7 +78,7 @@ impl AggAccumulator {
         // DISTINCT: ignore a value already accumulated. NULLs are not
         // tracked -- every aggregate already skips them.
         if let (Some(seen), Some(val)) = (self.seen.as_mut(), value.as_ref()) {
-            if !matches!(val, Value::Null) && !seen.insert(format!("{:?}", val)) {
+            if !matches!(val, Value::Null) && !seen.insert(row_key(val)) {
                 return Ok(());
             }
         }

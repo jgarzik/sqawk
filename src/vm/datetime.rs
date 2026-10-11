@@ -237,8 +237,16 @@ fn initial(arg: &Register, unixepoch_next: bool) -> Option<i64> {
 }
 
 /// Apply one modifier. `None`: not understood, so the result is NULL.
+///
+/// As in SQLite the moment may leave the valid range in between modifiers
+/// (it is checked once, at the end), but a modifier that works on the
+/// calendar date needs a valid moment to start from.
 fn modify(jd: i64, m: &str) -> SqawkResult<Option<i64>> {
     let lower = m.to_ascii_lowercase();
+    let valid = (0..=MAX_JD_MS).contains(&jd);
+    if !valid && (lower.starts_with("start of ") || lower.starts_with("weekday ")) {
+        return Ok(None);
+    }
     let simple = match lower.as_str() {
         "utc" => Some(jd),
         "localtime" => {
@@ -315,25 +323,42 @@ fn modify(jd: i64, m: &str) -> SqawkResult<Option<i64>> {
         return Ok(None);
     };
     let unit = unit.strip_suffix('s').unwrap_or(unit);
-    let add_ms = |per: f64| Some(jd + (n * per).round() as i64);
-    let out = match unit {
-        "day" => add_ms(MS_PER_DAY as f64),
-        "hour" => add_ms(3_600_000.0),
-        "minute" => add_ms(60_000.0),
-        "second" => add_ms(1000.0),
-        "month" | "year" if n.fract() == 0.0 => {
+    // SQLite's aXformType: each unit's size in seconds and the largest
+    // magnitude accepted (beyond it, or NaN, the modifier is not understood).
+    let (secs, limit) = match unit {
+        "second" => (1.0, 4.6427e14),
+        "minute" => (60.0, 7.7379e12),
+        "hour" => (3600.0, 1.2897e11),
+        "day" => (86_400.0, 5_373_485.0),
+        "month" => (30.0 * 86_400.0, 176_546.0),
+        "year" => (365.0 * 86_400.0, 14_713.0),
+        _ => return Ok(None),
+    };
+    if !(n > -limit && n < limit) {
+        return Ok(None);
+    }
+    // Months and years: the whole part moves the calendar date (a day past
+    // the end of the month rolls over), and the fraction is then added as
+    // 30-day months or 365-day years, exactly as SQLite does.
+    let (jd, frac) = match unit {
+        "month" | "year" => {
+            if !(0..=MAX_JD_MS).contains(&jd) {
+                return Ok(None);
+            }
             let p = Parts::from_jd(jd);
-            let k = n as i64;
+            let k = n.trunc() as i64;
             let p = if unit == "month" {
                 Parts { m: p.m + k, ..p }
             } else {
                 Parts { y: p.y + k, ..p }
             };
-            Some(p.to_jd())
+            (p.to_jd(), n - n.trunc())
         }
-        _ => None,
+        _ => (jd, n),
     };
-    Ok(out.filter(|&v| (0..=MAX_JD_MS).contains(&v)))
+    // Round half away from zero, as SQLite's `+ rRounder` truncation does.
+    let add = (frac * 1000.0 * secs).round();
+    Ok(jd.checked_add(add as i64))
 }
 
 /// Evaluate a date function's arguments (time string, then modifiers) to a
@@ -360,7 +385,7 @@ fn moment(args: &[Register]) -> SqawkResult<Option<i64>> {
             None => return Ok(None),
         }
     }
-    Ok(Some(jd))
+    Ok((0..=MAX_JD_MS).contains(&jd).then_some(jd))
 }
 
 fn fmt_date(p: &Parts) -> String {

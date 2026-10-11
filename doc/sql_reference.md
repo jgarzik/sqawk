@@ -123,6 +123,12 @@ space) is repeated as needed, `LPAD('ab', 5, 'xy')` is `xyxab`; a string
 longer than `len` is cut to its first `len` characters (`LPAD('hello', 2)` is
 `he`); an empty fill leaves a short string as it is; `len <= 0` gives `''`.
 
+No function builds a string longer than SQLite's default length limit,
+1,000,000,000 bytes: `LPAD('a', 10000000000)`, a `PRINTF` width or precision
+past the limit, or a `REPLACE`, `HEX` or concatenation whose result would
+exceed it is the error "string or blob too big". The length is checked before
+anything is allocated.
+
 ### Math Functions
 
 | Function | Description |
@@ -215,13 +221,18 @@ number, or seconds since 1970 when the first modifier is `unixepoch`. With no
 arguments the functions return the current moment.
 
 Modifiers: `+N days|hours|minutes|seconds|months|years` (or `-N`; fractions
-allowed except for months and years), `start of day|month|year`,
+allowed), `start of day|month|year`,
 `weekday N` (0 = Sunday), `unixepoch`, `utc`. `localtime` is an error, since
 sqawk has no time zone.
 
 A malformed time string or an unknown modifier gives NULL. A day past the end
 of its month, up to 31, rolls into the next month: `DATE('2024-02-30')` is
 `2024-03-01`, and `DATE('2024-01-31', '+1 month')` is `2024-03-02`.
+As in SQLite, a fractional month or year count moves the calendar by its
+whole part and then adds the fraction as 30-day months or 365-day years
+(`DATETIME('2024-01-01', '+1.5 months')` is `2024-02-16 00:00:00`); a count
+beyond a unit's range (about 14713 years) gives NULL; and the result must lie
+in years 0000-9999, which is checked after the last modifier.
 
 ## JOIN
 

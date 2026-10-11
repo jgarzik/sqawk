@@ -40,22 +40,28 @@ enum CursorData<'a> {
 
 /// One column of a keyed ephemeral row, normalized so that rows SQL calls
 /// equal for DISTINCT and the compound operators hash alike: NULL equals
-/// NULL, and a REAL equal to an integer is that integer.
+/// NULL, and a REAL equal to an integer is that integer. Text is never equal
+/// to a number (text '1' and integer 1 are distinct, as in SQLite). DISTINCT
+/// aggregates key their values the same way.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum RowKey {
+pub(super) enum RowKey {
     Null,
     Int(i64),
     Real(u64),
     Text(String),
 }
 
-fn row_key(v: &Value) -> RowKey {
+pub(super) fn row_key(v: &Value) -> RowKey {
     match v {
         Value::Null => RowKey::Null,
         Value::Integer(i) => RowKey::Int(*i),
         Value::Boolean(b) => RowKey::Int(*b as i64),
         Value::Float(f) => {
-            if f.fract() == 0.0 && f.abs() < 9.0e18 {
+            // Every integral real in [-2^63, 2^63) is exactly an i64.
+            if f.fract() == 0.0
+                && *f >= -9_223_372_036_854_775_808.0
+                && *f < 9_223_372_036_854_775_808.0
+            {
                 RowKey::Int(*f as i64)
             } else if f.is_nan() {
                 RowKey::Null
@@ -552,8 +558,16 @@ pub(super) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
                 _ => Ordering::Equal,
             };
             by_value.then_with(|| match (a, b) {
-                // Integer 1 and Float 1.0 are the same value
-                (Value::String(_), _) | (_, Value::String(_)) => a.field_str().cmp(&b.field_str()),
+                // Integer 1 and Float 1.0 are the same value. Text that
+                // spells a number sorts among the numbers by value, but is
+                // never the same value as one: by spelling, then (text `1`
+                // vs integer 1) the number first, as SQLite orders them --
+                // so GROUP BY agrees with DISTINCT.
+                (Value::String(_), _) | (_, Value::String(_)) => {
+                    a.field_str().cmp(&b.field_str()).then_with(|| {
+                        matches!(a, Value::String(_)).cmp(&matches!(b, Value::String(_)))
+                    })
+                }
                 _ => Ordering::Equal,
             })
         }
