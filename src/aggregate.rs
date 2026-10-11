@@ -57,4 +57,14 @@ impl AggregateFunction {
     pub fn is_aggregate_name(name: &str) -> bool {
         Self::from_name(name).is_some()
     }
+
+    /// Whether a call of `name` with `nargs` arguments is an aggregate.
+    /// MIN and MAX with two or more arguments are the scalar functions.
+    pub fn is_aggregate_call(name: &str, nargs: usize) -> bool {
+        match Self::from_name(name) {
+            Some(AggregateFunction::Min | AggregateFunction::Max) => nargs < 2,
+            Some(_) => true,
+            None => false,
+        }
+    }
 }

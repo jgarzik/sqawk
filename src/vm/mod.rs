@@ -13,6 +13,7 @@
 /// use is the single most useful thing to know when a statement is rejected.
 pub const SQLPARSER_VERSION: &str = "0.62";
 
+mod arith;
 pub mod ast_compat;
 pub mod bytecode;
 pub mod compiler;
@@ -23,7 +24,10 @@ mod compiler_from;
 mod compiler_select;
 mod compiler_subquery;
 mod compiler_window;
+mod datetime;
 pub mod engine;
+mod func;
+mod like;
 mod window;
 
 #[cfg(test)]

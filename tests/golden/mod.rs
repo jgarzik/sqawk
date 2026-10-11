@@ -805,18 +805,19 @@ fn str_left_right() -> Result<(), Box<dyn std::error::Error>> {
 fn math_abs() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/boundaries.csv"],
-        // NOTE: ABS(i64::MIN) has no representable result. sqawk saturates to
-        // i64::MAX rather than erroring or wrapping. Pinned so any change to
-        // that choice is deliberate, not so that it is endorsed.
+        "SELECT ABS(value) FROM boundaries WHERE id < 5",
+        concat!("ABS(value)", "\n0", "\n1", "\n1", "\n9223372036854775807",),
+    )
+}
+
+/// ABS(i64::MIN) has no representable result; as in SQLite it is an
+/// "integer overflow" error (it used to saturate to i64::MAX).
+#[test]
+fn math_abs_of_i64_min_is_overflow() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query_fails(
+        &["tests/data/boundaries.csv"],
         "SELECT ABS(value) FROM boundaries",
-        concat!(
-            "ABS(value)",
-            "\n0",
-            "\n1",
-            "\n1",
-            "\n9223372036854775807",
-            "\n9223372036854775807",
-        ),
+        "integer overflow",
     )
 }
 

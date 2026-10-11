@@ -125,3 +125,62 @@ fn test_cast_both_sides() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// SQLite CAST semantics. Expected values computed with SQLite 3.45.
+// ---------------------------------------------------------------------------
+
+mod sqlite_semantics {
+    use crate::helpers::{assert_query_on, ONE};
+
+    type R = Result<(), Box<dyn std::error::Error>>;
+
+    /// CAST(text AS INTEGER) reads an optional sign and the digits after it;
+    /// out-of-range values saturate.
+    #[test]
+    fn text_to_integer_uses_integer_prefix() -> R {
+        assert_query_on(
+            &[ONE],
+            "SELECT CAST('3.9' AS INTEGER) AS a, CAST('12abc' AS INTEGER) AS b, \
+             CAST(' 5 ' AS INTEGER) AS c, CAST('abc' AS INTEGER) AS d, \
+             CAST('1e3' AS INTEGER) AS e, CAST('-3.9' AS INTEGER) AS f, \
+             CAST('9999999999999999999' AS INTEGER) AS g, \
+             CAST('-9999999999999999999' AS INTEGER) AS h FROM one",
+            "a,b,c,d,e,f,g,h\n3,12,5,0,1,-3,9223372036854775807,-9223372036854775808",
+        )
+    }
+
+    #[test]
+    fn real_to_integer_truncates_and_saturates() -> R {
+        assert_query_on(
+            &[ONE],
+            "SELECT CAST(3.9 AS INTEGER) AS a, CAST(-3.9 AS INTEGER) AS b, \
+             CAST(1e30 AS INTEGER) AS c, CAST(-1e30 AS INTEGER) AS d FROM one",
+            "a,b,c,d\n3,-3,9223372036854775807,-9223372036854775808",
+        )
+    }
+
+    #[test]
+    fn text_to_real_uses_numeric_prefix() -> R {
+        assert_query_on(
+            &[ONE],
+            "SELECT CAST('12abc' AS REAL) AS a, CAST('abc' AS REAL) AS b, \
+             CAST('1e3x' AS REAL) AS c, typeof(CAST(5 AS REAL)) AS d FROM one",
+            "a,b,c,d\n12,0,1000,real",
+        )
+    }
+
+    /// Any type name is mapped by SQLite's affinity rules (BIGINT is
+    /// INTEGER, VARCHAR(10) is TEXT, DECIMAL/NUMERIC/BOOLEAN are NUMERIC).
+    #[test]
+    fn type_names_follow_affinity_rules() -> R {
+        assert_query_on(
+            &[ONE],
+            "SELECT CAST('12' AS NUMERIC) AS a, typeof(CAST('12' AS NUMERIC)) AS b, \
+             CAST('1.5' AS NUMERIC) AS c, CAST('12abc' AS NUMERIC) AS d, \
+             typeof(CAST('3.0' AS NUMERIC)) AS e, CAST('7x' AS BIGINT) AS f, \
+             typeof(CAST(5 AS VARCHAR(10))) AS g, CAST(1 AS BOOLEAN) AS h FROM one",
+            "a,b,c,d,e,f,g,h\n12,integer,1.5,12,integer,7,text,1",
+        )
+    }
+}

@@ -248,10 +248,13 @@ fn test_like_pattern_compilation() {
 
     let instructions = &program.instructions;
 
-    // Verify we have Like instruction with the correct pattern
-    let like_found = instructions
-        .iter()
-        .any(|inst| inst.opcode == OpCode::Like && inst.p4.as_deref() == Some("A%"));
+    // The pattern is loaded into the register after the value.
+    let like_found = instructions.iter().any(|inst| {
+        inst.opcode == OpCode::Like
+            && instructions.iter().any(|s| {
+                s.opcode == OpCode::String && s.p2 == inst.p1 + 1 && s.p4.as_deref() == Some("A%")
+            })
+    });
 
     assert!(like_found, "Expected Like instruction with pattern 'A%'");
 }

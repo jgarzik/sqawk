@@ -125,9 +125,8 @@ pub enum OpCode {
     Gt, // Greater than comparison (P1 > P2, result in P3)
     Ge, // Greater than or equal comparison (P1 >= P2, result in P3)
 
-    // Pattern matching operations
-    Like, // LIKE pattern match (P1 LIKE P4 pattern, result in P3). Case-sensitive.
-    Glob, // GLOB pattern match (P1 GLOB P4 pattern, result in P3). Unix-style wildcards.
+    // Pattern matching
+    Like, // r[P3] = r[P1] LIKE r[P1+1] [ESCAPE r[P1+2]]. P2: bit 0 NOT, bit 1 ILIKE, bit 2 ESCAPE.
 
     // Type conversion
     Cast, // Cast value in P1 to type in P4, result in P2. Types: "INTEGER", "TEXT", "REAL"
@@ -242,14 +241,10 @@ pub enum OpCode {
     AlterTableAdd, // Add column to table. P4 = "table_name:col_name:col_type"
     Truncate,      // Remove all rows from table. P4 = table name
 
-    // String functions
-    StringFunc, // P1 = src reg, P2 = dest reg, P3 = arg2 reg (for SUBSTR/REPLACE), P4 = function name
-
-    // Math functions
-    MathFunc, // P1 = src reg, P2 = dest reg, P4 = function name (ABS, ROUND, CEIL, FLOOR)
-
-    // Date/Time functions
-    DateFunc, // P1 = src reg (optional), P2 = dest reg, P4 = function name (DATE, TIME, NOW)
+    // Scalar function call, modelled on SQLite's OP_Function: the body is
+    // looked up by name in the built-in table (`func.rs`) when the program
+    // is loaded.
+    Function, // r[P3] = P4(r[P1], ..., r[P1+P2-1])
 
     // Arithmetic operations
     Add,       // P1 = left reg, P2 = right reg, P3 = dest reg. dest = left + right

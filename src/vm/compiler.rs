@@ -9,8 +9,9 @@ use super::ast_compat::{
 };
 use sqlparser::ast::{
     BinaryOperator, CaseWhen, DataType as SqlDataType, Expr, Function, FunctionArg,
-    FunctionArgExpr, Ident, ObjectName, SelectItem, SelectItemQualifiedWildcardKind, Statement,
-    UnaryOperator, Value, ValueWithSpan,
+    FunctionArgExpr, FunctionArguments, Ident, ObjectName, SelectItem,
+    SelectItemQualifiedWildcardKind, Statement, TrimWhereField, UnaryOperator, Value,
+    ValueWithSpan,
 };
 use sqlparser::dialect::HiveDialect;
 use sqlparser::parser::Parser;
@@ -20,6 +21,7 @@ use super::bytecode::{Instruction, OpCode, Program, AGG_COUNT, AGG_DISTINCT};
 use super::compiler_from::{expr_children, FromPlan};
 use super::compiler_subquery::Sub;
 use super::compiler_window::window_call_children;
+use super::func;
 use crate::aggregate::AggregateFunction;
 use crate::capacity::DEFAULT_CURSOR_CAPACITY;
 use crate::database::Database;
@@ -344,32 +346,6 @@ impl<'t> NameCtx<'t> {
             qualifier, name
         )))
     }
-}
-
-/// Validate the argument count of a math function (ABS, ROUND, CEIL,
-/// CEILING, FLOOR).
-///
-/// Without it, extra arguments were silently ignored: `SELECT ABS(-5, 2)`
-/// quietly returned 5.
-fn check_math_func_arity(func_name: &str, arg_count: usize) -> SqawkResult<()> {
-    if arg_count == 0 {
-        return Err(SqawkError::InvalidSqlQuery(format!(
-            "{} requires one argument",
-            func_name
-        )));
-    }
-
-    // ROUND is the only one of these taking an optional precision argument.
-    let max_args = if func_name == "ROUND" { 2 } else { 1 };
-    if arg_count > max_args {
-        return Err(SqawkError::InvalidSqlQuery(if max_args == 1 {
-            format!("{} takes exactly one argument", func_name)
-        } else {
-            format!("{} takes at most two arguments", func_name)
-        }));
-    }
-
-    Ok(())
 }
 
 /// Reject a scale or TO-datetime argument on CEIL/FLOOR.
@@ -999,45 +975,61 @@ impl<'a> SqlCompiler<'a> {
         Ok(())
     }
 
-    /// Compile `expr [NOT] LIKE pattern` (or ILIKE) into `dest`.
+    /// Compile `expr [NOT] LIKE pattern [ESCAPE c]` (or ILIKE) into `dest`.
     ///
-    /// A NULL operand yields NULL for both LIKE and NOT LIKE.
+    /// The pattern may be any expression. A NULL operand yields NULL for
+    /// both LIKE and NOT LIKE.
+    #[allow(clippy::too_many_arguments)]
     fn compile_like_pattern(
         &mut self,
         expr: &Expr,
         pattern: &Expr,
+        escape: Option<&ValueWithSpan>,
+        any: bool,
         negated: bool,
         case_insensitive: bool,
         ctx: &NameCtx<'a>,
         dest: i64,
     ) -> SqawkResult<()> {
-        let pattern_str = match pattern {
-            Expr::Value(ValueWithSpan {
-                value: Value::SingleQuotedString(s),
-                ..
-            }) => s.clone(),
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "LIKE pattern must be a string literal".to_string(),
-                ))
-            }
-        };
-        let value_reg = self.code_expr(expr, ctx, None)?;
-
-        // P2 encodes: bit 0 = negated, bit 1 = case_insensitive
-        let flags = (negated as i64) | ((case_insensitive as i64) << 1);
+        if any {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "LIKE ANY is not supported".into(),
+            ));
+        }
+        // [value, pattern, escape?] in consecutive registers.
+        let base = self.allocate_registers(if escape.is_some() { 3 } else { 2 });
+        self.code_expr(expr, ctx, Some(base))?;
+        self.code_expr(pattern, ctx, Some(base + 1))?;
+        if let Some(esc) = escape {
+            let lit = match &esc.value {
+                Value::SingleQuotedString(c) | Value::DoubleQuotedString(c) => {
+                    TableValue::String(c.clone().into())
+                }
+                Value::Null => TableValue::Null,
+                other => {
+                    return Err(SqawkError::InvalidSqlQuery(format!(
+                        "ESCAPE expression must be a single character, got {}",
+                        other
+                    )))
+                }
+            };
+            self.emit_value_literal(base + 2, &lit)?;
+        }
+        let flags =
+            (negated as i64) | ((case_insensitive as i64) << 1) | ((escape.is_some() as i64) << 2);
         self.emit(
             OpCode::Like,
-            value_reg,
+            base,
             flags,
             dest,
-            Some(pattern_str.clone()),
+            None,
             &format!(
-                "r[{}] = r[{}] {}LIKE '{}'",
+                "r[{}] = r[{}] {}{} r[{}]",
                 dest,
-                value_reg,
+                base,
                 if negated { "NOT " } else { "" },
-                pattern_str
+                if case_insensitive { "ILIKE" } else { "LIKE" },
+                base + 1
             ),
         );
         Ok(())
@@ -1133,27 +1125,11 @@ impl<'a> SqlCompiler<'a> {
                 "SUBSTR requires at least two arguments".to_string(),
             ));
         };
-
-        let src_reg = self.code_expr(sub_expr, ctx, None)?;
-        let start_reg = self.code_expr(from_expr, ctx, None)?;
-
-        // A length, if given, is passed to the engine via the P4 spec.
-        let func_spec = if let Some(for_expr) = substring_for {
-            let len_reg = self.code_expr(for_expr, ctx, None)?;
-            format!("SUBSTR:{}", len_reg)
-        } else {
-            "SUBSTR".to_string()
-        };
-
-        self.emit(
-            OpCode::StringFunc,
-            src_reg,
-            target_reg,
-            start_reg,
-            Some(func_spec),
-            &format!("r[{}] = SUBSTR(...)", target_reg),
-        );
-        Ok(())
+        let mut args = vec![sub_expr.clone(), from_expr.clone()];
+        if let Some(len) = substring_for {
+            args.push(len.clone());
+        }
+        self.emit_call("SUBSTR", &args, ctx, target_reg)
     }
 
     /// Compile a CASE expression into `dest`.
@@ -1237,551 +1213,180 @@ impl<'a> SqlCompiler<'a> {
             .to_uppercase()
     }
 
-    /// Compile COALESCE function - returns first non-NULL argument
-    fn compile_func_coalesce(
+    /// Evaluate `args` into consecutive registers and call the built-in
+    /// scalar function `name` on them (see `func.rs`).
+    pub(crate) fn emit_call(
         &mut self,
-        func: &Function,
+        name: &str,
+        args: &[Expr],
         ctx: &NameCtx<'a>,
-        target_reg: i64,
+        dest: i64,
     ) -> SqawkResult<()> {
-        if func_args(func).is_empty() {
-            return Err(SqawkError::InvalidSqlQuery(
-                "COALESCE requires at least one argument".to_string(),
-            ));
+        let def = func::lookup(name).ok_or_else(|| {
+            SqawkError::UnsupportedSqlFeature(format!("Unsupported function: {}", name))
+        })?;
+        func::check_arity(def, args.len())?;
+        let base = self.allocate_registers(args.len().max(1));
+        for (i, arg) in args.iter().enumerate() {
+            self.code_expr(arg, ctx, Some(base + i as i64))?;
         }
-
-        let mut jump_to_end_addrs = Vec::new();
-
-        for arg in func_args(func) {
-            let expr = self.extract_function_arg_expr(arg)?;
-            let arg_reg = self.allocate_register();
-            let null_check_reg = self.allocate_register();
-
-            // Compile the argument
-            self.code_expr_into(&expr, ctx, arg_reg)?;
-
-            // Check if it's NULL
-            self.emit(
-                OpCode::IsNull,
-                arg_reg,
-                null_check_reg,
-                0,
-                None,
-                &format!("r[{}] = (r[{}] IS NULL)", null_check_reg, arg_reg),
-            );
-
-            // If NULL (null_check_reg == 1), skip to next argument
-            let skip_addr = self.program.len();
-            self.emit(
-                OpCode::IfZ,
-                null_check_reg,
-                0, // Will be patched to "use this value"
-                0,
-                None,
-                "if NOT NULL, use this value",
-            );
-
-            // Patch to jump to next iteration (will be set at end of this iteration)
-            let continue_to_next = self.program.len();
-
-            // Add a goto to skip to next arg check (this arg was NULL)
-            self.emit(
-                OpCode::Goto,
-                0,
-                0, // Will be patched to next arg check
-                0,
-                None,
-                "skip to next arg (this was NULL)",
-            );
-
-            // Patch the IfZ to come here when not NULL
-            let use_value_addr = self.program.len();
-            if let Some(inst) = self.program.instructions.get_mut(skip_addr) {
-                inst.p2 = use_value_addr as i64;
-            }
-
-            // Copy value to target register (value is not NULL)
-            // Cast to same type as workaround for copy
-            self.emit(
-                OpCode::Cast,
-                arg_reg,
-                target_reg,
-                0,
-                Some("TEXT".to_string()),
-                &format!("r[{}] = r[{}] (COALESCE result)", target_reg, arg_reg),
-            );
-
-            // Jump to end (we found a non-NULL value)
-            jump_to_end_addrs.push(self.program.len());
-            self.emit(
-                OpCode::Goto,
-                0,
-                0, // Will be patched to end
-                0,
-                None,
-                "jump to COALESCE end",
-            );
-
-            // Patch the continue_to_next goto to jump here
-            let next_arg_addr = self.program.len();
-            if let Some(inst) = self.program.instructions.get_mut(continue_to_next) {
-                inst.p2 = next_arg_addr as i64;
-            }
-        }
-
-        // If all args were NULL, result is NULL
         self.emit(
-            OpCode::Null,
-            0,
-            target_reg,
-            0,
-            None,
-            &format!("r[{}] = NULL (all COALESCE args were NULL)", target_reg),
-        );
-
-        // Patch all jump-to-end addresses
-        let end_label = self.program.len();
-        for addr in jump_to_end_addrs {
-            if let Some(inst) = self.program.instructions.get_mut(addr) {
-                inst.p2 = end_label as i64;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Compile NULLIF function - returns NULL if both args are equal
-    fn compile_func_nullif(
-        &mut self,
-        func: &Function,
-        ctx: &NameCtx<'a>,
-        target_reg: i64,
-    ) -> SqawkResult<()> {
-        if func_args(func).len() != 2 {
-            return Err(SqawkError::InvalidSqlQuery(
-                "NULLIF requires exactly two arguments".to_string(),
-            ));
-        }
-
-        let expr1 = self.extract_function_arg_expr(&func_args(func)[0])?;
-        let expr2 = self.extract_function_arg_expr(&func_args(func)[1])?;
-
-        let reg1 = self.allocate_register();
-        let reg2 = self.allocate_register();
-        let cmp_reg = self.allocate_register();
-
-        // Compile both arguments
-        self.code_expr_into(&expr1, ctx, reg1)?;
-        self.code_expr_into(&expr2, ctx, reg2)?;
-
-        // Compare them
-        self.emit(
-            OpCode::Eq,
-            reg1,
-            reg2,
-            cmp_reg,
-            None,
-            &format!("r[{}] = (r[{}] == r[{}])", cmp_reg, reg1, reg2),
-        );
-
-        // If equal (cmp_reg == 1), return NULL; else return reg1
-        let not_equal_addr = self.program.len();
-        self.emit(
-            OpCode::IfZ,
-            cmp_reg,
-            0, // Will be patched
-            0,
-            None,
-            "if NOT equal, jump",
-        );
-
-        // Values are equal, set result to NULL
-        self.emit(
-            OpCode::Null,
-            0,
-            target_reg,
-            0,
-            None,
-            &format!("r[{}] = NULL (values equal)", target_reg),
-        );
-
-        let skip_else_addr = self.program.len();
-        self.emit(
-            OpCode::Goto,
-            0,
-            0, // Will be patched
-            0,
-            None,
-            "skip else branch",
-        );
-
-        // Patch IfZ to jump here (values not equal)
-        let else_addr = self.program.len();
-        if let Some(inst) = self.program.instructions.get_mut(not_equal_addr) {
-            inst.p2 = else_addr as i64;
-        }
-
-        // Values not equal, copy reg1 to target
-        self.emit(
-            OpCode::Cast,
-            reg1,
-            target_reg,
-            0,
-            Some("TEXT".to_string()),
-            &format!("r[{}] = r[{}] (values not equal)", target_reg, reg1),
-        );
-
-        // Patch skip_else to jump here
-        let end_addr = self.program.len();
-        if let Some(inst) = self.program.instructions.get_mut(skip_else_addr) {
-            inst.p2 = end_addr as i64;
-        }
-
-        Ok(())
-    }
-
-    /// Compile simple string functions (UPPER, LOWER, TRIM, LTRIM, RTRIM, LENGTH)
-    fn compile_func_string_simple(
-        &mut self,
-        func_name: &str,
-        func: &Function,
-        ctx: &NameCtx<'a>,
-        target_reg: i64,
-    ) -> SqawkResult<()> {
-        if func_args(func).is_empty() {
-            return Err(SqawkError::InvalidSqlQuery(format!(
-                "{} requires one argument",
-                func_name
-            )));
-        }
-
-        let expr = self.extract_function_arg_expr(&func_args(func)[0])?;
-        let src_reg = self.allocate_register();
-
-        // Compile the argument
-        self.code_expr_into(&expr, ctx, src_reg)?;
-
-        // Emit StringFunc opcode
-        self.emit(
-            OpCode::StringFunc,
-            src_reg,
-            target_reg,
-            0,
-            Some(func_name.to_string()),
-            &format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg),
-        );
-
-        Ok(())
-    }
-
-    /// Compile SUBSTR/SUBSTRING function
-    fn compile_func_substr(
-        &mut self,
-        func: &Function,
-        ctx: &NameCtx<'a>,
-        target_reg: i64,
-    ) -> SqawkResult<()> {
-        if func_args(func).len() < 2 {
-            return Err(SqawkError::InvalidSqlQuery(
-                "SUBSTR requires at least two arguments".to_string(),
-            ));
-        }
-
-        let str_expr = self.extract_function_arg_expr(&func_args(func)[0])?;
-        let start_expr = self.extract_function_arg_expr(&func_args(func)[1])?;
-
-        let str_reg = self.allocate_register();
-        let start_reg = self.allocate_register();
-
-        // Compile string and start arguments
-        self.code_expr_into(&str_expr, ctx, str_reg)?;
-        self.code_expr_into(&start_expr, ctx, start_reg)?;
-
-        // Check if we have a length argument
-        let func_spec = if func_args(func).len() >= 3 {
-            let len_expr = self.extract_function_arg_expr(&func_args(func)[2])?;
-            let len_reg = self.allocate_register();
-            self.code_expr_into(&len_expr, ctx, len_reg)?;
-            format!("SUBSTR:{}", len_reg)
-        } else {
-            "SUBSTR".to_string()
-        };
-
-        // Emit StringFunc opcode
-        self.emit(
-            OpCode::StringFunc,
-            str_reg,
-            target_reg,
-            start_reg,
-            Some(func_spec),
-            &format!("r[{}] = SUBSTR(...)", target_reg),
-        );
-
-        Ok(())
-    }
-
-    /// Compile REPLACE function
-    fn compile_func_replace(
-        &mut self,
-        func: &Function,
-        ctx: &NameCtx<'a>,
-        target_reg: i64,
-    ) -> SqawkResult<()> {
-        if func_args(func).len() != 3 {
-            return Err(SqawkError::InvalidSqlQuery(
-                "REPLACE requires three arguments".to_string(),
-            ));
-        }
-
-        let str_expr = self.extract_function_arg_expr(&func_args(func)[0])?;
-        let from_expr = self.extract_function_arg_expr(&func_args(func)[1])?;
-        let to_expr = self.extract_function_arg_expr(&func_args(func)[2])?;
-
-        let str_reg = self.allocate_register();
-        let from_reg = self.allocate_register();
-        let to_reg = self.allocate_register();
-
-        // Compile all three arguments
-        self.code_expr_into(&str_expr, ctx, str_reg)?;
-        self.code_expr_into(&from_expr, ctx, from_reg)?;
-        self.code_expr_into(&to_expr, ctx, to_reg)?;
-
-        // Emit StringFunc opcode with from_reg and to_reg in P4
-        self.emit(
-            OpCode::StringFunc,
-            str_reg,
-            target_reg,
-            0,
-            Some(format!("REPLACE:{}:{}", from_reg, to_reg)),
-            &format!("r[{}] = REPLACE(...)", target_reg),
-        );
-
-        Ok(())
-    }
-
-    /// Compile CONCAT function
-    fn compile_func_concat(
-        &mut self,
-        func: &Function,
-        ctx: &NameCtx<'a>,
-        target_reg: i64,
-    ) -> SqawkResult<()> {
-        if func_args(func).len() < 2 {
-            return Err(SqawkError::InvalidSqlQuery(
-                "CONCAT requires at least two arguments".to_string(),
-            ));
-        }
-
-        // Compile first argument to src_reg
-        let first_expr = self.extract_function_arg_expr(&func_args(func)[0])?;
-        let src_reg = self.allocate_register();
-        self.code_expr_into(&first_expr, ctx, src_reg)?;
-
-        // Compile remaining arguments and build P4 spec
-        let mut arg_regs = Vec::with_capacity(func_args(func).len().saturating_sub(1));
-        for arg in func_args(func).iter().skip(1) {
-            let expr = self.extract_function_arg_expr(arg)?;
-            let reg = self.allocate_register();
-            self.code_expr_into(&expr, ctx, reg)?;
-            arg_regs.push(reg.to_string());
-        }
-
-        // P4 = "CONCAT:reg1:reg2:..."
-        let func_spec = format!("CONCAT:{}", arg_regs.join(":"));
-
-        self.emit(
-            OpCode::StringFunc,
-            src_reg,
-            target_reg,
-            0,
-            Some(func_spec),
-            &format!("r[{}] = CONCAT(...)", target_reg),
-        );
-
-        Ok(())
-    }
-
-    /// Compile LEFT and RIGHT string functions
-    fn compile_func_left_right(
-        &mut self,
-        func_name: &str,
-        func: &Function,
-        ctx: &NameCtx<'a>,
-        target_reg: i64,
-    ) -> SqawkResult<()> {
-        if func_args(func).len() != 2 {
-            return Err(SqawkError::InvalidSqlQuery(format!(
-                "{} requires exactly two arguments",
-                func_name
-            )));
-        }
-
-        let str_expr = self.extract_function_arg_expr(&func_args(func)[0])?;
-        let len_expr = self.extract_function_arg_expr(&func_args(func)[1])?;
-
-        let str_reg = self.allocate_register();
-        let len_reg = self.allocate_register();
-
-        self.code_expr_into(&str_expr, ctx, str_reg)?;
-        self.code_expr_into(&len_expr, ctx, len_reg)?;
-
-        self.emit(
-            OpCode::StringFunc,
-            str_reg,
-            target_reg,
-            len_reg,
-            Some(func_name.to_string()),
+            OpCode::Function,
+            base,
+            args.len() as i64,
+            dest,
+            Some(def.name.to_string()),
             &format!(
-                "r[{}] = {}(r[{}], r[{}])",
-                target_reg, func_name, str_reg, len_reg
+                "r[{}] = {}(r[{}..{}])",
+                dest,
+                def.name,
+                base,
+                base + args.len() as i64
             ),
         );
-
         Ok(())
     }
 
-    /// Compile math functions (ABS, ROUND, CEIL, CEILING, FLOOR)
-    fn compile_func_math(
-        &mut self,
-        func_name: &str,
-        func: &Function,
-        ctx: &NameCtx<'a>,
-        target_reg: i64,
-    ) -> SqawkResult<()> {
-        let args = func_args(func);
-        check_math_func_arity(func_name, args.len())?;
-
-        let expr = self.extract_function_arg_expr(&args[0])?;
-        let src_reg = self.allocate_register();
-
-        // Compile the argument
-        self.code_expr_into(&expr, ctx, src_reg)?;
-
-        // P3 carries the register holding ROUND's precision, or -1 when the
-        // call has no second argument.
-        let (prec_reg, desc) = if args.len() == 2 {
-            let prec_expr = self.extract_function_arg_expr(&args[1])?;
-            let reg = self.allocate_register();
-            self.code_expr_into(&prec_expr, ctx, reg)?;
-            (
-                reg,
-                format!(
-                    "r[{}] = {}(r[{}], r[{}])",
-                    target_reg, func_name, src_reg, reg
-                ),
-            )
-        } else {
-            (
-                -1,
-                format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg),
-            )
+    /// The positional argument expressions of a scalar function call,
+    /// rejecting every part of the call syntax a scalar function cannot
+    /// honour (rather than silently ignoring it).
+    fn scalar_call_args(func: &Function) -> SqawkResult<Vec<Expr>> {
+        let name = Self::get_function_name(func);
+        let unsupported = |what: &str| {
+            Err(SqawkError::UnsupportedSqlFeature(format!(
+                "{} on {}() is not supported",
+                what, name
+            )))
         };
-
-        // Emit MathFunc opcode
-        self.emit(
-            OpCode::MathFunc,
-            src_reg,
-            target_reg,
-            prec_reg,
-            Some(func_name.to_string()),
-            &desc,
-        );
-
-        Ok(())
-    }
-
-    /// Compile date/time functions with no arguments (NOW, CURRENT_TIMESTAMP, etc.)
-    fn compile_func_datetime_noarg(&mut self, func_name: &str, target_reg: i64) -> SqawkResult<()> {
-        self.emit(
-            OpCode::DateFunc,
-            0, // No source register needed
-            target_reg,
-            0,
-            Some(func_name.to_string()),
-            &format!("r[{}] = {}()", target_reg, func_name),
-        );
-
-        Ok(())
-    }
-
-    /// Compile date/time functions with one argument (DATE, TIME)
-    fn compile_func_datetime(
-        &mut self,
-        func_name: &str,
-        func: &Function,
-        ctx: &NameCtx<'a>,
-        target_reg: i64,
-    ) -> SqawkResult<()> {
-        if func_args(func).is_empty() {
-            return Err(SqawkError::InvalidSqlQuery(format!(
-                "{} requires one argument",
-                func_name
-            )));
+        if func.filter.is_some() {
+            return unsupported("FILTER");
         }
+        if func.null_treatment.is_some() {
+            return unsupported("IGNORE/RESPECT NULLS");
+        }
+        if !func.within_group.is_empty() {
+            return unsupported("WITHIN GROUP");
+        }
+        if !matches!(func.parameters, FunctionArguments::None) {
+            return unsupported("A parameter list");
+        }
+        if func_is_distinct(func) {
+            return unsupported("DISTINCT");
+        }
+        match &func.args {
+            FunctionArguments::Subquery(_) => return unsupported("A subquery argument"),
+            FunctionArguments::List(list) if !list.clauses.is_empty() => {
+                return unsupported("A clause in the argument list")
+            }
+            _ => {}
+        }
+        func_args(func)
+            .iter()
+            .map(|arg| match arg {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => Ok(e.clone()),
+                FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => Err(
+                    SqawkError::InvalidSqlQuery(format!("{}(*) is not a valid call", name)),
+                ),
+                _ => Err(SqawkError::UnsupportedSqlFeature(format!(
+                    "Unsupported argument to {}(): {}",
+                    name, arg
+                ))),
+            })
+            .collect()
+    }
 
-        let expr = self.extract_function_arg_expr(&func_args(func)[0])?;
-        let src_reg = self.allocate_register();
-
-        // Compile the argument
-        self.code_expr_into(&expr, ctx, src_reg)?;
-
-        // Emit DateFunc opcode
-        self.emit(
-            OpCode::DateFunc,
-            src_reg,
-            target_reg,
-            0,
-            Some(func_name.to_string()),
-            &format!("r[{}] = {}(r[{}])", target_reg, func_name, src_reg),
-        );
-
+    /// `COALESCE(a, b, ...)` / `IFNULL(a, b)`: the first non-NULL argument.
+    /// Arguments after it are not evaluated.
+    fn compile_coalesce(&mut self, args: &[Expr], ctx: &NameCtx<'a>, dest: i64) -> SqawkResult<()> {
+        let end = self.label();
+        let is_null = self.allocate_register();
+        for (i, arg) in args.iter().enumerate() {
+            self.code_expr(arg, ctx, Some(dest))?;
+            if i + 1 < args.len() {
+                self.emit(OpCode::IsNull, dest, is_null, 0, None, "COALESCE: NULL?");
+                self.emit_jump_to(OpCode::IfZ, is_null, end, 0, None, "not NULL: done");
+            }
+        }
+        self.resolve(end);
         Ok(())
     }
 
-    /// Compile a function call - dispatches to specialized handlers
+    /// `NULLIF(a, b)`: NULL when `a = b`, otherwise `a`.
+    fn compile_nullif(&mut self, args: &[Expr], ctx: &NameCtx<'a>, dest: i64) -> SqawkResult<()> {
+        let a = self.code_expr(&args[0], ctx, None)?;
+        let b = self.code_expr(&args[1], ctx, None)?;
+        let eq = self.allocate_register();
+        let keep = self.label();
+        let end = self.label();
+        self.emit(OpCode::Eq, a, b, eq, None, "NULLIF: equal?");
+        self.emit_jump_to(OpCode::IfZ, eq, keep, 0, None, "not equal: keep a");
+        self.emit(OpCode::Null, 0, dest, 0, None, "NULLIF: equal");
+        self.emit_jump_to(OpCode::Goto, 0, end, 0, None, "");
+        self.resolve(keep);
+        self.emit(OpCode::Copy, a, dest, 0, None, "NULLIF: a");
+        self.resolve(end);
+        Ok(())
+    }
+
+    /// `IIF(c, a, b)`: `CASE WHEN c THEN a ELSE b END`.
+    fn compile_iif(&mut self, args: &[Expr], ctx: &NameCtx<'a>, dest: i64) -> SqawkResult<()> {
+        let cond = self.code_expr(&args[0], ctx, None)?;
+        let other = self.label();
+        let end = self.label();
+        self.emit_jump_to(OpCode::IfZ, cond, other, 0, None, "IIF: false or NULL");
+        self.code_expr(&args[1], ctx, Some(dest))?;
+        self.emit_jump_to(OpCode::Goto, 0, end, 0, None, "");
+        self.resolve(other);
+        self.code_expr(&args[2], ctx, Some(dest))?;
+        self.resolve(end);
+        Ok(())
+    }
+
+    /// Compile a scalar function call into `dest`.
     fn compile_function(
         &mut self,
         func: &Function,
         ctx: &NameCtx<'a>,
-        target_reg: i64,
+        dest: i64,
     ) -> SqawkResult<()> {
-        let func_name = Self::get_function_name(func);
-
-        match func_name.as_str() {
-            "COALESCE" => self.compile_func_coalesce(func, ctx, target_reg),
-            "NULLIF" => self.compile_func_nullif(func, ctx, target_reg),
-            "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "LENGTH" => {
-                self.compile_func_string_simple(&func_name, func, ctx, target_reg)
+        let name = Self::get_function_name(func);
+        let args = Self::scalar_call_args(func)?;
+        let arity = |min: usize, max: usize| -> SqawkResult<()> {
+            if args.len() < min || args.len() > max {
+                return Err(SqawkError::InvalidSqlQuery(format!(
+                    "wrong number of arguments to function {}()",
+                    name
+                )));
             }
-            "SUBSTR" | "SUBSTRING" => self.compile_func_substr(func, ctx, target_reg),
-            "REPLACE" => self.compile_func_replace(func, ctx, target_reg),
-            "CONCAT" => self.compile_func_concat(func, ctx, target_reg),
-            "LEFT" | "RIGHT" => self.compile_func_left_right(&func_name, func, ctx, target_reg),
-            "ABS" | "ROUND" | "CEIL" | "CEILING" | "FLOOR" => {
-                self.compile_func_math(&func_name, func, ctx, target_reg)
+            Ok(())
+        };
+        match name.as_str() {
+            "COALESCE" => {
+                arity(1, usize::MAX)?;
+                self.compile_coalesce(&args, ctx, dest)
             }
-            "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" => {
-                self.compile_func_datetime_noarg(&func_name, target_reg)
+            "IFNULL" => {
+                arity(2, 2)?;
+                self.compile_coalesce(&args, ctx, dest)
             }
-            "DATE" | "TIME" => self.compile_func_datetime(&func_name, func, ctx, target_reg),
+            "NULLIF" => {
+                arity(2, 2)?;
+                self.compile_nullif(&args, ctx, dest)
+            }
+            "IIF" => {
+                arity(3, 3)?;
+                self.compile_iif(&args, ctx, dest)
+            }
+            _ if func::lookup(&name).is_some() => self.emit_call(&name, &args, ctx, dest),
+            // An aggregate somewhere only a scalar can be (WHERE, GROUP BY,
+            // an aggregate's own argument).
+            _ if AggregateFunction::is_aggregate_name(&name) => Err(SqawkError::InvalidSqlQuery(
+                format!("misuse of aggregate function {}()", name),
+            )),
             _ => Err(SqawkError::UnsupportedSqlFeature(format!(
                 "Unsupported function: {}",
-                func_name
+                name
             ))),
-        }
-    }
-
-    /// Extract expression from a function argument
-    pub(crate) fn extract_function_arg_expr(&self, arg: &FunctionArg) -> SqawkResult<Expr> {
-        match arg {
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Ok(expr.clone()),
-            FunctionArg::Named {
-                arg: FunctionArgExpr::Expr(expr),
-                ..
-            } => Ok(expr.clone()),
-            _ => Err(SqawkError::UnsupportedSqlFeature(
-                "Unsupported function argument type".to_string(),
-            )),
         }
     }
 
@@ -1879,25 +1484,14 @@ impl<'a> SqlCompiler<'a> {
                 self.emit_value_literal(dest, &literal)?;
             }
 
-            // String concatenation. sqlparser has always produced this node;
-            // there was simply no arm for it, so `a || b` was reported as an
-            // unsupported operator. It lowers onto the CONCAT string function
-            // the engine already implements.
+            // String concatenation: NULL if either side is NULL (unlike
+            // CONCAT(), which treats NULL as '').
             Expr::BinaryOp {
                 left,
                 op: BinaryOperator::StringConcat,
                 right,
             } => {
-                let left_reg = self.code_expr(left, ctx, None)?;
-                let right_reg = self.code_expr(right, ctx, None)?;
-                self.emit(
-                    OpCode::StringFunc,
-                    left_reg,
-                    dest,
-                    0,
-                    Some(format!("CONCAT:{}", right_reg)),
-                    &format!("r[{}] = r[{}] || r[{}]", dest, left_reg, right_reg),
-                );
+                self.emit_call("||", &[(**left).clone(), (**right).clone()], ctx, dest)?;
             }
 
             // Logical AND / OR with SQL three-valued logic: both operands are
@@ -2016,51 +1610,58 @@ impl<'a> SqlCompiler<'a> {
             // Function calls. They were previously handled only inside the
             // projection path, so they worked in a SELECT list and failed in
             // WHERE -- the same asymmetry SUBSTR had.
+            //
+            // `TRIM([BOTH | LEADING | TRAILING] [chars] FROM s)` maps onto
+            // TRIM / LTRIM / RTRIM with the characters as second argument.
             Expr::Trim {
                 expr: inner,
-                trim_where: None,
-                trim_what: None,
-                ..
+                trim_where,
+                trim_what,
+                trim_characters,
             } => {
-                let src = self.code_expr(inner, ctx, None)?;
-                self.emit(
-                    OpCode::StringFunc,
-                    src,
-                    dest,
-                    0,
-                    Some("TRIM".to_string()),
-                    &format!("r[{}] = TRIM(r[{}])", dest, src),
-                );
+                if trim_characters.is_some() {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "TRIM(expr, characters) is not supported; use TRIM(characters FROM expr)"
+                            .into(),
+                    ));
+                }
+                let name = match trim_where {
+                    None | Some(TrimWhereField::Both) => "TRIM",
+                    Some(TrimWhereField::Leading) => "LTRIM",
+                    Some(TrimWhereField::Trailing) => "RTRIM",
+                };
+                let mut args = vec![(**inner).clone()];
+                if let Some(what) = trim_what {
+                    args.push((**what).clone());
+                }
+                self.emit_call(name, &args, ctx, dest)?;
             }
             Expr::Ceil { expr: inner, field } => {
                 check_ceil_floor_field("CEIL", field)?;
-                let src = self.code_expr(inner, ctx, None)?;
-                self.emit(
-                    OpCode::MathFunc,
-                    src,
-                    dest,
-                    -1,
-                    Some("CEIL".to_string()),
-                    &format!("r[{}] = CEIL(r[{}])", dest, src),
-                );
+                self.emit_call("CEIL", &[(**inner).clone()], ctx, dest)?;
             }
             Expr::Floor { expr: inner, field } => {
                 check_ceil_floor_field("FLOOR", field)?;
-                let src = self.code_expr(inner, ctx, None)?;
-                self.emit(
-                    OpCode::MathFunc,
-                    src,
-                    dest,
-                    -1,
-                    Some("FLOOR".to_string()),
-                    &format!("r[{}] = FLOOR(r[{}])", dest, src),
-                );
+                self.emit_call("FLOOR", &[(**inner).clone()], ctx, dest)?;
             }
 
             Expr::UnaryOp {
                 op: UnaryOperator::Minus,
                 expr: inner,
             } => {
+                // A negated numeric literal is one literal, so that
+                // -9223372036854775808 is the integer i64::MIN rather than
+                // the negation of an out-of-range (hence real) literal.
+                if let Expr::Value(ValueWithSpan {
+                    value: Value::Number(n, _),
+                    ..
+                }) = &**inner
+                {
+                    if let Ok(i) = format!("-{}", n).parse::<i64>() {
+                        self.emit_value_literal(dest, &TableValue::Integer(i))?;
+                        return Ok(dest);
+                    }
+                }
                 // 0 - value, so integer and float operands keep their type.
                 let inner_reg = self.code_expr(inner, ctx, None)?;
                 let zero_reg = self.allocate_register();
@@ -2100,16 +1701,36 @@ impl<'a> SqlCompiler<'a> {
             }
             Expr::Like {
                 negated,
+                any,
                 expr: inner,
                 pattern,
-                ..
-            } => self.compile_like_pattern(inner, pattern, *negated, false, ctx, dest)?,
+                escape_char,
+            } => self.compile_like_pattern(
+                inner,
+                pattern,
+                escape_char.as_ref(),
+                *any,
+                *negated,
+                false,
+                ctx,
+                dest,
+            )?,
             Expr::ILike {
                 negated,
+                any,
                 expr: inner,
                 pattern,
-                ..
-            } => self.compile_like_pattern(inner, pattern, *negated, true, ctx, dest)?,
+                escape_char,
+            } => self.compile_like_pattern(
+                inner,
+                pattern,
+                escape_char.as_ref(),
+                *any,
+                *negated,
+                true,
+                ctx,
+                dest,
+            )?,
             Expr::Between {
                 expr: inner,
                 negated,
@@ -2278,33 +1899,26 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// `code_expr` with the argument order the function compilers use.
-    fn code_expr_into(
-        &mut self,
-        expr: &Expr,
-        ctx: &NameCtx<'a>,
-        target_reg: i64,
-    ) -> SqawkResult<()> {
-        self.code_expr(expr, ctx, Some(target_reg)).map(|_| ())
-    }
-
     /// Convert a SQL DataType to a string representation for the VM
     fn sql_data_type_to_string(&self, data_type: &SqlDataType) -> String {
-        match data_type {
-            SqlDataType::Int(_)
-            | SqlDataType::Integer(_)
-            | SqlDataType::BigInt(_)
-            | SqlDataType::SmallInt(_) => "INTEGER".to_string(),
-            SqlDataType::Real | SqlDataType::Float(_) | SqlDataType::Double(_) => {
-                "REAL".to_string()
-            }
-            SqlDataType::Text
-            | SqlDataType::Varchar(_)
-            | SqlDataType::Char(_)
-            | SqlDataType::String(_) => "TEXT".to_string(),
-            SqlDataType::Boolean => "BOOLEAN".to_string(),
-            _ => format!("{:?}", data_type),
+        // SQLite's type-affinity rules, applied to the declared type's text
+        // (section 3.1 of https://www.sqlite.org/datatype3.html), so that
+        // `CAST(x AS BIGINT)`, `AS VARCHAR(10)`, `AS DECIMAL` all behave as
+        // they do there. BOOLEAN is kept apart only for its result type.
+        if matches!(data_type, SqlDataType::Boolean | SqlDataType::Bool) {
+            return "BOOLEAN".to_string();
         }
+        let t = data_type.to_string().to_ascii_uppercase();
+        if t.contains("INT") {
+            "INTEGER"
+        } else if t.contains("CHAR") || t.contains("CLOB") || t.contains("TEXT") || t == "STRING" {
+            "TEXT"
+        } else if t.contains("REAL") || t.contains("FLOA") || t.contains("DOUB") {
+            "REAL"
+        } else {
+            "NUMERIC"
+        }
+        .to_string()
     }
 
     /// Get a normalized table name from an ObjectName
@@ -2329,7 +1943,9 @@ impl<'a> SqlCompiler<'a> {
                 // alone ("COUNT" not "COUNT(*)", "ROW_NUMBER" for a window
                 // call); other functions include arguments for clarity.
                 let func_name = func.name.to_string().to_uppercase();
-                if func.over.is_some() || AggregateFunction::is_aggregate_name(&func_name) {
+                if func.over.is_some()
+                    || AggregateFunction::is_aggregate_call(&func_name, func_args(func).len())
+                {
                     func_name
                 } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
                     func_args(func).first()
@@ -2537,7 +2153,7 @@ impl<'a> SqlCompiler<'a> {
     pub(crate) fn is_aggregate_call(expr: &Expr) -> bool {
         match expr {
             Expr::Function(func) if func.over.is_none() => {
-                AggregateFunction::is_aggregate_name(&func.name.to_string())
+                AggregateFunction::is_aggregate_call(&func.name.to_string(), func_args(func).len())
             }
             _ => false,
         }

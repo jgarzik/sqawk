@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::helpers::{
-    assert_query, assert_query_fails, create_temp_dir, departments_csv, employees_csv,
-    nullable_csv, orders_csv, run_sql, users_csv,
+    assert_query, assert_query_fails, assert_query_on, create_temp_dir, departments_csv,
+    employees_csv, nullable_csv, orders_csv, run_sql, users_csv,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -49,15 +49,6 @@ fn write_files(
         out.push(p.to_str().unwrap().to_string());
     }
     Ok(out)
-}
-
-/// `assert_query` over ad-hoc tables written to a fresh temp dir.
-fn assert_query_on(files: &[(&str, &str)], sql: &str, expected: &str) -> TestResult {
-    let dir = create_temp_dir()?;
-    let bytes: Vec<(&str, &[u8])> = files.iter().map(|(n, c)| (*n, c.as_bytes())).collect();
-    let paths = write_files(dir.path(), &bytes)?;
-    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
-    assert_query(&refs, sql, expected)
 }
 
 /// Copy `content` into a temp file `file_name`, run `sql` with `--write`, and
@@ -1120,7 +1111,6 @@ fn percent_rank_function() -> TestResult {
 /// Integer division and modulo: `5 / 2` is 2 and `-7 / 2` is -3 (truncating),
 /// not 2.5 / -3.5 (Divide always produces a float in engine.rs).
 #[test]
-#[ignore]
 fn integer_division_truncates() -> TestResult {
     assert_query(
         &[users_csv()],
@@ -1131,7 +1121,6 @@ fn integer_division_truncates() -> TestResult {
 
 /// Same root cause, observed through WHERE.
 #[test]
-#[ignore]
 fn integer_division_in_where() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1143,7 +1132,6 @@ fn integer_division_in_where() -> TestResult {
 /// i64 overflow saturates at i64::MAX; SQLite promotes to REAL, so the sum
 /// compares greater than i64::MAX.
 #[test]
-#[ignore]
 fn integer_overflow_promotes_to_float() -> TestResult {
     assert_query(
         &[users_csv()],
@@ -1154,7 +1142,6 @@ fn integer_overflow_promotes_to_float() -> TestResult {
 
 /// Integer arithmetic goes through f64, losing precision above 2^53.
 #[test]
-#[ignore]
 fn large_integer_arithmetic_is_exact() -> TestResult {
     assert_query(
         &[users_csv()],
@@ -1166,7 +1153,6 @@ fn large_integer_arithmetic_is_exact() -> TestResult {
 /// CAST(text AS INTEGER) yields 0 unless the whole string is an integer;
 /// SQLite takes the longest numeric prefix ('3.9' -> 3, '12abc' -> 12).
 #[test]
-#[ignore]
 fn cast_text_to_integer_uses_numeric_prefix() -> TestResult {
     assert_query(
         &[users_csv()],
@@ -1188,7 +1174,6 @@ fn inserted_float_literal_is_numeric() -> TestResult {
 
 /// LIKE is case-sensitive; SQLite's LIKE is ASCII case-insensitive.
 #[test]
-#[ignore]
 fn like_is_ascii_case_insensitive() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1199,7 +1184,6 @@ fn like_is_ascii_case_insensitive() -> TestResult {
 
 /// LIKE ... ESCAPE is ignored, so an escaped `%` never matches literally.
 #[test]
-#[ignore]
 fn like_escape_percent() -> TestResult {
     assert_query_on(
         &[("s.csv", "k,s\n1,x\n4,x%y\n5,A_b\n")],
@@ -1210,7 +1194,6 @@ fn like_escape_percent() -> TestResult {
 
 /// Same root cause for an escaped `_`.
 #[test]
-#[ignore]
 fn like_escape_underscore() -> TestResult {
     assert_query_on(
         &[("s.csv", "k,s\n1,x\n4,x%y\n5,A_b\n")],
@@ -1221,7 +1204,6 @@ fn like_escape_underscore() -> TestResult {
 
 /// `x || NULL` returns `x`; it must be NULL.
 #[test]
-#[ignore]
 fn concat_with_null_is_null() -> TestResult {
     assert_query(
         &[users_csv()],
@@ -1232,7 +1214,6 @@ fn concat_with_null_is_null() -> TestResult {
 
 /// LENGTH counts bytes, not characters.
 #[test]
-#[ignore]
 fn length_counts_characters() -> TestResult {
     assert_query(
         &[users_csv()],
@@ -1244,7 +1225,6 @@ fn length_counts_characters() -> TestResult {
 /// SUBSTR with a negative start returns '' (must count from the end) and a
 /// zero start does not shrink the length as SQLite does.
 #[test]
-#[ignore]
 fn substr_negative_and_zero_start() -> TestResult {
     assert_query(
         &[users_csv()],
@@ -1256,7 +1236,6 @@ fn substr_negative_and_zero_start() -> TestResult {
 /// CURRENT_DATE returns the wrong date (a hand-rolled epoch-to-civil
 /// conversion in the date functions); must equal today's UTC date.
 #[test]
-#[ignore]
 fn current_date_is_today() -> TestResult {
     assert_query(
         &[users_csv()],
@@ -1470,7 +1449,6 @@ fn group_concat() -> TestResult {
 
 /// IFNULL is unsupported.
 #[test]
-#[ignore]
 fn ifnull_function() -> TestResult {
     assert_query(
         &[nullable_csv()],
@@ -1481,7 +1459,6 @@ fn ifnull_function() -> TestResult {
 
 /// IIF is unsupported.
 #[test]
-#[ignore]
 fn iif_function() -> TestResult {
     assert_query(
         &[nullable_csv()],
@@ -1492,7 +1469,6 @@ fn iif_function() -> TestResult {
 
 /// INSTR is unsupported.
 #[test]
-#[ignore]
 fn instr_function() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1503,7 +1479,6 @@ fn instr_function() -> TestResult {
 
 /// TYPEOF is unsupported.
 #[test]
-#[ignore]
 fn typeof_function() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1516,7 +1491,6 @@ fn typeof_function() -> TestResult {
 /// "Right-pad to length") but unsupported. SQLite lacks them; expected values
 /// follow the documented semantics.
 #[test]
-#[ignore]
 fn lpad_rpad_functions() -> TestResult {
     assert_query(
         &[employees_csv()],
