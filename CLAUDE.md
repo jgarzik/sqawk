@@ -69,8 +69,11 @@ effects of the ones before it.
 ### File Handling
 
 - **`file_handler.rs`**: Manages loading files into database tables
-- **`csv_handler.rs`**: Standard CSV file parsing (comma-separated)
-- **`delim_handler.rs`**: Custom delimiter support via `-F` flag (TSV, colon-separated, etc.)
+- **`csv_handler.rs`**: The single loader (`read_table`, built on the `csv`
+  crate) for every delimiter and for stdin, plus writeback. `.csv` files always
+  have a header; other files keep the header guess and `#`-comment skipping.
+  Fields load as Integer/Float only when the text round-trips exactly, so
+  untouched cells write back byte-for-byte
 
 ### SQL Features
 
