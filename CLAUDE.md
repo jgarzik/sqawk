@@ -41,21 +41,29 @@ Sqawk is an SQL-based CLI tool for processing delimiter-separated files (CSV, TS
 
 - **`main.rs`**: Entry point orchestrating the pipeline: CLI parsing → file loading → SQL execution → output → optional writeback. Any error is printed once as `sqawk: <message>` (one line, exit 1); clap usage errors exit 2
 - **`cli.rs`**: clap arguments; `-s`/`-f` are merged into one ordered script by command-line position
+- **`config.rs`**: `AppConfig`, the parsed options (-v, -F, --tabledef, --write, header/comment/output flags) passed to every component instead of global state
+- **`repl.rs`**: the interactive shell (`-i`). On a terminal: rustyline editor with prompt, multi-line statements, tab completion and history (`$XDG_STATE_HOME/sqawk/history` when that is absolute, else `~/.sqawk_history`); piped, it reads lines and prints only command output. Dot commands (`.tables`, `.schema`, `.save`, `.cd`, `.load`, ...) live here
 - **`error.rs`**: `SqawkError`; each `Display` is one complete line and no variant exposes a `source()` (that would print the cause twice). File I/O errors name the user's file (`SqawkError::open` / `write`), never a temp file
 - **`diag.rs`**: `diag!` / `outln!` -- every stderr diagnostic (errors, `-v`) and REPL stdout line goes through them; write errors are ignored, so a closed stream never panics. Do not use `eprintln!`/`println!`
-- **`database.rs`**: Central store for in-memory tables, manages table definitions and schemas
-- **`table.rs`**: In-memory table representation with columns, rows, and projection capabilities
-- **`sql_executor.rs`**: SQL parsing (via `sqlparser` crate) and execution against in-memory tables
+- **`database.rs`**: Central store for in-memory tables; owns modification tracking (`mark_modified` / `is_modified` / `modified_tables`, which decide what `--write` saves) and transactions (`begin` / `commit` / `rollback`; a table's original is kept the first time a transaction changes it)
+- **`table.rs`**: In-memory table representation with columns (name, type affinity, declared type name), rows, and projection capabilities
+- **`sql_executor.rs`**: `SqlExecutor`, the facade `main.rs` and the REPL use: `execute` hands SQL text to `vm::execute_vm` and applies the output delimiter to the result tables; it also saves modified tables (`save_modified_tables`, `save_table`), rolls back a transaction left open at exit (`finish`), and answers the REPL's table/column/row-count queries. It does no parsing itself
 
 ### SQL Execution (VM-based)
 
 SQL execution uses a bytecode VM inspired by SQLite's architecture:
-1. SQL is parsed via the `sqlparser` crate
+1. SQL is parsed by `src/vm/parse.rs` (`parse_sql`, sqlparser with `SqawkDialect`)
 2. The AST is compiled to bytecode (`src/vm/compiler.rs`)
 3. The VM engine executes the bytecode (`src/vm/engine.rs`)
 
 ### VM Module (`src/vm/`)
 
+- `mod.rs`: `execute_vm`, the statement loop: parses the script, then per
+  statement runs BEGIN/COMMIT/ROLLBACK directly on the `Database`,
+  materializes each derived table (`FROM (SELECT ...) t`) as a temporary
+  table under its alias, compiles and executes the statement, and applies the
+  engine's `TableModification`s (insert/replace/delete rows, create/drop/alter/
+  truncate tables) to the `Database`, marking each changed table modified
 - `bytecode.rs`: Bytecode instruction set and register/program types
 - `compiler.rs`: SQL AST to bytecode. Holds `code_expr`, the single expression
   compiler (the analogue of SQLite's `sqlite3ExprCode`) used from the SELECT
@@ -112,7 +120,11 @@ effects of the ones before it.
 
 ### File Handling
 
-- **`file_handler.rs`**: Manages loading files into database tables
+- **`file_handler.rs`**: Manages loading files into database tables and saving
+  them. `parse_table_spec` splits a file operand `[NAME=]PATH` (NAME only when
+  identifier-like; otherwise the table is named after the file stem; `-` is
+  stdin, table `stdin`); `has_tab_extension` is the `.tsv`/`.tab` rule used
+  for loading and for `CREATE TABLE ... LOCATION`
 - **`csv_handler.rs`**: The single loader (`read_table`, built on the `csv`
   crate) for every delimiter and for stdin, plus writeback. `.tsv`/`.tab` are
   tab-separated, everything else comma (unless `-F`); the first line is always
@@ -134,7 +146,7 @@ follow SQLite 3.45; deliberate differences are listed in
 
 ### Safe Writeback Model
 
-By default, all modifications remain in memory only. The `--write` flag must be explicitly provided to save changes back to source files. Only tables changed by INSERT/UPDATE/DELETE/ALTER/TRUNCATE are written, and rows a statement did not change are written back byte for byte. Scratch tables (CREATE TABLE without LOCATION, CREATE TABLE AS) are never written. Every target is checked for writability before any file is written; a read-only file aborts the whole writeback. An open transaction is rolled back before writeback.
+By default, all modifications remain in memory only. The `--write` flag must be explicitly provided to save changes back to source files. Only tables changed by INSERT/UPDATE/DELETE/ALTER/TRUNCATE are written, and rows a statement did not change are written back byte for byte. A table created by `CREATE TABLE ... LOCATION 'file'` is written too, even with no DML after it (the file is created with just the header); its delimiter is WITH (DELIMITER=...) if given, else tab for `.tsv`/`.tab`, else comma. Scratch tables (CREATE TABLE without LOCATION, CREATE TABLE AS) are never written. Every target is checked for writability before any file is written; a read-only file aborts the whole writeback. An open transaction is rolled back before writeback.
 
 ## Test Organization
 

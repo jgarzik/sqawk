@@ -307,9 +307,11 @@ sqawk> .exit
 
 Things in that transcript worth calling out:
 
-- `.schema` reports every column as `TEXT`. Loaded files carry no declared
-  schema -- types are inferred per value at comparison time, not per column, so
-  there is no column type for `.schema` to report. See
+- `.schema` reports every column of a loaded file as `TEXT`. Loaded files
+  carry no declared schema -- types are inferred per value at comparison
+  time, not per column, so there is no column type for `.schema` to report.
+  A table made with CREATE TABLE shows each column's type as declared
+  (`BIGINT`, `VARCHAR(20)`, ...). See
   [Type coercion](sql_reference.md#type-coercion).
 - Row counts are only printed after `.changes on`; the default is off.
 - Query results print exactly as with `-s`: the header line, then the rows.
@@ -324,9 +326,10 @@ prefix match); after `table.` it completes that table's columns, and after
 the line being typed; Ctrl-D (end of input) leaves the REPL.
 
 History is kept only when standard input is a terminal, in
-`$XDG_STATE_HOME/sqawk/history` when `XDG_STATE_HOME` is set (the directory
-is created as needed), otherwise in `~/.sqawk_history`. With neither
-`XDG_STATE_HOME` nor `HOME` set, no history is kept.
+`$XDG_STATE_HOME/sqawk/history` when `XDG_STATE_HOME` is an absolute path
+(the directory is created as needed). Otherwise -- `XDG_STATE_HOME` unset,
+empty or relative -- it is `$HOME/.sqawk_history` when `HOME` is set and
+non-empty, and when neither applies no history is kept.
 
 **Piping a script.** When standard input is not a terminal, `sqawk -i`
 reads commands from it line by line and prints no banner, no prompts and no
@@ -581,10 +584,31 @@ Comment support is useful for:
 - A row with **too many** fields is an error naming the line, since there is
   no column to hold the extra values and dropping them would lose data
 
+In `short.csv`, line 2 has two fields and loads as `1`, `2`, NULL:
+
 ```csv
 a,b,c
-1,2        # loads as 1, 2, NULL
-1,2,3,4    # error: record has 4 fields, but the table has 3 columns
+1,2
+4,5,6
+```
+
+```
+$ sqawk -s "SELECT a, b, c, c IS NULL FROM short" short.csv
+a,b,c,c IS NULL
+1,2,,1
+4,5,6,0
+```
+
+In `long.csv`, line 2 has four fields, and the file does not load:
+
+```csv
+a,b,c
+1,2,3,4
+```
+
+```
+$ sqawk -s "SELECT * FROM long" long.csv
+sqawk: long.csv: line 2: record has 4 fields, but the table has 3 columns
 ```
 
 Padding is silent. If a query returns unexpected NULLs in the last columns,
@@ -638,10 +662,13 @@ CREATE TABLE employees (
 
 #### Supported Data Types
 
-The usual type names are `INT` / `INTEGER`, `FLOAT` / `REAL` / `DOUBLE`,
-`TEXT` / `STRING` and `BOOLEAN`; any other name is accepted too. Column types
-are not enforced: as in a loaded table, each value keeps its own type, so
-`INSERT INTO t VALUES ('abc')` stores the text `abc` in an `INT` column.
+Any type name is accepted (`INT`, `BIGINT`, `VARCHAR(20)`, `DECIMAL(10,2)`,
+`FLOAT`, `TEXT`, `BOOLEAN`, ...), and `.schema` shows each column's type as
+declared. Every column needs a type: `CREATE TABLE t (a)` is a parse error.
+Column types are not enforced: as in a loaded table, each value keeps its own
+type, so `INSERT INTO t VALUES ('abc')` stores the text `abc` in an `INT`
+column. See [Data Types](sql_reference.md#data-types) for how a type name
+maps to an affinity.
 
 #### Setting File Location and Format
 
@@ -668,7 +695,11 @@ CREATE TABLE users (
 
 #### Specifying Custom Delimiters
 
-For non-CSV formats, specify the delimiter with the WITH clause:
+Without a WITH clause, the file gets the delimiter it will be loaded with: tab
+for a `.tsv` or `.tab` path, comma for any other. So a table created with
+`LOCATION './out.tsv'` is written tab-separated and reads back as the same
+columns. For any other delimiter, give it with the WITH clause, which wins
+over the extension:
 
 ```sql
 CREATE TABLE server_logs (

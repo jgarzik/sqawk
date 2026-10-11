@@ -33,8 +33,11 @@ one lookup used by SELECT, INSERT column lists and UPDATE SET.
 - **Rows**: Represented as vectors of values with one element per column
 - **Columns**: Identified by name, with automatic type inference based on content
 - **Schema**: Dynamically determined from the file's header row
-- **Column Types**: Not declared; inferred at runtime **per value**, so a single
-  column may hold integers, floats and text
+- **Column Types**: A loaded column has no declared type; a column created by
+  CREATE TABLE or ALTER TABLE ADD COLUMN records its declared type name and
+  that name's SQLite affinity (`Column::decl_type`, `Column::data_type`), but
+  never converts a value. Types live **per value**, so a single column may
+  hold integers, floats and text
 - **NULL**: An empty field reads as NULL. Comparisons follow SQL three-valued
   logic, so a comparison involving NULL is UNKNOWN and its row is filtered out
   rather than raising an error. Sorting and grouping treat NULL as equal to
@@ -53,9 +56,10 @@ Tables are loaded from delimiter-separated files at startup and can be modified 
 
 1. **Default Behavior**: All modifications remain in memory only
 2. **Tracking Changes**: The database keeps the set of modified tables
-   (`Database::modified`): INSERT, UPDATE, DELETE, ALTER TABLE and TRUNCATE
-   mark a table, CREATE TABLE marks the new one, and DROP TABLE removes the
-   mark with the table
+   (`Database::modified`, set by `Database::mark_modified`): INSERT, UPDATE,
+   DELETE, ALTER TABLE and TRUNCATE mark a table, CREATE TABLE marks the new
+   one (so a `CREATE TABLE ... LOCATION` file is written even with no rows),
+   and DROP TABLE removes the mark with the table
 3. **Write on Exit**: Modified tables are only written back to their source files if:
    - The `--write` (or `-w`) flag is explicitly provided
    - The table was actually modified by one of those statements
@@ -102,13 +106,19 @@ The `Table` struct represents an in-memory table with:
 SQL is not interpreted against the tables directly. It is compiled to bytecode
 and run on a register virtual machine, following SQLite's architecture:
 
-1. **Parse** — the `sqlparser` crate produces an AST
+1. **Parse** — `vm::parse::parse_sql` produces an AST (the `sqlparser` crate
+   with `SqawkDialect`)
 2. **Compile** — `vm::compiler` lowers the AST to a bytecode program
 3. **Execute** — `vm::engine` runs that program against table cursors
 
-`SqlExecutor` is a thin wrapper over this pipeline: it forwards to the VM,
-tracks which tables were modified, and provides `save_modified_tables()`, which
-writes back only tables that actually changed.
+Modification tracking belongs to `Database`: `vm::execute_vm` applies each
+statement's changes and calls `database.mark_modified(name)` for every table
+it changed, and `Database::is_modified` / `modified_tables` report the set.
+Code that changes a table outside that path must call
+`database.mark_modified` itself, or `--write` will not save the table.
+`SqlExecutor` is a thin facade over the pipeline: it forwards SQL to
+`vm::execute_vm`, and its `save_modified_tables()` writes back the tables in
+`Database::modified_tables()` that have a file.
 
 The compiler has one recursive expression compiler, `code_expr` (the analogue
 of SQLite's `sqlite3ExprCode`), used from every position an expression can

@@ -2,16 +2,23 @@
 
 ## Data Types
 
-| Type | Aliases |
-|------|---------|
-| `INTEGER` | `INT` |
-| `REAL` | `FLOAT`, `DOUBLE` |
-| `TEXT` | `STRING` |
-| `BOOLEAN` | `BOOL` |
-| `NULL` | |
+Every value is INTEGER, REAL, TEXT or NULL (what `TYPEOF` reports). `TRUE`
+and `FALSE` are the integers 1 and 0.
 
-A column type declared in CREATE TABLE is recorded but not enforced: any type
-name is accepted, and every value keeps its own type (see Type coercion).
+A column type declared in CREATE TABLE or ALTER TABLE ADD COLUMN is recorded
+but not enforced: any type name is accepted, any value can be stored in the
+column, and every value keeps its own type (see Type coercion). The name is
+kept as written and `.schema` shows it, with keywords in upper case and
+spacing normalized by the parser (`decimal(10, 2)` shows as `DECIMAL(10,2)`;
+a name that is not a keyword, such as `money`, keeps its case). Its affinity
+follows SQLite's rules, in order: a name containing `INT` is INTEGER
+(`BIGINT`, `SMALLINT`); `CHAR`, `CLOB` or `TEXT` is TEXT (`VARCHAR(20)`);
+`BLOB` is BLOB; `REAL`, `FLOA` or `DOUB` is REAL (`DOUBLE PRECISION`);
+anything else is NUMERIC (`DECIMAL(10,2)`, `BOOLEAN`, `DATE`, `STRING`). The
+affinity converts no value; it is the type `CREATE TABLE ... AS` gives a
+column copied from the table. Every column needs a type: `CREATE TABLE t (a)`
+is a parse error. A loaded file's columns have no declared type; `.schema`
+shows them as `TEXT`.
 
 Type inference on load, per cell: an empty field is NULL; a canonical integer
 (`42`, `-7` -- printing the number gives back the same text) is INTEGER; a
@@ -264,6 +271,9 @@ COALESCE, IFNULL and IIF evaluate only the argument they return.
 affinity rules: a name containing `INT` is INTEGER (`BIGINT`, `SMALLINT`);
 `CHAR`, `CLOB` or `TEXT` is TEXT (`VARCHAR(10)`); `REAL`, `FLOA` or `DOUB` is
 REAL; anything else (`NUMERIC`, `DECIMAL`, `BOOLEAN`, `DATE`) is NUMERIC.
+One exception: `STRING` is a TEXT alias (`CAST('x' AS STRING)` is the text
+`x`), where SQLite's rules make it NUMERIC. The exception is CAST's alone; a
+column declared `STRING` has NUMERIC affinity (see Data Types).
 
 - `CAST(text AS INTEGER)` reads an optional sign and the digits after it:
   `'3.9'` is 3, `'12abc'` is 12, `' 5 '` is 5, `'1e3'` is 1, `'abc'` is 0.
@@ -473,7 +483,7 @@ Supported functions:
 | `LAG(x [, offset [, default]])` | `x` from `offset` (default 1) rows back, else `default` (NULL) |
 | `LEAD(x [, offset [, default]])` | likewise, forward |
 | `FIRST_VALUE(x)`, `LAST_VALUE(x)`, `NTH_VALUE(x, n)` | `x` at the first / last / n-th row of the frame |
-| `COUNT(*)`, `COUNT(x)`, `SUM`, `AVG`, `MIN`, `MAX` | the aggregate over the frame |
+| `COUNT(*)`, `COUNT(x)`, `SUM`, `TOTAL`, `AVG`, `MIN`, `MAX`, `GROUP_CONCAT(x [, sep])`, `STRING_AGG(x, sep)` | the aggregate over the frame |
 
 Partition and order keys may be any expressions, any number of them; NULLs
 sort first. Rows with equal ORDER BY keys are *peers*. A query may use any
@@ -503,8 +513,8 @@ integer literal), and `RANGE` with `UNBOUNDED` / `CURRENT ROW` bounds. Named
 windows (`WINDOW w AS (...)`, `OVER w`, `OVER (w ORDER BY ...)`) are
 supported. Not supported, and rejected with an error: `RANGE` frames with an
 offset, `GROUPS` frames, `EXCLUDE`, `FILTER` on a window function, and
-`DISTINCT` inside one. SUM of integers is an integer; AVG, PERCENT_RANK and
-CUME_DIST are floats.
+`DISTINCT` inside one. SUM of integers is an integer; TOTAL, AVG,
+PERCENT_RANK and CUME_DIST are floats.
 
 ## Set Operations
 
@@ -573,9 +583,15 @@ CREATE TABLE name (
 CREATE TABLE name AS SELECT ... FROM ...
 ```
 
-The new table's columns are the query's result columns. Column and table
-constraints (`PRIMARY KEY`, `NOT NULL`, `DEFAULT`, ...) are rejected: sqawk
-does not enforce them. `STORED AS` takes only `TEXTFILE` and `WITH` only
+Column types are recorded, not enforced (see Data Types). With `LOCATION`,
+the table is written to that file under `--write`, even if nothing is
+inserted (the file then holds only the header). The file's delimiter is the
+`WITH (DELIMITER='...')` value when given, else the one the file would be
+loaded with: tab for a `.tsv` or `.tab` path, comma for any other.
+
+`CREATE TABLE ... AS` gives the new table the query's result columns.
+Column and table constraints (`PRIMARY KEY`, `NOT NULL`, `DEFAULT`, ...) are
+rejected: sqawk does not enforce them. `STORED AS` takes only `TEXTFILE` and `WITH` only
 `DELIMITER`; anything else there is an error. A table without `LOCATION`
 (every `CREATE TABLE ... AS` table among them) has no file and lasts for the
 run; `CREATE TEMP TABLE` is accepted for such a table.
@@ -734,6 +750,7 @@ sqawk aims to give SQLite's answers. Where it deliberately does not:
 |------|--------|-------|
 | Column types | Declared affinity converts `'10'` stored in an INTEGER column to 10; text compares with text as text (`'10' < '9'`) | Each cell is typed when read; numeric-looking text compares numerically everywhere, text against text included (`a = '10'` matches 10, `'10' > '9'`), see Type coercion |
 | NULL vs `''` | Distinct in output | Both print as an empty field |
+| `CAST(x AS STRING)` | NUMERIC affinity: `CAST('x' AS STRING)` is the integer `0` | TEXT: `CAST('x' AS STRING)` is the text `x` |
 | `UPPER` / `LOWER` | ASCII letters only | All of Unicode |
 | `TRIM(s)` | Strips spaces only | Strips all whitespace |
 | `SUM` / `AVG` over text | Non-numeric text counts as 0: `SUM` becomes real, `AVG` divides by every non-NULL value, and over only non-numeric text both give `0.0` | Non-numeric text is skipped: `SUM` stays an integer over integers and integer text, `AVG` divides by the count of numeric values, and over only non-numeric text both give NULL |
