@@ -151,3 +151,14 @@ fn update_from_message() -> R {
         "UPDATE ... FROM is not supported",
     )
 }
+
+/// An unsupported statement is named by its keywords (the error used to
+/// dump the statement's whole syntax tree).
+#[test]
+fn unsupported_statement_message() -> R {
+    assert_query_fails(
+        &["tests/data/users.csv"],
+        "CREATE VIEW v AS SELECT * FROM users",
+        "CREATE VIEW statements are not supported",
+    )
+}

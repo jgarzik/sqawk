@@ -13,7 +13,7 @@
 use super::arith::{self, text_of, text_to_num, to_num, Num};
 use super::bytecode::Register;
 use super::datetime;
-use super::engine::compare_values;
+use super::engine::{compare_values, VmEngine};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Value;
 
@@ -58,6 +58,8 @@ static FUNCS: &[FuncDef] = &[
     f!("CONCAT", 1, VARIADIC, concat),
     f!("CONCAT_WS", 2, VARIADIC, concat_ws),
     f!("||", 2, 2, concat_op),
+    // `a IS NOT DISTINCT FROM b`: NULL-safe equality.
+    f!("IS", 2, 2, is_same),
     f!("LEFT", 2, 2, left),
     f!("RIGHT", 2, 2, right),
     f!("LPAD", 2, 3, lpad),
@@ -301,6 +303,17 @@ fn concat_op(a: &[Register]) -> SqawkResult<Register> {
     let mut s = text_of(&a[0]);
     s.push_str(&text_of(&a[1]));
     text(s)
+}
+
+/// `a IS NOT DISTINCT FROM b`: 1 when both are NULL or they are equal (as
+/// `=` decides), else 0. Never NULL.
+fn is_same(a: &[Register]) -> SqawkResult<Register> {
+    let same = match (&a[0], &a[1]) {
+        (Register::Null, Register::Null) => true,
+        (Register::Null, _) | (_, Register::Null) => false,
+        (x, y) => VmEngine::sql_compare(x, y) == Some(std::cmp::Ordering::Equal),
+    };
+    Ok(Register::Integer(same as i64))
 }
 
 /// LEFT(s, n): the first n characters (none for n <= 0).

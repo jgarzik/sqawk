@@ -2007,12 +2007,14 @@ fn nested_derived_tables() -> Result<(), Box<dyn std::error::Error>> {
     )
 }
 
+/// A derived table's alias may shadow a real table's name, as in SQL (it
+/// used to be rejected: derived tables were registered under their alias).
 #[test]
-fn derived_table_alias_may_not_shadow_a_real_table() -> Result<(), Box<dyn std::error::Error>> {
-    assert_query_fails(
+fn derived_table_alias_may_shadow_a_real_table() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
         &["tests/data/employees.csv"],
-        "SELECT name FROM (SELECT name FROM employees) employees",
-        "shadows an existing table",
+        "SELECT name FROM (SELECT name FROM employees LIMIT 2) employees",
+        "name\nAlice\nBob",
     )
 }
 

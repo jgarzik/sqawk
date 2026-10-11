@@ -2604,7 +2604,7 @@ impl<'a> VmEngine<'a> {
     /// text that sqawk guesses a type for PER CELL, so a single column can
     /// hold both; and arithmetic already coerces this way, so `x + '1'` and
     /// `x > '1'` agree instead of disagreeing.
-    fn sql_compare(a: &Register, b: &Register) -> Option<std::cmp::Ordering> {
+    pub(super) fn sql_compare(a: &Register, b: &Register) -> Option<std::cmp::Ordering> {
         // Any NULL operand yields UNKNOWN.
         if matches!(a, Register::Null) || matches!(b, Register::Null) {
             return None;

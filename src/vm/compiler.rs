@@ -824,10 +824,16 @@ impl<'a> SqlCompiler<'a> {
                     "TRUNCATE of multiple tables is not supported".into(),
                 )),
             },
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported SQL statement type: {:?}",
-                statement
-            ))),
+            // Name the statement by its leading keywords; the AST's Debug
+            // form used to be dumped here, hundreds of characters long.
+            _ => {
+                let text = statement.to_string();
+                let head: Vec<&str> = text.split_whitespace().take(2).collect();
+                Err(SqawkError::UnsupportedSqlFeature(format!(
+                    "{} statements are not supported",
+                    head.join(" ")
+                )))
+            }
         }
     }
 
@@ -1716,6 +1722,15 @@ impl<'a> SqlCompiler<'a> {
                 return self.code_expr(inner, ctx, Some(dest));
             }
 
+            // NULL-safe (in)equality.
+            Expr::IsNotDistinctFrom(a, b) => {
+                self.emit_call("IS", &[(**a).clone(), (**b).clone()], ctx, dest)?;
+            }
+            Expr::IsDistinctFrom(a, b) => {
+                self.emit_call("IS", &[(**a).clone(), (**b).clone()], ctx, dest)?;
+                self.emit(OpCode::Not, dest, dest, 0, None, "IS DISTINCT FROM");
+            }
+
             // Predicates are values like any other: 1, 0, or NULL for
             // UNKNOWN. Filters (WHERE / ON / HAVING) test the result with
             // IfZ, which rejects NULL along with 0.
@@ -1968,8 +1983,22 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Use the last part of the object name as the table name
-        // (schemas and catalogs are ignored for now)
-        Ok(object_name_last(name))
+        // (schemas and catalogs are ignored for now). Table names match
+        // case-insensitively, as SQL identifiers do: `FROM EMP` finds the
+        // table loaded from emp.csv. An exact match wins.
+        let wanted = object_name_last(name);
+        if self.database.has_table(&wanted) {
+            return Ok(wanted);
+        }
+        let mut matches = self
+            .database
+            .table_names()
+            .into_iter()
+            .filter(|t| t.eq_ignore_ascii_case(&wanted));
+        match (matches.next(), matches.next()) {
+            (Some(only), None) => Ok(only),
+            _ => Ok(wanted),
+        }
     }
 
     pub(crate) fn get_column_name_from_expr(&self, expr: &Expr) -> String {

@@ -138,7 +138,9 @@ pub(crate) fn expr_children(expr: &Expr) -> Option<Vec<&Expr>> {
         | Expr::IsNotFalse(e)
         | Expr::Ceil { expr: e, .. }
         | Expr::Floor { expr: e, .. } => vec![e],
-        Expr::BinaryOp { left, right, .. } => vec![left, right],
+        Expr::BinaryOp { left, right, .. }
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => vec![left, right],
         Expr::Between {
             expr, low, high, ..
         } => vec![expr, low, high],

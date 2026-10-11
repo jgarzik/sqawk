@@ -135,7 +135,7 @@ def split_stmts(sql):
 
 
 def tables_in(sql):
-    return [t for t in TABLES if re.search(r"\b%s\b" % t, sql)]
+    return [t for t in TABLES if re.search(r"\b%s\b" % t, sql, re.IGNORECASE)]
 
 
 def run_sqawk(sql, extra_args=()):
