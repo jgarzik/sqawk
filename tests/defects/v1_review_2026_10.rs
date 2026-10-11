@@ -267,8 +267,18 @@ fn chain(n: usize, sep: &str, term: &str) -> String {
 }
 
 /// Run `sql` over the one-row table and return the process output.
+///
+/// The SQL goes in through `-f -` on stdin, not `-s`: the deep-expression
+/// tests use statements of 20-70 KB, past Windows' 32,767-character command
+/// line limit.
 fn run_one(sql: &str) -> Result<Output, Box<dyn std::error::Error>> {
-    run_sqls(&[ONE], &[], &[sql])
+    let dir = create_temp_dir()?;
+    let paths = write_files(dir.path(), &[(ONE.0, ONE.1.as_bytes())])?;
+    Ok(run_in(
+        dir.path(),
+        &["-f", "-", &paths[0]],
+        Some(sql.as_bytes()),
+    )?)
 }
 
 /// Run a piped (non-tty) REPL over `files` in a temp dir with `script` on
