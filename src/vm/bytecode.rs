@@ -106,11 +106,7 @@ pub fn spec_unescape(field: &str) -> String {
 }
 
 /// Opcodes for VM instructions
-///
-/// Note: Some opcodes are defined but not yet used by the compiler.
-/// They are kept for planned features in the SQL expansion roadmap.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
 pub enum OpCode {
     // Program flow control
     Init, // Initialize VM
@@ -186,7 +182,6 @@ pub enum OpCode {
     // Conditional jumps
     IfZ,   // Jump to P2 if register P1 contains 0
     IfPos, // Jump to P2 if register P1 is positive (> 0)
-    IfNeg, // Jump to P2 if register P1 is negative (< 0)
 
     // Utility opcodes
     Noop, // No operation
@@ -249,13 +244,11 @@ pub enum OpCode {
     // equal when every column is: NULL equals NULL and 1 equals 1.0. With
     // P3 = 2 columns are keyed as `=` compares instead (text '1' equals 1),
     // for IN (SELECT ...).
-    OpenEphemeral, // Open ephemeral cursor P1 with P2 columns. P4 = sort key spec; P3 = 1/2: keyed.
+    OpenEphemeral, // Open ephemeral cursor P1 with P2 columns. P3 = 1/2: keyed.
     IdxInsert,     // Insert into ephemeral cursor P1. P2 = start register, P3 = column count.
     IdxDelete,     // Remove row r[P2..P2+P3] from keyed ephemeral cursor P1, if present.
     Found,         // Jump to P2 if row r[P3..P3+P4] is in keyed ephemeral cursor P1.
     NotFound,      // Jump to P2 if row r[P3..P3+P4] is NOT in keyed ephemeral cursor P1.
-    Sort,          // Sort ephemeral cursor P1. Jump to P2 when empty, else continue.
-    Sequence,      // P1 = ephemeral cursor, P2 = dest register. Generate next sequence number.
 
     // DDL operations
     CreateTable,   // Create a table. P4 = "table_name:col1:type1,col2:type2,..."

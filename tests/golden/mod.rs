@@ -2319,7 +2319,7 @@ fn implicit_join_order_by_without_limit() -> Result<(), Box<dyn std::error::Erro
 // ---------------------------------------------------------------------------
 // Defects found by the high-effort review of this branch.
 //
-// Each is a place where a path that had not yet been unified drifted from the
+// Each was a place where a path that had not been unified drifted from the
 // one that had: DISTINCT set in one aggregate site and not another, column
 // resolution case-insensitive in NameCtx and exact elsewhere, SUBSTR arity
 // checked on the Function spelling but not the Expr::Substring one.

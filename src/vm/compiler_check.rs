@@ -9,7 +9,7 @@
 //! "Unsupported" error before a single row is touched.
 //!
 //! The checks destructure each node EXHAUSTIVELY (no `..`), so a field added
-//! by a future sqlparser release fails to compile here until someone decides
+//! by a newer sqlparser release fails to compile here until someone decides
 //! whether sqawk honours it.
 
 use sqlparser::ast::{

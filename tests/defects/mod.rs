@@ -167,8 +167,7 @@ fn join_respects_projection_order() -> Result<(), Box<dyn std::error::Error>> {
     )
 }
 
-/// Defect 4: ORDER BY is deliberately skipped on explicit JOINs
-/// (compiler.rs:729-737 -- "isn't fully implemented. For now [...] skip").
+/// Defect 4: ORDER BY was skipped on explicit JOINs.
 #[test]
 fn order_by_applies_to_join() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(

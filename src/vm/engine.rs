@@ -11,7 +11,7 @@ use super::{func, like};
 use crate::capacity::{
     DEFAULT_ACCUMULATOR_CAPACITY, DEFAULT_CURSOR_CAPACITY, DEFAULT_MODIFICATIONS_CAPACITY,
     DEFAULT_REGISTER_CAPACITY, DEFAULT_RESULT_CAPACITY, DEFAULT_SORTER_CAPACITY,
-    DEFAULT_SORTER_ROWS_CAPACITY, DEFAULT_SORT_KEYS_CAPACITY,
+    DEFAULT_SORTER_ROWS_CAPACITY,
 };
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
@@ -27,9 +27,6 @@ enum CursorData<'a> {
     Ephemeral {
         rows: Vec<Vec<Value>>,
         col_count: usize,
-        sort_keys: Vec<KeyOrder>,
-        sorted: bool,
-        sequence: i64,
         name: Option<String>, // Optional name for pending tables
         /// A KEYED ephemeral table (OpenEphemeral P3 = 1 or 2): each
         /// distinct row once, by its [`RowKey`]. `rows` is filled from it,
@@ -185,14 +182,11 @@ impl<'a> Cursor<'a> {
 
     /// Create ephemeral cursor. `keyed` (OpenEphemeral P3) 1 makes it a set
     /// of distinct rows keyed by [`row_key`], 2 by [`value_cmp_key`].
-    fn ephemeral(col_count: usize, sort_keys: Vec<KeyOrder>, keyed: i64) -> Self {
+    fn ephemeral(col_count: usize, keyed: i64) -> Self {
         Self {
             data: CursorData::Ephemeral {
                 rows: Vec::with_capacity(DEFAULT_SORTER_ROWS_CAPACITY),
                 col_count,
-                sort_keys,
-                sorted: false,
-                sequence: 0,
                 name: None,
                 set: (keyed != 0).then(HashMap::new),
                 key_of: if keyed == 2 { value_cmp_key } else { row_key },
@@ -212,9 +206,6 @@ impl<'a> Cursor<'a> {
             data: CursorData::Ephemeral {
                 rows: Vec::with_capacity(DEFAULT_SORTER_ROWS_CAPACITY),
                 col_count,
-                sort_keys: Vec::with_capacity(DEFAULT_SORT_KEYS_CAPACITY),
-                sorted: false,
-                sequence: 0,
                 name: Some(table_name),
                 set: None,
                 key_of: row_key,
@@ -366,9 +357,8 @@ impl<'a> Cursor<'a> {
                 set.insert(row.iter().map(*key_of).collect(), row);
                 Ok(())
             }
-            CursorData::Ephemeral { rows, sorted, .. } => {
+            CursorData::Ephemeral { rows, .. } => {
                 rows.push(row);
-                *sorted = false;
                 Ok(())
             }
             CursorData::Table { .. } => Err(SqawkError::VmError(
@@ -390,60 +380,6 @@ impl<'a> Cursor<'a> {
                 "Cursor is not a keyed ephemeral table".into(),
             )),
         }
-    }
-
-    /// Sort ephemeral cursor (Sort opcode)
-    /// Returns true if has rows (continue), false if empty (should jump)
-    fn sort(&mut self) -> Result<bool, SqawkError> {
-        match &mut self.data {
-            CursorData::Ephemeral {
-                rows,
-                sort_keys,
-                sorted,
-                ..
-            } => {
-                if rows.is_empty() {
-                    return Ok(false); // Empty - caller should jump
-                }
-                if !*sorted {
-                    let keys = sort_keys.clone();
-                    rows.sort_by(|a, b| compare_rows(&keys, a, b));
-                    *sorted = true;
-                }
-                self.position = 0;
-                self.valid = true;
-                Ok(true) // Has rows - caller continues
-            }
-            CursorData::Table { .. } => Err(SqawkError::VmError("Cannot sort table cursor".into())),
-        }
-    }
-
-    /// Generate next sequence number (Sequence opcode)
-    fn next_sequence(&mut self) -> Result<i64, SqawkError> {
-        match &mut self.data {
-            CursorData::Ephemeral { sequence, .. } => {
-                let seq = *sequence;
-                *sequence += 1;
-                Ok(seq)
-            }
-            CursorData::Table { .. } => Err(SqawkError::VmError(
-                "Cannot generate sequence from table cursor".into(),
-            )),
-        }
-    }
-
-    /// Number of rows in the cursor.
-    fn row_count(&self) -> usize {
-        match &self.data {
-            CursorData::Table { table } => table.row_count(),
-            CursorData::Ephemeral { rows, .. } => rows.len(),
-        }
-    }
-
-    /// Check if this is an ephemeral cursor
-    #[allow(dead_code)]
-    fn is_ephemeral(&self) -> bool {
-        matches!(self.data, CursorData::Ephemeral { .. })
     }
 
     /// Get column count
@@ -882,8 +818,7 @@ impl<'a> VmEngine<'a> {
                     return Err(SqawkError::TableNotFound(table_name.to_string()));
                 }
 
-                // Get the table from the database (safe to unwrap since we checked it exists)
-                // Note: We now borrow the table instead of cloning it (Phase 4B optimization)
+                // Borrow the table from the database (safe to unwrap since we checked it exists)
                 let table = self.database.get_table(table_name).unwrap();
 
                 // Create a cursor for the table (borrows, no clone)
@@ -1418,8 +1353,7 @@ impl<'a> VmEngine<'a> {
                     .clone();
                 let cursor = self.cursor_mut(inst.p1)?;
                 match &mut cursor.data {
-                    CursorData::Ephemeral { rows, sorted, .. } => {
-                        *sorted = false;
+                    CursorData::Ephemeral { rows, .. } => {
                         super::window::compute(rows, &def)?;
                     }
                     CursorData::Table { .. } => {
@@ -1566,33 +1500,6 @@ impl<'a> VmEngine<'a> {
 
                 // If the register is positive, jump to P2
                 if is_positive {
-                    return Ok(ExecuteResult::Jump(inst.p2 as usize));
-                }
-
-                // Otherwise, continue to the next instruction
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::IfNeg => {
-                // Jump if register P1 contains a negative value (< 0)
-                // P1: Register to test
-                // P2: Jump destination (instruction index)
-
-                // Get the register value to test
-                let reg = self.get_register(inst.p1 as usize)?;
-
-                // Check if the register contains a negative value
-                let is_negative = match reg {
-                    Register::Integer(val) => val < 0,
-                    Register::Float(val) => val < 0.0,
-                    // Boolean values aren't treated as negative
-                    Register::Boolean(_) => false,
-                    // String and null aren't treated as negative
-                    Register::String(_) | Register::Null => false,
-                };
-
-                // If the register is negative, jump to P2
-                if is_negative {
                     return Ok(ExecuteResult::Jump(inst.p2 as usize));
                 }
 
@@ -1774,10 +1681,6 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Jump(target as usize))
             }
 
-            // JumpIfTrue and JumpIfFalse have been replaced by SQLite-style opcodes:
-            // - IfZ (jump if zero/false)
-            // - IfPos (jump if positive)
-            // - IfNeg (jump if negative)
             OpCode::Noop => {
                 // No operation
                 Ok(ExecuteResult::Continue)
@@ -2107,24 +2010,21 @@ impl<'a> VmEngine<'a> {
             }
 
             OpCode::OpenEphemeral => {
-                // Open ephemeral cursor P1 with P2 columns. P4 = sort key spec.
+                // Open ephemeral cursor P1 with P2 columns; P3 = 1/2: keyed.
                 // Uses unified cursor model - Column/Next/Rewind work for ephemeral cursors.
                 let cursor_id = inst.p1 as usize;
                 let col_count = inst.p2 as usize;
-                let sort_spec = inst.p4.clone().unwrap_or_default();
-
-                let sort_keys = KeyOrder::parse_spec(&sort_spec);
 
                 // Create ephemeral cursor in the unified cursors map
-                let cursor = Cursor::ephemeral(col_count, sort_keys, inst.p3);
+                let cursor = Cursor::ephemeral(col_count, inst.p3);
                 self.cursors.insert(cursor_id, cursor);
 
                 if self.verbose {
                     diag!(
-                        "OpenEphemeral: Created ephemeral cursor {} with {} columns, spec: {}",
+                        "OpenEphemeral: Created ephemeral cursor {} with {} columns, keyed: {}",
                         cursor_id,
                         col_count,
-                        sort_spec
+                        inst.p3
                     );
                 }
 
@@ -2194,66 +2094,6 @@ impl<'a> VmEngine<'a> {
                 } else {
                     ExecuteResult::Continue
                 })
-            }
-
-            OpCode::Sort => {
-                // Sort ephemeral cursor P1. Jump to P2 if empty, else continue.
-                let cursor_id = inst.p1 as usize;
-                let jump_if_empty = inst.p2 as usize;
-
-                if let Some(cursor) = self.cursors.get_mut(&cursor_id) {
-                    let has_rows = cursor.sort()?;
-                    if has_rows {
-                        if self.verbose {
-                            diag!(
-                                "Sort: Sorted {} rows in cursor {}",
-                                cursor.row_count(),
-                                cursor_id
-                            );
-                        }
-                        Ok(ExecuteResult::Continue)
-                    } else {
-                        if self.verbose {
-                            diag!(
-                                "Sort: Cursor {} is empty, jumping to {}",
-                                cursor_id,
-                                jump_if_empty
-                            );
-                        }
-                        Ok(ExecuteResult::Jump(jump_if_empty))
-                    }
-                } else {
-                    Err(SqawkError::VmError(format!(
-                        "Cursor {} not found",
-                        cursor_id
-                    )))
-                }
-            }
-
-            OpCode::Sequence => {
-                // P1 = ephemeral cursor, P2 = dest register. Generate next sequence number.
-                let cursor_id = inst.p1 as usize;
-                let dest_reg = inst.p2 as usize;
-
-                if let Some(cursor) = self.cursors.get_mut(&cursor_id) {
-                    let seq = cursor.next_sequence()?;
-                    self.set_register(dest_reg, Register::Integer(seq))?;
-                    if self.verbose {
-                        diag!(
-                            "Sequence: Generated sequence {} from cursor {} into r[{}]",
-                            seq,
-                            cursor_id,
-                            dest_reg
-                        );
-                    }
-                } else {
-                    return Err(SqawkError::VmError(format!(
-                        "Cursor {} not found",
-                        cursor_id
-                    )));
-                }
-
-                Ok(ExecuteResult::Continue)
             }
 
             OpCode::AggStep => {
@@ -2329,21 +2169,8 @@ impl<'a> VmEngine<'a> {
                     Ok(ExecuteResult::Continue)
                 }
             }
-
-            #[allow(unreachable_patterns)]
-            _ => {
-                // This code is unreachable since all opcodes are handled above,
-                // but we keep it for future-proofing and to silence compiler warnings
-                Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Unsupported VM opcode: {:?}",
-                    inst.opcode
-                )))
-            }
         }
     }
-
-    // Removed unused methods get_results, has_results, get_column_names,
-    // get_affected_rows, and get_modified_tables
 
     /// Create a table from the results using the result schema
     pub fn create_result_table(&self) -> SqawkResult<Option<Table>> {

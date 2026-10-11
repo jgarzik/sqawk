@@ -396,7 +396,3 @@ The database engine has several architectural limitations:
 
 Unsupported SQL of note: CTEs (`WITH`), parenthesized joins, and RANGE
 frames with an offset, GROUPS frames and FILTER on window functions.
-
----
-
-*This documentation describes the current state of the Sqawk in-memory database as of the project's current version. Future versions may add additional capabilities.*

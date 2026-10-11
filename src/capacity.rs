@@ -60,9 +60,6 @@ pub const DEFAULT_TABLE_CAPACITY: usize = 8;
 /// Grows dynamically, but start with reasonable size.
 pub const DEFAULT_SORTER_ROWS_CAPACITY: usize = 256;
 
-/// Default capacity for sort key vectors.
-pub const DEFAULT_SORT_KEYS_CAPACITY: usize = 4;
-
 // =============================================================================
 // Headerless files
 // =============================================================================

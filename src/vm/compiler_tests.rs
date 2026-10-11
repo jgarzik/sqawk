@@ -183,7 +183,7 @@ fn test_in_subquery_compilation() {
     let database = create_test_database();
     let mut compiler = SqlCompiler::new(&database, false);
 
-    // Test IN (SELECT ...) subquery - now supported in Phase 4F
+    // IN (SELECT ...) subquery
     let sql = "SELECT * FROM users WHERE age IN (SELECT age FROM users)";
     let result = compiler.compile(sql);
 

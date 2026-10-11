@@ -19,7 +19,7 @@ impl<'a> SqlCompiler<'a> {
         names: &[ObjectName],
         if_exists: bool,
     ) -> SqawkResult<()> {
-        // Only support DROP TABLE for now
+        // DROP TABLE is the only DROP form sqawk implements.
         if *object_type != ObjectType::Table {
             return Err(SqawkError::UnsupportedSqlFeature(format!(
                 "DROP {:?} is not supported, only DROP TABLE",

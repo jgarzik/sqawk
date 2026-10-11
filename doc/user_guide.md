@@ -1145,8 +1145,4 @@ For more help, use the verbose mode (`-v`) to see detailed information about pro
 
 - [SQL Language Reference](sql_reference.md) - Complete guide to Sqawk's SQL dialect
 - [GitHub Repository](https://github.com/jgarzik/sqawk) - Source code and issue tracking
-- [Release Notes](https://github.com/jgarzik/sqawk/releases) - Latest features and bug fixes
-
----
-
-*This user guide describes Sqawk as of its current version. Features and behavior may change in future releases.*
+- [Changelog](../CHANGELOG.md) - What changed in each release

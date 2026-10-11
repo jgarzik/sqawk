@@ -3,7 +3,7 @@
 //! This module contains tests for complex features and scenarios that are not
 //! covered by the focused test modules.
 
-use crate::helpers::create_temp_dir;
+use crate::helpers::{assert_query_on, create_temp_dir};
 use predicates::prelude::*;
 use std::fs;
 
@@ -69,9 +69,68 @@ fn test_is_null_operator() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Skip testing complex WHERE expressions with logical operators for now
-/// as there might be an issue with our test environment
+/// Employees with NULL salaries and managers, for the three-valued WHERE tests.
+const EMP: (&str, &str) = (
+    "emp.csv",
+    "id,name,dept,salary,mgr\n\
+     1,Alice,Eng,100,\n\
+     2,Bob,Eng,80,1\n\
+     3,Carol,Sales,70,1\n\
+     4,Dan,Sales,,3\n\
+     5,Eve,Ops,90,\n",
+);
+
+/// AND/OR/NOT and parentheses in WHERE: AND binds tighter than OR, NOT
+/// tighter than both, and a NULL operand follows the SQL truth tables
+/// (expected output computed with SQLite 3.45).
 #[test]
 fn test_complex_where_expressions() -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
+    // AND before OR.
+    assert_query_on(
+        &[EMP],
+        "SELECT id, name FROM emp WHERE dept = 'Eng' AND salary > 85 OR dept = 'Ops'",
+        "id,name\n1,Alice\n5,Eve",
+    )?;
+    // Parentheses override it.
+    assert_query_on(
+        &[EMP],
+        "SELECT id, name FROM emp WHERE dept = 'Eng' AND (salary > 85 OR dept = 'Ops')",
+        "id,name\n1,Alice",
+    )?;
+    // NOT (FALSE OR NULL) is NULL, so Dan (NULL salary) is excluded.
+    assert_query_on(
+        &[EMP],
+        "SELECT id, name FROM emp WHERE NOT (dept = 'Eng' OR salary < 75)",
+        "id,name\n5,Eve",
+    )?;
+    // NOT applies to the comparison only, then AND.
+    assert_query_on(
+        &[EMP],
+        "SELECT id, name FROM emp WHERE NOT dept = 'Sales' AND mgr IS NOT NULL",
+        "id,name\n2,Bob",
+    )?;
+    assert_query_on(
+        &[EMP],
+        "SELECT id, name FROM emp \
+         WHERE (salary >= 80 AND NOT mgr IS NULL) OR (dept = 'Sales' AND salary IS NULL)",
+        "id,name\n2,Bob\n4,Dan",
+    )?;
+    // LIKE is case-insensitive: NOT (name LIKE 'c%') excludes Carol.
+    assert_query_on(
+        &[EMP],
+        "SELECT id, name FROM emp WHERE salary > 75 OR mgr = 1 AND NOT (name LIKE 'c%')",
+        "id,name\n1,Alice\n2,Bob\n5,Eve",
+    )?;
+    // The same operators as values: TRUE is 1, FALSE is 0.
+    assert_query_on(
+        &[EMP],
+        "SELECT id, salary > 75 AND mgr IS NULL, NOT (salary < 75) OR mgr = 3 \
+         FROM emp ORDER BY id",
+        "id,salary > 75 AND mgr IS NULL,NOT (salary < 75) OR mgr = 3\n\
+         1,1,1\n\
+         2,0,1\n\
+         3,0,0\n\
+         4,0,1\n\
+         5,1,1",
+    )
 }
