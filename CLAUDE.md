@@ -132,7 +132,7 @@ follow SQLite 3.45; deliberate differences are listed in
 
 ### Safe Writeback Model
 
-By default, all modifications remain in memory only. The `--write` flag must be explicitly provided to save changes back to source files. Only tables modified by INSERT/UPDATE/DELETE are written.
+By default, all modifications remain in memory only. The `--write` flag must be explicitly provided to save changes back to source files. Only tables changed by INSERT/UPDATE/DELETE/ALTER/TRUNCATE are written, and rows a statement did not change are written back byte for byte. Scratch tables (CREATE TABLE without LOCATION, CREATE TABLE AS) are never written. Every target is checked for writability before any file is written; a read-only file aborts the whole writeback. An open transaction is rolled back before writeback.
 
 ## Test Organization
 
