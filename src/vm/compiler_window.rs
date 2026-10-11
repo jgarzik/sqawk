@@ -17,7 +17,7 @@ impl<'a> SqlCompiler<'a> {
     pub(crate) fn compile_select_with_window(
         &mut self,
         select: &Select,
-        table: &Table,
+        table: &'a Table,
         table_name: &str,
         staging: i64,
     ) -> SqawkResult<()> {

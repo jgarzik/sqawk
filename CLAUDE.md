@@ -67,7 +67,10 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
   FROM-less SELECT is a plan with zero sources (one row)
 - `compiler_dml.rs`: INSERT / UPDATE / DELETE
 - `compiler_ddl.rs`: CREATE / DROP / ALTER / TRUNCATE
-- `compiler_window.rs`: window functions (stages rows in an ephemeral table
+- `compiler_window.rs`: window functions
+- `compiler_subquery.rs`: scalar / EXISTS / IN subqueries, compiled by the
+  same query compiler as fragments of the enclosing program (`Once` when
+  uncorrelated; correlation found by `NameCtx` outward resolution) (stages rows in an ephemeral table
   that the output stage reads back)
 - `ast_compat.rs`: thin accessors normalizing sqlparser AST shapes
 - `engine.rs`: Executes bytecode instructions

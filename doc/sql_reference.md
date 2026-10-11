@@ -198,6 +198,29 @@ SELECT COUNT(*) FROM (SELECT department FROM employees GROUP BY department) t
 A derived table is materialized before the outer query runs and exists only for
 the statement that declares it. Its alias may not shadow a real table.
 
+A subquery is a full query: it may use joins, GROUP BY, HAVING, DISTINCT,
+ORDER BY, LIMIT/OFFSET and UNION/INTERSECT/EXCEPT, and it may appear anywhere
+an expression can -- the SELECT list, WHERE, ON, HAVING, ORDER BY, LIMIT, CASE,
+function and aggregate arguments, UPDATE SET, DELETE WHERE and INSERT VALUES.
+
+- A name the subquery does not define is looked up in the enclosing queries,
+  innermost first, so a subquery may reference a column of any enclosing
+  query, at any depth. Such a subquery is *correlated* and runs again for each
+  outer row; an uncorrelated one runs once.
+- A scalar subquery yields its first row's value, or NULL when it returns no
+  rows. It must return exactly one column (*"sub-select returns 2 columns -
+  expected 1"*); so must the subquery of IN.
+- `x IN (SELECT ...)` follows SQL's three-valued logic: over an empty result
+  it is false (NOT IN true) even for a NULL `x`; otherwise a NULL `x`, or a
+  miss when the result contains a NULL, is NULL -- so `NOT IN` over a result
+  containing a NULL is never true.
+- In UPDATE and DELETE, a subquery sees the table as it was before the
+  statement started. (SQLite instead lets a correlated subquery see rows the
+  same UPDATE has already changed.)
+- Not supported: row values (`(a, b) IN (SELECT x, y ...)`), `ANY`/`ALL`,
+  window functions inside a subquery, and a derived table inside a subquery
+  used as an expression.
+
 ## Window Functions
 
 ```sql
@@ -254,15 +277,15 @@ UPDATE table SET col1 = val1 [, col2 = val2, ...]
 
 `UPDATE ... FROM other_table` is not supported and is accepted without effect.
 To pull a value from another table, use a correlated subquery in the SET
-expression -- it must select an aggregate:
+expression:
 
 ```sql
 UPDATE data SET category =
-    (SELECT MAX(category) FROM lookup WHERE lookup.code = data.code)
+    (SELECT category FROM lookup WHERE lookup.code = data.code)
 ```
 
-A correlated scalar subquery selecting a bare column is rejected with
-*"Correlated scalar subquery must select an aggregate function"*.
+When several lookup rows match, the first is used; a row with no match gets
+NULL.
 
 ## DELETE
 

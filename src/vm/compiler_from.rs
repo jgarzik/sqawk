@@ -221,7 +221,7 @@ pub(crate) fn expr_children(expr: &Expr) -> Option<Vec<&Expr>> {
 
 /// One loop of the nest.
 struct Level {
-    /// Index into [`FromPlan::srcs`] (also the cursor id).
+    /// Index into [`FromPlan::srcs`].
     src: usize,
     /// Filters evaluated before this level's match point: ON conjuncts, and
     /// WHERE conjuncts at an inner level (where there is no match point).
@@ -245,7 +245,9 @@ struct Group {
 
 /// A planned FROM clause.
 pub(crate) struct FromPlan<'t> {
-    /// Sources in FROM order; source `i` is opened on cursor `i`.
+    /// Sources in FROM order. A statement-level query opens source `i` on
+    /// cursor `i`; a subquery's sources get fresh cursor ids, so they never
+    /// collide with an enclosing query's.
     pub srcs: Vec<Src<'t>>,
     /// Table to open for each source.
     table_names: Vec<String>,
@@ -268,12 +270,14 @@ pub(crate) struct FromPlan<'t> {
     /// WHERE conjuncts of a SELECT without FROM: no loop to place them in,
     /// so they decide whether its single row exists.
     const_where: Vec<Expr>,
+    /// The enclosing query's scope, when this FROM belongs to a subquery.
+    outer: Option<Box<NameCtx<'t>>>,
 }
 
 impl<'t> FromPlan<'t> {
     /// The name scope for expressions evaluated inside the loop nest.
     pub(crate) fn ctx(&self) -> NameCtx<'t> {
-        let mut ctx = NameCtx::multi(self.srcs.clone());
+        let mut ctx = NameCtx::multi(self.srcs.clone()).with_outer(self.outer.clone());
         ctx.using = self.using.clone();
         ctx
     }
@@ -286,6 +290,17 @@ impl<'t> FromPlan<'t> {
         }
     }
 
+    /// Whether this FROM belongs to a subquery, whose loop nest may run once
+    /// per row of an enclosing query.
+    fn nested(&self) -> bool {
+        self.outer.is_some()
+    }
+
+    /// Cursor of source `src`.
+    fn cursor(&self, src: usize) -> i64 {
+        self.srcs[src].cursor
+    }
+
     /// Whether `(src, col)` is hidden from `*` by a USING merge.
     pub(crate) fn is_hidden(&self, src: usize, col: usize) -> bool {
         self.hidden.contains(&(src, col))
@@ -295,7 +310,7 @@ impl<'t> FromPlan<'t> {
     pub(crate) fn using_at(&self, src: usize, col: usize) -> Option<&UsingCol> {
         self.using
             .iter()
-            .find(|u| u.refs.first() == Some(&(src as i64, col)))
+            .find(|u| u.refs.first() == Some(&(self.cursor(src), col)))
     }
 
     /// The level holding source `src`.
@@ -329,28 +344,34 @@ pub(crate) fn expr_sources(expr: &Expr, ctx: &NameCtx<'_>) -> Option<Vec<usize>>
 }
 
 fn collect_sources(expr: &Expr, ctx: &NameCtx<'_>, out: &mut Vec<usize>) -> Option<()> {
-    let col = match expr {
-        Expr::Identifier(ident) => Some(ctx.resolve_unqualified(&ident.value).ok()?),
+    let found = match expr {
+        Expr::Identifier(ident) => Some(ctx.lookup(None, &ident.value).ok()?),
         Expr::CompoundIdentifier(parts) if parts.len() >= 2 => Some(
-            ctx.resolve_qualified(&parts[parts.len() - 2].value, &parts[parts.len() - 1].value)
-                .ok()?,
+            ctx.lookup(
+                Some(&parts[parts.len() - 2].value),
+                &parts[parts.len() - 1].value,
+            )
+            .ok()?,
         ),
         Expr::CompoundIdentifier(_) => return None,
         _ => None,
     };
-    match col {
-        Some(ColumnRef::Cursor { cursor, .. }) => {
-            // Only this scope's sources are tracked; an outer (correlated)
-            // reference cannot be placed by this planner.
-            ctx.srcs.iter().position(|s| s.cursor == cursor)?;
-            out.push(cursor as usize);
+    let position = |cursor: i64| ctx.srcs.iter().position(|s| s.cursor == cursor);
+    match found {
+        // A column of an enclosing query (a correlated reference) is fixed
+        // while this query runs: a constant, as far as placement goes.
+        Some((_, depth)) if depth > 0 => Some(()),
+        Some((ColumnRef::Cursor { cursor, .. }, _)) => {
+            out.push(position(cursor)?);
             Some(())
         }
-        Some(ColumnRef::Using(i)) => {
-            out.extend(ctx.using[i].refs.iter().map(|(c, _)| *c as usize));
+        Some((ColumnRef::Using(i), _)) => {
+            for (cursor, _) in &ctx.using_col(i).refs {
+                out.push(position(*cursor)?);
+            }
             Some(())
         }
-        Some(ColumnRef::Register(_)) => None,
+        Some((ColumnRef::Register(_), _)) => None,
         None => {
             if SqlCompiler::is_aggregate_call(expr) {
                 return None;
@@ -360,6 +381,26 @@ fn collect_sources(expr: &Expr, ctx: &NameCtx<'_>, out: &mut Vec<usize>) -> Opti
             }
             Some(())
         }
+    }
+}
+
+/// Whether `expr` reads a column of an enclosing query. Unanalyzable
+/// expressions (subqueries and the like) count as doing so.
+fn mentions_outer(expr: &Expr, ctx: &NameCtx<'_>) -> bool {
+    let name = match expr {
+        Expr::Identifier(ident) => Some((None, &ident.value)),
+        Expr::CompoundIdentifier(parts) if parts.len() >= 2 => Some((
+            Some(parts[parts.len() - 2].value.as_str()),
+            &parts[parts.len() - 1].value,
+        )),
+        _ => None,
+    };
+    if let Some((qualifier, name)) = name {
+        return ctx.lookup(qualifier, name).map_or(true, |(_, d)| d > 0);
+    }
+    match expr_children(expr) {
+        Some(children) => children.into_iter().any(|c| mentions_outer(c, ctx)),
+        None => true,
     }
 }
 
@@ -385,7 +426,7 @@ fn column_index_ci(table: &Table, name: &str) -> Option<usize> {
 impl<'a> SqlCompiler<'a> {
     /// Plan a FROM clause together with the WHERE clause filtering it.
     pub(crate) fn plan_from(
-        &self,
+        &mut self,
         from: &[TableWithJoins],
         selection: Option<&Expr>,
     ) -> SqawkResult<FromPlan<'a>> {
@@ -429,6 +470,7 @@ impl<'a> SqlCompiler<'a> {
                 full_where: None,
                 bare_star: false,
                 const_where,
+                outer: self.outer_scope.clone().map(Box::new),
             });
         }
 
@@ -449,6 +491,18 @@ impl<'a> SqlCompiler<'a> {
         }
 
         let database: &'a Database = self.database;
+        // A subquery's sources take fresh cursor ids; a statement-level
+        // query's are numbered from 0.
+        let outer = self.outer_scope.clone().map(Box::new);
+        let base = if outer.is_some() {
+            let base = self.alloc_cursor();
+            for _ in 1..factors.len() {
+                self.alloc_cursor();
+            }
+            base
+        } else {
+            0
+        };
         let mut srcs: Vec<Src<'a>> = Vec::with_capacity(factors.len());
         let mut table_names = Vec::with_capacity(factors.len());
         for (i, (factor, _)) in factors.iter().enumerate() {
@@ -492,7 +546,7 @@ impl<'a> SqlCompiler<'a> {
                 )));
             }
             srcs.push(Src {
-                cursor: i as i64,
+                cursor: base + i as i64,
                 table,
                 refname,
             });
@@ -551,12 +605,13 @@ impl<'a> SqlCompiler<'a> {
                 ));
                 hidden.push((i, right_col));
                 let key = name.to_ascii_lowercase();
-                let left_ref = (left_src as i64, left_col);
+                let left_ref = (srcs[left_src].cursor, left_col);
+                let right_ref = (srcs[i].cursor, right_col);
                 match using.iter_mut().find(|u| u.refs.contains(&left_ref)) {
-                    Some(u) => u.refs.push((i as i64, right_col)),
+                    Some(u) => u.refs.push(right_ref),
                     None => using.push(UsingCol {
                         name: key,
-                        refs: vec![left_ref, (i as i64, right_col)],
+                        refs: vec![left_ref, right_ref],
                     }),
                 }
             }
@@ -572,6 +627,7 @@ impl<'a> SqlCompiler<'a> {
             full_where: None,
             bare_star,
             const_where: Vec::new(),
+            outer,
         };
         let ctx = plan.ctx();
 
@@ -687,8 +743,10 @@ impl<'a> SqlCompiler<'a> {
             }
         }
 
-        // ---- Hash joins.
-        for lvl in 1..plan.levels.len() {
+        // ---- Hash joins. In a subquery the outermost level qualifies too,
+        // when its key is a correlated reference: the subquery reruns per
+        // outer row, and probing an index built once beats rescanning.
+        for lvl in 0..plan.levels.len() {
             let src = plan.levels[lvl].src;
             let outer: Vec<usize> = plan.levels[..lvl].iter().map(|l| l.src).collect();
             let mut inner_keys = Vec::new();
@@ -706,12 +764,20 @@ impl<'a> SqlCompiler<'a> {
                 else {
                     continue;
                 };
-                let only_inner = |s: &[usize]| s == [src];
-                let only_outer = |s: &[usize]| s.iter().all(|x| outer.contains(x));
-                if only_inner(&ls) && only_outer(&rs) {
+                // The inner key must be fixed per inner row -- the index is
+                // built once -- so it may not read an enclosing query.
+                let only_inner = |s: &[usize], e: &Expr| s == [src] && !mentions_outer(e, &ctx);
+                let only_outer = |s: &[usize], e: &Expr| {
+                    if lvl == 0 {
+                        plan.nested() && s.is_empty() && mentions_outer(e, &ctx)
+                    } else {
+                        s.iter().all(|x| outer.contains(x))
+                    }
+                };
+                if only_inner(&ls, left) && only_outer(&rs, right) {
                     inner_keys.push((**left).clone());
                     outer_keys.push((**right).clone());
-                } else if only_inner(&rs) && only_outer(&ls) {
+                } else if only_inner(&rs, right) && only_outer(&ls, left) {
                     inner_keys.push((**right).clone());
                     outer_keys.push((**left).clone());
                 }
@@ -735,14 +801,31 @@ impl<'a> SqlCompiler<'a> {
         body: &mut dyn FnMut(&mut Self, &NameCtx<'a>) -> SqawkResult<()>,
     ) -> SqawkResult<()> {
         let ctx = plan.ctx();
+        // A subquery's loop nest may run once per outer row. Its cursors and
+        // hash indexes do not depend on the outer row, so they are set up
+        // only the first time. (Not for FULL JOIN, whose per-row match marks
+        // must start fresh on every run.)
+        let once = plan.nested() && plan.full_where.is_none();
+        let opened = self.label();
+        if once {
+            self.emit_jump_to(
+                OpCode::Once,
+                0,
+                opened,
+                0,
+                None,
+                "subquery cursors: open once",
+            );
+        }
         for (i, name) in plan.table_names.iter().enumerate() {
+            let cursor = plan.cursor(i);
             self.emit(
                 OpCode::OpenRead,
-                i as i64,
+                cursor,
                 0,
                 0,
                 Some(name.clone()),
-                &format!("Open {} as cursor {}", name, i),
+                &format!("Open {} as cursor {}", name, cursor),
             );
         }
 
@@ -752,7 +835,7 @@ impl<'a> SqlCompiler<'a> {
             let Some((inner, _)) = &level.hash else {
                 continue;
             };
-            let cursor = level.src as i64;
+            let cursor = plan.cursor(level.src);
             let top = self.label();
             let done = self.label();
             self.emit_jump_to(
@@ -779,6 +862,9 @@ impl<'a> SqlCompiler<'a> {
             self.emit_jump_to(OpCode::Next, cursor, top, 0, None, "");
             self.resolve(done);
         }
+        if once {
+            self.resolve(opened);
+        }
 
         let match_regs: Vec<i64> = plan
             .groups
@@ -802,7 +888,7 @@ impl<'a> SqlCompiler<'a> {
         // FULL JOIN: right rows no left row matched, with the left side NULL.
         if let Some(where_terms) = &plan.full_where {
             let right = plan.levels.last().expect("FULL JOIN has a right level");
-            let cursor = right.src as i64;
+            let cursor = plan.cursor(right.src);
             let top = self.label();
             let next = self.label();
             let done = self.label();
@@ -819,7 +905,7 @@ impl<'a> SqlCompiler<'a> {
             for level in &plan.levels[..plan.levels.len() - 1] {
                 self.emit(
                     OpCode::NullRow,
-                    level.src as i64,
+                    plan.cursor(level.src),
                     0,
                     0,
                     None,
@@ -836,8 +922,10 @@ impl<'a> SqlCompiler<'a> {
             self.resolve(done);
         }
 
-        for i in 0..plan.srcs.len() {
-            self.emit(OpCode::Close, i as i64, 0, 0, None, "");
+        if !once {
+            for i in 0..plan.srcs.len() {
+                self.emit(OpCode::Close, plan.cursor(i), 0, 0, None, "");
+            }
         }
         Ok(())
     }
@@ -852,7 +940,7 @@ impl<'a> SqlCompiler<'a> {
         body: &mut dyn FnMut(&mut Self, &NameCtx<'a>) -> SqawkResult<()>,
     ) -> SqawkResult<()> {
         let level = &plan.levels[lvl];
-        let cursor = level.src as i64;
+        let cursor = plan.cursor(level.src);
         let starts = plan.groups.iter().position(|g| g.start == lvl);
         let ends = plan.groups.iter().position(|g| g.end == lvl);
 
@@ -948,7 +1036,14 @@ impl<'a> SqlCompiler<'a> {
             self.emit_jump_to(OpCode::IfPos, match_regs[g], done, 0, None, "matched: done");
             let group = &plan.groups[g];
             for l in &plan.levels[group.start..=group.end] {
-                self.emit(OpCode::NullRow, l.src as i64, 0, 0, None, "NULL-extend");
+                self.emit(
+                    OpCode::NullRow,
+                    plan.cursor(l.src),
+                    0,
+                    0,
+                    None,
+                    "NULL-extend",
+                );
             }
             self.emit_jump_to(OpCode::Goto, 0, match_labels[g], 0, None, "");
             self.resolve(done);

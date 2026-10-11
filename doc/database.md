@@ -83,11 +83,11 @@ writes back only tables that actually changed.
 The compiler has one recursive expression compiler, `code_expr` (the analogue
 of SQLite's `sqlite3ExprCode`), used from every position an expression can
 appear: the SELECT list, WHERE, HAVING, ORDER BY, SET clauses, join conditions,
-function arguments and correlated subqueries. Name resolution is carried
-separately in a `NameCtx`, which models the visible FROM sources, whether a
-column lives behind a cursor or in an already-loaded register, and the
-inner/outer scopes a correlated subquery needs. A node supported in one
-position is therefore supported in all of them.
+function arguments and subqueries. Name resolution is carried separately in a
+`NameCtx`, which models the visible FROM sources, whether a column lives
+behind a cursor or in an already-loaded register, and -- for a subquery -- a
+link to the enclosing query's scope. A node supported in one position is
+therefore supported in all of them.
 
 ### SELECT Pipeline
 
@@ -113,6 +113,38 @@ Every SELECT core runs one pipeline (`src/vm/compiler_select.rs`):
   ephemeral tables (`OpenEphemeral` with p3 = 1, `IdxInsert`, `IdxDelete`,
   `Found`/`NotFound`), and without ORDER BY a UNION, INTERSECT or EXCEPT
   result comes out sorted. INTERSECT ALL / EXCEPT ALL are not supported.
+
+### Subqueries
+
+A subquery (scalar, `EXISTS`, `IN`) is compiled by the same query compiler as
+a statement, as a fragment of the enclosing statement's program placed where
+the expression is evaluated (`src/vm/compiler_subquery.rs`), as in SQLite. So
+every SELECT feature works inside one. Only the destination differs: a scalar
+subquery copies its first row's value into a register and stops, EXISTS sets
+a flag on its first row and stops, and IN inserts its rows into a keyed
+ephemeral table that the left operand probes with `Found`, with SQL's
+three-valued result (a NULL member makes a miss NULL; an empty set makes IN
+false even for a NULL operand).
+
+- **Name resolution**: the subquery's FROM scope links to the scope of the
+  expression containing it. A name is resolved innermost scope first, then
+  outward, so the inner table shadows an outer one with the same column and an
+  outer table is found by its alias or, unaliased, by its own name even when
+  the subquery reads the same table under another alias.
+- **Correlation**: a subquery that resolves any name outward -- itself or
+  through a subquery nested in it -- is correlated. This is decided during
+  name resolution, not by matching qualifier strings. An uncorrelated
+  subquery's fragment is guarded by `Once` and runs for the first evaluation
+  only; a correlated one reruns on every evaluation, i.e. per outer row.
+- **Correlated execution**: a subquery's cursors and hash indexes do not
+  depend on the outer row, so they are set up once (`Once` around the
+  `OpenRead`s and hash builds). An equality between an inner column and an
+  outer column -- `WHERE d.k = f.k` -- becomes a hash probe, so a correlated
+  `EXISTS`/`IN`/scalar lookup costs one probe per outer row instead of a
+  rescan. Aggregate accumulators, sorters and DISTINCT tables are reset at
+  the start of every run.
+- A subquery's cursors are numbered apart from the statement's, so it never
+  disturbs an enclosing scan.
 
 ### Statement Execution Model
 

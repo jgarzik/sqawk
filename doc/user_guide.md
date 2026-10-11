@@ -598,19 +598,16 @@ sqawk -s "DELETE FROM data WHERE code NOT IN (SELECT code FROM lookup)" \
 
 `UPDATE ... FROM other_table` is **not** supported, and is silently accepted
 without doing anything -- no error, no rows changed. A cross-table update has
-to go through a correlated subquery in the SET expression, which must select an
-aggregate:
+to go through a correlated subquery in the SET expression:
 
 ```sh
 sqawk -s "UPDATE data SET category =
-            (SELECT MAX(category) FROM lookup WHERE lookup.code = data.code)" \
+            (SELECT category FROM lookup WHERE lookup.code = data.code)" \
       data.csv lookup.csv --write
 ```
 
-The `MAX()` is not cosmetic: a correlated scalar subquery that selects a bare
-column is rejected with *"Correlated scalar subquery must select an aggregate
-function"*. Wrapping the column in `MAX` picks the single matching value when
-the lookup key is unique.
+A row with no matching lookup row gets NULL (written back as an empty field);
+add `WHERE code IN (SELECT code FROM lookup)` to leave such rows untouched.
 
 ## Examples
 

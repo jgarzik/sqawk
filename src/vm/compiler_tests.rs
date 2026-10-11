@@ -413,3 +413,54 @@ fn test_left_join_where_is_not_an_on_condition() {
     assert!(ops.contains(&OpCode::HashProbe));
     assert!(ops.contains(&OpCode::NullRow));
 }
+
+fn count_op(ops: &[OpCode], op: OpCode) -> usize {
+    ops.iter().filter(|o| **o == op).count()
+}
+
+#[test]
+fn test_uncorrelated_subquery_runs_once() {
+    // Two Once guards: the subquery fragment (so it runs for the first outer
+    // row only) and its cursor setup.
+    let ops = join_opcodes("SELECT name FROM users WHERE age > (SELECT AVG(age) FROM users)");
+    assert_eq!(count_op(&ops, OpCode::Once), 2, "{ops:?}");
+    for sql in [
+        "SELECT name FROM users WHERE id IN (SELECT user_id FROM orders)",
+        "SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders)",
+    ] {
+        assert_eq!(count_op(&join_opcodes(sql), OpCode::Once), 2, "{sql}");
+    }
+}
+
+#[test]
+fn test_correlated_subquery_reruns_and_probes_hash() {
+    // Correlation is detected by name resolution, including through the
+    // outer table's own (unaliased) name that the inner table shares: the
+    // fragment guard is dropped, only the cursor setup stays Once, and the
+    // equality on the outer column becomes a hash probe.
+    for sql in [
+        "SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = users.id)",
+        "SELECT name FROM users WHERE age > (SELECT AVG(u2.age) FROM users u2 WHERE u2.id = users.id)",
+        "SELECT name FROM users WHERE id IN (SELECT user_id FROM orders WHERE orders.id = users.age)",
+    ] {
+        let ops = join_opcodes(sql);
+        assert_eq!(count_op(&ops, OpCode::Once), 1, "{sql}: {ops:?}");
+        assert!(ops.contains(&OpCode::HashProbe), "no hash probe: {sql}");
+    }
+}
+
+#[test]
+fn test_nested_subquery_correlation_depth() {
+    // The innermost subquery references the outermost query: both
+    // subqueries are correlated, so only the two cursor-setup guards remain.
+    let ops = join_opcodes(
+        "SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders o WHERE o.id > (SELECT MIN(u2.age) FROM users u2 WHERE u2.id = users.id))",
+    );
+    assert_eq!(count_op(&ops, OpCode::Once), 2, "{ops:?}");
+    // The innermost references only its parent: the middle subquery is
+    // uncorrelated and keeps its guard (3 = middle guard + two cursor setups).
+    let ops = join_opcodes(
+        "SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders o WHERE o.id > (SELECT MIN(u2.age) FROM users u2 WHERE u2.id = o.user_id))",
+    );
+    assert_eq!(count_op(&ops, OpCode::Once), 3, "{ops:?}");
+}

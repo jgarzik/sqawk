@@ -105,9 +105,6 @@ impl<'a> SqlCompiler<'a> {
 
                 // Patch init to jump past itself
                 self.patch_jump(init_addr, init_addr + 1);
-
-                // Update register counter
-                self.register_counter = (base_reg + column_count) as i64;
             }
 
             SetExpr::Select(select) => {

@@ -3,6 +3,8 @@
 //! This file contains tests for scalar subqueries with aggregate functions.
 //! Phase 4F: Subquery support
 
+mod exact;
+
 use crate::helpers::{create_custom_csv, create_temp_dir};
 
 /// Test scalar subquery with MAX aggregate

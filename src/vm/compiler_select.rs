@@ -38,12 +38,31 @@ pub(crate) struct Limits {
     off: Option<i64>,
 }
 
+/// Where a query's final rows go, after ORDER BY and LIMIT/OFFSET.
+#[derive(Clone, Copy)]
+pub(crate) enum Sink {
+    /// The client (`ResultRow`).
+    Client,
+    /// A scalar subquery: the first row's first column into this register,
+    /// then stop.
+    Mem(i64),
+    /// An EXISTS subquery: 1 into this register on the first row, then stop.
+    Exists(i64),
+    /// An IN subquery: each row's first column into this keyed ephemeral
+    /// table, and 1 into `nonempty`.
+    Set { cursor: i64, nonempty: i64 },
+}
+
 /// Where a SELECT core's finished rows go.
 #[derive(Clone, Copy)]
 pub(crate) enum Dest {
-    /// The client. The first OFFSET rows are skipped; the LIMIT-th row
-    /// jumps to `exit`, ending the whole query.
-    Output { limits: Limits, exit: Label },
+    /// The query's final destination. The first OFFSET rows are skipped;
+    /// the LIMIT-th row jumps to `exit`, ending the whole query.
+    Output {
+        limits: Limits,
+        exit: Label,
+        to: Sink,
+    },
     /// A compound query's ORDER BY sorter; the payload is the row itself.
     Sorter(i64),
     /// Insert into a keyed ephemeral table (UNION; the left side of
@@ -198,9 +217,24 @@ fn bare_output_position(outs: &[OutCol], expr: &Expr, ctx: &NameCtx<'_>) -> Opti
 }
 
 impl<'a> SqlCompiler<'a> {
-    /// Compile a query: a SELECT or a compound of SELECTs, with the query's
-    /// ORDER BY and LIMIT/OFFSET.
+    /// Compile a statement-level query, whose rows go to the client.
     pub(crate) fn compile_query(&mut self, query: &Query) -> SqawkResult<()> {
+        let schema = self.compile_query_to(query, Sink::Client)?;
+        self.program.set_result_schema(schema);
+        Ok(())
+    }
+
+    /// Compile a query: a SELECT or a compound of SELECTs, with the query's
+    /// ORDER BY and LIMIT/OFFSET, sending its rows to `to`. Returns the
+    /// result schema.
+    ///
+    /// A subquery is compiled by this same function, as a fragment of the
+    /// enclosing statement's program (see `compiler_subquery.rs`).
+    pub(crate) fn compile_query_to(
+        &mut self,
+        query: &Query,
+        to: Sink,
+    ) -> SqawkResult<ResultSchema> {
         // `ORDER BY ALL` carries no key list, so it would otherwise look
         // identical to "no ORDER BY" and be silently ignored. Reject it.
         if is_order_by_all(query) {
@@ -211,7 +245,7 @@ impl<'a> SqlCompiler<'a> {
 
         let exit = self.label();
         let limits = self.emit_limits(query, exit)?;
-        let out = Dest::Output { limits, exit };
+        let out = Dest::Output { limits, exit, to };
         let order_by = query_order_by(query);
 
         let schema = match &*query.body {
@@ -264,8 +298,7 @@ impl<'a> SqlCompiler<'a> {
             }
         };
         self.resolve(exit);
-        self.program.set_result_schema(schema);
-        Ok(())
+        Ok(schema)
     }
 
     /// Evaluate LIMIT and OFFSET into counter registers.
@@ -452,16 +485,6 @@ impl<'a> SqlCompiler<'a> {
 
         let plan = self.plan_from(&select.from, select.selection.as_ref())?;
 
-        // Correlated-subquery detection matches qualifiers against the outer
-        // table's alias.
-        self.current_outer_alias = match (select.from.first().map(|f| &f.relation), plan.srcs.len())
-        {
-            (Some(sqlparser::ast::TableFactor::Table { alias: Some(a), .. }), 1) => {
-                Some(a.name.value.clone())
-            }
-            _ => None,
-        };
-
         let has_group_by = !group_by_exprs(&select.group_by).is_empty();
         let has_aggregates = self.has_aggregates(&select.projection)
             || select.having.is_some()
@@ -512,6 +535,13 @@ impl<'a> SqlCompiler<'a> {
         distinct: bool,
         dest: Dest,
     ) -> SqawkResult<()> {
+        // The window stage numbers its own cursors from 0, which would
+        // collide with an enclosing query's.
+        if self.outer_scope.is_some() {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "Window functions in a subquery are not supported".into(),
+            ));
+        }
         let (table, table_name) = plan.single_table().ok_or_else(|| {
             SqawkError::UnsupportedSqlFeature(
                 "Window functions over a join are not supported".into(),
@@ -562,7 +592,7 @@ impl<'a> SqlCompiler<'a> {
         order_by: &[OrderByExpr],
         distinct: bool,
         dest: Dest,
-        ctx: Option<&NameCtx<'_>>,
+        ctx: Option<&NameCtx<'a>>,
     ) -> SqawkResult<OutputStage> {
         let n = outs.len();
         let schema = self.program.result_schema.clone();
@@ -638,7 +668,7 @@ impl<'a> SqlCompiler<'a> {
         &mut self,
         st: &OutputStage,
         outs: &[OutCol],
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         having: Option<&Expr>,
     ) -> SqawkResult<()> {
         let base = st.out_base();
@@ -657,7 +687,7 @@ impl<'a> SqlCompiler<'a> {
     pub(crate) fn emit_stage_computed(
         &mut self,
         st: &OutputStage,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         having: Option<&Expr>,
     ) -> SqawkResult<()> {
         let base = st.out_base();
@@ -755,7 +785,7 @@ impl<'a> SqlCompiler<'a> {
     fn emit_to_dest(&mut self, start: i64, n: usize, dest: Dest) {
         let n64 = n as i64;
         match dest {
-            Dest::Output { limits, exit } => {
+            Dest::Output { limits, exit, to } => {
                 let skip = self.label();
                 if let Some(off) = limits.off {
                     let emit = self.label();
@@ -767,8 +797,23 @@ impl<'a> SqlCompiler<'a> {
                     self.emit_jump_to(OpCode::Goto, 0, skip, 0, None, "");
                     self.resolve(emit);
                 }
-                self.emit(OpCode::ResultRow, start, n64, 0, None, "Output row");
-                if let Some(lim) = limits.lim {
+                match to {
+                    Sink::Client => self.emit(OpCode::ResultRow, start, n64, 0, None, "Output row"),
+                    // One row is all a scalar subquery or EXISTS needs.
+                    Sink::Mem(reg) => {
+                        self.emit(OpCode::Copy, start, reg, 0, None, "scalar subquery value");
+                        self.emit_jump_to(OpCode::Goto, 0, exit, 0, None, "first row only");
+                    }
+                    Sink::Exists(reg) => {
+                        self.emit(OpCode::Integer, 1, reg, 0, None, "EXISTS: a row");
+                        self.emit_jump_to(OpCode::Goto, 0, exit, 0, None, "one row suffices");
+                    }
+                    Sink::Set { cursor, nonempty } => {
+                        self.emit(OpCode::IdxInsert, cursor, start, 1, None, "IN set member");
+                        self.emit(OpCode::Integer, 1, nonempty, 0, None, "IN set not empty");
+                    }
+                }
+                if let (Some(lim), Sink::Client | Sink::Set { .. }) = (limits.lim, to) {
                     self.emit_jump_to(OpCode::DecrJumpZero, lim, exit, 0, None, "LIMIT reached");
                 }
                 self.resolve(skip);

@@ -21,6 +21,7 @@ mod compiler_ddl;
 mod compiler_dml;
 mod compiler_from;
 mod compiler_select;
+mod compiler_subquery;
 mod compiler_window;
 pub mod engine;
 

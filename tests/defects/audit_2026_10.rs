@@ -445,7 +445,6 @@ fn verbose_diagnostics_not_on_stdout() -> TestResult {
 /// (`evaluate_where_at_compile_time`, compiler.rs:3198) that treats any
 /// operator it does not know -- here LIKE -- as true, so every row matches.
 #[test]
-#[ignore]
 fn in_subquery_with_like() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -456,7 +455,6 @@ fn in_subquery_with_like() -> TestResult {
 
 /// Same root cause: a function call in the subquery WHERE matches nothing.
 #[test]
-#[ignore]
 fn in_subquery_with_function() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -467,7 +465,6 @@ fn in_subquery_with_function() -> TestResult {
 
 /// Same root cause: arithmetic in the subquery WHERE matches nothing.
 #[test]
-#[ignore]
 fn in_subquery_with_arithmetic() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -479,7 +476,6 @@ fn in_subquery_with_arithmetic() -> TestResult {
 /// Same root cause: an IN-list in an EXISTS subquery WHERE is treated as
 /// true, so EXISTS over an empty result is true.
 #[test]
-#[ignore]
 fn exists_subquery_with_in_list() -> TestResult {
     assert_no_rows(
         &[employees_csv(), departments_csv()],
@@ -490,7 +486,6 @@ fn exists_subquery_with_in_list() -> TestResult {
 /// Uncorrelated scalar subquery whose select item is an expression over an
 /// aggregate (`MAX(x) + 0`) evaluates wrongly, so the comparison never holds.
 #[test]
-#[ignore]
 fn scalar_subquery_with_aggregate_arithmetic() -> TestResult {
     assert_query(
         &[users_csv(), employees_csv()],
@@ -942,7 +937,6 @@ fn correlated_scalar_with_order_by_limit() -> TestResult {
 /// aggregates column 0 (id) instead of salary: the qualified argument is not
 /// resolved against the inner alias.
 #[test]
-#[ignore]
 fn correlated_scalar_aggregate_of_qualified_column() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -954,7 +948,6 @@ fn correlated_scalar_aggregate_of_qualified_column() -> TestResult {
 /// A correlated reference through the unaliased outer table name
 /// (`employees.department`) never matches, giving 0.
 #[test]
-#[ignore]
 fn correlated_scalar_unaliased_outer_table() -> TestResult {
     assert_query(
         &[employees_csv()],

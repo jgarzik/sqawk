@@ -9,8 +9,8 @@ use super::ast_compat::{
 };
 use sqlparser::ast::{
     BinaryOperator, CaseWhen, DataType as SqlDataType, Expr, Function, FunctionArg,
-    FunctionArgExpr, Ident, ObjectName, Query, Select, SelectItem, SelectItemQualifiedWildcardKind,
-    SetExpr, Statement, UnaryOperator, Value, ValueWithSpan,
+    FunctionArgExpr, Ident, ObjectName, SelectItem, SelectItemQualifiedWildcardKind, Statement,
+    UnaryOperator, Value, ValueWithSpan,
 };
 use sqlparser::dialect::HiveDialect;
 use sqlparser::parser::Parser;
@@ -18,22 +18,12 @@ use std::collections::HashMap;
 
 use super::bytecode::{Instruction, OpCode, Program, AGG_COUNT, AGG_DISTINCT};
 use super::compiler_from::{expr_children, FromPlan};
+use super::compiler_subquery::Sub;
 use crate::aggregate::AggregateFunction;
 use crate::capacity::DEFAULT_CURSOR_CAPACITY;
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{DataType, Table, Value as TableValue};
-
-/// Outer column reference found in a correlated subquery (Phase 4B)
-#[derive(Debug, Clone)]
-struct OuterColumnRef {
-    /// The table qualifier (alias or table name) the outer query used.
-    ///
-    /// Only the qualifier is needed: which column it names is resolved by
-    /// NameCtx against the outer table, so recording it here would be a second
-    /// copy of that lookup.
-    qualifier: String,
-}
 
 /// A symbolic jump target.
 ///
@@ -112,14 +102,21 @@ pub(crate) struct NameCtx<'t> {
     /// FROM sources in cursor order. Empty for `SELECT 1` (no FROM).
     pub srcs: Vec<Src<'t>>,
 
-    /// Enclosing query's sources, for a correlated subquery.
+    /// The enclosing query's scope, for a subquery.
     ///
     /// SQL resolves a name in the innermost scope first and only then looks
-    /// outward, so these are consulted only when `srcs` has no match. Keeping
-    /// them in a separate list rather than appending to `srcs` preserves that
-    /// precedence, and keeps the ambiguity check meaningful: two tables in one
-    /// FROM are ambiguous, but an inner name shadowing an outer one is not.
-    pub outer: Vec<Src<'t>>,
+    /// outward, so the enclosing scope is consulted only when this one has no
+    /// match. Keeping it as a separate link rather than appending its sources
+    /// preserves that precedence, and keeps the ambiguity check meaningful:
+    /// two tables in one FROM are ambiguous, but an inner name shadowing an
+    /// outer one is not. A name that resolves through this link makes the
+    /// subquery correlated.
+    pub outer: Option<Box<NameCtx<'t>>>,
+
+    /// Number of USING columns in all enclosing scopes. [`ColumnRef::Using`]
+    /// indexes the chain as one list, outermost scope first, so a merged
+    /// column of an enclosing join can be referenced from a subquery.
+    pub using_base: usize,
 
     /// Values already computed into registers, keyed by the rendered
     /// expression text (`"sum(salary)"`, or a GROUP BY key such as
@@ -159,7 +156,8 @@ impl<'t> NameCtx<'t> {
     pub(crate) fn multi(srcs: Vec<Src<'t>>) -> Self {
         NameCtx {
             srcs,
-            outer: Vec::new(),
+            outer: None,
+            using_base: 0,
             agg_bindings: Vec::new(),
             using: Vec::new(),
             col_bindings: None,
@@ -205,80 +203,138 @@ impl<'t> NameCtx<'t> {
         }
     }
 
-    /// Resolve an unqualified column name across every source.
+    /// Attach the enclosing query's scope.
+    pub(crate) fn with_outer(mut self, outer: Option<Box<NameCtx<'t>>>) -> Self {
+        self.using_base = outer.as_ref().map_or(0, |o| o.using_base + o.using.len());
+        self.outer = outer;
+        self
+    }
+
+    /// The USING column with chain-wide index `i`.
+    pub(crate) fn using_col(&self, i: usize) -> &UsingCol {
+        if i >= self.using_base {
+            &self.using[i - self.using_base]
+        } else {
+            self.outer
+                .as_ref()
+                .expect("USING index below using_base implies an outer scope")
+                .using_col(i)
+        }
+    }
+
+    /// The scope `depth` links outward (0 = this one).
+    pub(crate) fn scope_at(&self, depth: usize) -> &NameCtx<'t> {
+        let mut s = self;
+        for _ in 0..depth {
+            s = s.outer.as_deref().expect("depth within the scope chain");
+        }
+        s
+    }
+
+    /// Look a column up in THIS scope only, without the post-aggregation
+    /// binding.
     ///
-    /// Case-insensitive: `SELECT NAME` already worked while
-    /// `WHERE NAME = 'x'` did not, because the projection path lowercased and
-    /// `find_column_index` compared exactly.
-    ///
-    /// Returns `Err` if no source has the column, or if more than one does --
-    /// silently picking the first would make the result depend on FROM order.
-    /// A USING-merged column is the exception: it is one column by definition.
-    pub(crate) fn resolve_unqualified(&self, name: &str) -> SqawkResult<ColumnRef> {
+    /// `Ok(None)`: no such column here. `Err`: the name is ambiguous across
+    /// this scope's tables, or the qualifier names a table here that lacks
+    /// the column.
+    fn find_here(&self, qualifier: Option<&str>, name: &str) -> SqawkResult<Option<ColumnRef>> {
         let want = name.to_ascii_lowercase();
+        let column_of = |src: &Src<'_>| {
+            src.table
+                .column_metadata()
+                .iter()
+                .position(|c| c.name.to_ascii_lowercase() == want)
+        };
+        if let Some(qualifier) = qualifier {
+            let qual = qualifier.to_ascii_lowercase();
+            let Some(src) = self.srcs.iter().find(|s| s.refname == qual) else {
+                return Ok(None);
+            };
+            return match column_of(src) {
+                Some(col) => Ok(Some(ColumnRef::Cursor {
+                    cursor: src.cursor,
+                    col,
+                })),
+                None => Err(SqawkError::ColumnNotFound(format!(
+                    "{}.{}",
+                    qualifier, name
+                ))),
+            };
+        }
+        // A USING-merged column is one column by definition, never ambiguous.
         if let Some(i) = self.using.iter().position(|u| u.name == want) {
-            return Ok(ColumnRef::Using(i));
+            return Ok(Some(ColumnRef::Using(self.using_base + i)));
         }
         let mut found: Option<ColumnRef> = None;
         for src in &self.srcs {
-            for (i, col) in src.table.column_metadata().iter().enumerate() {
-                if col.name.to_ascii_lowercase() == want {
-                    if found.is_some() {
-                        return Err(SqawkError::InvalidSqlQuery(format!(
-                            "Column '{}' is ambiguous across the tables in FROM",
-                            name
-                        )));
-                    }
-                    found = Some(ColumnRef::Cursor {
-                        cursor: src.cursor,
-                        col: i,
-                    });
-                    break;
+            if let Some(col) = column_of(src) {
+                if found.is_some() {
+                    // Silently picking the first would make the result
+                    // depend on FROM order.
+                    return Err(SqawkError::InvalidSqlQuery(format!(
+                        "Column '{}' is ambiguous across the tables in FROM",
+                        name
+                    )));
                 }
+                found = Some(ColumnRef::Cursor {
+                    cursor: src.cursor,
+                    col,
+                });
             }
         }
-        if let Some(col) = found {
-            return Ok(col);
-        }
-        // Not in this scope: look outward, nearest first.
-        for src in &self.outer {
-            for (i, col) in src.table.column_metadata().iter().enumerate() {
-                if col.name.to_ascii_lowercase() == want {
-                    return Ok(ColumnRef::Cursor {
-                        cursor: src.cursor,
-                        col: i,
-                    });
-                }
-            }
-        }
-        Err(SqawkError::ColumnNotFound(name.to_string()))
+        Ok(found)
     }
 
-    /// Resolve a `table.column` (or `alias.column`) reference.
-    pub(crate) fn resolve_qualified(&self, qualifier: &str, name: &str) -> SqawkResult<ColumnRef> {
-        let qual = qualifier.to_ascii_lowercase();
-        let want = name.to_ascii_lowercase();
-        for src in self.srcs.iter().chain(&self.outer) {
-            if src.refname != qual {
-                continue;
+    /// Resolve a column reference through the scope chain, innermost scope
+    /// first, as SQL does. Returns the column -- with the post-aggregation
+    /// binding of the scope it was found in applied -- and how many scopes
+    /// outward that was (0: this scope; more: an outer reference, which
+    /// makes the subquery correlated).
+    ///
+    /// Matching is case-insensitive. A qualified name whose qualifier no
+    /// scope knows falls back, on a single-table scope, to the unqualified
+    /// name, so `employees.age` still works when the table was given an
+    /// alias. With several tables a wrong qualifier is an error: the fallback
+    /// could silently read the same-named column of another table.
+    pub(crate) fn lookup(
+        &self,
+        qualifier: Option<&str>,
+        name: &str,
+    ) -> SqawkResult<(ColumnRef, usize)> {
+        let label = match qualifier {
+            Some(q) => format!("{}.{}", q, name),
+            None => name.to_string(),
+        };
+        let mut scope = Some(self);
+        let mut depth = 0;
+        while let Some(s) = scope {
+            if let Some(col) = s.find_here(qualifier, name)? {
+                return Ok((s.bind(col, &label)?, depth));
             }
-            for (i, col) in src.table.column_metadata().iter().enumerate() {
-                if col.name.to_ascii_lowercase() == want {
-                    return Ok(ColumnRef::Cursor {
-                        cursor: src.cursor,
-                        col: i,
-                    });
-                }
-            }
-            return Err(SqawkError::ColumnNotFound(format!(
-                "{}.{}",
-                qualifier, name
-            )));
+            scope = s.outer.as_deref();
+            depth += 1;
         }
-        // Unknown qualifier entirely. With a single source, fall back to an
-        // unqualified match so `employees.age` still works when the table was
-        // given an alias. With several, a wrong qualifier is an error: the
-        // fallback could silently read the same-named column of another table.
+        if qualifier.is_some() && self.srcs.len() <= 1 {
+            if let Some(col) = self.find_here(None, name)? {
+                return Ok((self.bind(col, &label)?, 0));
+            }
+        }
+        Err(SqawkError::ColumnNotFound(label))
+    }
+
+    /// Resolve an unqualified column name in this scope only (no outward
+    /// lookup, no post-aggregation binding).
+    pub(crate) fn resolve_unqualified(&self, name: &str) -> SqawkResult<ColumnRef> {
+        self.find_here(None, name)?
+            .ok_or_else(|| SqawkError::ColumnNotFound(name.to_string()))
+    }
+
+    /// Resolve a `table.column` (or `alias.column`) reference in this scope
+    /// only, with the single-table fallback of [`Self::lookup`].
+    pub(crate) fn resolve_qualified(&self, qualifier: &str, name: &str) -> SqawkResult<ColumnRef> {
+        if let Some(col) = self.find_here(Some(qualifier), name)? {
+            return Ok(col);
+        }
         if self.srcs.len() <= 1 {
             return self.resolve_unqualified(name);
         }
@@ -353,8 +409,15 @@ pub struct SqlCompiler<'a> {
     /// Whether to generate verbose bytecode with detailed comments
     pub(crate) verbose: bool,
 
-    /// Current outer table alias for correlated subquery detection
-    pub(crate) current_outer_alias: Option<String>,
+    /// While a subquery is being compiled: the scope of the expression that
+    /// contains it, which becomes the outer link of the subquery's FROM
+    /// scope. `None` at statement level.
+    pub(crate) outer_scope: Option<NameCtx<'a>>,
+
+    /// One flag per subquery being compiled, innermost last: set when the
+    /// subquery (or one nested in it) references a column of an enclosing
+    /// query, i.e. when it is correlated.
+    pub(crate) correlated: Vec<bool>,
 
     /// Resolved address of each label, indexed by label id. `None` until
     /// [`SqlCompiler::resolve`] binds it.
@@ -388,7 +451,8 @@ impl<'a> SqlCompiler<'a> {
             program: Program::new(),
             register_counter: 0,
             verbose,
-            current_outer_alias: None,
+            outer_scope: None,
+            correlated: Vec::new(),
             label_addrs: Vec::new(),
             pending_jumps: Vec::new(),
             pending_jumps_three: Vec::new(),
@@ -613,6 +677,8 @@ impl<'a> SqlCompiler<'a> {
         self.pending_jumps_three.clear();
         self.next_cursor = FIRST_TEMP_CURSOR;
         self.next_sorter = 0;
+        self.outer_scope = None;
+        self.correlated.clear();
 
         let init_addr = self.program.len();
         self.emit(OpCode::Init, 0, 0, 0, None, "Start address filled in later");
@@ -872,28 +938,6 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// Extract the column index from an aggregate function argument
-    fn extract_agg_column_index(&self, func: &Function, table: &Table) -> SqawkResult<usize> {
-        // Handle COUNT(*) specially
-        if !func_args(func).is_empty() {
-            match &func_args(func)[0] {
-                FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => {
-                    // COUNT(*) - use first column (doesn't matter which for count)
-                    return Ok(0);
-                }
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident))) => {
-                    let col_name = ident.value.to_lowercase();
-                    return table
-                        .column_index(&col_name)
-                        .ok_or(SqawkError::ColumnNotFound(col_name));
-                }
-                _ => {}
-            }
-        }
-        // Default to first column
-        Ok(0)
-    }
-
     /// Emit bytecode to load a value as a literal
     fn emit_value_literal(&mut self, reg: i64, value: &TableValue) -> SqawkResult<()> {
         match value {
@@ -904,7 +948,7 @@ impl<'a> SqlCompiler<'a> {
                     reg,
                     0,
                     None,
-                    &format!("r[{}] = {} (subquery result)", reg, i),
+                    &format!("r[{}] = {}", reg, i),
                 );
             }
             TableValue::Float(f) => {
@@ -915,7 +959,7 @@ impl<'a> SqlCompiler<'a> {
                     reg,
                     0,
                     Some(f.to_string()),
-                    &format!("r[{}] = {} (subquery result)", reg, f),
+                    &format!("r[{}] = {}", reg, f),
                 );
                 // Cast to float
                 self.emit(
@@ -934,7 +978,7 @@ impl<'a> SqlCompiler<'a> {
                     reg,
                     0,
                     Some(s.clone().into_owned()),
-                    &format!("r[{}] = '{}' (subquery result)", reg, s),
+                    &format!("r[{}] = '{}'", reg, s),
                 );
             }
             TableValue::Boolean(b) => {
@@ -944,880 +988,13 @@ impl<'a> SqlCompiler<'a> {
                     reg,
                     0,
                     None,
-                    &format!("r[{}] = {} (subquery result)", reg, b),
+                    &format!("r[{}] = {}", reg, b),
                 );
             }
             TableValue::Null => {
-                self.emit(
-                    OpCode::Null,
-                    0,
-                    reg,
-                    0,
-                    None,
-                    &format!("r[{}] = NULL (subquery result)", reg),
-                );
+                self.emit(OpCode::Null, 0, reg, 0, None, &format!("r[{}] = NULL", reg));
             }
         }
-        Ok(())
-    }
-
-    /// Evaluate a scalar subquery at compile time and return the result value
-    /// This is used when a subquery appears as an operand in a comparison
-    fn evaluate_scalar_subquery(&self, subquery: &Query) -> SqawkResult<TableValue> {
-        // Get the subquery's SELECT body
-        let select = match &*subquery.body {
-            SetExpr::Select(select) => select,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple SELECT subqueries are supported".to_string(),
-                ))
-            }
-        };
-
-        // Verify it's a single-table query
-        if select.from.is_empty() {
-            return Err(SqawkError::UnsupportedSqlFeature(
-                "Subquery must have a FROM clause".to_string(),
-            ));
-        }
-
-        // Get the table name
-        let table_name = match &select.from[0].relation {
-            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple table references are supported in subqueries".to_string(),
-                ))
-            }
-        };
-
-        // Get the table
-        if !self.database.has_table(&table_name) {
-            return Err(SqawkError::TableNotFound(table_name.clone()));
-        }
-        let table = self.database.get_table(&table_name).unwrap();
-
-        // Filter rows if there's a WHERE clause in the subquery
-        let filtered_rows: Vec<&Vec<TableValue>> = if let Some(where_expr) = &select.selection {
-            table
-                .rows()
-                .iter()
-                .filter(|row| self.evaluate_where_at_compile_time(where_expr, row, table))
-                .collect()
-        } else {
-            table.rows().iter().collect()
-        };
-
-        // Check the projection to determine what value to compute
-        if select.projection.is_empty() {
-            return Err(SqawkError::InvalidSqlQuery(
-                "Subquery must have a projection".to_string(),
-            ));
-        }
-
-        let result_value = match &select.projection[0] {
-            SelectItem::UnnamedExpr(expr) => match expr {
-                Expr::Function(func) => {
-                    // Handle aggregate functions (MAX, MIN, COUNT, SUM, AVG)
-                    let func_name = func
-                        .name
-                        .0
-                        .first()
-                        .map(|id| {
-                            id.as_ident()
-                                .map(|i| i.value.to_uppercase())
-                                .unwrap_or_default()
-                        })
-                        .unwrap_or_default();
-
-                    // Get the aggregate function
-                    let agg_func = AggregateFunction::from_name(&func_name).ok_or_else(|| {
-                        SqawkError::UnsupportedSqlFeature(format!(
-                            "Unsupported aggregate function in subquery: {}",
-                            func_name
-                        ))
-                    })?;
-
-                    // Extract the column index from the function argument
-                    let col_idx = self.extract_agg_column_index(func, table)?;
-
-                    // Collect all values from that column
-                    let values: Vec<TableValue> = filtered_rows
-                        .iter()
-                        .map(|row| row[col_idx].clone())
-                        .collect();
-
-                    // Execute the aggregate function
-                    agg_func.execute(&values)?
-                }
-                Expr::Identifier(ident) => {
-                    // Simple column reference - get first row's value
-                    let col_name = ident.value.to_lowercase();
-                    let col_idx = table
-                        .column_index(&col_name)
-                        .ok_or(SqawkError::ColumnNotFound(col_name.clone()))?;
-
-                    if filtered_rows.is_empty() {
-                        TableValue::Null
-                    } else {
-                        filtered_rows[0][col_idx].clone()
-                    }
-                }
-                _ => {
-                    // Default: get first column of first row
-                    if filtered_rows.is_empty() {
-                        TableValue::Null
-                    } else {
-                        filtered_rows[0][0].clone()
-                    }
-                }
-            },
-            SelectItem::Wildcard(_) => {
-                // SELECT * - just get first column of first row
-                if filtered_rows.is_empty() {
-                    TableValue::Null
-                } else {
-                    filtered_rows[0][0].clone()
-                }
-            }
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Unsupported projection in scalar subquery".to_string(),
-                ))
-            }
-        };
-
-        Ok(result_value)
-    }
-
-    /// Evaluate an EXISTS subquery at compile time and return true/false
-    fn evaluate_exists_subquery(&self, subquery: &Query, negated: bool) -> SqawkResult<bool> {
-        // Get the subquery's SELECT body
-        let select = match &*subquery.body {
-            SetExpr::Select(select) => select,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple SELECT subqueries are supported in EXISTS clause".to_string(),
-                ))
-            }
-        };
-
-        // Verify it's a single-table query
-        if select.from.is_empty() {
-            return Err(SqawkError::UnsupportedSqlFeature(
-                "EXISTS subquery must have a FROM clause".to_string(),
-            ));
-        }
-
-        // Get the subquery table name
-        let subquery_table_name = match &select.from[0].relation {
-            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple table references are supported in EXISTS subqueries".to_string(),
-                ))
-            }
-        };
-
-        // Get the subquery table
-        if !self.database.has_table(&subquery_table_name) {
-            return Err(SqawkError::TableNotFound(subquery_table_name.clone()));
-        }
-        let subquery_table = self.database.get_table(&subquery_table_name).unwrap();
-
-        // Check if any rows match the subquery's WHERE clause
-        let has_rows = if let Some(where_expr) = &select.selection {
-            subquery_table
-                .rows()
-                .iter()
-                .any(|row| self.evaluate_where_at_compile_time(where_expr, row, subquery_table))
-        } else {
-            !subquery_table.rows().is_empty()
-        };
-
-        Ok(if negated { !has_rows } else { has_rows })
-    }
-
-    /// Evaluate an IN subquery at compile time and return the list of values
-    fn evaluate_in_subquery_values(&self, subquery: &Query) -> SqawkResult<Vec<TableValue>> {
-        // Get the subquery's SELECT body
-        let select = match &*subquery.body {
-            SetExpr::Select(select) => select,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple SELECT subqueries are supported in IN clause".to_string(),
-                ))
-            }
-        };
-
-        // Verify it's a single-table query
-        if select.from.is_empty() {
-            return Err(SqawkError::UnsupportedSqlFeature(
-                "IN subquery must have a FROM clause".to_string(),
-            ));
-        }
-
-        // Get the subquery table name
-        let subquery_table_name = match &select.from[0].relation {
-            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple table references are supported in IN subqueries".to_string(),
-                ))
-            }
-        };
-
-        // Get the subquery table
-        if !self.database.has_table(&subquery_table_name) {
-            return Err(SqawkError::TableNotFound(subquery_table_name.clone()));
-        }
-        let subquery_table = self.database.get_table(&subquery_table_name).unwrap();
-
-        // Filter rows if there's a WHERE clause in the subquery
-        let filtered_rows: Vec<&Vec<TableValue>> = if let Some(where_expr) = &select.selection {
-            subquery_table
-                .rows()
-                .iter()
-                .filter(|row| self.evaluate_where_at_compile_time(where_expr, row, subquery_table))
-                .collect()
-        } else {
-            subquery_table.rows().iter().collect()
-        };
-
-        // Get the column index from the subquery projection
-        let col_idx = if select.projection.is_empty() {
-            return Err(SqawkError::InvalidSqlQuery(
-                "IN subquery must have a projection".to_string(),
-            ));
-        } else {
-            match &select.projection[0] {
-                SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
-                    let col_name = ident.value.to_lowercase();
-                    subquery_table
-                        .column_index(&col_name)
-                        .ok_or(SqawkError::ColumnNotFound(col_name))?
-                }
-                SelectItem::Wildcard(_) => 0,
-                _ => 0, // Default to first column
-            }
-        };
-
-        // Collect values from the subquery result
-        let values: Vec<TableValue> = filtered_rows
-            .iter()
-            .map(|row| row[col_idx].clone())
-            .collect();
-
-        Ok(values)
-    }
-
-    /// Evaluate a WHERE expression at compile time for subquery filtering
-    fn evaluate_where_at_compile_time(
-        &self,
-        expr: &Expr,
-        row: &[TableValue],
-        table: &Table,
-    ) -> bool {
-        match expr {
-            Expr::BinaryOp { left, op, right } => {
-                match op {
-                    BinaryOperator::And => {
-                        self.evaluate_where_at_compile_time(left, row, table)
-                            && self.evaluate_where_at_compile_time(right, row, table)
-                    }
-                    BinaryOperator::Or => {
-                        self.evaluate_where_at_compile_time(left, row, table)
-                            || self.evaluate_where_at_compile_time(right, row, table)
-                    }
-                    BinaryOperator::Eq
-                    | BinaryOperator::NotEq
-                    | BinaryOperator::Lt
-                    | BinaryOperator::LtEq
-                    | BinaryOperator::Gt
-                    | BinaryOperator::GtEq => {
-                        let left_val = self.evaluate_expr_at_compile_time(left, row, table);
-                        let right_val = self.evaluate_expr_at_compile_time(right, row, table);
-                        self.compare_values(&left_val, &right_val, op)
-                    }
-                    _ => true, // Unknown op, assume true
-                }
-            }
-            Expr::IsNull(inner) => {
-                let val = self.evaluate_expr_at_compile_time(inner, row, table);
-                matches!(val, TableValue::Null)
-            }
-            Expr::IsNotNull(inner) => {
-                let val = self.evaluate_expr_at_compile_time(inner, row, table);
-                !matches!(val, TableValue::Null)
-            }
-            _ => true, // Unknown expression, assume true
-        }
-    }
-
-    /// Evaluate an expression at compile time to get a value
-    fn evaluate_expr_at_compile_time(
-        &self,
-        expr: &Expr,
-        row: &[TableValue],
-        table: &Table,
-    ) -> TableValue {
-        match expr {
-            Expr::Identifier(ident) => {
-                let col_name = ident.value.to_lowercase();
-                if let Some(idx) = table.column_index(&col_name) {
-                    row[idx].clone()
-                } else {
-                    TableValue::Null
-                }
-            }
-            Expr::Value(ValueWithSpan { value: val, .. }) => match val {
-                Value::Number(n, _) => {
-                    if let Ok(i) = n.parse::<i64>() {
-                        TableValue::Integer(i)
-                    } else if let Ok(f) = n.parse::<f64>() {
-                        TableValue::Float(f)
-                    } else {
-                        TableValue::String(n.clone().into())
-                    }
-                }
-                Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
-                    TableValue::String(s.clone().into())
-                }
-                Value::Boolean(b) => TableValue::Boolean(*b),
-                Value::Null => TableValue::Null,
-                _ => TableValue::Null,
-            },
-            _ => TableValue::Null,
-        }
-    }
-
-    /// Compare two values using the given operator
-    fn compare_values(&self, left: &TableValue, right: &TableValue, op: &BinaryOperator) -> bool {
-        match (left, right) {
-            (TableValue::Integer(l), TableValue::Integer(r)) => match op {
-                BinaryOperator::Eq => l == r,
-                BinaryOperator::NotEq => l != r,
-                BinaryOperator::Lt => l < r,
-                BinaryOperator::LtEq => l <= r,
-                BinaryOperator::Gt => l > r,
-                BinaryOperator::GtEq => l >= r,
-                _ => false,
-            },
-            (TableValue::Float(l), TableValue::Float(r)) => match op {
-                BinaryOperator::Eq => (l - r).abs() < f64::EPSILON,
-                BinaryOperator::NotEq => (l - r).abs() >= f64::EPSILON,
-                BinaryOperator::Lt => l < r,
-                BinaryOperator::LtEq => l <= r,
-                BinaryOperator::Gt => l > r,
-                BinaryOperator::GtEq => l >= r,
-                _ => false,
-            },
-            (TableValue::Integer(l), TableValue::Float(r)) => {
-                let l = *l as f64;
-                match op {
-                    BinaryOperator::Eq => (l - r).abs() < f64::EPSILON,
-                    BinaryOperator::NotEq => (l - r).abs() >= f64::EPSILON,
-                    BinaryOperator::Lt => l < *r,
-                    BinaryOperator::LtEq => l <= *r,
-                    BinaryOperator::Gt => l > *r,
-                    BinaryOperator::GtEq => l >= *r,
-                    _ => false,
-                }
-            }
-            (TableValue::Float(l), TableValue::Integer(r)) => {
-                let r = *r as f64;
-                match op {
-                    BinaryOperator::Eq => (l - r).abs() < f64::EPSILON,
-                    BinaryOperator::NotEq => (l - r).abs() >= f64::EPSILON,
-                    BinaryOperator::Lt => *l < r,
-                    BinaryOperator::LtEq => *l <= r,
-                    BinaryOperator::Gt => *l > r,
-                    BinaryOperator::GtEq => *l >= r,
-                    _ => false,
-                }
-            }
-            (TableValue::String(l), TableValue::String(r)) => match op {
-                BinaryOperator::Eq => l == r,
-                BinaryOperator::NotEq => l != r,
-                BinaryOperator::Lt => l < r,
-                BinaryOperator::LtEq => l <= r,
-                BinaryOperator::Gt => l > r,
-                BinaryOperator::GtEq => l >= r,
-                _ => false,
-            },
-            (TableValue::Boolean(l), TableValue::Boolean(r)) => match op {
-                BinaryOperator::Eq => l == r,
-                BinaryOperator::NotEq => l != r,
-                _ => false,
-            },
-            // Handle string to number comparisons
-            (TableValue::String(s), TableValue::Integer(i)) => {
-                if let Ok(n) = s.parse::<i64>() {
-                    match op {
-                        BinaryOperator::Eq => n == *i,
-                        BinaryOperator::NotEq => n != *i,
-                        BinaryOperator::Lt => n < *i,
-                        BinaryOperator::LtEq => n <= *i,
-                        BinaryOperator::Gt => n > *i,
-                        BinaryOperator::GtEq => n >= *i,
-                        _ => false,
-                    }
-                } else {
-                    false
-                }
-            }
-            (TableValue::Integer(i), TableValue::String(s)) => {
-                if let Ok(n) = s.parse::<i64>() {
-                    match op {
-                        BinaryOperator::Eq => *i == n,
-                        BinaryOperator::NotEq => *i != n,
-                        BinaryOperator::Lt => *i < n,
-                        BinaryOperator::LtEq => *i <= n,
-                        BinaryOperator::Gt => *i > n,
-                        BinaryOperator::GtEq => *i >= n,
-                        _ => false,
-                    }
-                } else {
-                    false
-                }
-            }
-            _ => false, // NULL comparisons return false
-        }
-    }
-
-    // =========================================================================
-    // Phase 4B: Correlated Subquery Support
-    // =========================================================================
-
-    /// Detect if a subquery references outer query columns (making it correlated)
-    ///
-    /// A correlated subquery contains references to columns from the outer query,
-    /// like: SELECT * FROM orders o WHERE amount > (SELECT AVG(amount) FROM orders WHERE user_id = o.user_id)
-    /// Here, `o.user_id` is an outer reference.
-    ///
-    /// The outer query's names are every FROM source in `ctx`, by refname and
-    /// table name, plus the alias recorded by the table-scan path. A context
-    /// with no sources (no FROM) cannot be correlated with.
-    fn detect_outer_references(&self, subquery: &Query, ctx: &NameCtx<'_>) -> Vec<OuterColumnRef> {
-        let mut outer_refs = Vec::new();
-        if ctx.srcs.is_empty() {
-            return outer_refs;
-        }
-
-        // Get the subquery's SELECT body
-        let select = match &*subquery.body {
-            SetExpr::Select(select) => select,
-            _ => return outer_refs,
-        };
-
-        let mut outer_names: Vec<String> = Vec::new();
-        for src in &ctx.srcs {
-            outer_names.push(src.refname.clone());
-            outer_names.push(src.table.name().to_ascii_lowercase());
-        }
-        if let Some(alias) = &self.current_outer_alias {
-            outer_names.push(alias.to_ascii_lowercase());
-        }
-
-        // The subquery's own table name and alias, which shadow outer names.
-        let mut inner_names: Vec<String> = Vec::new();
-        if let Some(sqlparser::ast::TableFactor::Table { name, alias, .. }) =
-            select.from.first().map(|f| &f.relation)
-        {
-            if let Some(ident) = name.0.last().and_then(|p| p.as_ident()) {
-                inner_names.push(ident.value.to_lowercase());
-            }
-            if let Some(a) = alias {
-                inner_names.push(a.name.value.to_lowercase());
-            }
-        }
-
-        if let Some(where_expr) = &select.selection {
-            Self::collect_outer_refs_from_expr(
-                where_expr,
-                &outer_names,
-                &inner_names,
-                &mut outer_refs,
-            );
-        }
-
-        outer_refs
-    }
-
-    /// Recursively collect outer column references from an expression
-    fn collect_outer_refs_from_expr(
-        expr: &Expr,
-        outer_names: &[String],
-        inner_names: &[String],
-        refs: &mut Vec<OuterColumnRef>,
-    ) {
-        let mut walk =
-            |e: &Expr| Self::collect_outer_refs_from_expr(e, outer_names, inner_names, refs);
-        match expr {
-            Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
-                let qualifier = parts[0].value.to_lowercase();
-                if outer_names.contains(&qualifier) && !inner_names.contains(&qualifier) {
-                    refs.push(OuterColumnRef { qualifier });
-                }
-            }
-            Expr::BinaryOp { left, right, .. } => {
-                walk(left);
-                walk(right);
-            }
-            Expr::Nested(inner)
-            | Expr::UnaryOp { expr: inner, .. }
-            | Expr::IsNull(inner)
-            | Expr::IsNotNull(inner)
-            | Expr::Cast { expr: inner, .. }
-            | Expr::Like { expr: inner, .. }
-            | Expr::ILike { expr: inner, .. } => walk(inner),
-            Expr::Between {
-                expr, low, high, ..
-            } => {
-                walk(expr);
-                walk(low);
-                walk(high);
-            }
-            Expr::InList { expr, list, .. } => {
-                walk(expr);
-                for item in list {
-                    walk(item);
-                }
-            }
-            Expr::Case {
-                operand,
-                conditions,
-                else_result,
-                ..
-            } => {
-                if let Some(op) = operand {
-                    walk(op);
-                }
-                for branch in conditions {
-                    walk(&branch.condition);
-                    walk(&branch.result);
-                }
-                if let Some(else_r) = else_result {
-                    walk(else_r);
-                }
-            }
-            Expr::Function(func) => {
-                for arg in func_args(func) {
-                    if let FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) = arg {
-                        walk(e);
-                    }
-                }
-            }
-            // Other expression types don't contain column references
-            _ => {}
-        }
-    }
-
-    /// Resolve the single table a correlated subquery scans.
-    fn correlated_subquery_table(
-        &self,
-        select: &Select,
-        what: &str,
-    ) -> SqawkResult<(String, &'a Table)> {
-        if select.from.is_empty() {
-            return Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Correlated {} subquery must have a FROM clause",
-                what
-            )));
-        }
-        let name = match &select.from[0].relation {
-            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Only simple table references are supported in correlated {}",
-                    what
-                )))
-            }
-        };
-        let database: &'a Database = self.database;
-        let table = database.get_table(&name)?;
-        Ok((name, table))
-    }
-
-    /// Name scope for a correlated subquery's condition.
-    ///
-    /// The subquery's own table forms the inner scope and the enclosing
-    /// query's sources the outer one, which is exactly `NameCtx`'s two-level
-    /// resolution: an unqualified name binds to the subquery, and a name it
-    /// does not have is looked up outward. With a single outer source, every
-    /// qualifier the subquery used for it (typically an alias the outer
-    /// scan does not record) resolves to it too.
-    fn correlated_ctx<'t>(
-        subquery_table: &'t Table,
-        sub_cursor: i64,
-        outer: &NameCtx<'t>,
-        outer_refs: &[OuterColumnRef],
-    ) -> NameCtx<'t> {
-        let mut ctx = NameCtx::single(subquery_table, sub_cursor);
-        ctx.outer = outer.srcs.iter().chain(&outer.outer).cloned().collect();
-        if let [only] = outer.srcs.as_slice() {
-            for r in outer_refs {
-                if !ctx.outer.iter().any(|s| s.refname == r.qualifier) {
-                    let mut alias = only.clone();
-                    alias.refname = r.qualifier.clone();
-                    ctx.outer.push(alias);
-                }
-            }
-        }
-        ctx
-    }
-
-    /// A cursor id for a correlated subquery's scan that no outer source uses.
-    fn correlated_cursor(outer: &NameCtx<'_>) -> i64 {
-        outer
-            .srcs
-            .iter()
-            .chain(&outer.outer)
-            .map(|s| s.cursor)
-            .max()
-            .unwrap_or(0)
-            + 100
-    }
-
-    /// Compile a correlated EXISTS subquery (Phase 4B) into `result_reg`.
-    ///
-    /// For each outer row, iterates through the subquery table and checks
-    /// if any row matches the correlated condition.
-    fn compile_correlated_exists_subquery(
-        &mut self,
-        subquery: &Query,
-        negated: bool,
-        outer: &NameCtx<'_>,
-        outer_refs: &[OuterColumnRef],
-        result_reg: i64,
-    ) -> SqawkResult<()> {
-        let select = match &*subquery.body {
-            SetExpr::Select(select) => select,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple SELECT subqueries are supported in correlated EXISTS".to_string(),
-                ))
-            }
-        };
-        let (subquery_table_name, subquery_table) =
-            self.correlated_subquery_table(select, "EXISTS")?;
-        let sub_cursor = Self::correlated_cursor(outer);
-
-        self.emit(
-            OpCode::Integer,
-            0,
-            result_reg,
-            0,
-            None,
-            &format!("r[{}] = 0 (EXISTS init)", result_reg),
-        );
-        self.emit(
-            OpCode::OpenRead,
-            sub_cursor,
-            0,
-            0,
-            Some(subquery_table_name.clone()),
-            &format!("Open {} for correlated EXISTS", subquery_table_name),
-        );
-
-        let done = self.label();
-        self.emit_jump_to(
-            OpCode::Rewind,
-            sub_cursor,
-            done,
-            0,
-            None,
-            "Rewind subquery cursor",
-        );
-        let loop_start = self.label();
-        self.resolve(loop_start);
-
-        let next_row = self.label();
-        if let Some(where_expr) = &select.selection {
-            let ctx = Self::correlated_ctx(subquery_table, sub_cursor, outer, outer_refs);
-            let cmp_reg = self.code_expr(where_expr, &ctx, None)?;
-            self.emit_jump_to(
-                OpCode::IfZ,
-                cmp_reg,
-                next_row,
-                0,
-                None,
-                "Skip if WHERE condition false",
-            );
-        }
-        self.emit(
-            OpCode::Integer,
-            1,
-            result_reg,
-            0,
-            None,
-            &format!("r[{}] = 1 (EXISTS match found)", result_reg),
-        );
-        self.emit_jump_to(OpCode::Goto, 0, done, 0, None, "Exit early on match");
-        self.resolve(next_row);
-        self.emit_jump_to(
-            OpCode::Next,
-            sub_cursor,
-            loop_start,
-            0,
-            None,
-            "Next subquery row",
-        );
-        self.resolve(done);
-
-        self.emit(
-            OpCode::Close,
-            sub_cursor,
-            0,
-            0,
-            None,
-            "Close subquery cursor",
-        );
-        if negated {
-            self.emit(OpCode::Not, result_reg, result_reg, 0, None, "NOT EXISTS");
-        }
-        Ok(())
-    }
-
-    /// Compile a correlated scalar subquery selecting one aggregate.
-    fn compile_correlated_scalar_subquery(
-        &mut self,
-        subquery: &Query,
-        outer: &NameCtx<'_>,
-        outer_refs: &[OuterColumnRef],
-        result_reg: i64,
-    ) -> SqawkResult<()> {
-        let select = match &*subquery.body {
-            SetExpr::Select(select) => select,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple SELECT subqueries are supported in correlated scalar".to_string(),
-                ))
-            }
-        };
-        let (subquery_table_name, subquery_table) =
-            self.correlated_subquery_table(select, "scalar")?;
-
-        let (agg_func_name, agg_col_idx) = match select.projection.first() {
-            Some(SelectItem::UnnamedExpr(Expr::Function(func))) => {
-                let func_name = func.name.to_string().to_uppercase();
-                let col_idx = self.extract_agg_column_index(func, subquery_table)?;
-                (func_name, col_idx)
-            }
-            Some(_) => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Correlated scalar subquery must select an aggregate function".to_string(),
-                ))
-            }
-            None => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Correlated scalar subquery must have a SELECT expression".to_string(),
-                ))
-            }
-        };
-        if !AggregateFunction::is_aggregate_name(&agg_func_name) {
-            return Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported aggregate in correlated subquery: {}",
-                agg_func_name
-            )));
-        }
-        let agg_type = Self::agg_func_type(agg_func_name.as_str());
-
-        let sub_cursor = Self::correlated_cursor(outer);
-        let acc_reg = self.allocate_register();
-        let val_reg = self.allocate_register();
-
-        // Initialize accumulator with Null (like SQLite does)
-        // AggStep/AggFinal will treat Null as "no data yet"
-        self.emit(
-            OpCode::Null,
-            0,
-            acc_reg,
-            acc_reg,
-            None,
-            &format!("r[{}]=NULL; Init {} accumulator", acc_reg, agg_func_name),
-        );
-        self.emit(
-            OpCode::OpenRead,
-            sub_cursor,
-            0,
-            0,
-            Some(subquery_table_name.clone()),
-            &format!("Open {} for correlated scalar", subquery_table_name),
-        );
-
-        let done = self.label();
-        self.emit_jump_to(
-            OpCode::Rewind,
-            sub_cursor,
-            done,
-            0,
-            None,
-            "Rewind subquery cursor",
-        );
-        let loop_start = self.label();
-        self.resolve(loop_start);
-
-        let next_row = self.label();
-        if let Some(where_expr) = &select.selection {
-            let ctx = Self::correlated_ctx(subquery_table, sub_cursor, outer, outer_refs);
-            let cmp_reg = self.code_expr(where_expr, &ctx, None)?;
-            self.emit_jump_to(
-                OpCode::IfZ,
-                cmp_reg,
-                next_row,
-                0,
-                None,
-                "Skip if WHERE false",
-            );
-        }
-        self.emit(
-            OpCode::Column,
-            sub_cursor,
-            agg_col_idx as i64,
-            val_reg,
-            None,
-            &format!("r[{}] = subquery column for agg", val_reg),
-        );
-        self.emit(
-            OpCode::AggStep,
-            agg_type,
-            val_reg,
-            acc_reg,
-            None,
-            &format!(
-                "Aggregate step: {} r[{}] -> r[{}]",
-                agg_func_name, val_reg, acc_reg
-            ),
-        );
-        self.resolve(next_row);
-        self.emit_jump_to(
-            OpCode::Next,
-            sub_cursor,
-            loop_start,
-            0,
-            None,
-            "Next subquery row",
-        );
-        self.resolve(done);
-
-        // P3 = function type hint for when no AggStep was called (register still Null)
-        self.emit(
-            OpCode::AggFinal,
-            acc_reg,
-            result_reg,
-            agg_type,
-            None,
-            &format!("r[{}] = final {} result", result_reg, agg_func_name),
-        );
-        self.emit(
-            OpCode::Close,
-            sub_cursor,
-            0,
-            0,
-            None,
-            "Close subquery cursor",
-        );
         Ok(())
     }
 
@@ -1830,7 +1007,7 @@ impl<'a> SqlCompiler<'a> {
         pattern: &Expr,
         negated: bool,
         case_insensitive: bool,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         dest: i64,
     ) -> SqawkResult<()> {
         let pattern_str = match pattern {
@@ -1875,7 +1052,7 @@ impl<'a> SqlCompiler<'a> {
         low: &Expr,
         high: &Expr,
         negated: bool,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         dest: i64,
     ) -> SqawkResult<()> {
         let x = self.code_expr(expr, ctx, None)?;
@@ -1912,7 +1089,7 @@ impl<'a> SqlCompiler<'a> {
         expr: &Expr,
         list: &[Expr],
         negated: bool,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         dest: i64,
     ) -> SqawkResult<()> {
         if list.is_empty() {
@@ -1942,7 +1119,7 @@ impl<'a> SqlCompiler<'a> {
         sub_expr: &Expr,
         substring_from: Option<&Expr>,
         substring_for: Option<&Expr>,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         // A start position is required.
@@ -1990,7 +1167,7 @@ impl<'a> SqlCompiler<'a> {
         operand: Option<&Expr>,
         conditions: &[CaseWhen],
         else_result: Option<&Expr>,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         dest: i64,
     ) -> SqawkResult<()> {
         // For simple CASE, compile the operand once.
@@ -2063,7 +1240,7 @@ impl<'a> SqlCompiler<'a> {
     fn compile_func_coalesce(
         &mut self,
         func: &Function,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).is_empty() {
@@ -2176,7 +1353,7 @@ impl<'a> SqlCompiler<'a> {
     fn compile_func_nullif(
         &mut self,
         func: &Function,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).len() != 2 {
@@ -2267,7 +1444,7 @@ impl<'a> SqlCompiler<'a> {
         &mut self,
         func_name: &str,
         func: &Function,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).is_empty() {
@@ -2300,7 +1477,7 @@ impl<'a> SqlCompiler<'a> {
     fn compile_func_substr(
         &mut self,
         func: &Function,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).len() < 2 {
@@ -2346,7 +1523,7 @@ impl<'a> SqlCompiler<'a> {
     fn compile_func_replace(
         &mut self,
         func: &Function,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).len() != 3 {
@@ -2385,7 +1562,7 @@ impl<'a> SqlCompiler<'a> {
     fn compile_func_concat(
         &mut self,
         func: &Function,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).len() < 2 {
@@ -2428,7 +1605,7 @@ impl<'a> SqlCompiler<'a> {
         &mut self,
         func_name: &str,
         func: &Function,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).len() != 2 {
@@ -2467,7 +1644,7 @@ impl<'a> SqlCompiler<'a> {
         &mut self,
         func_name: &str,
         func: &Function,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         let args = func_args(func);
@@ -2531,7 +1708,7 @@ impl<'a> SqlCompiler<'a> {
         &mut self,
         func_name: &str,
         func: &Function,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         if func_args(func).is_empty() {
@@ -2564,7 +1741,7 @@ impl<'a> SqlCompiler<'a> {
     fn compile_function(
         &mut self,
         func: &Function,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         let func_name = Self::get_function_name(func);
@@ -2631,7 +1808,7 @@ impl<'a> SqlCompiler<'a> {
     pub(crate) fn code_expr(
         &mut self,
         expr: &Expr,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         into: Option<i64>,
     ) -> SqawkResult<i64> {
         let dest = into.unwrap_or_else(|| self.allocate_register());
@@ -2658,8 +1835,8 @@ impl<'a> SqlCompiler<'a> {
             // Column references resolve through the context, so they work
             // across joins and aliases and are matched case-insensitively.
             Expr::Identifier(ident) => {
-                let col = ctx.resolve_unqualified(&ident.value)?;
-                let col = ctx.bind(col, &ident.value)?;
+                let (col, depth) = ctx.lookup(None, &ident.value)?;
+                self.note_outer_reference(depth);
                 self.emit_column_ref(col, ctx, dest, &ident.value);
             }
 
@@ -2669,10 +1846,9 @@ impl<'a> SqlCompiler<'a> {
             Expr::CompoundIdentifier(parts) if parts.len() >= 2 => {
                 let qualifier = &parts[parts.len() - 2].value;
                 let name = &parts[parts.len() - 1].value;
-                let label = format!("{}.{}", qualifier, name);
-                let col = ctx.resolve_qualified(qualifier, name)?;
-                let col = ctx.bind(col, &label)?;
-                self.emit_column_ref(col, ctx, dest, &label);
+                let (col, depth) = ctx.lookup(Some(qualifier), name)?;
+                self.note_outer_reference(depth);
+                self.emit_column_ref(col, ctx, dest, &format!("{}.{}", qualifier, name));
             }
 
             Expr::Nested(inner) => {
@@ -2938,55 +2114,14 @@ impl<'a> SqlCompiler<'a> {
                 expr: inner,
                 subquery,
                 negated,
-            } => {
-                let values = self.evaluate_in_subquery_values(subquery)?;
-                if values.is_empty() {
-                    self.emit_empty_in(*negated, dest);
-                } else {
-                    let x = self.code_expr(inner, ctx, None)?;
-                    let item = self.allocate_register();
-                    let hit = self.allocate_register();
-                    self.emit(OpCode::Integer, 0, dest, 0, None, "IN subquery init");
-                    for value in &values {
-                        self.emit_value_literal(item, value)?;
-                        self.emit_in_step(x, item, hit, dest);
-                    }
-                    if *negated {
-                        self.emit(OpCode::Not, dest, dest, 0, None, "NOT IN");
-                    }
-                }
-            }
+            } => self.compile_in_subquery(inner, subquery, *negated, ctx, dest)?,
             Expr::Exists { subquery, negated } => {
-                let outer_refs = self.detect_outer_references(subquery, ctx);
-                if outer_refs.is_empty() {
-                    let exists = self.evaluate_exists_subquery(subquery, *negated)?;
-                    self.emit(
-                        OpCode::Integer,
-                        exists as i64,
-                        dest,
-                        0,
-                        None,
-                        &format!("r[{}] = {} (EXISTS result)", dest, exists as i64),
-                    );
-                } else {
-                    self.compile_correlated_exists_subquery(
-                        subquery,
-                        *negated,
-                        ctx,
-                        &outer_refs,
-                        dest,
-                    )?;
+                self.compile_subquery(subquery, Sub::Exists, ctx, dest)?;
+                if *negated {
+                    self.emit(OpCode::Not, dest, dest, 0, None, "NOT EXISTS");
                 }
             }
-            Expr::Subquery(subquery) => {
-                let outer_refs = self.detect_outer_references(subquery, ctx);
-                if outer_refs.is_empty() {
-                    let value = self.evaluate_scalar_subquery(subquery)?;
-                    self.emit_value_literal(dest, &value)?;
-                } else {
-                    self.compile_correlated_scalar_subquery(subquery, ctx, &outer_refs, dest)?;
-                }
-            }
+            Expr::Subquery(subquery) => self.compile_subquery(subquery, Sub::Scalar, ctx, dest)?,
 
             Expr::Case {
                 operand,
@@ -3080,7 +2215,7 @@ impl<'a> SqlCompiler<'a> {
     }
 
     /// Emit whatever loads a resolved column into `dest`.
-    fn emit_column_ref(&mut self, col: ColumnRef, ctx: &NameCtx<'_>, dest: i64, label: &str) {
+    fn emit_column_ref(&mut self, col: ColumnRef, ctx: &NameCtx<'a>, dest: i64, label: &str) {
         match col {
             ColumnRef::Cursor { cursor, col } => self.emit(
                 OpCode::Column,
@@ -3104,7 +2239,7 @@ impl<'a> SqlCompiler<'a> {
             }
             // COALESCE over the merged columns, leftmost first.
             ColumnRef::Using(i) => {
-                let refs = ctx.using[i].refs.clone();
+                let refs = ctx.using_col(i).refs.clone();
                 let done = self.label();
                 let is_null = self.allocate_register();
                 for (n, (cursor, col)) in refs.iter().enumerate() {
@@ -3130,7 +2265,7 @@ impl<'a> SqlCompiler<'a> {
     fn code_expr_into(
         &mut self,
         expr: &Expr,
-        ctx: &NameCtx<'_>,
+        ctx: &NameCtx<'a>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         self.code_expr(expr, ctx, Some(target_reg)).map(|_| ())
@@ -3223,24 +2358,29 @@ impl<'a> SqlCompiler<'a> {
 
     /// Infer the data type of an expression
     pub(crate) fn infer_expr_type(&self, expr: &Expr, ctx: &NameCtx<'_>) -> DataType {
-        let column_type = |col: SqawkResult<ColumnRef>| -> DataType {
-            let (cursor, idx) = match col {
-                Ok(ColumnRef::Cursor { cursor, col }) => (cursor, col),
-                Ok(ColumnRef::Using(i)) => ctx.using[i].refs[0],
-                _ => return DataType::Text,
+        let column_type = |qualifier: Option<&str>, name: &str| -> DataType {
+            let Ok((col, depth)) = ctx.lookup(qualifier, name) else {
+                return DataType::Text;
             };
-            ctx.srcs
+            let scope = ctx.scope_at(depth);
+            let (cursor, idx) = match col {
+                ColumnRef::Cursor { cursor, col } => (cursor, col),
+                ColumnRef::Using(i) => ctx.using_col(i).refs[0],
+                ColumnRef::Register(_) => return DataType::Text,
+            };
+            scope
+                .srcs
                 .iter()
-                .chain(&ctx.outer)
                 .find(|s| s.cursor == cursor)
                 .and_then(|s| s.table.column_metadata().get(idx))
                 .map(|m| m.data_type)
                 .unwrap_or(DataType::Text)
         };
         match expr {
-            Expr::Identifier(ident) => column_type(ctx.resolve_unqualified(&ident.value)),
+            Expr::Identifier(ident) => column_type(None, &ident.value),
             Expr::CompoundIdentifier(parts) if parts.len() >= 2 => column_type(
-                ctx.resolve_qualified(&parts[parts.len() - 2].value, &parts[parts.len() - 1].value),
+                Some(&parts[parts.len() - 2].value),
+                &parts[parts.len() - 1].value,
             ),
             Expr::Function(func) => {
                 let func_name = func.name.to_string().to_uppercase();

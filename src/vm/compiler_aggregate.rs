@@ -169,6 +169,7 @@ impl<'a> SqlCompiler<'a> {
             // The whole input is one group, which exists even when empty.
             self.add_comment("Aggregate query (no GROUP BY)");
             let acc = self.allocate_registers(na.max(1));
+            self.emit_acc_reset(acc, na);
             self.emit_scan(plan, &mut |c, ctx| {
                 for (j, agg) in aggs.iter().enumerate() {
                     // -1: COUNT(*), which counts rows rather than values.
@@ -241,6 +242,7 @@ impl<'a> SqlCompiler<'a> {
 
         let key_reg = self.allocate_registers(nk);
         let acc = self.allocate_registers(na.max(1));
+        self.emit_acc_reset(acc, na);
         let first = self.allocate_register();
         self.emit(OpCode::Integer, 1, first, 0, None, "first row");
 
@@ -303,6 +305,15 @@ impl<'a> SqlCompiler<'a> {
         self.resolve(done);
         self.finish_stage(&st);
         Ok(())
+    }
+
+    /// Start `n` accumulators fresh. A NULL accumulator register is how
+    /// AggStep knows to begin a new aggregate; it must be set explicitly
+    /// because a subquery's aggregation can run again, once per outer row.
+    fn emit_acc_reset(&mut self, acc: i64, n: usize) {
+        for j in 0..n as i64 {
+            self.emit(OpCode::Null, 0, acc + j, 0, None, "accumulator: fresh");
+        }
     }
 
     /// Emit one output row of a grouped query: finalize the aggregates and

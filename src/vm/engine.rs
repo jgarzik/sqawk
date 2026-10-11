@@ -3556,70 +3556,6 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Continue)
             }
 
-            OpCode::InitCoroutine => {
-                // InitCoroutine P1, P2, P3
-                // P1 = register to store coroutine return/entry address
-                // P2 = address to jump to (skip over coroutine body)
-                // P3 = coroutine entry point (first instruction of coroutine)
-                let return_reg = inst.p1 as usize;
-                let skip_addr = inst.p2 as usize;
-                let entry_point = inst.p3 as usize;
-
-                // Store the entry point in the register - this will be swapped with PC on Yield
-                self.registers[return_reg] = Register::Integer(entry_point as i64);
-
-                // Jump over the coroutine body to continue main execution
-                Ok(ExecuteResult::Jump(skip_addr))
-            }
-
-            OpCode::Yield => {
-                // Yield P1
-                // P1 = register containing coroutine PC (swap with current PC)
-                // Cooperative context switch between main code and coroutine
-                let coro_reg = inst.p1 as usize;
-
-                // Get saved coroutine PC from register
-                let saved_pc = match &self.registers[coro_reg] {
-                    Register::Integer(pc) => *pc as usize,
-                    _ => {
-                        return Err(SqawkError::VmError(
-                            "Yield: register must contain integer PC".into(),
-                        ))
-                    }
-                };
-
-                // Save current PC + 1 (next instruction) into the register
-                // This is where we'll return after EndCoroutine
-                self.registers[coro_reg] = Register::Integer((self.pc + 1) as i64);
-
-                // Jump to the saved coroutine location
-                Ok(ExecuteResult::Jump(saved_pc))
-            }
-
-            OpCode::EndCoroutine => {
-                // EndCoroutine P1
-                // P1 = register containing return address (saved by last Yield)
-                // Jump back to caller, prepare register for next Yield
-                let coro_reg = inst.p1 as usize;
-
-                // Get return address from register
-                let return_addr = match &self.registers[coro_reg] {
-                    Register::Integer(pc) => *pc as usize,
-                    _ => {
-                        return Err(SqawkError::VmError(
-                            "EndCoroutine: register must contain integer return address".into(),
-                        ))
-                    }
-                };
-
-                // Store next instruction (PC + 1) for the next Yield call
-                // This will be the coroutine's resume point
-                self.registers[coro_reg] = Register::Integer((self.pc + 1) as i64);
-
-                // Jump back to caller
-                Ok(ExecuteResult::Jump(return_addr))
-            }
-
             OpCode::Once => {
                 // Once P1, P2
                 // First time: continue to next instruction
@@ -3635,40 +3571,6 @@ impl<'a> VmEngine<'a> {
                     self.once_flags.insert(self.pc, true);
                     Ok(ExecuteResult::Continue)
                 }
-            }
-
-            OpCode::Exists => {
-                // Exists P1, P2
-                // P1 = result register (set to 1 if cursor P2 has rows, else 0)
-                // P2 = cursor ID to check
-                let result_reg = inst.p1 as usize;
-                let cursor_idx = inst.p2 as usize;
-
-                let has_rows = if let Some(cursor) = self.cursors.get(&cursor_idx) {
-                    cursor.row_count() > 0
-                } else {
-                    false
-                };
-
-                self.registers[result_reg] = Register::Integer(if has_rows { 1 } else { 0 });
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::NotExists => {
-                // NotExists P1, P2
-                // P1 = result register (set to 1 if cursor P2 has no rows, else 0)
-                // P2 = cursor ID to check
-                let result_reg = inst.p1 as usize;
-                let cursor_idx = inst.p2 as usize;
-
-                let has_rows = if let Some(cursor) = self.cursors.get(&cursor_idx) {
-                    cursor.row_count() > 0
-                } else {
-                    false
-                };
-
-                self.registers[result_reg] = Register::Integer(if has_rows { 0 } else { 1 });
-                Ok(ExecuteResult::Continue)
             }
 
             #[allow(unreachable_patterns)]

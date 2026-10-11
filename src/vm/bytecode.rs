@@ -199,18 +199,14 @@ pub enum OpCode {
     MarkRowMatched, // Record that cursor P1's current row matched (no-op on a NULL row)
     IfRowMatched,   // Jump to P2 if cursor P1's current row was marked matched
 
-    // Subquery/Coroutine operations (inspired by SQLite)
-    InitCoroutine, // P1 = register to store return address, P2 = jump over coroutine, P3 = coroutine entry
-    Yield,         // Swap program counter with register P1 (coroutine yield)
-    EndCoroutine,  // Jump back to Yield that invoked this coroutine, set P1 for next Yield return
-    Once,          // First time: continue. Subsequently: jump to P2. Used for one-time init.
+    // Subqueries: an uncorrelated subquery's fragment, and a subquery's
+    // cursor setup, run only the first time they are reached.
+    Once, // First time: continue. Subsequently: jump to P2.
 
-    // Subquery result operations
-    AggStep,   // P1 = function type, P2 = value reg, P3 = accumulator reg. Step aggregate.
-    AggFinal,  // P1 = accumulator reg, P2 = result reg. Finalize aggregate.
-    AggReset,  // P1 = accumulator reg. Reset accumulator to initial state.
-    Exists,    // P1 = flag reg (set to 1 if cursor P2 has rows, else 0)
-    NotExists, // P1 = flag reg (set to 1 if cursor P2 has no rows, else 0)
+    // Aggregates
+    AggStep,  // P1 = function type, P2 = value reg, P3 = accumulator reg. Step aggregate.
+    AggFinal, // P1 = accumulator reg, P2 = result reg. Finalize aggregate.
+    AggReset, // P1 = accumulator reg. Reset accumulator to initial state.
 
     // Counter operations (LIMIT/OFFSET)
     DecrJumpZero, // Decrement register P1. If result is zero, jump to P2.
