@@ -145,8 +145,12 @@ When you run a Sqawk command:
 
 1. Sqawk loads each specified file into memory as a table
 2. Table names are derived from file names (without extensions) or can be explicitly assigned
-3. The first row is treated as column headers
-4. Data types are automatically inferred (numbers, strings, etc.)
+3. The first row is treated as column headers (always for `.csv` files and
+   standard input; other files are checked for a missing header -- see
+   [Header Rows](#header-rows))
+4. Data types are inferred per cell: an empty field is NULL, a number written
+   in its canonical form (`42`, `1.5`) is a number, and everything else is
+   text, kept exactly as written (`007`, `1.50`, `1e3`, `true`)
 5. SQL queries are executed against the in-memory tables
 6. Results are displayed on the console
 7. If `--write` is specified, modified tables are saved back to the source files
@@ -266,8 +270,14 @@ sqawk -s "DELETE FROM data WHERE status = 'expired'" data.csv --write
 
 Important notes about the write behavior:
 - Only tables that were actually modified by an operation (INSERT, UPDATE, DELETE) are saved
-- The original file format and delimiter are preserved
-- Column order and headers are maintained
+- Cells the statement did not change are written back exactly as they were
+  read: `007` stays `007`, `1.50` stays `1.50`, quoted text keeps its quotes
+  where they are needed. The one normalisation is that quotes a field did
+  not need (`"plain"`) are dropped
+- The delimiter, the header line (or its absence), CRLF line endings, the
+  file's permissions and row order are preserved. Writing through a symlink
+  updates the file it points to and leaves the link in place
+- NULL is written as an empty field
 - Without `--write`, your files remain untouched regardless of the SQL operations
 
 ### Field Separator Option (-F)
@@ -287,6 +297,9 @@ Notes on field separators:
   tab**, `.tsv` and `.txt` alike. A comma-separated `.txt` file therefore needs
   an explicit `-F,`. A file with no extension at all defaults to comma
 - Common separators include tab (`\t`), comma (`,`), colon (`:`), and pipe (`|`)
+- The separator must be a single ASCII character other than a quote or line
+  break; the two-character escape `\t` means tab. Anything else (including an
+  empty `-F ''`) is rejected with an error
 - `-F` applies to every input file in the invocation, not per file
 - The input separator is preserved when writing a table back with `--write`
 - Query results on stdout use `-F` when it is given, and comma otherwise --
@@ -320,6 +333,24 @@ sqawk -F: \
     passwd=/etc/passwd group=/etc/group
 ```
 
+### Header Rows
+
+- A `.csv` file's first line is always its header, as is the first line of
+  standard input. Lines starting with `#` are data
+- Any other file (`.tsv`, `.txt`, no extension) is checked: if its first line
+  looks like data rather than column names -- a number, a path starting with
+  `/`, `*`, `root` or `nobody` -- it is treated as data and the columns are
+  named `a`, `b`, `c`, ... Lines starting with `#` are comments and skipped
+- `--no-header` says no input file has a header row: the first line is data
+  and the columns are named `a`, `b`, `c`, ... (or by `--tabledef`)
+- `--tabledef` likewise means the file has no header row
+
+A table loaded without a header row is written back without one.
+
+```sh
+sqawk --no-header -s "SELECT a, b FROM pairs WHERE b > 10" pairs.csv
+```
+
 ### Verbose Mode (-v)
 
 The verbose mode provides additional information about the operations being performed:
@@ -328,7 +359,8 @@ The verbose mode provides additional information about the operations being perf
 sqawk -s "SELECT * FROM data WHERE id > 1000" data.csv -v
 ```
 
-Verbose output includes:
+Verbose output goes to standard error, so it never mixes with query results.
+It includes:
 - SQL statements being executed
 - Number of rows affected or returned
 - Table loading information
@@ -362,9 +394,11 @@ File format detection follows these rules:
 
 #### Comment Support
 
-Sqawk supports comment lines in CSV and other delimiter-separated files. Lines that begin with a comment character (typically '#') are ignored during processing:
+Delimited files other than `.csv` may contain comment lines. Lines that begin
+with `#` are ignored when such a file is read. In a `.csv` file, a `#` line is
+an ordinary record:
 
-```csv
+```
 # This line is a comment and will be ignored
 id,name,department,salary
 1,Alice,Engineering,75000
@@ -379,21 +413,22 @@ Comment support is useful for:
 
 #### Rows With The Wrong Field Count
 
-A row whose field count does not match the header is reconciled to the header
-rather than rejected. There is no flag for this and no strict mode:
-
 - A row with **too few** fields is padded with NULL
-- A row with **too many** fields is truncated to the header width
+- A row with **too many** fields is an error naming the line, since there is
+  no column to hold the extra values and dropping them would lose data
 
 ```csv
 a,b,c
 1,2        # loads as 1, 2, NULL
-1,2,3,4    # loads as 1, 2, 3
+1,2,3,4    # error: record has 4 fields, but the table has 3 columns
 ```
 
-This keeps imperfect data sources usable, but it is silent: nothing warns that
-a row was padded or truncated. If a query returns unexpected NULLs in the last
-columns, check the input for short rows.
+Padding is silent. If a query returns unexpected NULLs in the last columns,
+check the input for short rows.
+
+Fields are read per RFC 4180: a quoted field may contain the delimiter, line
+breaks, and doubled quotes (`"say ""hi"""`). Fields are never trimmed, and a
+UTF-8 byte order mark at the start of the file is ignored.
 
 Completely empty input is a different matter. The first line is the header, so
 a file or pipe with no content has no column names and is rejected with *"has
@@ -546,10 +581,11 @@ Sqawk follows a safe-by-default approach to file modification:
 - Files are never modified unless the `--write` flag is provided
 - Only tables that were actually changed are written back
 - When writing back:
-  - Original delimiters and formatting are preserved
-  - Column order remains the same
-  - Header row is preserved
-  - Empty values are written as empty fields, not NULLs
+  - Unchanged cells are written back byte for byte
+  - Original delimiter, header line (or its absence) and line endings are preserved
+  - Column and row order remain the same
+  - NULL is written as an empty field
+  - The file keeps its permissions; a symlink keeps pointing at the rewritten file
 
 Example of safe write behavior:
 
@@ -698,6 +734,13 @@ The output delimiter is whatever `-F` says, and comma when `-F` is absent. It
 does not follow the input file's delimiter, which is what makes the conversion
 above work.
 
+Output is a well-formed delimited file: a field containing the delimiter, a
+quote or a line break, or with leading or trailing spaces, is quoted
+(RFC 4180, with embedded quotes doubled), and NULL is an empty field. A row
+consisting of a single NULL prints as `""` so that it is not a blank line.
+When the reader goes away (`sqawk ... | head`), sqawk stops printing quietly
+and exits successfully.
+
 ### Reading Standard Input
 
 A file operand of `-` reads standard input, so sqawk can sit in the middle of a
@@ -769,10 +812,8 @@ An unaliased aggregate takes the function's name as its column header --
 
 ## Working with Large Files
 
-Sqawk holds a whole table at once. On-disk files are memory-mapped, so loading
-is zero-copy and read-only queries allocate almost nothing; a table is copied to
-the heap the first time it is modified. Either way the dataset must fit, which
-is worth planning for with large files:
+Sqawk holds a whole table in memory at once, so the dataset must fit, which is
+worth planning for with large files:
 
 **Tips for handling large files:**
 

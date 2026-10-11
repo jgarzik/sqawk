@@ -10,7 +10,12 @@
 | `BOOLEAN` | `BOOL` |
 | `NULL` | |
 
-Type inference on load: Integer → Float → Boolean → String. Empty values become NULL.
+Type inference on load, per cell: an empty field is NULL; a canonical integer
+(`42`, `-7` -- printing the number gives back the same text) is INTEGER; a
+canonical float (`1.5`, `-0.25`) is REAL; everything else is TEXT, verbatim and
+untrimmed -- including `007`, `1.50`, `1e3`, ` 42`, `true` and `NaN`. Booleans
+are never inferred. The rule guarantees that every loaded cell prints, and is
+written back, exactly as it was read.
 
 ## SELECT
 
@@ -288,7 +293,8 @@ TRUNCATE TABLE name
 
 ## NULL handling
 
-An empty field reads as NULL.
+An empty field reads as NULL, and NULL is printed (and written back) as an
+empty field.
 
 Comparison follows SQL three-valued logic: any comparison involving NULL is
 UNKNOWN, and a row whose `WHERE` evaluates to UNKNOWN is not returned. This
@@ -306,8 +312,17 @@ floats and text.
 When a comparison mixes a number and a string, the string is converted to a
 number if it parses as one, and the two are compared textually otherwise. This
 matches arithmetic, so `x + '1'` and `x > '1'` agree — awk-like rather than
-strict SQL, which suits untyped delimited input.
+strict SQL, which suits untyped delimited input. Two strings compare as text.
+
+Text that spells a number (`007`, `1.50`, `1e3`, which load as text to keep
+their spelling) is used as that number by arithmetic and by `SUM` and `AVG`.
+`ORDER BY`, `GROUP BY`, `MIN` and `MAX` order such text among the numbers by
+value; values equal as numbers but spelled differently (`7` and `007`) remain
+distinct groups.
 
 ## Writeback
 
 Modifications (INSERT, UPDATE, DELETE) remain in-memory unless `--write` flag is specified.
+Cells a statement did not change are written back byte for byte; NULL is
+written as an empty field; the source file's delimiter, header line (or its
+absence), line endings and permissions are kept.

@@ -107,23 +107,16 @@ lasts only for that statement.
 
 ### File Handlers
 
-The file handling system consists of multiple components:
-
-#### `FileHandler` Trait
-- Defines a common interface for different file format handlers
-- Provides abstraction for loading and saving tables from various file formats
-- Allows for consistent treatment of different delimiter-separated formats
-
-#### `CsvHandler` Implementation
-- Specialized handler for standard CSV files
-- Uses the csv crate for parsing and writing
-- Handles comma-separated values with standard CSV escaping rules
-
-#### `DelimHandler` Implementation
-- Handles files with custom delimiters (e.g., TSV, colon-separated, etc.)
-- Configured via the `-F` command-line option
-- Supports tab, colon, pipe, and other custom separators
-- Preserves the original delimiter and format during writeback
+- `FileHandler` (`file_handler.rs`) resolves `[table_name=]path` operands,
+  chooses the delimiter (`-F`, else comma for `.csv`, no extension and stdin,
+  tab otherwise) and the header policy (`.csv` and stdin: header always;
+  other files: headerless guess and `#` comments; `--no-header`/`--tabledef`:
+  no header), and routes writeback.
+- `csv_handler.rs` does all parsing and writing. Every format is read by the
+  `csv` crate with one configuration (RFC 4180 quoting, multi-line quoted
+  fields, no trimming, BOM stripped, ragged rows padded), and written back by
+  a small RFC 4180 record writer that also quotes fields with leading or
+  trailing whitespace.
 
 ## File I/O Patterns
 
@@ -132,8 +125,9 @@ The file handling system consists of multiple components:
 When saving modified tables back to disk (via the `--write` flag), Sqawk uses an atomic write pattern to ensure data integrity:
 
 1. **Write to Temporary File**: Data is first written to a temporary file in the same directory as the target file
-2. **Sync to Disk**: The temporary file is explicitly synced (`fsync`) to ensure data is durably stored on the physical device
-3. **Atomic Rename**: The temporary file is renamed to the target filename using an atomic rename operation
+2. **Keep Permissions**: The original file's permissions are copied onto the temporary file
+3. **Sync to Disk**: The temporary file is explicitly synced (`fsync`) to ensure data is durably stored on the physical device
+4. **Atomic Rename**: The temporary file is renamed to the target filename using an atomic rename operation
 
 This pattern provides several safety guarantees:
 
@@ -141,14 +135,13 @@ This pattern provides several safety guarantees:
 - **Disk Full Protection**: If the disk runs out of space, the original file is preserved
 - **All-or-Nothing Semantics**: Either the complete new file exists, or the original file is unchanged
 
-The temporary file is created in the same directory as the target file to ensure the rename operation is atomic (same filesystem requirement on POSIX systems).
+The temporary file is created in the same directory as the target file to ensure the rename operation is atomic (same filesystem requirement on POSIX systems). A symlinked path is resolved first, so the link's target is rewritten and the link itself is left in place.
 
 ### Delimiter Consistency
 
 Sqawk maintains delimiter consistency between input and output:
 
 - When a file is loaded with a specific delimiter (via `-F` flag or file extension detection), that delimiter is preserved in the table metadata
-- Query results are output using the same delimiter as the source table
 - When files are written back, the original delimiter format is preserved
 
 This ensures that TSV files remain TSV, colon-separated files remain colon-separated, and so on. The principle of least surprise: output format matches input format unless explicitly overridden.
@@ -164,76 +157,55 @@ Sqawk supports two primary output modes:
 
 For stdout output, the data is streamed directly without buffering concerns. For file writeback, the atomic write pattern described above is used.
 
-## Storage Backend Architecture
+## Storage
 
-Sqawk supports multiple storage backends for table row data, enabling efficient handling of different data sources:
+Every table holds its rows in memory as owned values (`Vec<Row>`). Files are
+read whole and parsed by the `csv` crate -- RFC 4180 quoting, quoted fields
+spanning lines, no trimming, UTF-8 byte order mark stripped -- and each cell's
+type is inferred with a rule that round-trips (see "Type inference" below), so
+an unmodified cell is written back byte for byte.
 
-### Memory Storage
+Standard input (the `-` operand) is read the same way, directly from the pipe.
+The resulting table has no file path, so `--write` reports it as unwritable
+rather than writing anywhere.
 
-The `MemoryStorage` backend stores all row data in heap-allocated memory:
-- Used for tables with no backing file (`CREATE TABLE`, `CREATE TABLE AS
-  SELECT`), and for any mmap table after its first modification
-- All string values are owned (heap-allocated)
-- Supports all operations including INSERT, UPDATE, DELETE
-- Data is mutable throughout the session
+### Type inference
 
-### Mmap Storage (Default for on-disk files)
+- empty field: NULL
+- canonical integer (`42`, `-7`, where formatting the number back gives the
+  same text): INTEGER
+- canonical float (`1.5`, `-0.25`): REAL
+- anything else, verbatim: TEXT -- including `007`, `1.50`, `1e3`, ` 42`,
+  `true`, `NaN`
 
-The `MmapStorage` backend uses memory-mapped files for zero-copy access:
-- Automatically used when loading files from disk
-- String values borrow directly from the mmap'd region (zero allocation)
-- Read-only by default to maintain zero-copy efficiency
-- Converts to MemoryStorage on first write operation
+Text that spells a number still acts as one where a number is needed:
+arithmetic, `SUM`/`AVG`, comparison against a number, and sort order.
 
-### Automatic Backend Selection
+### Source layout
 
-The storage backend is selected automatically based on the data source:
-- **On-disk files**: Uses mmap for zero-copy loading
-- **Tables created by DDL**: Uses in-memory storage; there is no file to map
-- **Write operations**: Mmap tables convert to memory on first modification
-
-Standard input (the `-` operand) is not seekable and cannot be mapped directly,
-so it is spooled to a temporary file and then loaded by the ordinary mmap path.
-The temp file handle is held for the run's duration, because the mmap borrows
-from it. The resulting table is then detached from that path, so `--write` has
-no target and reports the table as unwritable rather than rewriting a temp file
-that is about to be deleted.
+Each table records how its file was laid out -- whether it had a header line,
+whether records ended in CRLF, and whether `#` lines were comments -- and
+writeback reproduces it. Writeback also keeps the file's permissions and, for
+a symlink, rewrites the link's target and leaves the link in place.
 
 ### Row Identity Across Updates
 
 UPDATE replaces a row in place rather than deleting and re-appending it, so a
 table keeps its row order and `--write` does not reorder the user's file.
 
-### Write Operation Behavior
-
-When a table with mmap storage is modified (INSERT, UPDATE, DELETE):
-1. All rows are copied to heap memory (converting Cow::Borrowed to Cow::Owned)
-2. The storage backend switches from Mmap to Memory
-3. Subsequent operations use the in-memory copy
-4. The original file remains unchanged until `--write` is specified
-
-This design provides:
-- Zero-allocation loading for read-only queries
-- Transparent handling of write operations
-- Memory efficiency for large read-only datasets
-
 ## Performance Considerations
 
 Sqawk's in-memory database is optimized for:
 
 - **Fast Loading**: Delimiter-separated files are parsed directly into memory
-- **Zero-Copy Access**: Memory-mapped files enable direct access without allocation overhead
 - **Format Flexibility**: Support for CSV, TSV, and custom-delimited files
 - **Efficient Filtering**: WHERE clauses are applied in a single pass
 - **Low Memory Overhead**: Simple data structures minimize memory usage
 - **Zero Configuration**: No setup required, works directly with files in various formats
 
 For larger datasets, consider:
-- The entire dataset must fit in memory (or be addressable via mmap)
+- The entire dataset must fit in memory
 - Complex queries may require multiple passes over the data
-- Write operations on mmap tables trigger a copy to memory
-- Custom delimiters may have slightly different performance characteristics than standard CSV
-- Read-only operations on large files benefit most from mmap storage
 
 ## Join Implementation
 
@@ -275,8 +247,7 @@ The database engine has several architectural limitations:
   completes; there is no BEGIN/COMMIT and no rollback across statements
 - **Schema Flexibility**: Types are inferred per value rather than enforced
 - **No Constraints System**: Referential integrity not enforced
-- **Whole-dataset residency**: A table must fit in memory, or be addressable
-  via mmap
+- **Whole-dataset residency**: A table must fit in memory
 
 Unsupported SQL of note: CTEs (`WITH`), explicit window frames
 (`ROWS BETWEEN ...`), `USING`/`NATURAL` joins, and aggregates over outer
