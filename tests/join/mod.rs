@@ -2,6 +2,8 @@
 //!
 //! Tests for cross joins, inner joins, and multi-table joins.
 
+mod planner;
+
 use predicates::prelude::*;
 
 use crate::helpers::{get_orders_file, get_products_file, get_users_file};

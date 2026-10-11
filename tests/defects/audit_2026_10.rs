@@ -584,7 +584,6 @@ fn delete_not_in_keeps_null_row() -> TestResult {
 /// WHERE is ignored on LEFT JOIN (compiler_join.rs:384), so the anti-join
 /// idiom returns every left row.
 #[test]
-#[ignore]
 fn left_join_where_is_null_anti_join() -> TestResult {
     assert_query_on(
         &[("lt.csv", LT), ("rt.csv", RT)],
@@ -595,7 +594,6 @@ fn left_join_where_is_null_anti_join() -> TestResult {
 
 /// Same root cause: a value filter on the right table of a LEFT JOIN.
 #[test]
-#[ignore]
 fn left_join_where_on_right_column() -> TestResult {
     assert_query(
         &[users_csv(), orders_csv()],
@@ -607,7 +605,6 @@ fn left_join_where_on_right_column() -> TestResult {
 /// Same root cause on RIGHT JOIN (also hit by the right-table column shift
 /// below).
 #[test]
-#[ignore]
 fn right_join_where_is_null() -> TestResult {
     assert_query_on(
         &[("lt.csv", LT), ("rt.csv", RT)],
@@ -618,7 +615,6 @@ fn right_join_where_is_null() -> TestResult {
 
 /// Same root cause on FULL JOIN.
 #[test]
-#[ignore]
 fn full_join_where_is_null() -> TestResult {
     assert_query_on(
         &[("lt.csv", LT), ("rt.csv", RT)],
@@ -629,7 +625,6 @@ fn full_join_where_is_null() -> TestResult {
 
 /// Explicit CROSS JOIN drops the WHERE clause, returning the full product.
 #[test]
-#[ignore]
 fn cross_join_applies_where() -> TestResult {
     assert_query(
         &[users_csv(), orders_csv()],
@@ -640,7 +635,6 @@ fn cross_join_applies_where() -> TestResult {
 
 /// Explicit CROSS JOIN does not register table aliases ("Table 'u' not found").
 #[test]
-#[ignore]
 fn cross_join_with_aliases() -> TestResult {
     assert_query(
         &[users_csv(), orders_csv()],
@@ -654,7 +648,6 @@ fn cross_join_with_aliases() -> TestResult {
 /// `orders.date` yields the id (JOIN projection column offsets,
 /// compiler_join.rs).
 #[test]
-#[ignore]
 fn join_right_table_columns_resolve_correctly() -> TestResult {
     assert_query(
         &[users_csv(), orders_csv()],
@@ -784,7 +777,6 @@ fn literal_union_applies_limit() -> TestResult {
 
 /// HAVING without GROUP BY is ignored.
 #[test]
-#[ignore]
 fn having_without_group_by() -> TestResult {
     assert_no_rows(
         &[employees_csv()],
@@ -794,7 +786,6 @@ fn having_without_group_by() -> TestResult {
 
 /// HAVING is ignored on a JOIN ... GROUP BY.
 #[test]
-#[ignore]
 fn having_on_join() -> TestResult {
     assert_query(
         &[users_csv(), orders_csv()],
@@ -805,7 +796,6 @@ fn having_on_join() -> TestResult {
 
 /// HAVING is ignored on a comma-join ... GROUP BY.
 #[test]
-#[ignore]
 fn having_on_comma_join() -> TestResult {
     assert_query(
         &[users_csv(), orders_csv()],
@@ -816,7 +806,6 @@ fn having_on_comma_join() -> TestResult {
 
 /// Comma-join GROUP BY with two keys groups by the first key only.
 #[test]
-#[ignore]
 fn comma_join_group_by_uses_all_keys() -> TestResult {
     assert_query(
         &[users_csv(), orders_csv()],
@@ -829,7 +818,6 @@ fn comma_join_group_by_uses_all_keys() -> TestResult {
 /// Expected rows follow nested-loop order (users outer), which is what both
 /// sqawk's scan and SQLite produce here.
 #[test]
-#[ignore]
 fn comma_join_offset_skips_first_n() -> TestResult {
     assert_query(
         &[users_csv(), orders_csv()],
@@ -840,7 +828,6 @@ fn comma_join_offset_skips_first_n() -> TestResult {
 
 /// DISTINCT is dropped when LIMIT is present.
 #[test]
-#[ignore]
 fn distinct_with_limit() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -851,7 +838,6 @@ fn distinct_with_limit() -> TestResult {
 
 /// LIMIT/OFFSET with a computed column returns no rows.
 #[test]
-#[ignore]
 fn limit_offset_with_computed_column() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -862,7 +848,6 @@ fn limit_offset_with_computed_column() -> TestResult {
 
 /// LIMIT 0 with a computed column returns every row.
 #[test]
-#[ignore]
 fn limit_zero_with_computed_column() -> TestResult {
     assert_no_rows(
         &[employees_csv()],
@@ -873,7 +858,6 @@ fn limit_zero_with_computed_column() -> TestResult {
 /// `SELECT *, expr` puts the expression value in the second column and
 /// shifts the star columns right, under the original headers.
 #[test]
-#[ignore]
 fn star_with_expression_column_order() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -955,7 +939,6 @@ fn window_two_functions_in_one_select() -> TestResult {
 /// A correlated scalar subquery in the SELECT list is rejected ("Only column
 /// references supported in SELECT") once ORDER BY / LIMIT is added.
 #[test]
-#[ignore]
 fn correlated_scalar_with_order_by_limit() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1004,7 +987,6 @@ fn delete_with_join_is_error() -> TestResult {
 /// GROUP BY over zero rows fails with "No current row in sorter 0"; must
 /// return the header only.
 #[test]
-#[ignore]
 fn group_by_over_zero_rows() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1015,7 +997,6 @@ fn group_by_over_zero_rows() -> TestResult {
 
 /// Same root cause for ORDER BY over zero rows.
 #[test]
-#[ignore]
 fn order_by_over_zero_rows() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1320,7 +1301,6 @@ fn empty_set_aggregates_are_null() -> TestResult {
 
 /// JOIN ... USING is rejected ("Only ON join constraints supported").
 #[test]
-#[ignore]
 fn join_using() -> TestResult {
     assert_query_on(
         &[("lt.csv", LT), ("rt.csv", RT)],
@@ -1331,7 +1311,6 @@ fn join_using() -> TestResult {
 
 /// NATURAL JOIN is rejected.
 #[test]
-#[ignore]
 fn natural_join() -> TestResult {
     assert_query_on(
         &[("lt.csv", LT), ("rt.csv", RT)],
@@ -1343,7 +1322,6 @@ fn natural_join() -> TestResult {
 /// Two LEFT JOINs in one query are rejected ("Only INNER JOIN with ON clause
 /// supported in multi-table joins").
 #[test]
-#[ignore]
 fn two_left_joins() -> TestResult {
     assert_query_on(
         &[("lt.csv", LT), ("rt.csv", RT), ("xt.csv", XT)],
@@ -1355,7 +1333,6 @@ fn two_left_joins() -> TestResult {
 /// Arithmetic in a JOIN SELECT list is rejected ("Unsupported expression in
 /// JOIN projection").
 #[test]
-#[ignore]
 fn join_select_arithmetic() -> TestResult {
     assert_query(
         &[users_csv(), orders_csv()],
@@ -1366,7 +1343,6 @@ fn join_select_arithmetic() -> TestResult {
 
 /// A scalar function in a JOIN SELECT list is rejected.
 #[test]
-#[ignore]
 fn join_select_function() -> TestResult {
     assert_query(
         &[users_csv(), orders_csv()],
@@ -1377,7 +1353,6 @@ fn join_select_function() -> TestResult {
 
 /// An aggregate in the SELECT list of an outer join with GROUP BY is rejected.
 #[test]
-#[ignore]
 fn outer_join_aggregate_group_by() -> TestResult {
     assert_query(
         &[users_csv(), orders_csv()],
@@ -1390,7 +1365,6 @@ fn outer_join_aggregate_group_by() -> TestResult {
 /// GROUP BY ("must appear in GROUP BY"). Values follow sqawk's float
 /// formatting (SQLite prints 70000.0).
 #[test]
-#[ignore]
 fn round_of_avg_with_group_by() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1401,7 +1375,6 @@ fn round_of_avg_with_group_by() -> TestResult {
 
 /// Arithmetic over an aggregate (`COUNT(*) * 10`) is rejected with GROUP BY.
 #[test]
-#[ignore]
 fn aggregate_arithmetic_with_group_by() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1412,7 +1385,6 @@ fn aggregate_arithmetic_with_group_by() -> TestResult {
 
 /// An aggregate over CASE is rejected with GROUP BY.
 #[test]
-#[ignore]
 fn sum_of_case_with_group_by() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1424,7 +1396,6 @@ fn sum_of_case_with_group_by() -> TestResult {
 /// GROUP BY an expression is rejected ("Only column references supported in
 /// GROUP BY").
 #[test]
-#[ignore]
 fn group_by_function_expression() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1435,7 +1406,6 @@ fn group_by_function_expression() -> TestResult {
 
 /// Same, grouping by a numeric expression.
 #[test]
-#[ignore]
 fn group_by_length_expression() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1446,7 +1416,6 @@ fn group_by_length_expression() -> TestResult {
 
 /// GROUP BY ordinal (`GROUP BY 1`) is rejected.
 #[test]
-#[ignore]
 fn group_by_ordinal() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1458,7 +1427,6 @@ fn group_by_ordinal() -> TestResult {
 /// ORDER BY the alias of a computed column is rejected ("Only column
 /// references supported in SELECT").
 #[test]
-#[ignore]
 fn order_by_expression_alias() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1469,7 +1437,6 @@ fn order_by_expression_alias() -> TestResult {
 
 /// HAVING with AND of two aggregates is rejected.
 #[test]
-#[ignore]
 fn having_with_and() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1491,7 +1458,6 @@ fn having_with_alias() -> TestResult {
 
 /// HAVING aggregate IS NULL is rejected.
 #[test]
-#[ignore]
 fn having_aggregate_is_null() -> TestResult {
     assert_query(
         &[nullable_csv()],
@@ -1502,7 +1468,6 @@ fn having_aggregate_is_null() -> TestResult {
 
 /// HAVING an aggregate that is not in the SELECT list is rejected.
 #[test]
-#[ignore]
 fn having_aggregate_not_in_select() -> TestResult {
     assert_query(
         &[employees_csv()],
