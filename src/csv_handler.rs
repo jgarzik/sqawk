@@ -519,6 +519,26 @@ mod tests {
         }
     }
 
+    /// Load errors must name the same line whatever the line endings. With
+    /// CRLF the reported line is one too low (csv-core ends a CRLF record at
+    /// the CR and counts its LF only when the next record is read), so a
+    /// Windows checkout of tests/data/malformed.csv reported line 5, not 6.
+    #[test]
+    #[ignore]
+    fn load_error_line_is_the_same_for_crlf() {
+        let lf = b"id,name,age\n1,Alice,30\n3,Charlie,35\n5,Too,Many,Fields\n";
+        let crlf = b"id,name,age\r\n1,Alice,30\r\n3,Charlie,35\r\n5,Too,Many,Fields\r\n";
+        let quote = b"id,name\r\n1,\"a\r\nb\"\r\n2,x\r\n3,y,z\r\n";
+        for (data, want) in [(&lf[..], 4), (&crlf[..], 4), (&quote[..], 5)] {
+            match load(data, &ReadOptions::default()) {
+                Err(SqawkError::CsvParseError { line, .. }) => {
+                    assert_eq!(line, want, "{:?}", String::from_utf8_lossy(data))
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn untouched_bytes_round_trip() {
         for data in [
