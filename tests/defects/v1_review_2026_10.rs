@@ -1725,7 +1725,8 @@ fn repl_rollback_restores_values() -> TestResult {
 // ORDER BY / GROUP BY integer terms (found after P9)
 // ---------------------------------------------------------------------------
 //
-// SQLite's rule: an integer literal, optionally with unary `+` or `-`, whose
+// SQLite's rule: an integer literal, optionally under parentheses and unary
+// `+` or `-`, whose
 // value fits in 32 bits is a result-column position and must lie in 1..=N or
 // the statement fails with "Nth ORDER BY term out of range"; any other term
 // (a larger integer, a real such as 1.0, an expression such as 1+0) is an
@@ -1736,7 +1737,6 @@ const T3: (&str, &str) = ("t3.csv", "a\n3\n1\n2\n");
 /// `ORDER BY +1` is position 1 in SQLite and sorts the rows; sqawk treated it
 /// as a constant and returned them unsorted -- a silent wrong answer.
 #[test]
-#[ignore]
 fn order_by_unary_plus_position_sorts() -> TestResult {
     assert_query_on(&[T3], "SELECT a FROM t3 ORDER BY +1", "a\n1\n2\n3")?;
     assert_query_on(&[T3], "SELECT a FROM t3 ORDER BY +1 DESC", "a\n3\n2\n1")
@@ -1744,7 +1744,6 @@ fn order_by_unary_plus_position_sorts() -> TestResult {
 
 /// `GROUP BY +1` is position 1 too.
 #[test]
-#[ignore]
 fn group_by_unary_plus_position() -> TestResult {
     assert_query_on(
         &[T3],
@@ -1756,7 +1755,6 @@ fn group_by_unary_plus_position() -> TestResult {
 /// Negative and zero positions are out of range (sqawk accepted `-1` as a
 /// constant and `GROUP BY -1` gave a misleading GROUP BY membership error).
 #[test]
-#[ignore]
 fn negative_and_zero_positions_are_out_of_range() -> TestResult {
     for sql in [
         "SELECT a FROM t3 ORDER BY -1",
@@ -1778,7 +1776,6 @@ fn negative_and_zero_positions_are_out_of_range() -> TestResult {
 /// Integers beyond 32 bits and real literals are constant expressions, not
 /// positions: no reordering, a single group (sqawk errored on both).
 #[test]
-#[ignore]
 fn large_integer_and_real_terms_are_constants() -> TestResult {
     assert_query_on(&[T3], "SELECT a FROM t3 ORDER BY 4294967297", "a\n3\n1\n2")?;
     assert_query_on(&[T3], "SELECT a FROM t3 ORDER BY 2147483648", "a\n3\n1\n2")?;

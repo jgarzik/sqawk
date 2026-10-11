@@ -11,16 +11,13 @@
 //! bound to the register holding its value, which is what makes `SUM(x) + 1`,
 //! `ROUND(AVG(x), 1)`, `UPPER(key)` and arbitrary HAVING expressions work.
 
-use sqlparser::ast::{
-    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, OrderByExpr, Select, Value,
-    ValueWithSpan,
-};
+use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments, OrderByExpr, Select};
 
 use super::ast_compat::{func_args, group_by_exprs};
 use super::bytecode::{OpCode, AGG_DISTINCT, AGG_SEP, AGG_TYPE_MASK};
 use super::compiler::{NameCtx, OutCol, SqlCompiler};
 use super::compiler_from::{expr_children, reads_only_outer, FromPlan};
-use super::compiler_select::{Dest, OutputStage};
+use super::compiler_select::{term_position, Dest, OutputStage};
 use super::compiler_window::{window_call_children, WindowStage};
 use crate::aggregate::AggregateFunction;
 use crate::error::{SqawkError, SqawkResult};
@@ -185,22 +182,12 @@ impl<'a> SqlCompiler<'a> {
         // GROUP BY keys. `GROUP BY 2` names the second output column, and a
         // name that is no column but is a SELECT alias names that column.
         let mut keys: Vec<Expr> = Vec::new();
-        for g in group_by_exprs(&select.group_by) {
+        for (i, g) in group_by_exprs(&select.group_by).iter().enumerate() {
+            if let Some(j) = term_position(g, i, "GROUP", outs.len())? {
+                keys.push(outs[j].expr.clone());
+                continue;
+            }
             let key = match g {
-                Expr::Value(ValueWithSpan {
-                    value: Value::Number(n, _),
-                    ..
-                }) => {
-                    let pos: usize = n.parse().unwrap_or(0);
-                    if pos == 0 || pos > outs.len() {
-                        return Err(SqawkError::InvalidSqlQuery(format!(
-                            "GROUP BY position {} is out of range (1..{})",
-                            n,
-                            outs.len()
-                        )));
-                    }
-                    outs[pos - 1].expr.clone()
-                }
                 Expr::Identifier(ident) if ctx.resolve_unqualified(&ident.value).is_err() => {
                     match outs.iter().find(|o| {
                         o.alias

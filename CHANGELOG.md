@@ -180,6 +180,9 @@ under **Breaking changes**.
 - Crashes: arithmetic, `ABS`, `SUBSTR`, `PRINTF` widths and date modifiers no
   longer overflow or panic; deeply nested expressions are an error instead of
   a stack overflow; a closed standard output or standard error never panics.
+- Integer ORDER BY / GROUP BY terms follow SQLite: `+1`, `(1)` and `- -1`
+  are positions, 0 and negatives are "out of range" errors, and integers
+  beyond 32 bits and reals such as `1.0` are constants.
 - Line numbers in load errors are right for CRLF and CR-only files.
 - `CURRENT_DATE` and the date functions no longer use a 365-day year and
   30-day months.

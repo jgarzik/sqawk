@@ -293,6 +293,22 @@ column reference is named as written (`id` for a column declared `Id`).
 
 Use `AS` whenever the header is consumed downstream.
 
+### Column Positions in ORDER BY and GROUP BY
+
+As in SQLite, an ORDER BY or GROUP BY term that is an integer literal --
+under any parentheses and unary `+` / `-` -- whose value fits in 32 bits is
+a result-column position: `ORDER BY 2`, `ORDER BY +1`, `GROUP BY (1)` and
+`ORDER BY - -1` name a column. It must lie between 1 and the number of
+result columns, or the statement fails with
+`1st ORDER BY term out of range - should be between 1 and 2` (or
+`GROUP BY`; `-1` and `0` are out of range).
+Any other term is an ordinary expression, so a constant one does not reorder
+rows and gives a single group: `ORDER BY 1.0`, `ORDER BY 4294967297`,
+`ORDER BY 1+0`, `ORDER BY '1'`. In a compound SELECT an ORDER BY term that
+is not a position must name a result column, or the statement fails with
+`1st ORDER BY term does not match any column in the result set`. Inside a
+window (`OVER (ORDER BY 1)`) an integer is always a constant.
+
 ### Date/Time Functions
 
 | Function | Description |
@@ -722,7 +738,6 @@ sqawk aims to give SQLite's answers. Where it deliberately does not:
 | `TRIM(s)` | Strips spaces only | Strips all whitespace |
 | `SUM` / `AVG` over text | Non-numeric text counts as 0: `SUM` becomes real, `AVG` divides by every non-NULL value, and over only non-numeric text both give `0.0` | Non-numeric text is skipped: `SUM` stays an integer over integers and integer text, `AVG` divides by the count of numeric values, and over only non-numeric text both give NULL |
 | Bare column in an aggregate query (`SELECT k, MAX(y), s FROM t GROUP BY k`, `SELECT COUNT(*), x FROM t`) | Allowed: the value comes from one row of the group | Rejected: `'s' must appear in GROUP BY or be used in an aggregate` |
-| Integer `ORDER BY` / `GROUP BY` term | Only a 32-bit integer is a column position (a larger one is a constant); 0 or a negative one is an "out of range" error | Any integer literal is a column position (out of range is an error); a negative one such as `-1` is a constant expression |
 | `INSERT OR REPLACE`, `ON CONFLICT` | Plain INSERT when the table has no unique constraint | Rejected: sqawk tables have no keys, so the statement cannot do what it asks |
 | Subqueries in UPDATE / DELETE | A correlated subquery sees rows already changed | Sees the table as it was before the statement |
 | Aggregate of outer-query columns in a subquery (`(SELECT MIN(t.x) FROM u)`) | Evaluated in the outer query, which becomes an aggregate query | Rejected; an aggregate that also reads a column of the subquery's own tables aggregates in the subquery, as in SQLite |

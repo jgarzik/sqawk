@@ -19,7 +19,7 @@
 
 use sqlparser::ast::{
     Distinct, Expr, Ident, OrderByExpr, Query, Select, SelectItem, SetExpr, SetOperator,
-    SetQuantifier, Value, ValueWithSpan,
+    SetQuantifier, UnaryOperator, Value, ValueWithSpan,
 };
 
 use super::ast_compat::{
@@ -131,28 +131,66 @@ fn is_distinct(select: &Select) -> SqawkResult<bool> {
     }
 }
 
-/// A positional ORDER BY key (`ORDER BY 2`) as a zero-based output index.
-///
-/// Compiled as an ordinary expression, such a key would be a constant and
-/// the sort a silent no-op.
-fn order_by_ordinal(expr: &Expr, out_columns: usize) -> SqawkResult<Option<usize>> {
-    let n = match expr {
+/// The value of an ORDER BY / GROUP BY term that SQLite reads as a
+/// result-column position (its `sqlite3ExprIsInteger`): an integer literal
+/// that fits in 32 bits, under any number of parentheses and unary `+` /
+/// `-`. `1.0`, `4294967297`, `1+0` and `'1'` are not positions.
+fn term_integer(expr: &Expr) -> Option<i64> {
+    match expr {
+        // A hex literal past 0x7fffffffffffffff reaches here as a negative
+        // number; SQLite never reads it as a position.
         Expr::Value(ValueWithSpan {
             value: Value::Number(n, _),
             ..
-        }) => n,
-        _ => return Ok(None),
+        }) if !n.starts_with('-') => n.parse::<i32>().ok().map(i64::from),
+        Expr::Nested(e) => term_integer(e),
+        Expr::UnaryOp {
+            op: UnaryOperator::Plus,
+            expr,
+        } => term_integer(expr),
+        Expr::UnaryOp {
+            op: UnaryOperator::Minus,
+            expr,
+        } => term_integer(expr).map(|v| -v),
+        _ => None,
+    }
+}
+
+/// `n` with its English ordinal suffix (`1st`, `12th`, `22nd`), as SQLite
+/// numbers ORDER BY / GROUP BY terms in its errors.
+fn ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n / 10 % 10) {
+        (_, 1) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
     };
-    let idx: usize = n
-        .parse()
-        .map_err(|_| SqawkError::InvalidSqlQuery(format!("Invalid ORDER BY position: {}", n)))?;
-    if idx == 0 || idx > out_columns {
+    format!("{}{}", n, suffix)
+}
+
+/// The zero-based output column named by a positional ORDER BY / GROUP BY
+/// term (`ORDER BY 2`, `GROUP BY +1`), or None when the term is an ordinary
+/// expression (see [`term_integer`]). `term` is the term's zero-based index
+/// in its clause; `clause` is `"ORDER"` or `"GROUP"`.
+pub(crate) fn term_position(
+    expr: &Expr,
+    term: usize,
+    clause: &str,
+    out_columns: usize,
+) -> SqawkResult<Option<usize>> {
+    let Some(v) = term_integer(expr) else {
+        return Ok(None);
+    };
+    if v < 1 || v > out_columns as i64 {
         return Err(SqawkError::InvalidSqlQuery(format!(
-            "ORDER BY position {} is out of range (1..{})",
-            idx, out_columns
+            "{} {} BY term out of range - should be between 1 and {}",
+            ordinal(term + 1),
+            clause,
+            out_columns
         )));
     }
-    Ok(Some(idx - 1))
+    Ok(Some(v as usize - 1))
 }
 
 /// The output column whose header `expr` names, if any.
@@ -268,13 +306,13 @@ impl<'a> SqlCompiler<'a> {
                 let schema = self.compile_compound(body, Dest::Sorter(sorter))?;
                 let n = schema.columns.len();
                 let mut spec = Vec::with_capacity(order_by.len());
-                for ob in order_by {
-                    let pos = match order_by_ordinal(&ob.expr, n)? {
-                        Some(i) => i,
+                for (i, ob) in order_by.iter().enumerate() {
+                    let pos = match term_position(&ob.expr, i, "ORDER", n)? {
+                        Some(j) => j,
                         None => schema_position(&schema, &ob.expr).ok_or_else(|| {
                             SqawkError::InvalidSqlQuery(format!(
-                                "ORDER BY term does not match any column in the result set: {}",
-                                ob.expr
+                                "{} ORDER BY term does not match any column in the result set",
+                                ordinal(i + 1)
                             ))
                         })?,
                     };
@@ -598,7 +636,7 @@ impl<'a> SqlCompiler<'a> {
         let mut spec = Vec::with_capacity(order_by.len());
         for (i, ob) in order_by.iter().enumerate() {
             let text = NameCtx::agg_key(&ob.expr);
-            let key = if let Some(j) = order_by_ordinal(&ob.expr, n)? {
+            let key = if let Some(j) = term_position(&ob.expr, i, "ORDER", n)? {
                 SortKey::Out(j)
             } else if let Some(j) = alias_position(outs, &ob.expr) {
                 SortKey::Out(j)
