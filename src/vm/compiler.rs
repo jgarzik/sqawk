@@ -10,11 +10,12 @@ use super::ast_compat::{
 };
 use sqlparser::ast::{
     BinaryOperator, CaseWhen, DataType as SqlDataType, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArguments, Ident, ObjectName, SelectItem,
+    FunctionArgExpr, FunctionArguments, Ident, ObjectName, Select, SelectItem,
     SelectItemQualifiedWildcardKind, Statement, TrimWhereField, UnaryOperator, Value,
     ValueWithSpan,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::bytecode::{Instruction, OpCode, Program, AGG_COUNT, AGG_DISTINCT};
 use super::compiler_check::{check_create_table, check_delete, check_insert, check_update};
@@ -22,6 +23,7 @@ use super::compiler_from::{expr_children, FromPlan};
 use super::compiler_subquery::Sub;
 use super::compiler_window::window_call_children;
 use super::func;
+use super::parse::SqlSource;
 use crate::aggregate::AggregateFunction;
 use crate::capacity::DEFAULT_CURSOR_CAPACITY;
 use crate::database::Database;
@@ -348,6 +350,24 @@ impl<'t> NameCtx<'t> {
     }
 }
 
+/// The name the table declares for the column `qualifier.name` (or `name`)
+/// resolves to in `ctx` or an enclosing scope -- `Id` for a reference
+/// written `id` -- or `None` when it does not resolve to a table column.
+fn declared_column_name(ctx: &NameCtx<'_>, qualifier: Option<&str>, name: &str) -> Option<String> {
+    let (col, depth) = ctx.lookup(qualifier, name).ok()?;
+    let (cursor, idx) = match col {
+        ColumnRef::Cursor { cursor, col } => (cursor, col),
+        ColumnRef::Using(i) => ctx.using_col(i).refs[0],
+        ColumnRef::Register(_) => return None,
+    };
+    ctx.scope_at(depth)
+        .srcs
+        .iter()
+        .find(|s| s.cursor == cursor)
+        .and_then(|s| s.table.column_metadata().get(idx))
+        .map(|m| m.name.clone())
+}
+
 /// Reject a scale or TO-datetime argument on CEIL/FLOOR.
 ///
 /// sqlparser lowers `CEIL`/`FLOOR` to [`sqlparser::ast::Expr::Ceil`] and
@@ -418,6 +438,15 @@ pub struct SqlCompiler<'a> {
     /// While an INSERT ... SELECT or CREATE TABLE ... AS is compiled: where
     /// `Sink::Table` sends the query's rows.
     pub(crate) insert_target: Option<InsertTarget>,
+
+    /// The text the statement was parsed from, which names unaliased
+    /// result columns. `None` names them by the expression's Display form.
+    pub(crate) source: Option<Arc<SqlSource>>,
+
+    /// The statement is the query of a derived table (`FROM (SELECT ...)`),
+    /// whose column references SQLite names as written (`id` for a column
+    /// declared `Id`) rather than by the declared name.
+    pub(crate) derived: bool,
 }
 
 /// The table an INSERT ... SELECT or CREATE TABLE ... AS writes into.
@@ -450,7 +479,17 @@ impl<'a> SqlCompiler<'a> {
             next_cursor: FIRST_TEMP_CURSOR,
             next_sorter: 0,
             insert_target: None,
+            source: None,
+            derived: false,
         }
+    }
+
+    /// Name unaliased result columns by their text in `source`; `derived`
+    /// as the field.
+    pub fn with_source(mut self, source: Option<Arc<SqlSource>>, derived: bool) -> Self {
+        self.source = source;
+        self.derived = derived;
+        self
     }
 
     /// A fresh cursor id for an ephemeral table.
@@ -709,6 +748,7 @@ impl<'a> SqlCompiler<'a> {
 
         // Parse the SQL statement
         let statements = super::parse::parse_sql(sql)?;
+        self.source = Some(Arc::new(SqlSource::new(sql)));
 
         if statements.is_empty() {
             return Err(SqawkError::InvalidSqlQuery(
@@ -838,25 +878,25 @@ impl<'a> SqlCompiler<'a> {
     /// Expand a SELECT list into one expression per output column.
     ///
     /// `*` and `t.*` become column references, so every output column --
-    /// expanded or written -- is compiled by `code_expr` alike.
+    /// expanded or written -- is compiled by `code_expr` alike. Columns are
+    /// named as SQLite names them: an alias wins; a column reference and a
+    /// `*` expansion give the column's own name (duplicates included); any
+    /// other expression gives its text exactly as written.
     pub(crate) fn expand_projection(
         &self,
-        projection: &[SelectItem],
+        select: &Select,
         plan: &FromPlan<'a>,
     ) -> SqawkResult<Vec<OutCol>> {
-        let multi = plan.srcs.len() > 1;
-        let star_name = |refname: &str, col: &str| {
-            if multi && !plan.bare_star {
-                format!("{}.{}", refname, col)
-            } else {
-                col.to_string()
-            }
-        };
         let column = |refname: &str, col: &str| {
             Expr::CompoundIdentifier(vec![Ident::new(refname), Ident::new(col)])
         };
+        let texts = self
+            .source
+            .as_ref()
+            .and_then(|src| src.select_item_texts(select));
+        let ctx = plan.ctx();
         let mut outs = Vec::new();
-        for item in projection {
+        for (item_no, item) in select.projection.iter().enumerate() {
             match item {
                 SelectItem::Wildcard(_) => {
                     for (si, src) in plan.srcs.iter().enumerate() {
@@ -870,7 +910,7 @@ impl<'a> SqlCompiler<'a> {
                             };
                             outs.push(OutCol {
                                 expr,
-                                name: star_name(&src.refname, &meta.name),
+                                name: meta.name.clone(),
                                 alias: None,
                             });
                         }
@@ -895,16 +935,19 @@ impl<'a> SqlCompiler<'a> {
                     for meta in src.table.column_metadata() {
                         outs.push(OutCol {
                             expr: column(&src.refname, &meta.name),
-                            name: star_name(&src.refname, &meta.name),
+                            name: meta.name.clone(),
                             alias: None,
                         });
                     }
                 }
-                SelectItem::UnnamedExpr(expr) => outs.push(OutCol {
-                    expr: expr.clone(),
-                    name: self.output_name(expr, multi),
-                    alias: None,
-                }),
+                SelectItem::UnnamedExpr(expr) => {
+                    let text = texts.as_ref().map(|t| t[item_no]);
+                    outs.push(OutCol {
+                        expr: expr.clone(),
+                        name: self.output_name(expr, text, &ctx),
+                        alias: None,
+                    })
+                }
                 SelectItem::ExprWithAlias { expr, alias } => outs.push(OutCol {
                     expr: expr.clone(),
                     name: alias.value.clone(),
@@ -922,18 +965,31 @@ impl<'a> SqlCompiler<'a> {
         Ok(outs)
     }
 
-    /// Header for an unaliased SELECT-list expression.
-    ///
-    /// In a join a qualified column keeps its qualifier (`users.name`), as
-    /// join output always has; a single-table query shows the bare name.
-    pub(crate) fn output_name(&self, expr: &Expr, multi: bool) -> String {
-        match expr {
-            Expr::CompoundIdentifier(parts) if multi => parts
-                .iter()
-                .map(|p| p.value.as_str())
-                .collect::<Vec<_>>()
-                .join("."),
-            _ => self.get_column_name_from_expr(expr),
+    /// Name of an unaliased result column: a column reference (parenthesized
+    /// or not) is named by the column as the table declares it -- in a
+    /// derived table's query, as written -- anything else by `text`, its
+    /// source text, or failing that its Display form.
+    pub(crate) fn output_name(&self, expr: &Expr, text: Option<&str>, ctx: &NameCtx<'_>) -> String {
+        let mut e = expr;
+        while let Expr::Nested(inner) = e {
+            e = inner;
+        }
+        let reference = match e {
+            Expr::Identifier(ident) => Some((None, &ident.value)),
+            Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                Some((Some(parts[0].value.as_str()), &parts[1].value))
+            }
+            _ => None,
+        };
+        if let Some((qualifier, name)) = reference {
+            if self.derived {
+                return name.clone();
+            }
+            return declared_column_name(ctx, qualifier, name).unwrap_or_else(|| name.clone());
+        }
+        match text {
+            Some(t) => t.to_string(),
+            None => expr.to_string(),
         }
     }
 
@@ -2002,64 +2058,6 @@ impl<'a> SqlCompiler<'a> {
         match (matches.next(), matches.next()) {
             (Some(only), None) => Ok(only),
             _ => Ok(wanted),
-        }
-    }
-
-    pub(crate) fn get_column_name_from_expr(&self, expr: &Expr) -> String {
-        match expr {
-            Expr::Identifier(ident) => ident.value.clone(),
-            Expr::CompoundIdentifier(parts) => {
-                parts.last().map(|p| p.value.clone()).unwrap_or_default()
-            }
-            Expr::Function(func) => {
-                // Aggregate and window functions are named by the function
-                // alone ("COUNT" not "COUNT(*)", "ROW_NUMBER" for a window
-                // call); other functions include arguments for clarity.
-                let func_name = func.name.to_string().to_uppercase();
-                if func.over.is_some()
-                    || AggregateFunction::is_aggregate_call(&func_name, func_args(func).len())
-                {
-                    func_name
-                } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
-                    func_args(func).first()
-                {
-                    format!("{}(*)", func_name)
-                } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr))) =
-                    func_args(func).first()
-                {
-                    // ROUND's precision has to appear in the name, or
-                    // `SELECT ROUND(a, 1), ROUND(a, 3)` yields two columns
-                    // both called `ROUND(a)` and the second is unaddressable.
-                    // The precision is rendered from the AST rather than named
-                    // recursively, so a literal shows as `1` not `expr`.
-                    if func_name == "ROUND" {
-                        if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(prec))) =
-                            func_args(func).get(1)
-                        {
-                            return format!(
-                                "{}({}, {})",
-                                func_name,
-                                self.get_column_name_from_expr(arg_expr),
-                                prec
-                            );
-                        }
-                    }
-                    format!(
-                        "{}({})",
-                        func_name,
-                        self.get_column_name_from_expr(arg_expr)
-                    )
-                } else {
-                    format!("{}()", func_name)
-                }
-            }
-            // SUBSTR/SUBSTRING is its own Expr variant rather than a Function,
-            // so it needs an arm here to keep the descriptive column name
-            // (`SUBSTR(name)`) instead of falling through to `expr`.
-            Expr::Substring { expr, .. } => {
-                format!("SUBSTR({})", self.get_column_name_from_expr(expr))
-            }
-            _ => "expr".to_string(),
         }
     }
 

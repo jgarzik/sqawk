@@ -5,11 +5,11 @@
 use sqlparser::ast::{AlterTableOperation, ObjectName, ObjectType};
 
 use super::ast_compat::sql_option_key_value;
-use super::bytecode::{OpCode, ResultSchema};
+use super::bytecode::{spec_escape, OpCode, ResultSchema};
 use super::compiler::{InsertTarget, SqlCompiler};
 use super::compiler_select::Sink;
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::DataType;
+use crate::table::{unique_column_names, DataType};
 
 impl<'a> SqlCompiler<'a> {
     /// Compile a DROP statement (DROP TABLE)
@@ -80,7 +80,12 @@ impl<'a> SqlCompiler<'a> {
                 let col_name = column_def.name.value.clone();
                 let col_type = Self::sql_type_to_internal(&column_def.data_type.to_string());
 
-                let spec = format!("{}:{}:{}", table_name, col_name, col_type);
+                let spec = format!(
+                    "{}:{}:{}",
+                    spec_escape(&table_name),
+                    spec_escape(&col_name),
+                    col_type
+                );
 
                 self.emit(
                     OpCode::AlterTableAdd,
@@ -174,15 +179,19 @@ impl<'a> SqlCompiler<'a> {
         let schema = schema?;
         self.program.set_result_schema(ResultSchema::new());
 
-        let mut spec = table_name.clone();
-        for col in &schema.columns {
+        // The new table's columns are named as SQLite names them: the
+        // query's result names, made unique (`id, id:1`).
+        let mut names: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+        unique_column_names(&mut names);
+        let mut spec = spec_escape(&table_name);
+        for (col, name) in schema.columns.iter().zip(&names) {
             let type_str = match col.data_type {
                 DataType::Integer => "INTEGER",
                 DataType::Float => "REAL",
                 DataType::Boolean => "BOOLEAN",
                 _ => "TEXT",
             };
-            spec.push_str(&format!(":{}:{}", col.name, type_str));
+            spec.push_str(&format!(":{}:{}", spec_escape(name), type_str));
         }
         spec.push_str("||");
         self.program.instructions[create].p4 = Some(spec.into());
@@ -202,10 +211,10 @@ impl<'a> SqlCompiler<'a> {
         let table_name = self.get_table_name(name)?;
 
         // Build column specification: "table_name:col1:type1:col2:type2:..."
-        let mut spec = table_name.clone();
+        let mut spec = spec_escape(&table_name);
         for col in columns {
             spec.push(':');
-            spec.push_str(&col.name.value);
+            spec.push_str(&spec_escape(&col.name.value));
             spec.push(':');
             let type_str = Self::sql_type_to_internal(&col.data_type.to_string());
             spec.push_str(type_str);
@@ -232,11 +241,11 @@ impl<'a> SqlCompiler<'a> {
         // Add file path and delimiter to spec: "...|filepath|delimiter"
         spec.push('|');
         if let Some(ref fp) = file_path {
-            spec.push_str(fp);
+            spec.push_str(&spec_escape(fp));
         }
         spec.push('|');
         if let Some(ref d) = delimiter {
-            spec.push_str(d);
+            spec.push_str(&spec_escape(d));
         }
 
         // Generate Init

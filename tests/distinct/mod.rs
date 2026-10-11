@@ -199,10 +199,7 @@ fn test_distinct_with_join() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Check output - should include unique combinations from the join
-    assert!(
-        stdout.contains("users.name,orders.product_id"),
-        "Missing header"
-    );
+    assert!(stdout.contains("name,product_id"), "Missing header");
 
     // Check for expected entries after join
     let expected_entries = vec!["John,101", "John,103", "John,104", "Jane,102", "Jane,105"];

@@ -626,7 +626,6 @@ const T: (&str, &str) = ("t.csv", "n,name\n5,ab\n");
 
 /// In a join, `u.name, o.id` are headed `u.name,o.id`; SQLite: `name,id`.
 #[test]
-#[ignore]
 fn qualified_column_header_is_bare_name() -> TestResult {
     assert_query_on(
         &[U, O],
@@ -638,14 +637,12 @@ fn qualified_column_header_is_bare_name() -> TestResult {
 /// `*` over a join is headed `u.id,u.name,o.id,o.uid`; SQLite uses bare
 /// names, duplicates included.
 #[test]
-#[ignore]
 fn star_over_join_header_is_bare_names() -> TestResult {
     assert_query_on(&[U, O], "SELECT * FROM u, o", "id,name,id,uid\n1,ann,7,1")
 }
 
 /// Unaliased expressions are headed `expr`; SQLite uses the text as written.
 #[test]
-#[ignore]
 fn expression_header_is_sql_text() -> TestResult {
     assert_query_on(&[T], "SELECT n*2 FROM t", "n*2\n10")?;
     assert_query_on(&[T], "SELECT upper(name)||1 FROM t", "upper(name)||1\nAB1")?;
@@ -654,7 +651,6 @@ fn expression_header_is_sql_text() -> TestResult {
 
 /// `COUNT(*)` is headed `COUNT`; SQLite: `COUNT(*)`.
 #[test]
-#[ignore]
 fn count_star_header_is_sql_text() -> TestResult {
     assert_query_on(&[T], "SELECT COUNT(*) FROM t", "COUNT(*)\n1")
 }

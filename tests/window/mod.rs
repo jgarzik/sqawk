@@ -517,14 +517,14 @@ fn window_over_join() -> TestResult {
     check(
         "SELECT w.id, cat.label, SUM(w.v) OVER (PARTITION BY cat.label) AS s \
          FROM w JOIN cat ON w.g = cat.g ORDER BY w.id",
-        "w.id,cat.label,s\n1,Alpha,60\n2,Alpha,60\n3,Alpha,60\n4,Beta,20\n5,Beta,20\n\
+        "id,label,s\n1,Alpha,60\n2,Alpha,60\n3,Alpha,60\n4,Beta,20\n5,Beta,20\n\
          6,Beta,20\n8,Alpha,60",
     )?;
     // A NULL-extended row is a row like any other.
     check(
         "SELECT cat.label, w.id, ROW_NUMBER() OVER (PARTITION BY cat.g ORDER BY w.id) AS rn \
          FROM cat LEFT JOIN w ON w.g = cat.g",
-        "cat.label,w.id,rn\nAlpha,1,1\nAlpha,2,2\nAlpha,3,3\nAlpha,8,4\nBeta,4,1\n\
+        "label,id,rn\nAlpha,1,1\nAlpha,2,2\nAlpha,3,3\nAlpha,8,4\nBeta,4,1\n\
          Beta,5,2\nBeta,6,3\nGamma,,1",
     )
 }

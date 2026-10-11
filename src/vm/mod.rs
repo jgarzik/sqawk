@@ -40,6 +40,7 @@ mod compiler_tests;
 mod tests;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::capacity::DEFAULT_TABLE_CAPACITY;
 use crate::database::Database;
@@ -123,14 +124,21 @@ pub fn execute_vm(
         ));
     }
 
-    execute_statements(statements, database, verbose)
+    let source = Arc::new(parse::SqlSource::new(sql));
+    execute_statements(statements, database, verbose, &source, false)
 }
 
 /// Compile and execute parsed statements one at a time (see `execute_vm`).
+///
+/// `source` is the text the statements were parsed from; it names unaliased
+/// result columns. `in_derived`: the statement is a derived table's query,
+/// whose column references are named as written (see `SqlCompiler`).
 fn execute_statements(
     statements: Vec<sqlparser::ast::Statement>,
     database: &mut Database,
     verbose: bool,
+    source: &Arc<parse::SqlSource>,
+    in_derived: bool,
 ) -> SqawkResult<VmExecutionResult> {
     let mut tables: Vec<Table> = Vec::new();
     let mut modified_tables = HashSet::with_capacity(DEFAULT_TABLE_CAPACITY);
@@ -145,7 +153,7 @@ fn execute_statements(
         // every FROM site about subqueries, each derived table is executed
         // first and registered under its alias, and the statement is rewritten
         // to reference that name. The compiler then sees an ordinary table.
-        let derived = materialize_derived_tables(&mut statement, database, verbose)?;
+        let derived = materialize_derived_tables(&mut statement, database, verbose, source)?;
 
         // Phases 1-3 run inside a closure so a failure anywhere still drops
         // the derived tables registered above. Leaving them behind made the
@@ -156,7 +164,8 @@ fn execute_statements(
         let outcome = (|| -> SqawkResult<(Option<Table>, AppliedModifications)> {
             // PHASE 1: SQL -> BYTECODE, against the CURRENT database state.
             let program = {
-                let mut compiler = compiler::SqlCompiler::new(database, verbose);
+                let mut compiler = compiler::SqlCompiler::new(database, verbose)
+                    .with_source(Some(Arc::clone(source)), in_derived);
                 compiler.compile_statement_program(&statement)?
             };
 
@@ -232,15 +241,19 @@ fn materialize_derived_tables(
     statement: &mut sqlparser::ast::Statement,
     database: &mut Database,
     verbose: bool,
+    source: &Arc<parse::SqlSource>,
 ) -> SqawkResult<Vec<String>> {
-    let mut registered = Vec::new();
+    let mut registered = Registered {
+        names: Vec::new(),
+        source: Arc::clone(source),
+    };
     let result = materialize_statement(statement, database, verbose, &mut registered);
     if result.is_err() {
-        for name in &registered {
+        for name in &registered.names {
             database.remove_table(name);
         }
     }
-    result.map(|_| registered)
+    result.map(|_| registered.names)
 }
 
 fn materialize_statement(
@@ -282,7 +295,12 @@ fn materialize_statement(
     Ok(())
 }
 
-type Registered = Vec<String>;
+/// The derived tables registered so far for one statement, and the text the
+/// statement was parsed from.
+struct Registered {
+    names: Vec<String>,
+    source: Arc<parse::SqlSource>,
+}
 
 fn materialize_in_query(
     query: &mut sqlparser::ast::Query,
@@ -448,17 +466,21 @@ fn materialize_in_factor(
         .find(|n| !database.has_table(n))
         .expect("an unused name");
 
+    let source = Arc::clone(&registered.source);
     let result = execute_statements(
         vec![sqlparser::ast::Statement::Query(Box::new(inner))],
         database,
         verbose,
+        &source,
+        true,
     )?;
     let mut table = result.tables.into_iter().next_back().ok_or_else(|| {
         SqawkError::InvalidSqlQuery("Subquery in FROM produced no result".to_string())
     })?;
     table.set_name(name.clone());
+    table.dedup_column_names();
     database.add_table(name.clone(), table)?;
-    registered.push(name.clone());
+    registered.names.push(name.clone());
 
     *factor = sqlparser::ast::TableFactor::Table {
         name: sqlparser::ast::ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(

@@ -807,7 +807,7 @@ CREATE TABLE sales (
 );
 
 sqawk> SELECT COUNT(*) FROM sales;
-COUNT
+COUNT(*)
 1250
 
 sqawk> SELECT c.name, SUM(s.amount) AS total
@@ -821,8 +821,10 @@ Globex,31004.10
 sqawk> .exit
 ```
 
-An unaliased aggregate takes the function's name as its column header --
-`COUNT`, `SUM`, `AVG` -- so use `AS` when the header matters downstream.
+An unaliased expression takes its SQL text as its column header --
+`COUNT(*)`, `SUM(s.amount)` -- and a column reference its bare column name
+(`c.name` is headed `name`), as in SQLite; use `AS` when the header matters
+downstream.
 
 ## Working with Large Files
 

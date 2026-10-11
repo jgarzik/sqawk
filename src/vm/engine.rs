@@ -6,7 +6,7 @@
 
 use super::agg::AggAccumulator;
 use super::arith::{self, ArithOp, Num};
-use super::bytecode::{Instruction, KeyOrder, OpCode, Program, Register, AGG_SEP};
+use super::bytecode::{spec_unescape, Instruction, KeyOrder, OpCode, Program, Register, AGG_SEP};
 use super::{func, like};
 use crate::capacity::{
     DEFAULT_ACCUMULATOR_CAPACITY, DEFAULT_CURSOR_CAPACITY, DEFAULT_MODIFICATIONS_CAPACITY,
@@ -1162,7 +1162,7 @@ impl<'a> VmEngine<'a> {
                     ));
                 }
 
-                let table_name = name_and_cols[0].to_string();
+                let table_name = spec_unescape(name_and_cols[0]);
 
                 // Parse columns (pairs of name:type)
                 let col_count = (name_and_cols.len() - 1) / 2;
@@ -1170,7 +1170,7 @@ impl<'a> VmEngine<'a> {
                 let mut i = 1;
                 while i + 1 < name_and_cols.len() {
                     columns.push(ColumnDef {
-                        name: name_and_cols[i].to_string(),
+                        name: spec_unescape(name_and_cols[i]),
                         data_type: name_and_cols[i + 1].to_string(),
                     });
                     i += 2;
@@ -1180,11 +1180,11 @@ impl<'a> VmEngine<'a> {
                 let file_path = parts
                     .get(1)
                     .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string());
+                    .map(|s| spec_unescape(s));
                 let delimiter = parts
                     .get(2)
                     .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string());
+                    .map(|s| spec_unescape(s));
 
                 // Add to pending modifications
                 self.pending_modifications
@@ -1255,8 +1255,8 @@ impl<'a> VmEngine<'a> {
                     ));
                 }
 
-                let table_name = parts[0].to_string();
-                let column_name = parts[1].to_string();
+                let table_name = spec_unescape(parts[0]);
+                let column_name = spec_unescape(parts[1]);
                 let column_type = parts[2].to_string();
 
                 // Add to pending modifications

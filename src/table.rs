@@ -321,6 +321,28 @@ impl Value {
     }
 }
 
+/// Make `names` unique, case-insensitively, the way SQLite names the
+/// columns of a subquery in FROM or a CREATE TABLE ... AS: a name equal to
+/// an earlier one gets `:1`, `:2`, ... in place of any `:N` suffix it had,
+/// the first that is free (`id, id, id` becomes `id, id:1, id:2`).
+pub fn unique_column_names(names: &mut [String]) {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for name in names.iter_mut() {
+        let mut cnt = 0u32;
+        while seen.contains(&name.to_lowercase()) {
+            let digits = name.len() - name.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+            let mut base = name.len();
+            if digits > 0 && digits < name.len() && name.as_bytes()[name.len() - digits - 1] == b':'
+            {
+                base = name.len() - digits - 1;
+            }
+            cnt += 1;
+            *name = format!("{}:{}", &name[..base], cnt);
+        }
+        seen.insert(name.to_lowercase());
+    }
+}
+
 /// Interpret text as a number: an i64 if it parses as one, else a finite f64.
 ///
 /// This is the single "numeric reading" of text, used by every comparison
@@ -1143,6 +1165,18 @@ impl Table {
         self.column_map.get(name).copied()
     }
 
+    /// Make the column names unique as SQLite names the columns of a
+    /// derived table or CREATE TABLE ... AS (see [`unique_column_names`]).
+    pub fn dedup_column_names(&mut self) {
+        let mut names: Vec<String> = self.cols.iter().map(|c| c.name.clone()).collect();
+        unique_column_names(&mut names);
+        self.column_map.clear();
+        for (i, (col, name)) in self.cols.iter_mut().zip(names).enumerate() {
+            self.column_map.insert(name.clone(), i);
+            col.name = name;
+        }
+    }
+
     /// Print the table to stdout as a delimited file
     ///
     /// Header line, then one record per row, using this table's delimiter
@@ -1418,5 +1452,23 @@ impl RecordWriter {
             out.write_all(b"\"\"")?;
         }
         out.write_all(self.terminator)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unique_column_names;
+
+    #[test]
+    fn unique_column_names_like_sqlite() {
+        let mut names: Vec<String> = ["Id", "id", "id+1", "ID", "id+1", "a:1", "a:1", "x:"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        unique_column_names(&mut names);
+        assert_eq!(
+            names,
+            ["Id", "id:1", "id+1", "ID:2", "id+1:1", "a:1", "a:2", "x:"]
+        );
     }
 }

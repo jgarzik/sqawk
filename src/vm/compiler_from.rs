@@ -263,12 +263,6 @@ pub(crate) struct FromPlan<'t> {
     /// The FROM clause ends in a FULL JOIN: the WHERE conjuncts, re-applied
     /// in the pass over unmatched right rows.
     full_where: Option<Vec<Expr>>,
-    /// `*` expands to bare column names rather than `table.column`.
-    ///
-    /// Joins have always labelled `*` columns `table.column`; a USING or
-    /// NATURAL join instead merges the shared columns into one, and SQL names
-    /// its columns bare (`k,a,b`), which is what this selects.
-    pub bare_star: bool,
     /// WHERE conjuncts of a SELECT without FROM: no loop to place them in,
     /// so they decide whether its single row exists.
     const_where: Vec<Expr>,
@@ -489,7 +483,6 @@ impl<'a> SqlCompiler<'a> {
                 using: Vec::new(),
                 hidden: Vec::new(),
                 full_where: None,
-                bare_star: false,
                 const_where,
                 outer: self.outer_scope.clone().map(Box::new),
             });
@@ -578,7 +571,6 @@ impl<'a> SqlCompiler<'a> {
         let mut using: Vec<UsingCol> = Vec::new();
         let mut hidden: Vec<(usize, usize)> = Vec::new();
         let mut join_terms: Vec<Vec<Expr>> = vec![Vec::new(); srcs.len()];
-        let mut bare_star = false;
         for (i, (_, op)) in factors.iter().enumerate() {
             let Some((_, constraint)) = op else { continue };
             let names: Vec<String> = match constraint {
@@ -605,7 +597,6 @@ impl<'a> SqlCompiler<'a> {
                     .map(|c| c.name.clone())
                     .collect(),
             };
-            bare_star = true;
             for name in names {
                 let right_col = column_index_ci(srcs[i].table, &name);
                 // The leftmost source that has the column.
@@ -646,7 +637,6 @@ impl<'a> SqlCompiler<'a> {
             using,
             hidden,
             full_where: None,
-            bare_star,
             const_where: Vec::new(),
             outer,
         };

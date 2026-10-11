@@ -20,7 +20,9 @@ fn test_basic_aggregate_functions() -> Result<(), Box<dyn std::error::Error>> {
     // COUNT(*) = 8, SUM(age) = 257, AVG(salary) = 67500.0, MIN(age) = 22, MAX(salary) = 90000
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("COUNT,SUM,AVG,MIN,MAX"))
+        .stdout(predicate::str::contains(
+            "COUNT(*),SUM(age),AVG(salary),MIN(age),MAX(salary)",
+        ))
         .stdout(predicate::str::contains("8,257,67500.0,22,90000"));
 
     Ok(())
@@ -63,7 +65,9 @@ fn test_aggregate_functions_with_filter() -> Result<(), Box<dyn std::error::Erro
     // COUNT = 6, SUM(salary) = 440000, AVG(age) = 35.0, MIN(salary) = 60000, MAX(age) = 45
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("COUNT,SUM,AVG,MIN,MAX"))
+        .stdout(predicate::str::contains(
+            "COUNT(*),SUM(salary),AVG(age),MIN(salary),MAX(age)",
+        ))
         .stdout(predicate::str::contains("6,440000,35.0,60000,45"));
 
     Ok(())

@@ -233,11 +233,23 @@ REAL; anything else (`NUMERIC`, `DECIMAL`, `BOOLEAN`, `DATE`) is NUMERIC.
 
 ### Result Column Names
 
-An expression without `AS` is named after its function -- `COUNT`, `SUM`,
-`ROUND(expr)`, `COALESCE(expr)` -- and a bare `CAST` or arithmetic expression
-is named `expr`. `ROUND` includes its precision, so `ROUND(salary, 2)` is named
-`ROUND(salary, 2)` and two roundings of one column to different precisions stay
-addressable. Use `AS` whenever the header is consumed downstream.
+Result columns are named as SQLite names them:
+
+- an `AS` alias names its column;
+- a column reference, qualified or not (`u.name`, `NAME`, `(name)`), is named
+  by the column as the table declares it (`name`), and `*` / `t.*` expand to
+  the tables' column names -- in a join duplicates stay (`id,name,id,total`);
+- any other expression is named by its text exactly as written, spacing and
+  case included: `COUNT(*)`, `n  +  1`, `upper(name)||1`,
+  `a IS NOT DISTINCT FROM 5`;
+- a compound SELECT takes its names from its leftmost SELECT.
+
+The columns of a derived table (`FROM (SELECT ...)`) and of a table made by
+`CREATE TABLE ... AS` are named the same way and then made unique as SQLite
+does: a repeated name gets `:1`, `:2`, ... (`id, id:1`). In a derived table a
+column reference is named as written (`id` for a column declared `Id`).
+
+Use `AS` whenever the header is consumed downstream.
 
 ### Date/Time Functions
 

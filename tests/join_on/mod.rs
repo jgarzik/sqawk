@@ -17,9 +17,9 @@ fn test_inner_join_on_basic() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-v");
 
     // Check output
-    cmd.assert().success().stdout(predicate::str::contains(
-        "users.name,orders.product_id,orders.date",
-    ));
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("name,product_id,date"));
 
     // Verify join results
     cmd.assert()
@@ -58,9 +58,9 @@ fn test_inner_join_on_with_where() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-v");
 
     // Check output - should only include orders with product_id > 102
-    cmd.assert().success().stdout(predicate::str::contains(
-        "users.name,orders.product_id,orders.date",
-    ));
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("name,product_id,date"));
 
     // Verify results match the filter
     cmd.assert()
@@ -95,9 +95,9 @@ fn test_three_way_inner_join_on() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-v");
 
     // Check column aliases and content
-    cmd.assert().success().stdout(predicate::str::contains(
-        "user,product,products.price,orders.date",
-    ));
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("user,product,price,date"));
 
     // Check some expected join results
     cmd.assert()

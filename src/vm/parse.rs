@@ -23,7 +23,9 @@ use sqlparser::ast::{
     OrderByKind, Query, Select, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement,
     TableFactor, TableWithJoins, Values, WindowFrameBound, WindowSpec, WindowType,
 };
+use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
+use sqlparser::tokenizer::{Location, Token, Tokenizer};
 
 use super::dialect::SqawkDialect;
 use crate::error::{SqawkError, SqawkResult};
@@ -576,9 +578,207 @@ fn rewrite_compound(body: &mut Box<SetExpr>) -> SqawkResult<()> {
     Ok(())
 }
 
+/// The text a statement was parsed from, tokenized with byte offsets, so a
+/// result column can be named by its expression exactly as written.
+///
+/// sqlparser's expression spans do not cover a whole expression (`-x`
+/// spans `x`, `CAST(x AS INT)` spans `x`, `(a)` spans `a`), so names are
+/// cut from the token stream instead: the tokens between a SELECT keyword
+/// and the end of its result list, split at top-level commas.
+pub struct SqlSource {
+    text: String,
+    /// Every token in source order: its (line, column) location and its
+    /// byte range in `text`.
+    tokens: Vec<(Token, (u64, u64), usize, usize)>,
+}
+
+impl SqlSource {
+    /// Tokenize `sql` as [`parse_sql`] does. A text that does not tokenize
+    /// yields a source without tokens, which names nothing.
+    pub fn new(sql: &str) -> Self {
+        let mut tokens = Vec::new();
+        if let Ok(toks) = Tokenizer::new(&SqawkDialect, sql).tokenize_with_location() {
+            // Locations only grow, so one forward walk maps them all.
+            let mut walk = (1u64, 1u64, sql.char_indices().peekable());
+            let mut offset = |loc: Location| -> usize {
+                let (line, col, chars) = &mut walk;
+                while (*line, *col) < (loc.line, loc.column) {
+                    match chars.next() {
+                        Some((_, '\n')) => {
+                            *line += 1;
+                            *col = 1;
+                        }
+                        Some(_) => *col += 1,
+                        None => break,
+                    }
+                }
+                chars.peek().map_or(sql.len(), |(i, _)| *i)
+            };
+            for t in toks {
+                let start = offset(t.span.start);
+                let end = offset(t.span.end);
+                tokens.push((
+                    t.token,
+                    (t.span.start.line, t.span.start.column),
+                    start,
+                    end,
+                ));
+            }
+        }
+        SqlSource {
+            text: sql.to_string(),
+            tokens,
+        }
+    }
+
+    /// The source text of each item of `select`'s result list, from its
+    /// first token to its last (an item's alias included), or `None` when
+    /// the list cannot be located in the text.
+    pub fn select_item_texts(&self, select: &Select) -> Option<Vec<&str>> {
+        let start = select.select_token.0.span.start;
+        if start.line == 0 {
+            return None;
+        }
+        // The SELECT keyword's token: the one starting at that location.
+        let mut i = self
+            .tokens
+            .binary_search_by_key(&(start.line, start.column), |t| t.1)
+            .ok()?;
+        if !matches!(&self.tokens[i].0, Token::Word(w) if w.keyword == Keyword::SELECT) {
+            return None;
+        }
+        i += 1;
+        let significant = |t: &Token| !matches!(t, Token::Whitespace(_));
+        while i < self.tokens.len() && !significant(&self.tokens[i].0) {
+            i += 1;
+        }
+        if matches!(&self.tokens.get(i)?.0,
+            Token::Word(w) if matches!(w.keyword, Keyword::DISTINCT | Keyword::ALL))
+        {
+            i += 1;
+        }
+
+        let mut items = Vec::new();
+        let mut first: Option<usize> = None;
+        let mut last = 0;
+        let mut depth = 0usize;
+        let mut prev_distinct = false;
+        let mut push = |first: &mut Option<usize>, last: usize| -> Option<()> {
+            let f = (*first)?;
+            items.push(&self.text[self.tokens[f].2..self.tokens[last].3]);
+            *first = None;
+            Some(())
+        };
+        while let Some((tok, ..)) = self.tokens.get(i) {
+            if !significant(tok) {
+                i += 1;
+                continue;
+            }
+            match tok {
+                Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+                Token::RParen | Token::RBracket | Token::RBrace => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                Token::Comma if depth == 0 => {
+                    push(&mut first, last)?;
+                    i += 1;
+                    continue;
+                }
+                Token::SemiColon if depth == 0 => break,
+                Token::Word(w) if depth == 0 => {
+                    let ends = match w.keyword {
+                        // `a IS [NOT] DISTINCT FROM b` stays in the item.
+                        Keyword::FROM => !prev_distinct,
+                        Keyword::WHERE
+                        | Keyword::GROUP
+                        | Keyword::HAVING
+                        | Keyword::WINDOW
+                        | Keyword::QUALIFY
+                        | Keyword::ORDER
+                        | Keyword::LIMIT
+                        | Keyword::OFFSET
+                        | Keyword::UNION
+                        | Keyword::INTERSECT
+                        | Keyword::EXCEPT
+                        | Keyword::INTO => w.quote_style.is_none(),
+                        _ => false,
+                    };
+                    if ends {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            prev_distinct = matches!(tok, Token::Word(w) if w.keyword == Keyword::DISTINCT);
+            first.get_or_insert(i);
+            last = i;
+            i += 1;
+        }
+        push(&mut first, last)?;
+        (items.len() == select.projection.len()).then_some(items)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The item texts of the first SELECT of `sql`, and of the SELECT of the
+    /// scalar subquery that is its first item when there is one.
+    fn texts(sql: &str) -> Vec<String> {
+        let source = SqlSource::new(sql);
+        let Statement::Query(q) = one(sql) else {
+            panic!("not a query")
+        };
+        let SetExpr::Select(sel) = q.body.as_ref() else {
+            panic!("not a select")
+        };
+        let mut out: Vec<String> = source
+            .select_item_texts(sel)
+            .expect("located")
+            .into_iter()
+            .map(String::from)
+            .collect();
+        if let SelectItem::UnnamedExpr(Expr::Subquery(sub)) = &sel.projection[0] {
+            if let SetExpr::Select(inner) = sub.body.as_ref() {
+                out.extend(
+                    source
+                        .select_item_texts(inner)
+                        .expect("inner")
+                        .into_iter()
+                        .map(String::from),
+                );
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn select_item_texts_are_the_source_spans() {
+        assert_eq!(
+            texts("SELECT n  +  1, COUNT( * ) FROM t"),
+            ["n  +  1", "COUNT( * )"]
+        );
+        assert_eq!(
+            texts("select distinct -a /* c */ , cast(a as text)\n from t where x"),
+            ["-a", "cast(a as text)"]
+        );
+        assert_eq!(
+            texts("SELECT a IS NOT DISTINCT FROM 5, b AS x FROM t"),
+            ["a IS NOT DISTINCT FROM 5", "b AS x"]
+        );
+        assert_eq!(
+            texts("SELECT 'é,', f(a, b) OVER (PARTITION BY c, d)"),
+            ["'é,'", "f(a, b) OVER (PARTITION BY c, d)"]
+        );
+        assert_eq!(
+            texts("SELECT (SELECT max(v), 2\nFROM u) FROM t ORDER BY 1"),
+            ["(SELECT max(v), 2\nFROM u)", "max(v)", "2"]
+        );
+    }
 
     fn one(sql: &str) -> Statement {
         parse_sql(sql).unwrap().pop().unwrap()

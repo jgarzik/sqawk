@@ -136,7 +136,7 @@ fn sqawk_can_query_the_generated_data() -> Result<(), Box<dyn std::error::Error>
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(
         lines,
-        ["COUNT", "40"],
+        ["COUNT(*)", "40"],
         "expected exactly 40 customers, got: {stdout}"
     );
     Ok(())

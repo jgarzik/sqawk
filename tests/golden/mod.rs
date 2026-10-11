@@ -56,7 +56,7 @@ fn select_literal() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT 1",
-        concat!("expr", "\n1",),
+        concat!("1", "\n1",),
     )
 }
 
@@ -67,7 +67,7 @@ fn select_literal_expressions() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT UPPER('ab') || 'c', CAST('12' AS INTEGER) + 1, CASE WHEN 1 > 2 THEN 'x' ELSE 'y' END, SUBSTR('hello', 2, 3), -ABS(-4)",
-        concat!("expr,expr,expr,SUBSTR(expr),expr", "\nABc,13,y,ell,-4"),
+        concat!("UPPER('ab') || 'c',CAST('12' AS INTEGER) + 1,CASE WHEN 1 > 2 THEN 'x' ELSE 'y' END,\"SUBSTR('hello', 2, 3)\",-ABS(-4)", "\nABc,13,y,ell,-4"),
     )
 }
 
@@ -77,7 +77,7 @@ fn select_three_valued_predicates() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT NULL AND 0, NULL OR 1, NULL OR 0, 2 IN (1, NULL), 1 IN (1, NULL), NULL BETWEEN 1 AND 2, NULL LIKE 'a%'",
-        concat!("expr,expr,expr,expr,expr,expr,expr", "\n0,1,,,1,,"),
+        concat!("NULL AND 0,NULL OR 1,NULL OR 0,\"2 IN (1, NULL)\",\"1 IN (1, NULL)\",NULL BETWEEN 1 AND 2,NULL LIKE 'a%'", "\n0,1,,,1,,"),
     )
 }
 
@@ -342,7 +342,7 @@ fn agg_count() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT COUNT(*) FROM employees",
-        concat!("COUNT", "\n8",),
+        concat!("COUNT(*)", "\n8",),
     )
 }
 
@@ -351,7 +351,7 @@ fn agg_sum() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT SUM(salary) FROM employees",
-        concat!("SUM", "\n540000",),
+        concat!("SUM(salary)", "\n540000",),
     )
 }
 
@@ -360,7 +360,7 @@ fn agg_avg() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT AVG(salary) FROM employees",
-        concat!("AVG", "\n67500.0",),
+        concat!("AVG(salary)", "\n67500.0",),
     )
 }
 
@@ -369,7 +369,7 @@ fn agg_min_max() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT MIN(salary), MAX(salary) FROM employees",
-        concat!("MIN,MAX", "\n45000,90000",),
+        concat!("MIN(salary),MAX(salary)", "\n45000,90000",),
     )
 }
 
@@ -378,7 +378,7 @@ fn agg_with_where() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT COUNT(*) FROM employees WHERE department = 'Engineering'",
-        concat!("COUNT", "\n3",),
+        concat!("COUNT(*)", "\n3",),
     )
 }
 
@@ -397,7 +397,7 @@ fn group_by_basic() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT department, COUNT(*) FROM employees GROUP BY department",
         concat!(
-            "department,COUNT",
+            "department,COUNT(*)",
             "\nEngineering,3",
             "\nHR,1",
             "\nMarketing,2",
@@ -412,7 +412,7 @@ fn group_by_sum() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT department, SUM(salary) FROM employees GROUP BY department",
         concat!(
-            "department,SUM",
+            "department,SUM(salary)",
             "\nEngineering,210000",
             "\nHR,45000",
             "\nMarketing,115000",
@@ -427,7 +427,7 @@ fn group_by_having() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT department, COUNT(*) FROM employees GROUP BY department HAVING COUNT(*) > 1",
         concat!(
-            "department,COUNT",
+            "department,COUNT(*)",
             "\nEngineering,3",
             "\nMarketing,2",
             "\nSales,2",
@@ -441,7 +441,7 @@ fn join_on() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users JOIN orders ON users.id = orders.user_id",
         concat!(
-            "users.name,orders.id",
+            "name,id",
             "\nJohn,101",
             "\nJohn,103",
             "\nJohn,105",
@@ -457,7 +457,7 @@ fn join_inner() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.date FROM users INNER JOIN orders ON users.id = orders.user_id",
         concat!(
-            "users.name,orders.date",
+            "name,date",
             "\nJohn,2023-01-15",
             "\nJohn,2023-02-10",
             "\nJohn,2023-03-05",
@@ -473,7 +473,7 @@ fn join_left() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users LEFT JOIN orders ON users.id = orders.user_id",
         concat!(
-            "users.name,orders.id",
+            "name,id",
             "\nJohn,101",
             "\nJohn,103",
             "\nJohn,105",
@@ -489,7 +489,7 @@ fn join_right() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users RIGHT JOIN orders ON users.id = orders.user_id",
         concat!(
-            "users.name,orders.id",
+            "name,id",
             "\nJohn,101",
             "\nJane,102",
             "\nJohn,103",
@@ -505,7 +505,7 @@ fn join_full() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users FULL JOIN orders ON users.id = orders.user_id",
         concat!(
-            "users.name,orders.id",
+            "name,id",
             "\nJohn,101",
             "\nJohn,103",
             "\nJohn,105",
@@ -521,7 +521,7 @@ fn join_cross() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users CROSS JOIN orders",
         concat!(
-            "users.name,orders.id",
+            "name,id",
             "\nJohn,101",
             "\nJohn,102",
             "\nJohn,103",
@@ -542,7 +542,7 @@ fn join_implicit() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users, orders WHERE users.id = orders.user_id",
         concat!(
-            "users.name,orders.id",
+            "name,id",
             "\nJohn,101",
             "\nJohn,103",
             "\nJohn,105",
@@ -558,7 +558,7 @@ fn join_three() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv", "tests/data/products.csv"],
         "SELECT users.name, products.name FROM users, orders, products WHERE users.id = orders.user_id AND orders.product_id = products.product_id",
         concat!(
-            "users.name,products.name",
+            "name,name",
             "\nJohn,Laptop",
             "\nJohn,Headphones",
             "\nJohn,Keyboard",
@@ -715,7 +715,7 @@ fn str_substr() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT SUBSTR(name, 1, 3) FROM employees",
         concat!(
-            "SUBSTR(name)",
+            "\"SUBSTR(name, 1, 3)\"",
             "\nAli",
             "\nBob",
             "\nCha",
@@ -734,7 +734,7 @@ fn str_replace() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT REPLACE(department, 'Engineering', 'Eng') FROM employees",
         concat!(
-            "REPLACE(department)",
+            "\"REPLACE(department, 'Engineering', 'Eng')\"",
             "\nEng",
             "\nMarketing",
             "\nEng",
@@ -753,7 +753,7 @@ fn str_trim() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/strings.csv"],
         "SELECT TRIM(padded_text) FROM strings",
         concat!(
-            "expr",
+            "TRIM(padded_text)",
             "\ntrimme",
             "\nneeds space",
             "\nwhitespace",
@@ -769,7 +769,7 @@ fn str_concat() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT CONCAT(name, department) FROM employees",
         concat!(
-            "CONCAT(name)",
+            "\"CONCAT(name, department)\"",
             "\nAliceEngineering",
             "\nBobMarketing",
             "\nCharlieEngineering",
@@ -788,7 +788,7 @@ fn str_left_right() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT LEFT(name, 2), RIGHT(name, 2) FROM employees",
         concat!(
-            "LEFT(name),RIGHT(name)",
+            "\"LEFT(name, 2)\",\"RIGHT(name, 2)\"",
             "\nAl,ce",
             "\nBo,ob",
             "\nCh,ie",
@@ -846,7 +846,7 @@ fn arith_add() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT name, salary + 1000 FROM employees",
         concat!(
-            "name,expr",
+            "name,salary + 1000",
             "\nAlice,71000",
             "\nBob,56000",
             "\nCharlie,66000",
@@ -865,7 +865,7 @@ fn arith_mul() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT name, salary * 2 FROM employees",
         concat!(
-            "name,expr",
+            "name,salary * 2",
             "\nAlice,140000",
             "\nBob,110000",
             "\nCharlie,130000",
@@ -884,7 +884,7 @@ fn arith_div() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT name, salary / 1000 FROM employees",
         concat!(
-            "name,expr",
+            "name,salary / 1000",
             "\nAlice,70",
             "\nBob,55",
             "\nCharlie,65",
@@ -903,7 +903,7 @@ fn arith_mod() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT name, age % 7 FROM employees",
         concat!(
-            "name,expr",
+            "name,age % 7",
             "\nAlice,2",
             "\nBob,4",
             "\nCharlie,0",
@@ -922,7 +922,7 @@ fn arith_unary_minus() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT name, -salary FROM employees",
         concat!(
-            "name,expr",
+            "name,-salary",
             "\nAlice,-70000",
             "\nBob,-55000",
             "\nCharlie,-65000",
@@ -941,7 +941,7 @@ fn coalesce() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/nullable.csv"],
         "SELECT id, COALESCE(score, 0) FROM nullable",
         concat!(
-            "id,COALESCE(score)",
+            "id,\"COALESCE(score, 0)\"",
             "\n1,90",
             "\n2,0",
             "\n3,70",
@@ -957,7 +957,7 @@ fn nullif() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT name, NULLIF(department, 'HR') FROM employees",
         concat!(
-            "name,NULLIF(department)",
+            "name,\"NULLIF(department, 'HR')\"",
             "\nAlice,Engineering",
             "\nBob,Marketing",
             "\nCharlie,Engineering",
@@ -976,7 +976,7 @@ fn win_row_number() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT name, ROW_NUMBER() OVER (ORDER BY salary DESC) FROM employees",
         concat!(
-            "name,ROW_NUMBER",
+            "name,ROW_NUMBER() OVER (ORDER BY salary DESC)",
             "\nGrace,1",
             "\nDavid,2",
             "\nFrank,3",
@@ -995,7 +995,7 @@ fn win_rank() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT name, RANK() OVER (ORDER BY department) FROM employees",
         concat!(
-            "name,RANK",
+            "name,RANK() OVER (ORDER BY department)",
             "\nAlice,1",
             "\nCharlie,1",
             "\nFrank,1",
@@ -1014,7 +1014,7 @@ fn win_dense_rank() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT name, DENSE_RANK() OVER (ORDER BY department) FROM employees",
         concat!(
-            "name,DENSE_RANK",
+            "name,DENSE_RANK() OVER (ORDER BY department)",
             "\nAlice,1",
             "\nCharlie,1",
             "\nFrank,1",
@@ -1033,7 +1033,7 @@ fn win_lag() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT name, LAG(salary) OVER (ORDER BY salary) FROM employees",
         concat!(
-            "name,LAG",
+            "name,LAG(salary) OVER (ORDER BY salary)",
             "\nHenry,",
             "\nBob,45000",
             "\nEve,55000",
@@ -1052,7 +1052,7 @@ fn win_lead() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT name, LEAD(salary) OVER (ORDER BY salary) FROM employees",
         concat!(
-            "name,LEAD",
+            "name,LEAD(salary) OVER (ORDER BY salary)",
             "\nHenry,55000",
             "\nBob,60000",
             "\nEve,65000",
@@ -1118,7 +1118,7 @@ fn outer_join_inner_baseline() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT customers.name, purchases.item FROM customers INNER JOIN purchases ON customers.id = purchases.customer_id",
         concat!(
-            "customers.name,purchases.item",
+            "name,item",
             "\nAnn,Book",
             "\nAnn,Pen",
             "\nBen,Desk",
@@ -1132,7 +1132,7 @@ fn outer_join_left_nullfill() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT customers.name, purchases.item FROM customers LEFT JOIN purchases ON customers.id = purchases.customer_id",
         concat!(
-            "customers.name,purchases.item",
+            "name,item",
             "\nAnn,Book",
             "\nAnn,Pen",
             "\nBen,Desk",
@@ -1147,7 +1147,7 @@ fn outer_join_right_nullfill() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT customers.name, purchases.item FROM customers RIGHT JOIN purchases ON customers.id = purchases.customer_id",
         concat!(
-            "customers.name,purchases.item",
+            "name,item",
             "\nAnn,Book",
             "\nAnn,Pen",
             "\nBen,Desk",
@@ -1162,7 +1162,7 @@ fn outer_join_full_nullfill() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT customers.name, purchases.item FROM customers FULL JOIN purchases ON customers.id = purchases.customer_id",
         concat!(
-            "customers.name,purchases.item",
+            "name,item",
             "\nAnn,Book",
             "\nAnn,Pen",
             "\nBen,Desk",
@@ -1315,7 +1315,7 @@ fn aggregate_distinct_variants() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/repeats.csv"],
         "SELECT SUM(v), SUM(DISTINCT v), COUNT(v), COUNT(DISTINCT v), \
          MIN(DISTINCT v), MAX(DISTINCT v), AVG(DISTINCT v) FROM repeats",
-        "SUM,SUM,COUNT,COUNT,MIN,MAX,AVG\n100,60,5,3,10,30,20.0",
+        "SUM(v),SUM(DISTINCT v),COUNT(v),COUNT(DISTINCT v),MIN(DISTINCT v),MAX(DISTINCT v),AVG(DISTINCT v)\n100,60,5,3,10,30,20.0",
     )
 }
 
@@ -1333,7 +1333,7 @@ fn case_as_projected_value() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name, CASE WHEN age > 30 THEN 'old' ELSE 'young' END FROM employees LIMIT 3",
-        "name,expr\nAlice,young\nBob,young\nCharlie,old",
+        "name,CASE WHEN age > 30 THEN 'old' ELSE 'young' END\nAlice,young\nBob,young\nCharlie,old",
     )
 }
 
@@ -1342,7 +1342,7 @@ fn cast_as_projected_value() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT CAST(salary AS TEXT) FROM employees LIMIT 2",
-        "expr\n70000\n55000",
+        "CAST(salary AS TEXT)\n70000\n55000",
     )
 }
 
@@ -1351,7 +1351,7 @@ fn is_null_as_projected_value() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/nullable.csv"],
         "SELECT id, score IS NULL FROM nullable",
-        "id,expr\n1,0\n2,1\n3,0\n4,0\n5,0",
+        "id,score IS NULL\n1,0\n2,1\n3,0\n4,0\n5,0",
     )
 }
 
@@ -1360,7 +1360,7 @@ fn like_as_projected_value() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name, name LIKE 'A%' FROM employees LIMIT 2",
-        "name,expr\nAlice,1\nBob,0",
+        "name,name LIKE 'A%'\nAlice,1\nBob,0",
     )
 }
 
@@ -1369,7 +1369,7 @@ fn between_as_projected_value() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name, age BETWEEN 30 AND 40 FROM employees LIMIT 3",
-        "name,expr\nAlice,1\nBob,0\nCharlie,1",
+        "name,age BETWEEN 30 AND 40\nAlice,1\nBob,0\nCharlie,1",
     )
 }
 
@@ -1414,7 +1414,7 @@ fn group_by_with_where_and_having() -> Result<(), Box<dyn std::error::Error>> {
          HAVING COUNT(*) > 1",
         // age > 25 drops Bob(25) and Henry(22), leaving Marketing with one
         // row, which HAVING then removes.
-        "department,COUNT\nEngineering,3\nSales,2",
+        "department,COUNT(*)\nEngineering,3\nSales,2",
     )
 }
 
@@ -1425,7 +1425,7 @@ fn group_by_three_columns() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT department, role, COUNT(*) FROM employees GROUP BY department, role",
-        "department,role,COUNT\n\
+        "department,role,COUNT(*)\n\
          Engineering,Developer,2\n\
          Engineering,Manager,1\n\
          HR,Intern,1\n\
@@ -1442,7 +1442,7 @@ fn group_by_with_where_excluding_a_whole_group() -> Result<(), Box<dyn std::erro
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT department, COUNT(*) FROM employees WHERE salary > 60000 GROUP BY department",
-        "department,COUNT\nEngineering,3\nSales,2",
+        "department,COUNT(*)\nEngineering,3\nSales,2",
     )
 }
 
@@ -1454,7 +1454,7 @@ fn having_on_a_group_key() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT department, COUNT(*) FROM employees GROUP BY department \
          HAVING department = 'Sales'",
-        "department,COUNT\nSales,2",
+        "department,COUNT(*)\nSales,2",
     )
 }
 
@@ -1466,7 +1466,7 @@ fn having_selects_between_same_type_aggregates() -> Result<(), Box<dyn std::erro
         &["tests/data/employees.csv"],
         "SELECT department, SUM(salary), SUM(age) FROM employees GROUP BY department \
          HAVING SUM(age) > 90",
-        "department,SUM,SUM\nEngineering,210000,97",
+        "department,SUM(salary),SUM(age)\nEngineering,210000,97",
     )
 }
 
@@ -1481,7 +1481,7 @@ fn group_by_order_by_aggregate() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT department, COUNT(*) FROM employees GROUP BY department \
          ORDER BY COUNT(*) DESC, department ASC",
-        "department,COUNT\nEngineering,3\nMarketing,2\nSales,2\nHR,1",
+        "department,COUNT(*)\nEngineering,3\nMarketing,2\nSales,2\nHR,1",
     )
 }
 
@@ -1491,7 +1491,7 @@ fn group_by_order_by_limit_together() -> Result<(), Box<dyn std::error::Error>> 
         &["tests/data/employees.csv"],
         "SELECT department, SUM(salary) FROM employees GROUP BY department \
          ORDER BY SUM(salary) DESC LIMIT 2",
-        "department,SUM\nEngineering,210000\nSales,170000",
+        "department,SUM(salary)\nEngineering,210000\nSales,170000",
     )
 }
 
@@ -1501,7 +1501,7 @@ fn group_by_order_by_offset() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT department, COUNT(*) FROM employees GROUP BY department \
          ORDER BY department ASC LIMIT 2 OFFSET 1",
-        "department,COUNT\nHR,1\nMarketing,2",
+        "department,COUNT(*)\nHR,1\nMarketing,2",
     )
 }
 
@@ -1511,7 +1511,7 @@ fn join_order_by_descending() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users JOIN orders ON users.id = orders.user_id \
          ORDER BY orders.id DESC",
-        "users.name,orders.id\nJohn,105\nJane,104\nJohn,103\nJane,102\nJohn,101",
+        "name,id\nJohn,105\nJane,104\nJohn,103\nJane,102\nJohn,101",
     )
 }
 
@@ -1521,7 +1521,7 @@ fn join_order_by_with_limit() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users JOIN orders ON users.id = orders.user_id \
          ORDER BY orders.id ASC LIMIT 2",
-        "users.name,orders.id\nJohn,101\nJane,102",
+        "name,id\nJohn,101\nJane,102",
     )
 }
 
@@ -1581,7 +1581,7 @@ fn aggregates_skip_nulls() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/nullable.csv"],
         "SELECT COUNT(*), COUNT(score), SUM(score), AVG(score) FROM nullable",
-        "COUNT,COUNT,SUM,AVG\n5,4,300,75.0",
+        "COUNT(*),COUNT(score),SUM(score),AVG(score)\n5,4,300,75.0",
     )
 }
 
@@ -1611,7 +1611,7 @@ fn group_by_aggregate_before_key() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT COUNT(*), SUM(salary), department FROM employees GROUP BY department",
-        "COUNT,SUM,department\n\
+        "COUNT(*),SUM(salary),department\n\
          3,210000,Engineering\n\
          1,45000,HR\n\
          2,115000,Marketing\n\
@@ -1624,7 +1624,7 @@ fn group_by_key_repeated_in_projection() -> Result<(), Box<dyn std::error::Error
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT department, COUNT(*), department FROM employees GROUP BY department LIMIT 2",
-        "department,COUNT,department\nEngineering,3,Engineering\nHR,1,HR",
+        "department,COUNT(*),department\nEngineering,3,Engineering\nHR,1,HR",
     )
 }
 
@@ -1653,7 +1653,7 @@ fn join_projection_reversed() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT orders.id, users.name FROM users JOIN orders ON users.id = orders.user_id",
-        "orders.id,users.name\n101,John\n103,John\n105,John\n102,Jane\n104,Jane",
+        "id,name\n101,John\n103,John\n105,John\n102,Jane\n104,Jane",
     )
 }
 
@@ -1663,7 +1663,7 @@ fn left_join_reversed_projection_nullfill() -> Result<(), Box<dyn std::error::Er
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT purchases.item, customers.name FROM customers LEFT JOIN purchases \
          ON customers.id = purchases.customer_id",
-        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\n,Cara",
+        "item,name\nBook,Ann\nPen,Ann\nDesk,Ben\n,Cara",
     )
 }
 
@@ -1673,7 +1673,7 @@ fn right_join_reversed_projection_nullfill() -> Result<(), Box<dyn std::error::E
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT purchases.item, customers.name FROM customers RIGHT JOIN purchases \
          ON customers.id = purchases.customer_id",
-        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\nOrphan,",
+        "item,name\nBook,Ann\nPen,Ann\nDesk,Ben\nOrphan,",
     )
 }
 
@@ -1683,7 +1683,7 @@ fn full_join_reversed_projection_nullfill() -> Result<(), Box<dyn std::error::Er
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT purchases.item, customers.name FROM customers FULL JOIN purchases \
          ON customers.id = purchases.customer_id",
-        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\n,Cara\nOrphan,",
+        "item,name\nBook,Ann\nPen,Ann\nDesk,Ben\n,Cara\nOrphan,",
     )
 }
 
@@ -1746,7 +1746,7 @@ fn aggregate_over_arithmetic() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT SUM(salary + age) FROM employees",
-        "SUM\n540257",
+        "SUM(salary + age)\n540257",
     )
 }
 
@@ -1755,7 +1755,7 @@ fn aggregate_over_function() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT MAX(LENGTH(name)), MIN(LENGTH(name)) FROM employees",
-        "MAX,MIN\n7,3",
+        "MAX(LENGTH(name)),MIN(LENGTH(name))\n7,3",
     )
 }
 
@@ -1764,7 +1764,7 @@ fn arithmetic_over_aggregate() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT SUM(salary) + 1 FROM employees",
-        "expr\n540001",
+        "SUM(salary) + 1\n540001",
     )
 }
 
@@ -1773,7 +1773,7 @@ fn arithmetic_between_two_aggregates() -> Result<(), Box<dyn std::error::Error>>
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT COUNT(*) * 2, MAX(salary) - MIN(salary) FROM employees",
-        "expr,expr\n16,45000",
+        "COUNT(*) * 2,MAX(salary) - MIN(salary)\n16,45000",
     )
 }
 
@@ -1782,7 +1782,7 @@ fn aggregate_mixed_with_plain_projection() -> Result<(), Box<dyn std::error::Err
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT COUNT(*), SUM(salary) / COUNT(*) FROM employees",
-        "COUNT,expr\n8,67500",
+        "COUNT(*),SUM(salary) / COUNT(*)\n8,67500",
     )
 }
 
@@ -1798,7 +1798,7 @@ fn two_selects_keep_separate_headers() -> Result<(), Box<dyn std::error::Error>>
     assert_query(
         &["tests/data/people.csv"],
         "SELECT name FROM people WHERE age > 30; SELECT COUNT(*) FROM people",
-        "name\nAlice\nCharlie\nCOUNT\n3",
+        "name\nAlice\nCharlie\nCOUNT(*)\n3",
     )
 }
 
@@ -1866,7 +1866,7 @@ fn unordered_window_gives_partition_totals() -> Result<(), Box<dyn std::error::E
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name, SUM(salary) OVER (PARTITION BY department) FROM employees",
-        "name,SUM\n\
+        "name,SUM(salary) OVER (PARTITION BY department)\n\
          Alice,210000\nCharlie,210000\nFrank,210000\n\
          Henry,45000\n\
          Bob,115000\nEve,115000\n\
@@ -1879,7 +1879,7 @@ fn ordered_window_keeps_running_totals() -> Result<(), Box<dyn std::error::Error
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT name, SUM(salary) OVER (PARTITION BY department ORDER BY salary) FROM employees",
-        "name,SUM\n\
+        "name,SUM(salary) OVER (PARTITION BY department ORDER BY salary)\n\
          Charlie,65000\nAlice,135000\nFrank,210000\n\
          Henry,45000\n\
          Bob,55000\nEve,115000\n\
@@ -1894,7 +1894,7 @@ fn multiple_unordered_window_aggregates() -> Result<(), Box<dyn std::error::Erro
         &["tests/data/employees.csv"],
         "SELECT name, COUNT(salary) OVER (PARTITION BY department), \
          MIN(salary) OVER (PARTITION BY department) FROM employees",
-        "name,COUNT,MIN\n\
+        "name,COUNT(salary) OVER (PARTITION BY department),MIN(salary) OVER (PARTITION BY department)\n\
          Alice,3,65000\nCharlie,3,65000\nFrank,3,65000\n\
          Henry,1,45000\n\
          Bob,2,55000\nEve,2,55000\n\
@@ -1917,7 +1917,7 @@ fn count_over_inner_join() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT COUNT(*) FROM users JOIN orders ON users.id = orders.user_id",
-        "COUNT\n5",
+        "COUNT(*)\n5",
     )
 }
 
@@ -1927,7 +1927,7 @@ fn group_by_over_inner_join() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, COUNT(*) FROM users JOIN orders ON users.id = orders.user_id \
          GROUP BY users.name",
-        "users.name,COUNT\nJane,2\nJohn,3",
+        "name,COUNT(*)\nJane,2\nJohn,3",
     )
 }
 
@@ -1937,7 +1937,7 @@ fn inner_join_and_comma_join_agree() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT COUNT(*) FROM users, orders WHERE users.id = orders.user_id",
-        "COUNT\n5",
+        "COUNT(*)\n5",
     )
 }
 
@@ -1950,7 +1950,7 @@ fn outer_join_aggregate_is_not_silently_rewritten() -> Result<(), Box<dyn std::e
     assert_query(
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT COUNT(*) FROM customers LEFT JOIN purchases ON customers.id = purchases.customer_id",
-        "COUNT\n4",
+        "COUNT(*)\n4",
     )
 }
 
@@ -1976,7 +1976,7 @@ fn aggregate_over_derived_table() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT COUNT(*) FROM (SELECT name FROM employees WHERE department = 'Engineering') t",
-        "COUNT\n3",
+        "COUNT(*)\n3",
     )
 }
 
@@ -1985,7 +1985,7 @@ fn derived_table_over_group_by() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT * FROM (SELECT department, COUNT(*) FROM employees GROUP BY department) t",
-        "department,COUNT\nEngineering,3\nHR,1\nMarketing,2\nSales,2",
+        "department,COUNT(*)\nEngineering,3\nHR,1\nMarketing,2\nSales,2",
     )
 }
 
@@ -2044,7 +2044,7 @@ fn join_on_with_and() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users JOIN orders \
          ON users.id = orders.user_id AND orders.id > 102",
-        "users.name,orders.id\nJohn,103\nJohn,105\nJane,104",
+        "name,id\nJohn,103\nJohn,105\nJane,104",
     )
 }
 
@@ -2054,7 +2054,7 @@ fn join_on_with_or() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users JOIN orders \
          ON users.id = orders.user_id OR orders.id = 999",
-        "users.name,orders.id\nJohn,101\nJohn,103\nJohn,105\nJane,102\nJane,104",
+        "name,id\nJohn,101\nJohn,103\nJohn,105\nJane,102\nJane,104",
     )
 }
 
@@ -2066,7 +2066,7 @@ fn left_join_with_compound_on_keeps_nullfill() -> Result<(), Box<dyn std::error:
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT customers.name, purchases.item FROM customers LEFT JOIN purchases \
          ON customers.id = purchases.customer_id AND purchases.id > 10",
-        "customers.name,purchases.item\nAnn,Pen\nBen,Desk\nCara,",
+        "name,item\nAnn,Pen\nBen,Desk\nCara,",
     )
 }
 
@@ -2084,7 +2084,7 @@ fn function_in_multi_table_where() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users, orders \
          WHERE users.id = orders.user_id AND UPPER(users.name) = 'JOHN'",
-        "users.name,orders.id\nJohn,101\nJohn,103\nJohn,105",
+        "name,id\nJohn,101\nJohn,103\nJohn,105",
     )
 }
 
@@ -2094,7 +2094,7 @@ fn arithmetic_in_multi_table_where() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users, orders \
          WHERE users.id = orders.user_id AND orders.id - 100 > 3",
-        "users.name,orders.id\nJohn,105\nJane,104",
+        "name,id\nJohn,105\nJane,104",
     )
 }
 
@@ -2104,7 +2104,7 @@ fn not_in_multi_table_where() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users, orders \
          WHERE users.id = orders.user_id AND NOT (orders.id = 101)",
-        "users.name,orders.id\nJohn,103\nJohn,105\nJane,102\nJane,104",
+        "name,id\nJohn,103\nJohn,105\nJane,102\nJane,104",
     )
 }
 
@@ -2115,7 +2115,7 @@ fn unqualified_column_in_multi_table_where() -> Result<(), Box<dyn std::error::E
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users, orders \
          WHERE users.id = orders.user_id AND date = '2023-01-15'",
-        "users.name,orders.id\nJohn,101",
+        "name,id\nJohn,101",
     )
 }
 
@@ -2125,7 +2125,7 @@ fn function_in_join_on_clause() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users JOIN orders \
          ON users.id = orders.user_id AND UPPER(users.name) = 'JANE'",
-        "users.name,orders.id\nJane,102\nJane,104",
+        "name,id\nJane,102\nJane,104",
     )
 }
 
@@ -2145,7 +2145,7 @@ fn three_table_join_with_compound_on() -> Result<(), Box<dyn std::error::Error>>
         "SELECT users.name, products.name FROM users \
          JOIN orders ON users.id = orders.user_id \
          JOIN products ON orders.product_id = products.product_id AND products.price > 200",
-        "users.name,products.name\nJohn,Laptop\nJane,Phone\nJane,Monitor",
+        "name,name\nJohn,Laptop\nJane,Phone\nJane,Monitor",
     )
 }
 
@@ -2160,7 +2160,7 @@ fn three_table_join_unfiltered() -> Result<(), Box<dyn std::error::Error>> {
         "SELECT users.name, products.name, products.price FROM users \
          JOIN orders ON users.id = orders.user_id \
          JOIN products ON orders.product_id = products.product_id",
-        "users.name,products.name,products.price\n\
+        "name,name,price\n\
          John,Laptop,1200\nJohn,Headphones,150\nJohn,Keyboard,80\n\
          Jane,Phone,800\nJane,Monitor,350",
     )
@@ -2225,7 +2225,7 @@ fn alias_in_inner_join() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT u.name, o.id FROM users u JOIN orders o ON u.id = o.user_id",
-        "u.name,o.id\nJohn,101\nJohn,103\nJohn,105\nJane,102\nJane,104",
+        "name,id\nJohn,101\nJohn,103\nJohn,105\nJane,102\nJane,104",
     )
 }
 
@@ -2234,7 +2234,7 @@ fn alias_in_left_join() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT c.name, p.item FROM customers c LEFT JOIN purchases p ON c.id = p.customer_id",
-        "c.name,p.item\nAnn,Book\nAnn,Pen\nBen,Desk\nCara,",
+        "name,item\nAnn,Book\nAnn,Pen\nBen,Desk\nCara,",
     )
 }
 
@@ -2249,7 +2249,7 @@ fn alias_in_three_table_join() -> Result<(), Box<dyn std::error::Error>> {
         "SELECT u.name, p.name FROM users u \
          JOIN orders o ON u.id = o.user_id \
          JOIN products p ON o.product_id = p.product_id",
-        "u.name,p.name\nJohn,Laptop\nJohn,Headphones\nJohn,Keyboard\nJane,Phone\nJane,Monitor",
+        "name,name\nJohn,Laptop\nJohn,Headphones\nJohn,Keyboard\nJane,Phone\nJane,Monitor",
     )
 }
 
@@ -2258,7 +2258,7 @@ fn alias_in_implicit_join() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT u.name, o.id FROM users u, orders o WHERE u.id = o.user_id",
-        "u.name,o.id\nJohn,101\nJohn,103\nJohn,105\nJane,102\nJane,104",
+        "name,id\nJohn,101\nJohn,103\nJohn,105\nJane,102\nJane,104",
     )
 }
 
@@ -2291,7 +2291,7 @@ fn grouped_join_order_by_and_limit() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT u.name, COUNT(*) AS n FROM users u JOIN orders o ON u.id = o.user_id \
          GROUP BY u.name ORDER BY n DESC LIMIT 1",
-        "u.name,n\nJohn,3",
+        "name,n\nJohn,3",
     )
 }
 
@@ -2303,7 +2303,7 @@ fn implicit_join_order_by_takes_top_rows() -> Result<(), Box<dyn std::error::Err
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT u.name, o.id FROM users u, orders o WHERE u.id = o.user_id \
          ORDER BY o.id DESC LIMIT 2",
-        "u.name,o.id\nJohn,105\nJane,104",
+        "name,id\nJohn,105\nJane,104",
     )
 }
 
@@ -2312,7 +2312,7 @@ fn implicit_join_order_by_without_limit() -> Result<(), Box<dyn std::error::Erro
     assert_query(
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT u.name, o.id FROM users u, orders o WHERE u.id = o.user_id ORDER BY o.id DESC",
-        "u.name,o.id\nJohn,105\nJane,104\nJohn,103\nJane,102\nJohn,101",
+        "name,id\nJohn,105\nJane,104\nJohn,103\nJane,102\nJohn,101",
     )
 }
 
@@ -2333,7 +2333,7 @@ fn distinct_aggregate_under_group_by() -> Result<(), Box<dyn std::error::Error>>
     assert_query(
         &["tests/data/repeats_grouped.csv"],
         "SELECT grp, COUNT(DISTINCT val), SUM(DISTINCT val) FROM repeats_grouped GROUP BY grp",
-        "grp,COUNT,SUM\na,2,3\nb,2,4",
+        "grp,COUNT(DISTINCT val),SUM(DISTINCT val)\na,2,3\nb,2,4",
     )
 }
 
@@ -2345,7 +2345,7 @@ fn distinct_aggregate_in_having() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/repeats_grouped.csv"],
         "SELECT grp, COUNT(DISTINCT val) FROM repeats_grouped GROUP BY grp \
          HAVING COUNT(DISTINCT val) > 1",
-        "grp,COUNT\na,2\nb,2",
+        "grp,COUNT(DISTINCT val)\na,2\nb,2",
     )
 }
 
@@ -2357,7 +2357,7 @@ fn order_by_over_select_star_join() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT * FROM customers, purchases WHERE customers.id = purchases.customer_id \
          ORDER BY purchases.id DESC",
-        "customers.id,customers.name,purchases.id,purchases.customer_id,purchases.item\n\
+        "id,name,id,customer_id,item\n\
          2,Ben,12,2,Desk\n\
          1,Ann,11,1,Pen\n\
          1,Ann,10,1,Book",
@@ -2370,7 +2370,7 @@ fn order_by_bare_key_against_qualified_projection() -> Result<(), Box<dyn std::e
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT users.name, orders.id FROM users JOIN orders ON users.id = orders.user_id \
          ORDER BY id DESC LIMIT 2",
-        "users.name,orders.id\nJohn,105\nJane,104",
+        "name,id\nJohn,105\nJane,104",
     )
 }
 
@@ -2399,7 +2399,7 @@ fn window_aggregate_over_explicit_columns() -> Result<(), Box<dyn std::error::Er
     assert_query(
         &["tests/data/windowed.csv"],
         "SELECT a, d, SUM(x) OVER (PARTITION BY d) FROM windowed",
-        "a,d,SUM\n1,E,30\n2,E,30\n3,S,30",
+        "a,d,SUM(x) OVER (PARTITION BY d)\n1,E,30\n2,E,30\n3,S,30",
     )
 }
 
@@ -2446,7 +2446,7 @@ fn unqualified_column_in_multi_table_is_case_insensitive() -> Result<(), Box<dyn
     assert_query(
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT NAME, COUNT(*) FROM users, orders WHERE users.id = orders.user_id GROUP BY NAME",
-        "NAME,COUNT\nJane,2\nJohn,3",
+        "name,COUNT(*)\nJane,2\nJohn,3",
     )
 }
 
@@ -2781,5 +2781,70 @@ fn outer_only_aggregate_rejected() -> Result<(), Box<dyn std::error::Error>> {
         "SELECT k, (SELECT MIN(d.n + e.v) FROM e) AS m, \
          (SELECT COUNT(*) FROM e WHERE e.v > d.n) AS c FROM d",
         "k,m,c\n1,15,1\n2,25,0",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Result column names, as SQLite names them (expected names from SQLite
+// 3.45 `cursor.description` / `PRAGMA table_info`).
+// ---------------------------------------------------------------------------
+
+const NAMES_T: (&str, &str) = ("t.csv", "Id,Name\n1,ann\n");
+const NAMES_U: (&str, &str) = ("u.csv", "id,name\n1,bob\n");
+
+#[test]
+fn column_names_follow_sqlite() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[NAMES_T],
+        "SELECT ID, t.NAME, (id), -id, id  +  1, id IS 5, id IS NOT DISTINCT FROM 5 FROM t",
+        "Id,Name,Id,-id,id  +  1,id IS 5,id IS NOT DISTINCT FROM 5\n1,ann,1,-1,2,0,0",
+    )?;
+    assert_query_on(
+        &[NAMES_T, NAMES_U],
+        "SELECT * FROM t, u",
+        "Id,Name,id,name\n1,ann,1,bob",
+    )?;
+    assert_query_on(
+        &[NAMES_T, NAMES_U],
+        "SELECT t.*, u.name FROM t JOIN u USING (id)",
+        "Id,Name,name\n1,ann,bob",
+    )?;
+    assert_query_on(
+        &[NAMES_T],
+        "SELECT count(*), Count( * ), upper(min(name))||1 FROM t",
+        "count(*),Count( * ),upper(min(name))||1\n1,1,ANN1",
+    )?;
+    assert_query_on(
+        &[NAMES_T, NAMES_U],
+        "SELECT id + 0 FROM t UNION SELECT id AS k FROM u",
+        "id + 0\n1",
+    )
+}
+
+/// Derived-table and CREATE TABLE ... AS columns are made unique with `:N`;
+/// a derived table names a column reference as written.
+#[test]
+fn derived_and_ctas_column_names_are_unique() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[NAMES_T],
+        "SELECT * FROM (SELECT id, ID, id + 1, id + 1 FROM t)",
+        "id,ID:1,id + 1,id + 1:1\n1,1,2,2",
+    )?;
+    assert_query_on(
+        &[NAMES_T, NAMES_U],
+        "SELECT * FROM (SELECT * FROM t, u)",
+        "Id,Name,id:1,name:1\n1,ann,1,bob",
+    )?;
+    assert_query_on(
+        &[NAMES_T],
+        "CREATE TABLE c AS SELECT id, t.id, name || ':' || '|' FROM t; SELECT * FROM c",
+        "Id,Id:1,name || ':' || '|'\n1,1,ann:|",
+    )?;
+    // Column names containing the instruction's own separators.
+    assert_query_on(
+        &[NAMES_T],
+        "CREATE TABLE z (\"a:b\" INT, \"c|d\" TEXT); INSERT INTO z VALUES (1, 'x'); \
+         ALTER TABLE z ADD COLUMN \"e:f|g\" TEXT; SELECT * FROM z",
+        "a:b,c|d,e:f|g\n1,x,",
     )
 }

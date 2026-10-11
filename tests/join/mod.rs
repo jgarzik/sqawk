@@ -21,8 +21,12 @@ fn test_cross_join() -> Result<(), Box<dyn std::error::Error>> {
     // Check output - should have combined columns for a complete cross join
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("users.id,users.name,users.email,orders.id,orders.user_id,orders.product_id,orders.date"))
-        .stderr(predicate::str::contains("Processing multiple tables in FROM clause as CROSS JOINs"));
+        .stdout(predicate::str::contains(
+            "id,name,email,id,user_id,product_id,date",
+        ))
+        .stderr(predicate::str::contains(
+            "Processing multiple tables in FROM clause as CROSS JOINs",
+        ));
 
     // Verify we have a proper cross join with both users appearing in the result
     cmd.assert()
@@ -71,14 +75,26 @@ fn test_inner_join() -> Result<(), Box<dyn std::error::Error>> {
     // Check output - should include john and jane, but only their own orders
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("users.id,users.name,users.email,orders.id,orders.user_id,orders.product_id,orders.date"))
+        .stdout(predicate::str::contains(
+            "id,name,email,id,user_id,product_id,date",
+        ))
         // John's orders
-        .stdout(predicate::str::contains("1,John,john@example.com,101,1,101,2023-01-15"))
-        .stdout(predicate::str::contains("1,John,john@example.com,103,1,103,2023-02-10"))
-        .stdout(predicate::str::contains("1,John,john@example.com,105,1,104,2023-03-05"))
+        .stdout(predicate::str::contains(
+            "1,John,john@example.com,101,1,101,2023-01-15",
+        ))
+        .stdout(predicate::str::contains(
+            "1,John,john@example.com,103,1,103,2023-02-10",
+        ))
+        .stdout(predicate::str::contains(
+            "1,John,john@example.com,105,1,104,2023-03-05",
+        ))
         // Jane's orders
-        .stdout(predicate::str::contains("2,Jane,jane@example.com,102,2,102,2023-01-20"))
-        .stdout(predicate::str::contains("2,Jane,jane@example.com,104,2,105,2023-02-25"));
+        .stdout(predicate::str::contains(
+            "2,Jane,jane@example.com,102,2,102,2023-01-20",
+        ))
+        .stdout(predicate::str::contains(
+            "2,Jane,jane@example.com,104,2,105,2023-02-25",
+        ));
 
     // Verify verbose output contains filtering indications
     cmd.assert()
@@ -100,9 +116,9 @@ fn test_inner_join_with_projection() -> Result<(), Box<dyn std::error::Error>> {
         .arg(get_orders_file().to_str().unwrap());
 
     // Check output - should include only selected columns
-    cmd.assert().success().stdout(predicate::str::contains(
-        "users.name,orders.product_id,orders.date",
-    ));
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("name,product_id,date"));
 
     // Verify we have the correct data
     cmd.assert()
@@ -123,9 +139,9 @@ fn test_three_table_join() -> Result<(), Box<dyn std::error::Error>> {
         .arg(get_products_file().to_str().unwrap());
 
     // Check output headers
-    cmd.assert().success().stdout(predicate::str::contains(
-        "users.name,products.name,products.price,orders.date",
-    ));
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("name,name,price,date"));
 
     // Check for some expected combinations
     cmd.assert()
@@ -150,9 +166,7 @@ fn test_join_with_additional_filtering() -> Result<(), Box<dyn std::error::Error
     // We should only see products with price > 500
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains(
-            "users.name,products.name,products.price",
-        ))
+        .stdout(predicate::str::contains("name,name,price"))
         // These should be included (price > 500)
         .stdout(predicate::str::contains("John,Laptop,1200"))
         .stdout(predicate::str::contains("Jane,Phone,800"));
@@ -190,7 +204,7 @@ fn test_join_order_preservation() -> Result<(), Box<dyn std::error::Error>> {
     // Just check that we get the expected results in some order
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("users.name,orders.id"))
+        .stdout(predicate::str::contains("name,id"))
         .stdout(predicate::str::contains("John,101"))
         .stdout(predicate::str::contains("Jane,102"));
 

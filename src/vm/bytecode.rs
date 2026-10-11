@@ -86,6 +86,25 @@ impl ResultSchema {
     }
 }
 
+/// Escape one field of a DDL instruction's P4 spec (CreateTable,
+/// AlterTableAdd), whose fields are separated by `:` and `|`. Column names
+/// may contain either -- an unaliased result column is named by its SQL
+/// text, `a||b` -- and so may file paths.
+pub fn spec_escape(field: &str) -> String {
+    field
+        .replace('%', "%25")
+        .replace(':', "%3A")
+        .replace('|', "%7C")
+}
+
+/// Undo [`spec_escape`].
+pub fn spec_unescape(field: &str) -> String {
+    field
+        .replace("%7C", "|")
+        .replace("%3A", ":")
+        .replace("%25", "%")
+}
+
 /// Opcodes for VM instructions
 ///
 /// Note: Some opcodes are defined but not yet used by the compiler.

@@ -538,7 +538,7 @@ impl<'a> SqlCompiler<'a> {
         select: &Select,
         plan: &FromPlan<'a>,
     ) -> SqawkResult<Vec<OutCol>> {
-        let outs = self.expand_projection(&select.projection, plan)?;
+        let outs = self.expand_projection(select, plan)?;
         if outs.is_empty() {
             return Err(SqawkError::InvalidSqlQuery(
                 "SELECT * with no tables specified".into(),
