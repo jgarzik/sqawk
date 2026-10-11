@@ -203,6 +203,49 @@ fn unclosed_quote_is_load_error() -> TestResult {
     Ok(())
 }
 
+/// Load errors name the same line in a CRLF file as in its LF twin: too
+/// many fields, an unclosed quote, and both past `#` lines under --comments.
+#[test]
+fn load_error_lines_are_the_same_for_crlf() -> TestResult {
+    let dir = create_temp_dir()?;
+    let cases: [(&str, &str, &[&str], &str); 4] = [
+        (
+            "w",
+            "id,name\n1,\"a\nb\"\n\n2,x\n3,y,z\n",
+            &[],
+            "line 6: record has 3 fields, but the table has 2 columns",
+        ),
+        (
+            "q",
+            "a,b\n1,2\n3,\"x\n4,5\n",
+            &[],
+            "line 3: unterminated quoted field",
+        ),
+        (
+            "cw",
+            "# head\na,b\n# mid\n1,2\n3,4,5\n",
+            &["--comments"],
+            "line 5: record has 3 fields",
+        ),
+        (
+            "cq",
+            "# head\na,b\n# mid\n1,\"x\n",
+            &["--comments"],
+            "line 4: unterminated quoted field",
+        ),
+    ];
+    for (name, lf, flags, want) in cases {
+        for (suffix, content) in [("lf", lf.to_string()), ("crlf", lf.replace('\n', "\r\n"))] {
+            let file = format!("{name}_{suffix}.csv");
+            let p = put(dir.path(), &file, content.as_bytes())?;
+            let (_out, stderr, ok) = run_sql("SELECT 1", &[&p], flags)?;
+            assert!(!ok, "{file}");
+            assert!(stderr.contains(&format!("{file}: {want}")), "{stderr}");
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn duplicate_header_names_are_named() -> TestResult {
     let dir = create_temp_dir()?;

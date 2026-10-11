@@ -98,7 +98,7 @@ pub fn read_table(
 
     let header = opts.header && opts.columns.is_none();
     let mut record = csv::ByteRecord::new();
-    let mut line = 0usize;
+    let mut lines = LineCounter::new(body);
     // The bytes between records: blank lines, and `#` lines under
     // --comments. Kept verbatim, anchored to the record that follows.
     let mut gaps = CommentLines::default();
@@ -113,7 +113,7 @@ pub fn read_table(
     let mut last: Option<(usize, usize)> = None;
 
     loop {
-        let more = read_record(&mut reader, &mut record, source, &mut line)?;
+        let more = read_record(&mut reader, &mut record, source, &mut lines)?;
         let from = record
             .position()
             .map_or(prev_end, |p| p.byte() as usize)
@@ -130,6 +130,7 @@ pub fn read_table(
         if end > start && end < body.len() && body[end - 1] == b'\r' && body[end] == b'\n' {
             end += 1;
         }
+        let line = lines.line_at(start);
         let gap = &body[prev_end..start];
         prev_end = end;
         last = Some((start, end));
@@ -174,11 +175,9 @@ pub fn read_table(
     // the input, so the rest of the file would load as one field.
     if let Some((start, end)) = last {
         if let Some(quote) = unclosed_quote(&body[start..end], opts.delimiter) {
-            let at = start + quote;
-            let quote_line = 1 + body[..at].iter().filter(|&&b| b == b'\n').count();
             return Err(SqawkError::CsvParseError {
                 file: source.to_string(),
-                line: quote_line,
+                line: lines.line_at(start + quote),
                 error: "unterminated quoted field".to_string(),
             });
         }
@@ -325,27 +324,67 @@ fn unclosed_quote(rec: &[u8], delimiter: u8) -> Option<usize> {
     (state == S::Quoted).then_some(opened)
 }
 
-/// Read the next record; false at end of input. `line` tracks the 1-based
-/// line where the record starts, for error messages.
+/// 1-based line numbers of byte offsets in a file body, for error messages.
+///
+/// The line is counted from the bytes themselves, not taken from csv-core's
+/// record positions: csv-core ends a CRLF record at the CR and counts its LF
+/// only when the next record is read, so its line numbers lag by one in CRLF
+/// files. A line ends at LF, at CRLF, or at a CR not followed by LF (the
+/// three terminators the csv crate accepts), so every line ending convention
+/// and any mix of them number lines alike. Offsets are asked for in
+/// increasing order, so the count resumes where the last one stopped.
+struct LineCounter<'a> {
+    body: &'a [u8],
+    /// Offset counted up to
+    pos: usize,
+    /// Line breaks in `body[..pos]`
+    breaks: usize,
+}
+
+impl<'a> LineCounter<'a> {
+    fn new(body: &'a [u8]) -> Self {
+        LineCounter {
+            body,
+            pos: 0,
+            breaks: 0,
+        }
+    }
+
+    /// The line `offset` is on.
+    fn line_at(&mut self, offset: usize) -> usize {
+        let offset = offset.min(self.body.len());
+        if offset < self.pos {
+            self.pos = 0;
+            self.breaks = 0;
+        }
+        let body = self.body;
+        self.breaks += (self.pos..offset)
+            .filter(|&i| match body[i] {
+                b'\n' => true,
+                b'\r' => body.get(i + 1) != Some(&b'\n'),
+                _ => false,
+            })
+            .count();
+        self.pos = offset;
+        1 + self.breaks
+    }
+}
+
+/// Read the next record; false at end of input.
 fn read_record(
     reader: &mut csv::Reader<&[u8]>,
     record: &mut csv::ByteRecord,
     source: &str,
-    line: &mut usize,
+    lines: &mut LineCounter,
 ) -> SqawkResult<bool> {
-    match reader.read_byte_record(record) {
-        Ok(more) => {
-            if let Some(pos) = record.position() {
-                *line = pos.line() as usize;
-            }
-            Ok(more)
-        }
-        Err(e) => Err(SqawkError::CsvParseError {
+    reader.read_byte_record(record).map_err(|e| {
+        let at = e.position().map_or(lines.pos, |p| p.byte() as usize);
+        SqawkError::CsvParseError {
             file: source.to_string(),
-            line: e.position().map_or(*line + 1, |p| p.line() as usize),
+            line: lines.line_at(at),
             error: e.to_string(),
-        }),
-    }
+        }
+    })
 }
 
 /// Where a writeback of `file_path` lands.
@@ -519,24 +558,126 @@ mod tests {
         }
     }
 
-    /// Load errors must name the same line whatever the line endings. With
-    /// CRLF the reported line is one too low (csv-core ends a CRLF record at
-    /// the CR and counts its LF only when the next record is read), so a
-    /// Windows checkout of tests/data/malformed.csv reported line 5, not 6.
+    /// The line a load error names.
+    fn error_line(data: &[u8], opts: &ReadOptions) -> usize {
+        match load(data, opts) {
+            Err(SqawkError::CsvParseError { line, .. }) => line,
+            other => panic!("{:?}: unexpected {other:?}", String::from_utf8_lossy(data)),
+        }
+    }
+
+    /// Load errors must name the same line whatever the line endings. csv-core
+    /// ends a CRLF record at the CR and counts its LF only when the next
+    /// record is read, so its line numbers are one too low in CRLF files (a
+    /// Windows checkout of tests/data/malformed.csv reported line 5, not 6).
     #[test]
-    #[ignore]
     fn load_error_line_is_the_same_for_crlf() {
         let lf = b"id,name,age\n1,Alice,30\n3,Charlie,35\n5,Too,Many,Fields\n";
         let crlf = b"id,name,age\r\n1,Alice,30\r\n3,Charlie,35\r\n5,Too,Many,Fields\r\n";
         let quote = b"id,name\r\n1,\"a\r\nb\"\r\n2,x\r\n3,y,z\r\n";
         for (data, want) in [(&lf[..], 4), (&crlf[..], 4), (&quote[..], 5)] {
-            match load(data, &ReadOptions::default()) {
-                Err(SqawkError::CsvParseError { line, .. }) => {
-                    assert_eq!(line, want, "{:?}", String::from_utf8_lossy(data))
-                }
-                other => panic!("unexpected: {other:?}"),
-            }
+            assert_eq!(
+                error_line(data, &ReadOptions::default()),
+                want,
+                "{:?}",
+                String::from_utf8_lossy(data)
+            );
         }
+    }
+
+    /// Every line ending convention, any mix of them, quoted line breaks,
+    /// blank lines and a BOM: the error names the line the bad record is on.
+    #[test]
+    fn load_error_line_any_line_endings() {
+        let opts = ReadOptions::default();
+        for (data, want) in [
+            // Mixed endings.
+            (&b"a,b\r\n1,2\n3,4\r\n5,6,7\n"[..], 4),
+            (b"a,b\n1,2\r\n3,4\n5,6,7\r\n", 4),
+            // CR alone ends a record, so it ends a line.
+            (b"a,b\r1,2\r3,4,5\r", 3),
+            // Quoted fields holding LF, CRLF and both.
+            (b"a,b\n1,\"x\ny\"\n2,\"p\r\nq\"\r\n3,4,5\n", 6),
+            (b"a,b\r\n1,\"x\ny\r\nz\"\r\n3,4,5\r\n", 5),
+            // Blank lines (LF and CRLF) before the bad record.
+            (b"a,b\n\n1,2\n\n\n3,4,5\n", 6),
+            (b"a,b\r\n\r\n1,2\r\n\r\n\r\n3,4,5\r\n", 6),
+            // The BOM is not a line.
+            (b"\xef\xbb\xbfa,b\r\n1,2\r\n3,4,5\r\n", 3),
+            (b"\xef\xbb\xbfa,b\n1,2\n3,4,5\n", 3),
+            // The last record, without a line ending.
+            (b"a,b\r\n1,2\r\n3,4,5", 3),
+        ] {
+            assert_eq!(
+                error_line(data, &opts),
+                want,
+                "{:?}",
+                String::from_utf8_lossy(data)
+            );
+        }
+    }
+
+    /// Skipped `#` lines count as lines.
+    #[test]
+    fn load_error_line_after_comments() {
+        let opts = ReadOptions {
+            comments: true,
+            ..ReadOptions::default()
+        };
+        for (data, want) in [
+            (&b"# head\na,b\n# one\n1,2\n# two\n# three\n3,4,5\n"[..], 7),
+            (
+                b"# head\r\na,b\r\n# one\r\n1,2\r\n# two\r\n# three\r\n3,4,5\r\n",
+                7,
+            ),
+            (b"# head\r\na,b\n\r\n# one\r\n\n1,2\r\n3,4,5\n", 7),
+            (b"\xef\xbb\xbf# head\r\na,b\r\n3,4,5\r\n", 3),
+        ] {
+            assert_eq!(
+                error_line(data, &opts),
+                want,
+                "{:?}",
+                String::from_utf8_lossy(data)
+            );
+        }
+    }
+
+    /// An unclosed quote is reported at the line of its opening quote.
+    #[test]
+    fn unclosed_quote_line_any_line_endings() {
+        let opts = ReadOptions::default();
+        for (data, want) in [
+            (&b"a,b\n1,2\n3,\"x\n4,5\n"[..], 3),
+            (b"a,b\r\n1,2\r\n3,\"x\r\n4,5\r\n", 3),
+            (b"a,b\r\n1,\"p\r\nq\"\r\n\r\n3,\"x\r\n4,5\r\n", 5),
+            (b"\xef\xbb\xbfa,b\r\n1,2\n3,\"x\r\n", 3),
+            (b"a,b\r1,2\r3,\"x\r4,5\r", 3),
+        ] {
+            assert_eq!(
+                error_line(data, &opts),
+                want,
+                "{:?}",
+                String::from_utf8_lossy(data)
+            );
+        }
+        let comments = ReadOptions {
+            comments: true,
+            ..ReadOptions::default()
+        };
+        assert_eq!(error_line(b"#c\r\na,b\r\n#d\r\n1,\"x\r\n", &comments), 4);
+    }
+
+    /// A bad header is reported at its own line, past BOM, blank and
+    /// comment lines.
+    #[test]
+    fn bad_header_line() {
+        assert_eq!(error_line(b"a,a\r\n1,2\r\n", &ReadOptions::default()), 1);
+        assert_eq!(error_line(b"\r\n\r\na,a\r\n", &ReadOptions::default()), 3);
+        let comments = ReadOptions {
+            comments: true,
+            ..ReadOptions::default()
+        };
+        assert_eq!(error_line(b"\xef\xbb\xbf#c\r\n\na,,b\r\n", &comments), 3);
     }
 
     #[test]
