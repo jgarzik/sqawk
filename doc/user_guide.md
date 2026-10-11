@@ -379,7 +379,9 @@ sqawk -s "DELETE FROM data WHERE status = 'expired'" data.csv --write
 Important notes about the write behavior:
 - Only tables that were actually modified are saved: by INSERT, UPDATE,
   DELETE, ALTER TABLE or TRUNCATE, or created by `CREATE TABLE ...
-  LOCATION 'file'`. A table created without `LOCATION` (including `CREATE
+  LOCATION 'file'` over a file that did not exist (an existing `LOCATION`
+  file is written only if a statement changes its table). A table created
+  without `LOCATION` (including `CREATE
   TABLE ... AS SELECT`) is a scratch table: it has no file and is skipped. A
   table that was modified and then dropped is not written
 - Every file is checked before any is written: if one is read-only (or its
@@ -632,6 +634,8 @@ Besides the tables loaded from input files, you can create tables with the
 CREATE TABLE statement. This is useful for:
 
 - Creating empty tables without loading from a file
+- Declaring the column names and types of an existing file (see
+  [An Existing File](#an-existing-file))
 - Defining the file, and its delimiter, that a new table is written to
 
 #### Basic CREATE TABLE Syntax
@@ -643,7 +647,7 @@ CREATE TABLE table_name (
     ...
 ) [LOCATION 'file_path'] 
   [STORED AS TEXTFILE]
-  [WITH (DELIMITER='...')]
+  [WITH (DELIMITER='...', HEADER=true|false, COMMENTS=true|false)]
 ```
 
 Example:
@@ -683,7 +687,8 @@ CREATE TABLE logs (
 ```
 
 TEXTFILE is the only format: `STORED AS PARQUET` (or any other format) is an
-error. Likewise `WITH` takes only `DELIMITER`; any other option is an error:
+error. Likewise `WITH` takes only `DELIMITER`, `HEADER` and `COMMENTS`; any
+other option is an error:
 
 ```sql
 CREATE TABLE users (
@@ -711,6 +716,72 @@ CREATE TABLE server_logs (
   STORED AS TEXTFILE
   WITH (DELIMITER='\t')
 ```
+
+#### An Existing File
+
+When the `LOCATION` file already exists, the declared columns are its schema
+(as for a Hive external table): the file is loaded under the declared names,
+by the same loader as an input file, and its rows are the table's rows.
+
+- The file's first line is a header. It is skipped as data, it must have
+  exactly one field per declared column, and `--write` writes it back as it
+  was read: the declared names do not replace its text.
+- `WITH (HEADER=false)` says the file has no header line: the first line is
+  data, and the file is written back without one.
+- `WITH (COMMENTS=true)` skips `#` lines and keeps them in place, as
+  `--comments` does for input files.
+- The delimiter follows the same rule as for a new file: `WITH
+  (DELIMITER=...)`, else tab for `.tsv` / `.tab`, else comma.
+- Loading the file is not a change. With `--write`, the file is rewritten
+  only if a statement changed the table, and every row no statement changed
+  is written back byte for byte.
+
+```sh
+$ cat people.csv
+num,label
+1,alice
+2,bob
+$ sqawk -s "CREATE TABLE p (id INT, name TEXT) LOCATION 'people.csv';
+            INSERT INTO p VALUES (3, 'carol');
+            SELECT * FROM p WHERE id > 1" seed.csv --write
+id,name
+2,bob
+3,carol
+$ cat people.csv
+num,label
+1,alice
+2,bob
+3,carol
+```
+
+A headerless file, here semicolon-separated:
+
+```sh
+$ cat pairs.txt
+1;alice
+2;bob
+$ sqawk -s "CREATE TABLE q (id INT, name TEXT) LOCATION 'pairs.txt'
+              WITH (DELIMITER=';', HEADER=false);
+            SELECT name FROM q WHERE id = 2" seed.csv
+name
+bob
+```
+
+A header whose field count differs from the declared columns is an error,
+and so is a file that is already loaded, as an input file or by another
+`CREATE TABLE ... LOCATION`:
+
+```sh
+$ sqawk -s "CREATE TABLE p (id INT) LOCATION 'people.csv'" seed.csv
+sqawk: people.csv: line 1: header has 2 fields, but the table declares 1 columns
+$ sqawk -s "CREATE TABLE p (id INT, name TEXT) LOCATION 'people.csv'" people.csv
+sqawk: file people.csv is already loaded as table people
+```
+
+A relative `LOCATION` is resolved against the current directory when the
+statement runs. A `LOCATION` that does not exist yet is a new, empty table,
+created by `--write` (with a header line of the declared names, or none
+under `HEADER=false`).
 
 #### Working with Created Tables
 

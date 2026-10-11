@@ -21,7 +21,7 @@ Sqawk implements a lightweight in-memory database engine that supports SQL opera
 Tables in Sqawk are in-memory representations of delimiter-separated files. Each table has:
 
 - A unique name (derived from the file's filename or explicitly provided)
-- A set of columns with names (derived from the file's header row)
+- A set of named columns (see [Where Columns Come From](#where-columns-come-from))
 - Zero or more rows of data
 - Optional metadata including the source file path and delimiter information
 
@@ -32,7 +32,8 @@ one lookup used by SELECT, INSERT column lists and UPDATE SET.
 
 - **Rows**: Represented as vectors of values with one element per column
 - **Columns**: Identified by name, with automatic type inference based on content
-- **Schema**: Dynamically determined from the file's header row
+- **Schema**: The column names come from one of the sources listed under
+  [Where Columns Come From](#where-columns-come-from)
 - **Column Types**: A loaded column has no declared type; a column created by
   CREATE TABLE or ALTER TABLE ADD COLUMN records its declared type name and
   that name's SQLite affinity (`Column::decl_type`, `Column::data_type`), but
@@ -50,6 +51,37 @@ one lookup used by SELECT, INSERT column lists and UPDATE SET.
   operators still keep text `'1'` and integer `1` apart. See
   [SQL Reference](sql_reference.md#type-coercion) for the exact rules
 
+### Where Columns Come From
+
+A table's columns are defined in exactly one of these ways:
+
+1. **The file's header line** (the default for an input file): the first
+   line names the columns and is not data. On `--write` it is written back
+   as it was read.
+2. **`--no-header`**: every line of every input file is data and the
+   columns are named `a`, `b`, `c`, ...; writeback emits no header line.
+3. **`--tabledef=table:col1,col2,...`**: the names are declared before the
+   file loads, and that file's first line is data (as with `--no-header`).
+   `--tabledef` takes names only, never types.
+4. **`CREATE TABLE t (col TYPE, ...) LOCATION 'path'`**: the declared names
+   and types are the schema of the file, as for a Hive external table.
+   - When the file exists it is loaded under the declared names. Its first
+     line is a header by default: it is skipped as data, must have exactly
+     one field per declared column (else an error naming the file and both
+     counts), and is written back verbatim -- the declared names do not
+     replace its text. With `WITH (HEADER=false)` the first line is data and
+     writeback emits no header.
+   - When the file does not exist the table starts empty and `--write`
+     creates the file, with a header line of the declared names (none under
+     `HEADER=false`).
+5. **`CREATE TABLE t AS SELECT ...`**: the query's result columns. The
+   table has no file and is never written.
+
+`CREATE TABLE t (col TYPE, ...)` without `LOCATION` declares the columns of
+a scratch table, which has no file and is never written. Declared types are
+recorded (`.schema` shows them) but not enforced: every value keeps its own
+type.
+
 ### Table Lifecycle
 
 Tables are loaded from delimiter-separated files at startup and can be modified through SQL operations. Sqawk uses a safe, sed-like writeback model:
@@ -58,8 +90,10 @@ Tables are loaded from delimiter-separated files at startup and can be modified 
 2. **Tracking Changes**: The database keeps the set of modified tables
    (`Database::modified`, set by `Database::mark_modified`): INSERT, UPDATE,
    DELETE, ALTER TABLE and TRUNCATE mark a table, CREATE TABLE marks the new
-   one (so a `CREATE TABLE ... LOCATION` file is written even with no rows),
-   and DROP TABLE removes the mark with the table
+   one unless its `LOCATION` file already exists (so a new `CREATE TABLE ...
+   LOCATION` file is written even with no rows, while loading an existing
+   one is not a modification), and DROP TABLE removes the mark with the
+   table
 3. **Write on Exit**: Modified tables are only written back to their source files if:
    - The `--write` (or `-w`) flag is explicitly provided
    - The table was actually modified by one of those statements
@@ -224,7 +258,9 @@ the alias). The registration lasts only for that statement.
   writes), chooses the delimiter (`-F`, else tab for `.tsv`/`.tab`, comma for
   everything else and stdin) and the header policy (the first line is the
   header unless `--no-header`/`--tabledef`; `#` lines are comments only
-  under `--comments`), and routes writeback.
+  under `--comments`), and routes writeback. `load_location` loads the file
+  of `CREATE TABLE ... LOCATION` the same way, under the declared columns,
+  with the `WITH` options in place of the command-line flags.
 - `csv_handler.rs` does all parsing and writing. Every format is read by the
   `csv` crate with one configuration (RFC 4180 quoting, multi-line quoted
   fields, no trimming, ragged rows padded, an unclosed quote is an error,

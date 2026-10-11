@@ -124,7 +124,8 @@ effects of the ones before it.
   them. `parse_table_spec` splits a file operand `[NAME=]PATH` (NAME only when
   identifier-like; otherwise the table is named after the file stem; `-` is
   stdin, table `stdin`); `has_tab_extension` is the `.tsv`/`.tab` rule used
-  for loading and for `CREATE TABLE ... LOCATION`
+  for loading and for `CREATE TABLE ... LOCATION`; `load_location` loads (or
+  starts) a LOCATION table under its declared columns
 - **`csv_handler.rs`**: The single loader (`read_table`, built on the `csv`
   crate) for every delimiter and for stdin, plus writeback. `.tsv`/`.tab` are
   tab-separated, everything else comma (unless `-F`); the first line is always
@@ -146,7 +147,7 @@ follow SQLite 3.45; deliberate differences are listed in
 
 ### Safe Writeback Model
 
-By default, all modifications remain in memory only. The `--write` flag must be explicitly provided to save changes back to source files. Only tables changed by INSERT/UPDATE/DELETE/ALTER/TRUNCATE are written, and rows a statement did not change are written back byte for byte. A table created by `CREATE TABLE ... LOCATION 'file'` is written too, even with no DML after it (the file is created with just the header); its delimiter is WITH (DELIMITER=...) if given, else tab for `.tsv`/`.tab`, else comma. Scratch tables (CREATE TABLE without LOCATION, CREATE TABLE AS) are never written. Every target is checked for writability before any file is written; a read-only file aborts the whole writeback. An open transaction is rolled back before writeback.
+By default, all modifications remain in memory only. The `--write` flag must be explicitly provided to save changes back to source files. Only tables changed by INSERT/UPDATE/DELETE/ALTER/TRUNCATE are written, and rows a statement did not change are written back byte for byte. `CREATE TABLE t (cols) LOCATION 'file'` follows Hive external-table semantics (`file_handler::load_location`): an existing file is loaded under the declared columns (its header line skipped, checked against the column count and written back verbatim; `WITH (HEADER=false)` makes the first line data; `WITH (COMMENTS=true)` is `--comments`) and loading it is not a modification; a file that does not exist yet is written even with no DML after it (created with just the header). The delimiter is WITH (DELIMITER=...) if given, else tab for `.tsv`/`.tab`, else comma. A LOCATION file already loaded as another table is an error. Scratch tables (CREATE TABLE without LOCATION, CREATE TABLE AS) are never written. Every target is checked for writability before any file is written; a read-only file aborts the whole writeback. An open transaction is rolled back before writeback.
 
 ## Test Organization
 

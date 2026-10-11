@@ -576,7 +576,7 @@ CREATE TABLE name (
 )
 [LOCATION 'path']
 [STORED AS TEXTFILE]
-[WITH (DELIMITER='...')]
+[WITH (DELIMITER='...', HEADER=true|false, COMMENTS=true|false)]
 ```
 
 ```sql
@@ -584,15 +584,54 @@ CREATE TABLE name AS SELECT ... FROM ...
 ```
 
 Column types are recorded, not enforced (see Data Types). With `LOCATION`,
-the table is written to that file under `--write`, even if nothing is
-inserted (the file then holds only the header). The file's delimiter is the
-`WITH (DELIMITER='...')` value when given, else the one the file would be
-loaded with: tab for a `.tsv` or `.tab` path, comma for any other.
+the declared columns are the schema of that file, as for a Hive external
+table:
+
+- **The file exists**: it is loaded under the declared column names, by the
+  same loader as an input file. Its first line is a header: it is skipped
+  as data, must have exactly one field per declared column (else
+  `x.csv: line 1: header has 3 fields, but the table declares 2 columns`),
+  and is written back as it was read -- the declared names do not replace
+  its text. A record with more fields than columns is an error; a short one
+  is padded with NULL. Loading is not a modification: with no INSERT,
+  UPDATE, DELETE, ALTER TABLE or TRUNCATE, `--write` leaves the file alone,
+  and rows no statement changed are written back byte for byte.
+- **The file does not exist**: the table starts empty and `--write` creates
+  the file, even if nothing is inserted (the file then holds only the
+  header line of the declared names).
+
+`WITH` options:
+
+- `DELIMITER='c'`: the file's delimiter. Without it, tab for a `.tsv` or
+  `.tab` path and comma for any other -- the rule an input file is loaded
+  with.
+- `HEADER=true|false` (default `true`): with `false` the file's first line
+  is data and the file is written with no header line.
+- `COMMENTS=true|false` (default `false`): with `true`, lines starting with
+  `#` are comments, kept in place on writeback (the `--comments` rule).
+
+`HEADER` and `COMMENTS` take `true` or `false` in any case, quoted or not,
+and need `LOCATION`. A relative path is resolved against the current
+directory when the statement runs. A file already loaded -- as an input file
+or by another `CREATE TABLE ... LOCATION` -- is an error (`file x.csv is
+already loaded as table x`), as is a directory or a file that cannot be read.
+Inside a transaction, `ROLLBACK` removes the table and never touches the
+file.
+
+```sql
+-- people.csv holds "num,label\n1,alice\n2,bob\n"
+CREATE TABLE p (id INT, name TEXT) LOCATION 'people.csv';
+SELECT name FROM p WHERE id = 2;          -- bob
+
+-- pairs.txt holds "1;alice\n2;bob\n" (no header line)
+CREATE TABLE q (id INT, name TEXT) LOCATION 'pairs.txt'
+  WITH (DELIMITER=';', HEADER=false);
+```
 
 `CREATE TABLE ... AS` gives the new table the query's result columns.
 Column and table constraints (`PRIMARY KEY`, `NOT NULL`, `DEFAULT`, ...) are
 rejected: sqawk does not enforce them. `STORED AS` takes only `TEXTFILE` and `WITH` only
-`DELIMITER`; anything else there is an error. A table without `LOCATION`
+`DELIMITER`, `HEADER` and `COMMENTS`; anything else there is an error. A table without `LOCATION`
 (every `CREATE TABLE ... AS` table among them) has no file and lasts for the
 run; `CREATE TEMP TABLE` is accepted for such a table.
 
@@ -676,7 +715,8 @@ a condition (WHERE, `NOT`, `AND`, CASE), text is likewise read as a number, so
 
 Modifications remain in memory unless the `--write` flag is specified. Then
 every table that INSERT, UPDATE, DELETE, ALTER TABLE or TRUNCATE changed, or
-that `CREATE TABLE ... LOCATION` created, is written to its file. A table
+that `CREATE TABLE ... LOCATION` created over a file that did not exist, is
+written to its file. A table
 with no file (CREATE TABLE without LOCATION, CREATE TABLE ... AS) is
 skipped, and a table dropped by DROP TABLE is not written.
 Rows no statement changed are written back byte for byte, exactly as they
@@ -734,7 +774,8 @@ nothing is modified. That includes:
   `EXCEPT ALL`
 - table and column constraints, `CREATE TABLE IF NOT EXISTS`,
   `PARTITIONED BY`, `ROW FORMAT`, `STORED AS` any format but `TEXTFILE`,
-  `WITH` options other than `DELIMITER`, table comments, and `LOCATION` /
+  `WITH` options other than `DELIMITER` / `HEADER` / `COMMENTS` (and
+  `HEADER` / `COMMENTS` without `LOCATION`), table comments, and `LOCATION` /
   `STORED AS` / `WITH` or a column list on `CREATE TABLE ... AS`
 - savepoints, transaction modes (`ISOLATION LEVEL`, `READ ONLY`) and
   `START TRANSACTION`
