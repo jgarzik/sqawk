@@ -57,7 +57,9 @@ impl<'a> SqlCompiler<'a> {
                 );
 
                 // Process each row of values
-                let base_reg = self.register_counter as usize;
+                // Reserve the row block, so registers allocated while
+                // compiling a value expression cannot alias a column.
+                let base_reg = self.allocate_registers(column_count) as usize;
                 for value_row in &values.rows {
                     if value_row.len() != column_indices.len() {
                         return Err(SqawkError::InvalidSqlQuery(format!(
@@ -71,8 +73,8 @@ impl<'a> SqlCompiler<'a> {
                     for i in 0..column_count {
                         self.emit(
                             OpCode::Null,
-                            (base_reg + i) as i64,
                             0,
+                            (base_reg + i) as i64,
                             0,
                             None,
                             &format!("Init col {} to NULL", i),
@@ -83,7 +85,7 @@ impl<'a> SqlCompiler<'a> {
                     for (i, expr) in value_row.iter().enumerate() {
                         let col_idx = column_indices[i];
                         let value_reg = base_reg + col_idx;
-                        self.compile_expr_into_register(expr, value_reg)?;
+                        self.code_expr(expr, &NameCtx::empty(), Some(value_reg as i64))?;
                     }
 
                     // Insert the row
@@ -188,8 +190,8 @@ impl<'a> SqlCompiler<'a> {
         for i in 0..target_column_count {
             self.emit(
                 OpCode::Null,
-                (base_reg + i) as i64,
                 0,
+                (base_reg + i) as i64,
                 0,
                 None,
                 &format!("Init col {} to NULL", i),
@@ -221,43 +223,12 @@ impl<'a> SqlCompiler<'a> {
                     }
                     break; // Wildcard handles all columns
                 }
-                SelectItem::UnnamedExpr(expr) => {
-                    // Compile the expression
-                    match expr {
-                        Expr::Identifier(ident) => {
-                            let col_name = ident.value.to_lowercase();
-                            if let Some(col_idx) = source_table.column_index(&col_name) {
-                                self.emit(
-                                    OpCode::Column,
-                                    0,
-                                    col_idx as i64,
-                                    dest_reg as i64,
-                                    None,
-                                    &format!("Load {} to reg {}", col_name, dest_reg),
-                                );
-                            }
-                        }
-                        Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
-                            let col_name = parts[1].value.to_lowercase();
-                            if let Some(col_idx) = source_table.column_index(&col_name) {
-                                self.emit(
-                                    OpCode::Column,
-                                    0,
-                                    col_idx as i64,
-                                    dest_reg as i64,
-                                    None,
-                                    &format!("Load {} to reg {}", col_name, dest_reg),
-                                );
-                            }
-                        }
-                        _ => {
-                            // For other expressions, try to compile them
-                            self.compile_expr_into_register(expr, dest_reg)?;
-                        }
-                    }
-                }
-                SelectItem::ExprWithAlias { expr, .. } => {
-                    self.compile_expr_into_register(expr, dest_reg)?;
+                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+                    self.code_expr(
+                        expr,
+                        &NameCtx::single(source_table, 0),
+                        Some(dest_reg as i64),
+                    )?;
                 }
                 _ => {}
             }
@@ -265,7 +236,7 @@ impl<'a> SqlCompiler<'a> {
 
         // Check WHERE clause if present
         let skip_addr = if let Some(where_expr) = &select.selection {
-            let cond_reg = self.compile_where_condition(where_expr, source_table, 0)?;
+            let cond_reg = self.code_expr(where_expr, &NameCtx::single(source_table, 0), None)?;
             let addr = self.program.len();
             self.emit(
                 OpCode::IfZ,
@@ -378,7 +349,7 @@ impl<'a> SqlCompiler<'a> {
         // If there's a WHERE clause, check if row matches
         if let Some(where_expr) = selection {
             // Compile WHERE condition using table context
-            let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
+            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table, cursor_idx), None)?;
 
             // If condition is false (0), skip to next row
             let skip_addr = self.program.len();
@@ -514,7 +485,7 @@ impl<'a> SqlCompiler<'a> {
         // If there's a WHERE clause, check if row matches
         let skip_addr = if let Some(where_expr) = selection {
             // Compile WHERE condition using table context
-            let cond_reg = self.compile_where_condition(where_expr, table_ref, 0)?;
+            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table_ref, 0), None)?;
 
             // If condition is false (0), skip to next row
             let addr = self.program.len();

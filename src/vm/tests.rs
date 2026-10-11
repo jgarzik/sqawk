@@ -1625,6 +1625,36 @@ mod compare_jump_not_tests {
         );
     }
 
+    #[test]
+    fn and_or_follow_three_valued_truth_tables() {
+        // r1 = NULL, r2 = 0, r3 = 1
+        let row = run_row(vec![
+            init(),
+            create_instruction(OpCode::Null, 0, 1, 0, None, None),
+            create_instruction(OpCode::Integer, 0, 2, 0, None, None),
+            create_instruction(OpCode::Integer, 1, 3, 0, None, None),
+            create_instruction(OpCode::And, 1, 2, 10, None, None), // NULL AND 0
+            create_instruction(OpCode::And, 1, 3, 11, None, None), // NULL AND 1
+            create_instruction(OpCode::Or, 1, 3, 12, None, None),  // NULL OR 1
+            create_instruction(OpCode::Or, 1, 2, 13, None, None),  // NULL OR 0
+            create_instruction(OpCode::And, 3, 3, 14, None, None), // 1 AND 1
+            create_instruction(OpCode::Or, 2, 2, 15, None, None),  // 0 OR 0
+            create_instruction(OpCode::ResultRow, 10, 6, 0, None, None),
+            halt(),
+        ]);
+        assert_eq!(
+            row,
+            vec![
+                Value::Integer(0),
+                Value::Null,
+                Value::Integer(1),
+                Value::Null,
+                Value::Integer(1),
+                Value::Integer(0),
+            ]
+        );
+    }
+
     /// Build a program that compares two 2-register vectors and reports which
     /// branch Jump takes: 1 = Less, 2 = Equal, 3 = Greater.
     fn compare_branch(lhs: [i64; 2], rhs: [i64; 2]) -> Value {

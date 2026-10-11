@@ -143,6 +143,12 @@ pub enum OpCode {
     // `NOT <expr>` expressible at all.
     Not, // P2 = NULL if P1 is NULL, else 1 if P1 is falsy, else 0
 
+    // Three-valued AND / OR, modelled on SQLite's OP_And / OP_Or. Both
+    // operands are evaluated; the result follows the SQL truth tables, so
+    // NULL AND 0 = 0, NULL AND 1 = NULL, NULL OR 1 = 1, NULL OR 0 = NULL.
+    And, // P3 = P1 AND P2
+    Or,  // P3 = P1 OR P2
+
     // Vector comparison, modelled on SQLite's OP_Compare / OP_Jump.
     //
     // Compare sets an internal flag from a pairwise comparison of two register

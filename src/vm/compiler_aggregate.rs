@@ -78,7 +78,7 @@ impl<'a> SqlCompiler<'a> {
         // WHERE clause filtering - must be evaluated BEFORE aggregates
         // If WHERE condition is false, skip to Next
         if let Some(where_expr) = &select.selection {
-            let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
+            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table, cursor_idx), None)?;
             // If condition is false (0), jump past the AggStep calls
             where_skip_addr = Some(self.program.len());
             self.emit(
@@ -489,7 +489,7 @@ impl<'a> SqlCompiler<'a> {
         // accumulator.
         let next_label = self.label();
         if let Some(where_expr) = &select.selection {
-            let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
+            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table, cursor_idx), None)?;
             self.emit_jump_to(
                 OpCode::IfZ,
                 cond_reg,

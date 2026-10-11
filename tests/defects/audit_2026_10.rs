@@ -502,7 +502,6 @@ fn scalar_subquery_with_aggregate_arithmetic() -> TestResult {
 /// NOT IN treats a NULL left operand as "not in"; NULL NOT IN (...) is
 /// unknown and must not match (three-valued logic in the WHERE compiler).
 #[test]
-#[ignore]
 fn not_in_list_excludes_null() -> TestResult {
     assert_query(
         &[nullable_csv()],
@@ -513,7 +512,6 @@ fn not_in_list_excludes_null() -> TestResult {
 
 /// NOT BETWEEN matches NULL.
 #[test]
-#[ignore]
 fn not_between_excludes_null() -> TestResult {
     assert_query(
         &[nullable_csv()],
@@ -524,7 +522,6 @@ fn not_between_excludes_null() -> TestResult {
 
 /// NOT (x LIKE ...) matches NULL.
 #[test]
-#[ignore]
 fn not_of_like_excludes_null() -> TestResult {
     assert_query(
         &[nullable_csv()],
@@ -536,7 +533,6 @@ fn not_of_like_excludes_null() -> TestResult {
 /// NOT (a OR b) where `a` is NULL and `b` false is NOT(NULL) = NULL; sqawk
 /// treats it as true.
 #[test]
-#[ignore]
 fn not_of_or_excludes_null() -> TestResult {
     assert_query(
         &[nullable_csv()],
@@ -548,7 +544,6 @@ fn not_of_or_excludes_null() -> TestResult {
 /// `x NOT IN (SELECT col)` where col contains a NULL is never true; sqawk
 /// returns every row.
 #[test]
-#[ignore]
 fn not_in_subquery_with_null_is_empty() -> TestResult {
     assert_no_rows(
         &[employees_csv(), nullable_csv()],
@@ -558,7 +553,6 @@ fn not_in_subquery_with_null_is_empty() -> TestResult {
 
 /// `1 NOT IN (2, NULL)` is unknown, so no rows.
 #[test]
-#[ignore]
 fn literal_not_in_list_with_null_is_unknown() -> TestResult {
     assert_no_rows(
         &[employees_csv()],
@@ -568,7 +562,6 @@ fn literal_not_in_list_with_null_is_unknown() -> TestResult {
 
 /// `NULL AND 1` is NULL, not false.
 #[test]
-#[ignore]
 fn null_and_true_is_null() -> TestResult {
     assert_query(
         &[users_csv()],
@@ -580,7 +573,6 @@ fn null_and_true_is_null() -> TestResult {
 /// `DELETE ... WHERE grade NOT IN ('A')` also deletes the row whose grade is
 /// NULL; NOT IN over NULL is unknown and must keep it.
 #[test]
-#[ignore]
 fn delete_not_in_keeps_null_row() -> TestResult {
     assert_query(
         &[nullable_csv()],
@@ -674,7 +666,6 @@ fn join_right_table_columns_resolve_correctly() -> TestResult {
 /// INSERT with a column list writes values positionally into the wrong
 /// columns (compiler_dml.rs:60): email gets the name.
 #[test]
-#[ignore]
 fn insert_column_list_maps_by_name() -> TestResult {
     assert_query(
         &[users_csv()],
@@ -687,7 +678,6 @@ fn insert_column_list_maps_by_name() -> TestResult {
 /// p1/p2 misuse in compiler_dml.rs): the second row inherits stale register
 /// values.
 #[test]
-#[ignore]
 fn insert_multi_row_omitted_columns_are_null() -> TestResult {
     assert_query(
         &[users_csv()],
@@ -698,7 +688,6 @@ fn insert_multi_row_omitted_columns_are_null() -> TestResult {
 
 /// Same root cause, with the column list leaving a middle column out.
 #[test]
-#[ignore]
 fn insert_multi_row_omitted_middle_column() -> TestResult {
     assert_query(
         &[users_csv()],
@@ -895,7 +884,6 @@ fn star_with_expression_column_order() -> TestResult {
 
 /// `SELECT 1 WHERE 0` emits a row: WHERE is ignored on FROM-less SELECT.
 #[test]
-#[ignore]
 fn fromless_select_applies_where() -> TestResult {
     assert_no_rows(&[users_csv()], "SELECT 1 WHERE 0")
 }

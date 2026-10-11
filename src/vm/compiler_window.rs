@@ -6,7 +6,7 @@ use sqlparser::ast::{Expr, Select, SelectItem, Value, ValueWithSpan, WindowType}
 
 use super::ast_compat::{func_args, order_by_is_asc};
 use super::bytecode::{OpCode, ResultSchema};
-use super::compiler::SqlCompiler;
+use super::compiler::{NameCtx, SqlCompiler};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{DataType, Table};
 
@@ -152,7 +152,7 @@ impl<'a> SqlCompiler<'a> {
 
         // Apply WHERE filter if present
         if let Some(where_expr) = &select.selection {
-            let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
+            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table, cursor_idx), None)?;
             self.emit(
                 OpCode::IfZ,
                 cond_reg,
@@ -460,11 +460,10 @@ impl<'a> SqlCompiler<'a> {
                         }
                         _ => {
                             // Other expressions - compile as usual
-                            self.compile_where_operand(
+                            self.code_expr(
                                 expr,
-                                table,
-                                ephemeral_cursor as usize,
-                                output_start_reg + output_idx as i64,
+                                &NameCtx::single(table, ephemeral_cursor),
+                                Some(output_start_reg + output_idx as i64),
                             )?;
                         }
                     }

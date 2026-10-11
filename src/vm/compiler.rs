@@ -59,6 +59,7 @@ struct OuterColumnRef {
 pub(crate) struct Label(usize);
 
 /// One FROM source visible to expression compilation.
+#[derive(Clone)]
 pub(crate) struct Src<'t> {
     /// VM cursor id for this source.
     pub cursor: i64,
@@ -155,7 +156,6 @@ impl<'t> NameCtx<'t> {
     }
 
     /// A scope with no FROM sources, for constant expressions.
-    #[allow(dead_code)] // used by constant-expression contexts
     pub(crate) fn empty() -> Self {
         NameCtx {
             srcs: Vec::new(),
@@ -270,11 +270,8 @@ fn classify_join_for_rewrite(op: &sqlparser::ast::JoinOperator) -> Option<Option
 /// Validate the argument count of a math function (ABS, ROUND, CEIL,
 /// CEILING, FLOOR).
 ///
-/// Shared because expressions reach the `MathFunc` opcode through two entry
-/// points -- `code_expr`'s `compile_func_math` and the older `compile_expr`,
-/// which handles a SELECT list with no FROM clause. When only the first
-/// validated arity, `SELECT ABS(-5, 2)` quietly returned 5 while
-/// `SELECT ABS(-5, 2) FROM t` errored.
+/// Without it, extra arguments were silently ignored: `SELECT ABS(-5, 2)`
+/// quietly returned 5.
 fn check_math_func_arity(func_name: &str, arg_count: usize) -> SqawkResult<()> {
     if arg_count == 0 {
         return Err(SqawkError::InvalidSqlQuery(format!(
@@ -1052,7 +1049,7 @@ impl<'a> SqlCompiler<'a> {
         }
 
         if select.from.is_empty() {
-            self.compile_select_literal(&select.projection)?;
+            self.compile_select_literal(select)?;
         } else {
             // Check for implicit join (comma-separated tables in FROM)
             if select.from.len() > 1 {
@@ -1173,7 +1170,7 @@ impl<'a> SqlCompiler<'a> {
         let has_order_by = !query_order_by(query).is_empty();
 
         if select.from.is_empty() {
-            self.compile_select_literal(&select.projection)?;
+            self.compile_select_literal(select)?;
             return Ok(());
         }
 
@@ -1358,7 +1355,7 @@ impl<'a> SqlCompiler<'a> {
         // WHERE first, so filtered rows never reach the sorter.
         let next_label = self.label();
         if let Some(where_expr) = &select.selection {
-            let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
+            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table, cursor_idx), None)?;
             self.emit_jump_to(
                 OpCode::IfZ,
                 cond_reg,
@@ -1666,7 +1663,7 @@ impl<'a> SqlCompiler<'a> {
 
         // WHERE clause
         if let Some(where_expr) = &select.selection {
-            let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
+            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table, cursor_idx), None)?;
             self.emit_jump_to(
                 OpCode::IfZ,
                 cond_reg,
@@ -1828,345 +1825,48 @@ impl<'a> SqlCompiler<'a> {
         Ok((limit, offset))
     }
 
-    /// Compile a SELECT statement with literals (e.g., SELECT 1, SELECT 'text')
-    fn compile_select_literal(&mut self, projection: &[SelectItem]) -> SqawkResult<()> {
+    /// Compile a SELECT with no FROM clause (e.g., `SELECT 1, 'text'`).
+    ///
+    /// The expressions go through `code_expr` with an empty name scope, so
+    /// everything that works with a FROM clause -- string functions, CAST,
+    /// CASE, `||`, predicates -- works without one. A WHERE clause decides
+    /// whether the single row is emitted.
+    fn compile_select_literal(&mut self, select: &Select) -> SqawkResult<()> {
         self.add_comment("Literal value query (no table)");
+        let ctx = NameCtx::empty();
 
-        // For each selected literal, add an instruction to load it into a register
-        let mut result_regs = Vec::new();
+        let skip = self.label();
+        if let Some(where_expr) = &select.selection {
+            let cond = self.code_expr(where_expr, &ctx, None)?;
+            self.emit_jump_to(OpCode::IfZ, cond, skip, 0, None, "WHERE false: no row");
+        }
 
-        for item in projection.iter() {
-            match item {
-                SelectItem::UnnamedExpr(expr) => {
-                    // Compile a simple expression and store the value in a register
-                    let reg = self.compile_expr(expr)?;
-                    result_regs.push(reg);
-                }
-                SelectItem::ExprWithAlias { expr, alias } => {
-                    // Same as UnnamedExpr but with an alias (column name)
-                    let reg = self.compile_expr(expr)?;
-                    result_regs.push(reg);
-
-                    // We don't need to do anything special with the alias for now
-                    // But we could store it for the result table column names
-                    if self.verbose {
-                        self.add_comment(&format!("Column alias: {}", alias));
-                    }
-                }
+        let start_reg = self.allocate_registers(select.projection.len());
+        for (i, item) in select.projection.iter().enumerate() {
+            let expr = match item {
+                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => expr,
                 _ => {
                     return Err(SqawkError::UnsupportedSqlFeature(
                         "Only simple expressions supported in SELECT without FROM".to_string(),
                     ));
                 }
-            }
+            };
+            self.code_expr(expr, &ctx, Some(start_reg + i as i64))?;
         }
 
-        // Generate the result row
-        if !result_regs.is_empty() {
-            // ResultRow requires contiguous registers, but compile_expr may have
-            // allocated non-contiguous registers. Copy results to contiguous block.
-            let start_reg = self.allocate_registers(result_regs.len());
-
-            // Copy each result to the contiguous block
-            for (i, &src_reg) in result_regs.iter().enumerate() {
-                let dest_reg = start_reg + i as i64;
-                if src_reg != dest_reg {
-                    self.emit(
-                        OpCode::Copy,
-                        src_reg,
-                        dest_reg,
-                        0,
-                        None,
-                        &format!("Copy r[{}] -> r[{}]", src_reg, dest_reg),
-                    );
-                }
-            }
-
-            // Output the result row from contiguous registers
+        if !select.projection.is_empty() {
             self.emit(
                 OpCode::ResultRow,
-                start_reg,                // First register
-                result_regs.len() as i64, // Number of columns
+                start_reg,
+                select.projection.len() as i64,
                 0,
                 None,
                 "Output literal result row",
             );
         }
+        self.resolve(skip);
 
         Ok(())
-    }
-
-    /// Compile an expression into a specific register
-    pub(crate) fn compile_expr_into_register(
-        &mut self,
-        expr: &sqlparser::ast::Expr,
-        target_reg: usize,
-    ) -> SqawkResult<()> {
-        // Compile the expression
-        let src_reg = self.compile_expr(expr)?;
-
-        // If not already in target register, copy
-        if src_reg != target_reg as i64 {
-            self.emit(
-                OpCode::Copy,
-                src_reg,
-                target_reg as i64,
-                0,
-                None,
-                "Copy expr result to target",
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Compile an expression into bytecode and return the register containing the result
-    fn compile_expr(&mut self, expr: &sqlparser::ast::Expr) -> SqawkResult<i64> {
-        let result_reg = self.allocate_register();
-
-        match expr {
-            sqlparser::ast::Expr::Value(ValueWithSpan { value, .. }) => {
-                // Load the appropriate value based on type
-                match value {
-                    sqlparser::ast::Value::Number(num, _) => {
-                        // Try to parse as integer first
-                        if let Ok(int_val) = num.parse::<i64>() {
-                            self.emit(
-                                OpCode::Integer,
-                                int_val,    // Value
-                                result_reg, // Target register
-                                0,
-                                None,
-                                &format!("r[{}] = {}", result_reg, int_val),
-                            );
-                        } else if let Ok(float_val) = num.parse::<f64>() {
-                            // For floats, use String opcode and rely on runtime conversion
-                            self.emit(
-                                OpCode::String,
-                                0,
-                                result_reg,
-                                0,
-                                Some(float_val.to_string()),
-                                &format!("r[{}] = {} (float)", result_reg, float_val),
-                            );
-                        } else {
-                            return Err(SqawkError::UnsupportedSqlFeature(format!(
-                                "Invalid numeric literal: {}",
-                                num
-                            )));
-                        }
-                    }
-                    sqlparser::ast::Value::SingleQuotedString(s) => {
-                        self.emit(
-                            OpCode::String,
-                            0,
-                            result_reg,
-                            0,
-                            Some(s.clone()),
-                            &format!("r[{}] = '{}'", result_reg, s),
-                        );
-                    }
-                    sqlparser::ast::Value::Null => {
-                        self.emit(
-                            OpCode::Null,
-                            0,
-                            result_reg,
-                            0,
-                            None,
-                            &format!("r[{}] = NULL", result_reg),
-                        );
-                    }
-                    _ => {
-                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                            "Unsupported literal type: {:?}",
-                            value
-                        )));
-                    }
-                }
-            }
-            sqlparser::ast::Expr::UnaryOp { op, expr } => {
-                // Handle unary operators (e.g., -5, +3)
-                match op {
-                    sqlparser::ast::UnaryOperator::Minus => {
-                        // Compile the inner expression
-                        let inner_reg = self.compile_expr(expr)?;
-                        // Negate using 0 - value (avoids Integer -1 special case)
-                        let zero_reg = self.allocate_register();
-                        self.emit(
-                            OpCode::Integer,
-                            0,
-                            zero_reg,
-                            0,
-                            None,
-                            &format!("r[{}] = 0", zero_reg),
-                        );
-                        self.emit(
-                            OpCode::Subtract,
-                            zero_reg,
-                            inner_reg,
-                            result_reg,
-                            None,
-                            &format!("r[{}] = -r[{}]", result_reg, inner_reg),
-                        );
-                    }
-                    sqlparser::ast::UnaryOperator::Plus => {
-                        // Unary plus is a no-op, just compile the inner expression
-                        let inner_reg = self.compile_expr(expr)?;
-                        self.emit(
-                            OpCode::Copy,
-                            inner_reg,
-                            result_reg,
-                            0,
-                            None,
-                            &format!("r[{}] = +r[{}]", result_reg, inner_reg),
-                        );
-                    }
-                    _ => {
-                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                            "Unsupported unary operator: {:?}",
-                            op
-                        )));
-                    }
-                }
-            }
-            sqlparser::ast::Expr::BinaryOp { left, op, right } => {
-                // Handle arithmetic binary operators
-                let left_reg = self.compile_expr(left)?;
-                let right_reg = self.compile_expr(right)?;
-
-                let opcode = match op {
-                    sqlparser::ast::BinaryOperator::Plus => OpCode::Add,
-                    sqlparser::ast::BinaryOperator::Minus => OpCode::Subtract,
-                    sqlparser::ast::BinaryOperator::Multiply => OpCode::Multiply,
-                    sqlparser::ast::BinaryOperator::Divide => OpCode::Divide,
-                    sqlparser::ast::BinaryOperator::Modulo => OpCode::Remainder,
-                    _ => {
-                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                            "Unsupported binary operator: {:?}",
-                            op
-                        )));
-                    }
-                };
-
-                self.emit(
-                    opcode,
-                    left_reg,
-                    right_reg,
-                    result_reg,
-                    None,
-                    &format!(
-                        "r[{}] = r[{}] {:?} r[{}]",
-                        result_reg, left_reg, op, right_reg
-                    ),
-                );
-            }
-            sqlparser::ast::Expr::Function(func) => {
-                // Handle function calls (ABS, ROUND, etc.)
-                let func_name = func
-                    .name
-                    .0
-                    .iter()
-                    .map(|id| id.as_ident().map(|i| i.value.as_str()).unwrap_or_default())
-                    .collect::<Vec<_>>()
-                    .join(".")
-                    .to_uppercase();
-
-                match func_name.as_str() {
-                    "ABS" | "ROUND" | "CEIL" | "CEILING" | "FLOOR" => {
-                        check_math_func_arity(&func_name, func_args(func).len())?;
-                        let arg_expr = self.extract_function_arg_expr(&func_args(func)[0])?;
-                        let src_reg = self.compile_expr(&arg_expr)?;
-                        // P3 is the register holding ROUND's precision; -1
-                        // means the call had no second argument. Zero would
-                        // name register 0, so it must not be used as "none".
-                        let prec_reg = if func_name == "ROUND" && func_args(func).len() > 1 {
-                            let prec_expr = self.extract_function_arg_expr(&func_args(func)[1])?;
-                            self.compile_expr(&prec_expr)?
-                        } else {
-                            -1
-                        };
-                        self.emit(
-                            OpCode::MathFunc,
-                            src_reg,
-                            result_reg,
-                            prec_reg,
-                            Some(func_name.clone()),
-                            &format!("r[{}] = {}(r[{}])", result_reg, func_name, src_reg),
-                        );
-                    }
-                    "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" => {
-                        // No-argument date/time functions
-                        self.emit(
-                            OpCode::DateFunc,
-                            0, // No source register needed
-                            result_reg,
-                            0,
-                            Some(func_name.clone()),
-                            &format!("r[{}] = {}()", result_reg, func_name),
-                        );
-                    }
-                    "DATE" | "TIME" => {
-                        // Single-argument date/time functions
-                        if func_args(func).is_empty() {
-                            return Err(SqawkError::InvalidSqlQuery(format!(
-                                "{} requires one argument",
-                                func_name
-                            )));
-                        }
-                        let arg_expr = self.extract_function_arg_expr(&func_args(func)[0])?;
-                        let src_reg = self.compile_expr(&arg_expr)?;
-                        self.emit(
-                            OpCode::DateFunc,
-                            src_reg,
-                            result_reg,
-                            0,
-                            Some(func_name.clone()),
-                            &format!("r[{}] = {}(r[{}])", result_reg, func_name, src_reg),
-                        );
-                    }
-                    _ => {
-                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                            "Unsupported function in expression: {}",
-                            func_name
-                        )));
-                    }
-                }
-            }
-            sqlparser::ast::Expr::Ceil { expr, field } => {
-                // CEIL is a special expression type in sqlparser
-                check_ceil_floor_field("CEIL", field)?;
-                let src_reg = self.compile_expr(expr)?;
-                self.emit(
-                    OpCode::MathFunc,
-                    src_reg,
-                    result_reg,
-                    -1,
-                    Some("CEIL".to_string()),
-                    &format!("r[{}] = CEIL(r[{}])", result_reg, src_reg),
-                );
-            }
-            sqlparser::ast::Expr::Floor { expr, field } => {
-                // FLOOR is a special expression type in sqlparser
-                check_ceil_floor_field("FLOOR", field)?;
-                let src_reg = self.compile_expr(expr)?;
-                self.emit(
-                    OpCode::MathFunc,
-                    src_reg,
-                    result_reg,
-                    -1,
-                    Some("FLOOR".to_string()),
-                    &format!("r[{}] = FLOOR(r[{}])", result_reg, src_reg),
-                );
-            }
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Unsupported expression type: {:?}",
-                    expr
-                )));
-            }
-        }
-
-        Ok(result_reg)
     }
 
     /// Compile a table scan with optional WHERE clause
@@ -2348,7 +2048,8 @@ impl<'a> SqlCompiler<'a> {
             if self.verbose {
                 eprintln!("WHERE comparison: {:?}", where_expr);
             }
-            let skip_addr = self.compile_where_condition(where_expr, table, cursor_idx)?;
+            let skip_addr =
+                self.code_expr(where_expr, &NameCtx::single(table, cursor_idx as i64), None)?;
 
             // If WHERE condition failed, jump to Next instruction to skip this row
             self.emit(
@@ -2505,14 +2206,14 @@ impl<'a> SqlCompiler<'a> {
                     }
                 }
                 SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-                    self.compile_projection_expr(expr, table, cursor_idx as usize, value_reg)?;
+                    self.code_expr(expr, &NameCtx::single(table, cursor_idx), Some(value_reg))?;
                 }
             }
         }
 
         // WHERE clause
         if let Some(where_expr) = &select.selection {
-            let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
+            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table, cursor_idx), None)?;
             // Jump to Next if condition fails
             let next_addr = self.program.len()
                 + 1
@@ -2598,261 +2299,6 @@ impl<'a> SqlCompiler<'a> {
         }
 
         Ok(())
-    }
-
-    /// Compile a projection expression (column or function) into a register
-    fn compile_projection_expr(
-        &mut self,
-        expr: &Expr,
-        table: &Table,
-        cursor_idx: usize,
-        dest_reg: i64,
-    ) -> SqawkResult<()> {
-        // Delegate to the single expression compiler.
-        //
-        // This function used to be a parallel implementation that understood
-        // only bare columns and a fixed list of single-argument functions.
-        // Its `_` arm tried resolve_column_expr and, on failure, emitted NO
-        // INSTRUCTION AT ALL -- leaving the destination register at its
-        // default NULL. That is why `SELECT name, salary*2 FROM employees
-        // LIMIT 3` produced NULLs while the same query without LIMIT (which
-        // took a different path) produced correct values.
-        let ctx = NameCtx::single(table, cursor_idx as i64);
-        self.code_expr(expr, &ctx, Some(dest_reg)).map(|_| ())
-    }
-
-    /// Compile a WHERE condition and return the register containing the result
-    pub(crate) fn compile_where_condition(
-        &mut self,
-        where_expr: &Expr,
-        table: &Table,
-        cursor_idx: usize,
-    ) -> SqawkResult<i64> {
-        match where_expr {
-            Expr::BinaryOp { left, op, right } => {
-                self.compile_binary_comparison(left, op, right, table, cursor_idx)
-            }
-            Expr::Like {
-                negated,
-                expr,
-                pattern,
-                ..
-            } => self.compile_like_pattern(expr, pattern, *negated, table, cursor_idx, false),
-            Expr::ILike {
-                negated,
-                expr,
-                pattern,
-                ..
-            } => self.compile_like_pattern(expr, pattern, *negated, table, cursor_idx, true),
-            Expr::Between {
-                expr,
-                negated,
-                low,
-                high,
-            } => self.compile_between(expr, low, high, *negated, table, cursor_idx),
-            Expr::InList {
-                expr,
-                list,
-                negated,
-            } => self.compile_in_list(expr, list, *negated, table, cursor_idx),
-            Expr::Case {
-                operand,
-                conditions,
-                else_result,
-                ..
-            } => self.compile_case(
-                operand.as_deref(),
-                conditions,
-                else_result.as_deref(),
-                table,
-                cursor_idx,
-                None,
-            ),
-            Expr::IsNull(expr) => {
-                // Compile IS NULL as a condition
-                let expr_reg = self.allocate_register();
-                let result_reg = self.allocate_register();
-
-                self.compile_where_operand(expr, table, cursor_idx, expr_reg)?;
-
-                self.emit(
-                    OpCode::IsNull,
-                    expr_reg,
-                    result_reg,
-                    0,
-                    None,
-                    &format!("r[{}] = (r[{}] IS NULL)", result_reg, expr_reg),
-                );
-
-                Ok(result_reg)
-            }
-            Expr::IsNotNull(expr) => {
-                // Compile IS NOT NULL as a condition
-                let expr_reg = self.allocate_register();
-                let result_reg = self.allocate_register();
-
-                self.compile_where_operand(expr, table, cursor_idx, expr_reg)?;
-
-                // First check IS NULL
-                self.emit(
-                    OpCode::IsNull,
-                    expr_reg,
-                    result_reg,
-                    0,
-                    None,
-                    &format!("r[{}] = (r[{}] IS NULL)", result_reg, expr_reg),
-                );
-
-                // Then negate the result (if is_null is 1, set to 0; if 0, set to 1)
-                // We can do this with: result = 1 - result
-                let one_reg = self.allocate_register();
-                let final_reg = self.allocate_register();
-
-                self.emit(
-                    OpCode::Integer,
-                    1,
-                    one_reg,
-                    0,
-                    None,
-                    &format!("r[{}] = 1", one_reg),
-                );
-
-                // Subtract using: if result is 0, final = 1; if result is 1, final = 0
-                // We need a subtraction operation, but we don't have one yet
-                // Alternative: use IfZ to branch
-                let is_null_label = self.program.len();
-                self.emit(
-                    OpCode::IfZ,
-                    result_reg,
-                    0, // Will be patched
-                    0,
-                    None,
-                    "if IS NULL result is 0 (not null), jump",
-                );
-
-                // result_reg was 1 (is null), so set final to 0
-                self.emit(
-                    OpCode::Integer,
-                    0,
-                    final_reg,
-                    0,
-                    None,
-                    &format!("r[{}] = 0 (was null)", final_reg),
-                );
-
-                let skip_else_addr = self.program.len();
-                self.emit(
-                    OpCode::Goto,
-                    0,
-                    0, // Will be patched
-                    0,
-                    None,
-                    "skip else branch",
-                );
-
-                // Patch the IfZ to jump here when result was 0 (not null)
-                let not_null_label = self.program.len();
-                if let Some(inst) = self.program.instructions.get_mut(is_null_label) {
-                    inst.p2 = not_null_label as i64;
-                }
-
-                // result_reg was 0 (not null), so set final to 1
-                self.emit(
-                    OpCode::Integer,
-                    1,
-                    final_reg,
-                    0,
-                    None,
-                    &format!("r[{}] = 1 (was not null)", final_reg),
-                );
-
-                // Patch skip_else to jump here
-                let end_label = self.program.len();
-                if let Some(inst) = self.program.instructions.get_mut(skip_else_addr) {
-                    inst.p2 = end_label as i64;
-                }
-
-                Ok(final_reg)
-            }
-            // Phase 4F: Subquery support
-            Expr::Subquery(subquery) => {
-                // Scalar subquery - returns a single value
-                self.compile_scalar_subquery(subquery, table, cursor_idx)
-            }
-            Expr::InSubquery {
-                expr,
-                subquery,
-                negated,
-            } => {
-                // IN (SELECT ...) - check if value exists in subquery results
-                self.compile_in_subquery(expr, subquery, *negated, table, cursor_idx)
-            }
-            Expr::Exists { subquery, negated } => {
-                // EXISTS (SELECT ...) - check if subquery returns any rows
-                self.compile_exists_subquery(subquery, *negated, table, cursor_idx)
-            }
-            // `NOT <predicate>`. Previously unsupported in any position: the
-            // predicate compiler had no arm, and the several NOT-forms that
-            // did work (NOT LIKE, NOT IN, IS NOT NULL) each hand-rolled their
-            // own inversion instead of sharing one.
-            Expr::UnaryOp {
-                op: UnaryOperator::Not,
-                expr: inner,
-            } => {
-                let inner_reg = self.compile_where_condition(inner, table, cursor_idx)?;
-                let dest = self.allocate_register();
-                self.emit(
-                    OpCode::Not,
-                    inner_reg,
-                    dest,
-                    0,
-                    None,
-                    &format!("r[{}] = NOT r[{}]", dest, inner_reg),
-                );
-                Ok(dest)
-            }
-            Expr::Nested(inner) => self.compile_where_condition(inner, table, cursor_idx),
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported WHERE clause expression: {:?}",
-                where_expr
-            ))),
-        }
-    }
-
-    /// Compile a scalar subquery (Phase 4F/4B)
-    ///
-    /// Scalar subqueries return a single value that can be used in expressions.
-    /// - Non-correlated: uses compile-time execution
-    /// - Correlated: uses runtime execution with coroutines
-    ///
-    /// Example: SELECT * FROM users WHERE age = (SELECT MAX(age) FROM users)
-    fn compile_scalar_subquery(
-        &mut self,
-        subquery: &Query,
-        outer_table: &Table,
-        outer_cursor_idx: usize,
-    ) -> SqawkResult<i64> {
-        let result_reg = self.allocate_register();
-
-        // Detect if this is a correlated subquery
-        let outer_refs = self.detect_outer_references(subquery, outer_table.name(), None);
-
-        if outer_refs.is_empty() {
-            // Non-correlated: evaluate at compile time
-            let result_value = self.evaluate_scalar_subquery(subquery)?;
-            self.emit_value_literal(result_reg, &result_value)?;
-        } else {
-            // Correlated: emit runtime execution bytecode
-            self.compile_correlated_scalar_subquery(
-                subquery,
-                outer_table,
-                outer_cursor_idx,
-                &outer_refs,
-                result_reg,
-            )?;
-        }
-
-        Ok(result_reg)
     }
 
     /// Extract the column index from an aggregate function argument
@@ -3368,310 +2814,6 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// Compile an IN (SELECT ...) subquery (Phase 4F)
-    ///
-    /// Uses compile-time execution: executes the subquery during compilation
-    /// and generates comparison code similar to IN (list).
-    ///
-    /// Example: SELECT * FROM orders WHERE user_id IN (SELECT id FROM users WHERE active = 1)
-    fn compile_in_subquery(
-        &mut self,
-        expr: &Expr,
-        subquery: &Query,
-        negated: bool,
-        table: &Table,
-        cursor_idx: usize,
-    ) -> SqawkResult<i64> {
-        // Get the subquery's SELECT body
-        let select = match &*subquery.body {
-            SetExpr::Select(select) => select,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple SELECT subqueries are supported in IN clause".to_string(),
-                ))
-            }
-        };
-
-        // Verify it's a single-table query
-        if select.from.is_empty() {
-            return Err(SqawkError::UnsupportedSqlFeature(
-                "IN subquery must have a FROM clause".to_string(),
-            ));
-        }
-
-        // Get the subquery table name
-        let subquery_table_name = match &select.from[0].relation {
-            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple table references are supported in IN subqueries".to_string(),
-                ))
-            }
-        };
-
-        // Get the subquery table
-        if !self.database.has_table(&subquery_table_name) {
-            return Err(SqawkError::TableNotFound(subquery_table_name.clone()));
-        }
-        let subquery_table = self.database.get_table(&subquery_table_name).unwrap();
-
-        // Filter rows if there's a WHERE clause in the subquery
-        let filtered_rows: Vec<&Vec<TableValue>> = if let Some(where_expr) = &select.selection {
-            subquery_table
-                .rows()
-                .iter()
-                .filter(|row| self.evaluate_where_at_compile_time(where_expr, row, subquery_table))
-                .collect()
-        } else {
-            subquery_table.rows().iter().collect()
-        };
-
-        // Get the column index from the subquery projection
-        let col_idx = if select.projection.is_empty() {
-            return Err(SqawkError::InvalidSqlQuery(
-                "IN subquery must have a projection".to_string(),
-            ));
-        } else {
-            match &select.projection[0] {
-                SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
-                    let col_name = ident.value.to_lowercase();
-                    subquery_table
-                        .column_index(&col_name)
-                        .ok_or(SqawkError::ColumnNotFound(col_name))?
-                }
-                SelectItem::Wildcard(_) => 0,
-                _ => 0, // Default to first column
-            }
-        };
-
-        // Collect values from the subquery result
-        let subquery_values: Vec<TableValue> = filtered_rows
-            .iter()
-            .map(|row| row[col_idx].clone())
-            .collect();
-
-        // If subquery returns no values, handle specially
-        if subquery_values.is_empty() {
-            let result_reg = self.allocate_register();
-            self.emit(
-                OpCode::Integer,
-                if negated { 1 } else { 0 },
-                result_reg,
-                0,
-                None,
-                &format!(
-                    "r[{}] = {} (empty IN subquery)",
-                    result_reg,
-                    if negated { 1 } else { 0 }
-                ),
-            );
-            return Ok(result_reg);
-        }
-
-        // Allocate registers
-        let expr_reg = self.allocate_register();
-        let result_reg = self.allocate_register();
-        let temp_reg = self.allocate_register();
-
-        // Compile the expression value (from the outer query)
-        self.compile_where_operand(expr, table, cursor_idx, expr_reg)?;
-
-        // Initialize result to 0 (false, not found)
-        self.emit(
-            OpCode::Integer,
-            0,
-            result_reg,
-            0,
-            None,
-            &format!("r[{}] = 0 (IN subquery initial)", result_reg),
-        );
-
-        // Track jump addresses that need to be patched to skip to end when match found
-        let mut jump_to_end_addrs = Vec::with_capacity(subquery_values.len());
-
-        // Compare against each value from the subquery
-        for value in &subquery_values {
-            let item_reg = self.allocate_register();
-
-            // Emit the subquery value as a literal
-            self.emit_value_literal(item_reg, value)?;
-
-            // Compare expr == item
-            self.emit(
-                OpCode::Eq,
-                expr_reg,
-                item_reg,
-                temp_reg,
-                None,
-                &format!("r[{}] = (r[{}] == r[{}])", temp_reg, expr_reg, item_reg),
-            );
-
-            // If match found (temp_reg != 0), set result to 1 and jump to end
-            let skip_set_addr = self.program.len();
-            self.emit(
-                OpCode::IfZ,
-                temp_reg,
-                0, // Will be patched to skip the next instructions
-                0,
-                None,
-                "if no match, skip to next item",
-            );
-
-            // Set result to 1 (found)
-            self.emit(
-                OpCode::Integer,
-                1,
-                result_reg,
-                0,
-                None,
-                &format!("r[{}] = 1 (found in subquery)", result_reg),
-            );
-
-            // Jump to end (skip remaining comparisons)
-            jump_to_end_addrs.push(self.program.len());
-            self.emit(
-                OpCode::Goto,
-                0,
-                0, // Will be patched to end
-                0,
-                None,
-                "skip to end",
-            );
-
-            // Patch the skip address to continue to next comparison
-            let continue_addr = self.program.len();
-            if let Some(inst) = self.program.instructions.get_mut(skip_set_addr) {
-                inst.p2 = continue_addr as i64;
-            }
-        }
-
-        // End label - all "found" jumps come here
-        let end_label = self.program.len();
-
-        // Patch all jump-to-end addresses
-        for addr in jump_to_end_addrs {
-            if let Some(inst) = self.program.instructions.get_mut(addr) {
-                inst.p2 = end_label as i64;
-            }
-        }
-
-        // Handle negation: if NOT IN, invert the result
-        if negated {
-            let zero_reg = self.allocate_register();
-            self.emit(
-                OpCode::Integer,
-                0,
-                zero_reg,
-                0,
-                None,
-                &format!("r[{}] = 0 for NOT IN", zero_reg),
-            );
-            self.emit(
-                OpCode::Eq,
-                result_reg,
-                zero_reg,
-                result_reg,
-                None,
-                &format!("r[{}] = (r[{}] == 0) for NOT IN", result_reg, result_reg),
-            );
-        }
-
-        Ok(result_reg)
-    }
-
-    /// Compile an EXISTS (SELECT ...) subquery (Phase 4F/4B)
-    ///
-    /// - Non-correlated: uses compile-time execution
-    /// - Correlated: uses runtime execution with inline subquery iteration
-    ///
-    /// Example: SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)
-    fn compile_exists_subquery(
-        &mut self,
-        subquery: &Query,
-        negated: bool,
-        outer_table: &Table,
-        outer_cursor_idx: usize,
-    ) -> SqawkResult<i64> {
-        let result_reg = self.allocate_register();
-
-        // Detect if this is a correlated subquery
-        let outer_refs = self.detect_outer_references(subquery, outer_table.name(), None);
-
-        if !outer_refs.is_empty() {
-            // Correlated: emit runtime execution bytecode
-            return self.compile_correlated_exists_subquery(
-                subquery,
-                negated,
-                outer_table,
-                outer_cursor_idx,
-                &outer_refs,
-                result_reg,
-            );
-        }
-
-        // Non-correlated: use compile-time execution
-        // Get the subquery's SELECT body
-        let select = match &*subquery.body {
-            SetExpr::Select(select) => select,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple SELECT subqueries are supported in EXISTS clause".to_string(),
-                ))
-            }
-        };
-
-        // Verify it's a single-table query
-        if select.from.is_empty() {
-            return Err(SqawkError::UnsupportedSqlFeature(
-                "EXISTS subquery must have a FROM clause".to_string(),
-            ));
-        }
-
-        // Get the subquery table name
-        let subquery_table_name = match &select.from[0].relation {
-            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple table references are supported in EXISTS subqueries".to_string(),
-                ))
-            }
-        };
-
-        // Get the subquery table
-        if !self.database.has_table(&subquery_table_name) {
-            return Err(SqawkError::TableNotFound(subquery_table_name.clone()));
-        }
-        let subquery_table = self.database.get_table(&subquery_table_name).unwrap();
-
-        // Check if any rows match the subquery's WHERE clause
-        let has_rows = if let Some(where_expr) = &select.selection {
-            subquery_table
-                .rows()
-                .iter()
-                .any(|row| self.evaluate_where_at_compile_time(where_expr, row, subquery_table))
-        } else {
-            !subquery_table.rows().is_empty()
-        };
-
-        // Emit the result
-        let exists = if negated { !has_rows } else { has_rows };
-        self.emit(
-            OpCode::Integer,
-            if exists { 1 } else { 0 },
-            result_reg,
-            0,
-            None,
-            &format!(
-                "r[{}] = {} ({}EXISTS result)",
-                result_reg,
-                if exists { 1 } else { 0 },
-                if negated { "NOT " } else { "" }
-            ),
-        );
-
-        Ok(result_reg)
-    }
-
     // =========================================================================
     // Phase 4B: Correlated Subquery Support
     // =========================================================================
@@ -3681,13 +2823,15 @@ impl<'a> SqlCompiler<'a> {
     /// A correlated subquery contains references to columns from the outer query,
     /// like: SELECT * FROM orders o WHERE amount > (SELECT AVG(amount) FROM orders WHERE user_id = o.user_id)
     /// Here, `o.user_id` is an outer reference.
-    fn detect_outer_references(
-        &self,
-        subquery: &Query,
-        outer_table_name: &str,
-        outer_alias: Option<&str>,
-    ) -> Vec<OuterColumnRef> {
+    ///
+    /// The outer query's names are every FROM source in `ctx`, by refname and
+    /// table name, plus the alias recorded by the table-scan path. A context
+    /// with no sources (no FROM) cannot be correlated with.
+    fn detect_outer_references(&self, subquery: &Query, ctx: &NameCtx<'_>) -> Vec<OuterColumnRef> {
         let mut outer_refs = Vec::new();
+        if ctx.srcs.is_empty() {
+            return outer_refs;
+        }
 
         // Get the subquery's SELECT body
         let select = match &*subquery.body {
@@ -3695,31 +2839,33 @@ impl<'a> SqlCompiler<'a> {
             _ => return outer_refs,
         };
 
-        // Get the subquery's table name to distinguish from outer refs
-        let subquery_table_name = select.from.first().and_then(|f| match &f.relation {
-            sqlparser::ast::TableFactor::Table { name, alias, .. } => {
-                let table_name = name
-                    .0
-                    .last()
-                    .and_then(|p| p.as_ident())
-                    .map(|i| i.value.to_lowercase())
-                    .unwrap_or_default();
-                let alias_name = alias.as_ref().map(|a| a.name.value.to_lowercase());
-                Some((table_name, alias_name))
+        let mut outer_names: Vec<String> = Vec::new();
+        for src in &ctx.srcs {
+            outer_names.push(src.refname.clone());
+            outer_names.push(src.table.name().to_ascii_lowercase());
+        }
+        if let Some(alias) = &self.current_outer_alias {
+            outer_names.push(alias.to_ascii_lowercase());
+        }
+
+        // The subquery's own table name and alias, which shadow outer names.
+        let mut inner_names: Vec<String> = Vec::new();
+        if let Some(sqlparser::ast::TableFactor::Table { name, alias, .. }) =
+            select.from.first().map(|f| &f.relation)
+        {
+            if let Some(ident) = name.0.last().and_then(|p| p.as_ident()) {
+                inner_names.push(ident.value.to_lowercase());
             }
-            _ => None,
-        });
+            if let Some(a) = alias {
+                inner_names.push(a.name.value.to_lowercase());
+            }
+        }
 
-        // Use the passed outer_alias, or fall back to self.current_outer_alias
-        let effective_outer_alias = outer_alias.or(self.current_outer_alias.as_deref());
-
-        // Walk the subquery's WHERE clause looking for outer references
         if let Some(where_expr) = &select.selection {
-            self.collect_outer_refs_from_expr(
+            Self::collect_outer_refs_from_expr(
                 where_expr,
-                outer_table_name,
-                effective_outer_alias,
-                subquery_table_name.as_ref(),
+                &outer_names,
+                &inner_names,
                 &mut outer_refs,
             );
         }
@@ -3729,126 +2875,42 @@ impl<'a> SqlCompiler<'a> {
 
     /// Recursively collect outer column references from an expression
     fn collect_outer_refs_from_expr(
-        &self,
         expr: &Expr,
-        outer_table_name: &str,
-        outer_alias: Option<&str>,
-        subquery_table: Option<&(String, Option<String>)>,
+        outer_names: &[String],
+        inner_names: &[String],
         refs: &mut Vec<OuterColumnRef>,
     ) {
+        let mut walk =
+            |e: &Expr| Self::collect_outer_refs_from_expr(e, outer_names, inner_names, refs);
         match expr {
             Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
                 let qualifier = parts[0].value.to_lowercase();
-
-                // Check if this references the outer table (not the subquery's own table)
-                let is_outer_ref = {
-                    let matches_outer_alias = outer_alias
-                        .map(|a| a.to_lowercase() == qualifier)
-                        .unwrap_or(false);
-                    let matches_outer_table = outer_table_name.to_lowercase() == qualifier;
-
-                    // Make sure it's not referencing the subquery's own table
-                    let matches_subquery = subquery_table
-                        .map(|(name, alias)| {
-                            name == &qualifier
-                                || alias.as_ref().map(|a| a == &qualifier).unwrap_or(false)
-                        })
-                        .unwrap_or(false);
-
-                    (matches_outer_alias || matches_outer_table) && !matches_subquery
-                };
-
-                if is_outer_ref {
+                if outer_names.contains(&qualifier) && !inner_names.contains(&qualifier) {
                     refs.push(OuterColumnRef { qualifier });
                 }
             }
             Expr::BinaryOp { left, right, .. } => {
-                self.collect_outer_refs_from_expr(
-                    left,
-                    outer_table_name,
-                    outer_alias,
-                    subquery_table,
-                    refs,
-                );
-                self.collect_outer_refs_from_expr(
-                    right,
-                    outer_table_name,
-                    outer_alias,
-                    subquery_table,
-                    refs,
-                );
+                walk(left);
+                walk(right);
             }
-            Expr::Nested(inner) => {
-                self.collect_outer_refs_from_expr(
-                    inner,
-                    outer_table_name,
-                    outer_alias,
-                    subquery_table,
-                    refs,
-                );
-            }
-            Expr::UnaryOp { expr, .. } => {
-                self.collect_outer_refs_from_expr(
-                    expr,
-                    outer_table_name,
-                    outer_alias,
-                    subquery_table,
-                    refs,
-                );
-            }
-            Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
-                self.collect_outer_refs_from_expr(
-                    inner,
-                    outer_table_name,
-                    outer_alias,
-                    subquery_table,
-                    refs,
-                );
-            }
+            Expr::Nested(inner)
+            | Expr::UnaryOp { expr: inner, .. }
+            | Expr::IsNull(inner)
+            | Expr::IsNotNull(inner)
+            | Expr::Cast { expr: inner, .. }
+            | Expr::Like { expr: inner, .. }
+            | Expr::ILike { expr: inner, .. } => walk(inner),
             Expr::Between {
-                expr,
-                low,
-                high,
-                negated: _,
+                expr, low, high, ..
             } => {
-                self.collect_outer_refs_from_expr(
-                    expr,
-                    outer_table_name,
-                    outer_alias,
-                    subquery_table,
-                    refs,
-                );
-                self.collect_outer_refs_from_expr(
-                    low,
-                    outer_table_name,
-                    outer_alias,
-                    subquery_table,
-                    refs,
-                );
-                self.collect_outer_refs_from_expr(
-                    high,
-                    outer_table_name,
-                    outer_alias,
-                    subquery_table,
-                    refs,
-                );
+                walk(expr);
+                walk(low);
+                walk(high);
             }
             Expr::InList { expr, list, .. } => {
-                self.collect_outer_refs_from_expr(
-                    expr,
-                    outer_table_name,
-                    outer_alias,
-                    subquery_table,
-                    refs,
-                );
+                walk(expr);
                 for item in list {
-                    self.collect_outer_refs_from_expr(
-                        item,
-                        outer_table_name,
-                        outer_alias,
-                        subquery_table,
-                        refs,
-                    );
+                    walk(item);
                 }
             }
             Expr::Case {
@@ -3858,50 +2920,20 @@ impl<'a> SqlCompiler<'a> {
                 ..
             } => {
                 if let Some(op) = operand {
-                    self.collect_outer_refs_from_expr(
-                        op,
-                        outer_table_name,
-                        outer_alias,
-                        subquery_table,
-                        refs,
-                    );
+                    walk(op);
                 }
                 for branch in conditions {
-                    self.collect_outer_refs_from_expr(
-                        &branch.condition,
-                        outer_table_name,
-                        outer_alias,
-                        subquery_table,
-                        refs,
-                    );
-                    self.collect_outer_refs_from_expr(
-                        &branch.result,
-                        outer_table_name,
-                        outer_alias,
-                        subquery_table,
-                        refs,
-                    );
+                    walk(&branch.condition);
+                    walk(&branch.result);
                 }
                 if let Some(else_r) = else_result {
-                    self.collect_outer_refs_from_expr(
-                        else_r,
-                        outer_table_name,
-                        outer_alias,
-                        subquery_table,
-                        refs,
-                    );
+                    walk(else_r);
                 }
             }
             Expr::Function(func) => {
                 for arg in func_args(func) {
                     if let FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) = arg {
-                        self.collect_outer_refs_from_expr(
-                            e,
-                            outer_table_name,
-                            outer_alias,
-                            subquery_table,
-                            refs,
-                        );
+                        walk(e);
                     }
                 }
             }
@@ -3910,7 +2942,73 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// Compile a correlated EXISTS subquery (Phase 4B)
+    /// Resolve the single table a correlated subquery scans.
+    fn correlated_subquery_table(
+        &self,
+        select: &Select,
+        what: &str,
+    ) -> SqawkResult<(String, &'a Table)> {
+        if select.from.is_empty() {
+            return Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Correlated {} subquery must have a FROM clause",
+                what
+            )));
+        }
+        let name = match &select.from[0].relation {
+            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(format!(
+                    "Only simple table references are supported in correlated {}",
+                    what
+                )))
+            }
+        };
+        let database: &'a Database = self.database;
+        let table = database.get_table(&name)?;
+        Ok((name, table))
+    }
+
+    /// Name scope for a correlated subquery's condition.
+    ///
+    /// The subquery's own table forms the inner scope and the enclosing
+    /// query's sources the outer one, which is exactly `NameCtx`'s two-level
+    /// resolution: an unqualified name binds to the subquery, and a name it
+    /// does not have is looked up outward. With a single outer source, every
+    /// qualifier the subquery used for it (typically an alias the outer
+    /// scan does not record) resolves to it too.
+    fn correlated_ctx<'t>(
+        subquery_table: &'t Table,
+        sub_cursor: i64,
+        outer: &NameCtx<'t>,
+        outer_refs: &[OuterColumnRef],
+    ) -> NameCtx<'t> {
+        let mut ctx = NameCtx::single(subquery_table, sub_cursor);
+        ctx.outer = outer.srcs.iter().chain(&outer.outer).cloned().collect();
+        if let [only] = outer.srcs.as_slice() {
+            for r in outer_refs {
+                if !ctx.outer.iter().any(|s| s.refname == r.qualifier) {
+                    let mut alias = only.clone();
+                    alias.refname = r.qualifier.clone();
+                    ctx.outer.push(alias);
+                }
+            }
+        }
+        ctx
+    }
+
+    /// A cursor id for a correlated subquery's scan that no outer source uses.
+    fn correlated_cursor(outer: &NameCtx<'_>) -> i64 {
+        outer
+            .srcs
+            .iter()
+            .chain(&outer.outer)
+            .map(|s| s.cursor)
+            .max()
+            .unwrap_or(0)
+            + 100
+    }
+
+    /// Compile a correlated EXISTS subquery (Phase 4B) into `result_reg`.
     ///
     /// For each outer row, iterates through the subquery table and checks
     /// if any row matches the correlated condition.
@@ -3918,12 +3016,10 @@ impl<'a> SqlCompiler<'a> {
         &mut self,
         subquery: &Query,
         negated: bool,
-        outer_table: &Table,
-        outer_cursor_idx: usize,
+        outer: &NameCtx<'_>,
         outer_refs: &[OuterColumnRef],
         result_reg: i64,
-    ) -> SqawkResult<i64> {
-        // Get the subquery's SELECT body
+    ) -> SqawkResult<()> {
         let select = match &*subquery.body {
             SetExpr::Select(select) => select,
             _ => {
@@ -3932,34 +3028,10 @@ impl<'a> SqlCompiler<'a> {
                 ))
             }
         };
+        let (subquery_table_name, subquery_table) =
+            self.correlated_subquery_table(select, "EXISTS")?;
+        let sub_cursor = Self::correlated_cursor(outer);
 
-        // Verify it's a single-table query
-        if select.from.is_empty() {
-            return Err(SqawkError::UnsupportedSqlFeature(
-                "Correlated EXISTS subquery must have a FROM clause".to_string(),
-            ));
-        }
-
-        // Get the subquery table name
-        let subquery_table_name = match &select.from[0].relation {
-            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple table references are supported in correlated EXISTS".to_string(),
-                ))
-            }
-        };
-
-        // Get the subquery table
-        if !self.database.has_table(&subquery_table_name) {
-            return Err(SqawkError::TableNotFound(subquery_table_name.clone()));
-        }
-        let subquery_table = self.database.get_table(&subquery_table_name).unwrap();
-
-        // Use a unique cursor ID for the subquery (offset from outer cursor)
-        let sub_cursor_idx = outer_cursor_idx + 100;
-
-        // Initialize result to 0 (not found)
         self.emit(
             OpCode::Integer,
             0,
@@ -3968,394 +3040,82 @@ impl<'a> SqlCompiler<'a> {
             None,
             &format!("r[{}] = 0 (EXISTS init)", result_reg),
         );
-
-        // Open the subquery table
         self.emit(
             OpCode::OpenRead,
-            sub_cursor_idx as i64,
+            sub_cursor,
             0,
             0,
             Some(subquery_table_name.clone()),
             &format!("Open {} for correlated EXISTS", subquery_table_name),
         );
 
-        // Rewind to first row (jump to done if empty)
-        let rewind_addr = self.program.len();
-        self.emit(
+        let done = self.label();
+        self.emit_jump_to(
             OpCode::Rewind,
-            sub_cursor_idx as i64,
-            0, // Will be patched to done_addr
+            sub_cursor,
+            done,
             0,
             None,
             "Rewind subquery cursor",
         );
+        let loop_start = self.label();
+        self.resolve(loop_start);
 
-        let loop_start = self.program.len();
-
-        // For the WHERE clause, we need to evaluate the correlated condition
-        // This requires comparing subquery columns with outer columns
+        let next_row = self.label();
         if let Some(where_expr) = &select.selection {
-            let cmp_reg = self.allocate_register();
-
-            // Compile the WHERE condition with both tables accessible
-            // For correlated subqueries, we need to handle outer references specially
-            self.compile_correlated_where(
-                where_expr,
-                subquery_table,
-                sub_cursor_idx,
-                outer_table,
-                outer_cursor_idx,
-                outer_refs,
-                cmp_reg,
-            )?;
-
-            // If condition is false (0), jump to next row
-            let skip_match_addr = self.program.len();
-            self.emit(
+            let ctx = Self::correlated_ctx(subquery_table, sub_cursor, outer, outer_refs);
+            let cmp_reg = self.code_expr(where_expr, &ctx, None)?;
+            self.emit_jump_to(
                 OpCode::IfZ,
                 cmp_reg,
-                0, // Will be patched to next_row
+                next_row,
                 0,
                 None,
                 "Skip if WHERE condition false",
             );
-
-            // Match found! Set result to 1
-            self.emit(
-                OpCode::Integer,
-                1,
-                result_reg,
-                0,
-                None,
-                &format!("r[{}] = 1 (EXISTS match found)", result_reg),
-            );
-
-            // Jump to done (exit early)
-            let goto_done_addr = self.program.len();
-            self.emit(
-                OpCode::Goto,
-                0,
-                0, // Will be patched to done_addr
-                0,
-                None,
-                "Exit early on match",
-            );
-
-            // Patch skip_match to jump here
-            let next_row_addr = self.program.len();
-            if let Some(inst) = self.program.instructions.get_mut(skip_match_addr) {
-                inst.p2 = next_row_addr as i64;
-            }
-
-            // Next row
-            self.emit(
-                OpCode::Next,
-                sub_cursor_idx as i64,
-                loop_start as i64,
-                0,
-                None,
-                "Next subquery row",
-            );
-
-            // Done label
-            let done_addr = self.program.len();
-
-            // Patch rewind to jump to done if empty
-            if let Some(inst) = self.program.instructions.get_mut(rewind_addr) {
-                inst.p2 = done_addr as i64;
-            }
-
-            // Patch goto_done to jump here
-            if let Some(inst) = self.program.instructions.get_mut(goto_done_addr) {
-                inst.p2 = done_addr as i64;
-            }
-        } else {
-            // No WHERE clause - if table has any rows, EXISTS is true
-            self.emit(
-                OpCode::Integer,
-                1,
-                result_reg,
-                0,
-                None,
-                &format!("r[{}] = 1 (EXISTS: table has rows)", result_reg),
-            );
-
-            // Done
-            let done_addr = self.program.len();
-            if let Some(inst) = self.program.instructions.get_mut(rewind_addr) {
-                inst.p2 = done_addr as i64;
-            }
         }
+        self.emit(
+            OpCode::Integer,
+            1,
+            result_reg,
+            0,
+            None,
+            &format!("r[{}] = 1 (EXISTS match found)", result_reg),
+        );
+        self.emit_jump_to(OpCode::Goto, 0, done, 0, None, "Exit early on match");
+        self.resolve(next_row);
+        self.emit_jump_to(
+            OpCode::Next,
+            sub_cursor,
+            loop_start,
+            0,
+            None,
+            "Next subquery row",
+        );
+        self.resolve(done);
 
-        // Close the subquery cursor
         self.emit(
             OpCode::Close,
-            sub_cursor_idx as i64,
+            sub_cursor,
             0,
             0,
             None,
             "Close subquery cursor",
         );
-
-        // Handle NOT EXISTS: flip the result
         if negated {
-            // result = (result == 0) ? 1 : 0
-            // Use branching: if result is 0, set to 1; else set to 0
-            let skip_zero_addr = self.program.len();
-            self.emit(
-                OpCode::IfZ,
-                result_reg,
-                0, // Will be patched
-                0,
-                None,
-                &format!("if r[{}] == 0, jump to set 1", result_reg),
-            );
-
-            // result was non-zero (EXISTS found rows), so NOT EXISTS = 0
-            self.emit(
-                OpCode::Integer,
-                0,
-                result_reg,
-                0,
-                None,
-                &format!("r[{}] = 0 (NOT EXISTS false)", result_reg),
-            );
-
-            let goto_end_addr = self.program.len();
-            self.emit(
-                OpCode::Goto,
-                0,
-                0, // Will be patched
-                0,
-                None,
-                "skip to end",
-            );
-
-            // result was zero (EXISTS found no rows), so NOT EXISTS = 1
-            let set_one_addr = self.program.len();
-            if let Some(inst) = self.program.instructions.get_mut(skip_zero_addr) {
-                inst.p2 = set_one_addr as i64;
-            }
-
-            self.emit(
-                OpCode::Integer,
-                1,
-                result_reg,
-                0,
-                None,
-                &format!("r[{}] = 1 (NOT EXISTS true)", result_reg),
-            );
-
-            // Patch goto to end
-            let end_addr = self.program.len();
-            if let Some(inst) = self.program.instructions.get_mut(goto_end_addr) {
-                inst.p2 = end_addr as i64;
-            }
+            self.emit(OpCode::Not, result_reg, result_reg, 0, None, "NOT EXISTS");
         }
-
-        Ok(result_reg)
+        Ok(())
     }
 
-    /// Compile a WHERE clause with correlated column references
-    #[allow(clippy::too_many_arguments)]
-    fn compile_correlated_where(
-        &mut self,
-        where_expr: &Expr,
-        subquery_table: &Table,
-        sub_cursor_idx: usize,
-        outer_table: &Table,
-        outer_cursor_idx: usize,
-        outer_refs: &[OuterColumnRef],
-        result_reg: i64,
-    ) -> SqawkResult<()> {
-        match where_expr {
-            Expr::BinaryOp { left, op, right } => {
-                match op {
-                    BinaryOperator::And => {
-                        // Compile both sides and AND them
-                        let left_reg = self.allocate_register();
-                        let right_reg = self.allocate_register();
-                        self.compile_correlated_where(
-                            left,
-                            subquery_table,
-                            sub_cursor_idx,
-                            outer_table,
-                            outer_cursor_idx,
-                            outer_refs,
-                            left_reg,
-                        )?;
-                        self.compile_correlated_where(
-                            right,
-                            subquery_table,
-                            sub_cursor_idx,
-                            outer_table,
-                            outer_cursor_idx,
-                            outer_refs,
-                            right_reg,
-                        )?;
-                        // AND: result = left AND right
-                        // If left is 0, result is 0; else result is right
-                        let skip_addr = self.program.len();
-                        self.emit(
-                            OpCode::IfZ,
-                            left_reg,
-                            0, // Will patch to set result=0
-                            0,
-                            None,
-                            "AND: skip if left is false",
-                        );
-                        // Left is true, result = right
-                        self.emit(
-                            OpCode::Copy,
-                            right_reg,
-                            result_reg,
-                            0,
-                            None,
-                            &format!("r[{}] = r[{}] (AND right)", result_reg, right_reg),
-                        );
-                        let goto_end_addr = self.program.len();
-                        self.emit(
-                            OpCode::Goto,
-                            0,
-                            0, // Will patch to end
-                            0,
-                            None,
-                            "",
-                        );
-                        // Left is false, result = 0
-                        let false_addr = self.program.len();
-                        if let Some(inst) = self.program.instructions.get_mut(skip_addr) {
-                            inst.p2 = false_addr as i64;
-                        }
-                        self.emit(
-                            OpCode::Integer,
-                            0,
-                            result_reg,
-                            0,
-                            None,
-                            &format!("r[{}] = 0 (AND false)", result_reg),
-                        );
-                        let end_addr = self.program.len();
-                        if let Some(inst) = self.program.instructions.get_mut(goto_end_addr) {
-                            inst.p2 = end_addr as i64;
-                        }
-                        Ok(())
-                    }
-                    BinaryOperator::Eq
-                    | BinaryOperator::NotEq
-                    | BinaryOperator::Lt
-                    | BinaryOperator::LtEq
-                    | BinaryOperator::Gt
-                    | BinaryOperator::GtEq => {
-                        // Compile left and right operands
-                        let left_reg = self.allocate_register();
-                        let right_reg = self.allocate_register();
-
-                        self.compile_correlated_operand(
-                            left,
-                            subquery_table,
-                            sub_cursor_idx,
-                            outer_table,
-                            outer_cursor_idx,
-                            outer_refs,
-                            left_reg,
-                        )?;
-                        self.compile_correlated_operand(
-                            right,
-                            subquery_table,
-                            sub_cursor_idx,
-                            outer_table,
-                            outer_cursor_idx,
-                            outer_refs,
-                            right_reg,
-                        )?;
-
-                        // Emit comparison
-                        let cmp_opcode = Self::binary_op_to_comparison_opcode(op)?;
-
-                        self.emit(
-                            cmp_opcode,
-                            left_reg,
-                            right_reg,
-                            result_reg,
-                            None,
-                            &format!(
-                                "r[{}] = r[{}] {:?} r[{}]",
-                                result_reg, left_reg, op, right_reg
-                            ),
-                        );
-                        Ok(())
-                    }
-                    _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                        "Unsupported operator in correlated subquery WHERE: {:?}",
-                        op
-                    ))),
-                }
-            }
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported expression in correlated subquery WHERE: {:?}",
-                where_expr
-            ))),
-        }
-    }
-
-    /// Compile an operand in a correlated WHERE clause
-    #[allow(clippy::too_many_arguments)]
-    /// Compile an operand of a correlated subquery's condition.
-    ///
-    /// The subquery's own tables form the inner scope and the enclosing
-    /// query's the outer one, which is exactly `NameCtx`'s two-level
-    /// resolution: an unqualified name binds to the subquery, and a name it
-    /// does not have is looked up outward.
-    ///
-    /// This was a private operand compiler handling identifiers, qualified
-    /// identifiers and literals, so a correlated condition could not contain
-    /// arithmetic or a function call even though a plain WHERE could.
-    #[allow(clippy::too_many_arguments)]
-    fn compile_correlated_operand(
-        &mut self,
-        expr: &Expr,
-        subquery_table: &Table,
-        sub_cursor_idx: usize,
-        outer_table: &Table,
-        outer_cursor_idx: usize,
-        outer_refs: &[OuterColumnRef],
-        dest_reg: i64,
-    ) -> SqawkResult<()> {
-        // An alias the outer query used for its table must resolve too, not
-        // just the table's own name.
-        let outer_refname = outer_refs
-            .first()
-            .map(|r| r.qualifier.clone())
-            .unwrap_or_else(|| outer_table.name().to_ascii_lowercase());
-
-        let mut ctx = NameCtx::single(subquery_table, sub_cursor_idx as i64);
-        ctx.outer = vec![
-            Src {
-                cursor: outer_cursor_idx as i64,
-                reg_base: None,
-                table: outer_table,
-                refname: outer_refname,
-            },
-            Src {
-                cursor: outer_cursor_idx as i64,
-                reg_base: None,
-                table: outer_table,
-                refname: outer_table.name().to_ascii_lowercase(),
-            },
-        ];
-        self.code_expr(expr, &ctx, Some(dest_reg)).map(|_| ())
-    }
-
+    /// Compile a correlated scalar subquery selecting one aggregate.
     fn compile_correlated_scalar_subquery(
         &mut self,
         subquery: &Query,
-        outer_table: &Table,
-        outer_cursor_idx: usize,
+        outer: &NameCtx<'_>,
         outer_refs: &[OuterColumnRef],
         result_reg: i64,
     ) -> SqawkResult<()> {
-        // Get the subquery's SELECT body
         let select = match &*subquery.body {
             SetExpr::Select(select) => select,
             _ => {
@@ -4364,70 +3124,26 @@ impl<'a> SqlCompiler<'a> {
                 ))
             }
         };
+        let (subquery_table_name, subquery_table) =
+            self.correlated_subquery_table(select, "scalar")?;
 
-        // Verify it's a single-table query
-        if select.from.is_empty() {
-            return Err(SqawkError::UnsupportedSqlFeature(
-                "Correlated scalar subquery must have a FROM clause".to_string(),
-            ));
-        }
-
-        // Get the subquery table name
-        let subquery_table_name = match &select.from[0].relation {
-            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple table references are supported in correlated scalar".to_string(),
-                ))
-            }
-        };
-
-        // Get the subquery table
-        if !self.database.has_table(&subquery_table_name) {
-            return Err(SqawkError::TableNotFound(subquery_table_name.clone()));
-        }
-        let subquery_table = self.database.get_table(&subquery_table_name).unwrap();
-
-        // Get the aggregate function from the SELECT list
-        if select.projection.is_empty() {
-            return Err(SqawkError::UnsupportedSqlFeature(
-                "Correlated scalar subquery must have a SELECT expression".to_string(),
-            ));
-        }
-
-        let (agg_func_name, agg_col_idx) = match &select.projection[0] {
-            SelectItem::UnnamedExpr(Expr::Function(func)) => {
+        let (agg_func_name, agg_col_idx) = match select.projection.first() {
+            Some(SelectItem::UnnamedExpr(Expr::Function(func))) => {
                 let func_name = func.name.to_string().to_uppercase();
                 let col_idx = self.extract_agg_column_index(func, subquery_table)?;
                 (func_name, col_idx)
             }
-            _ => {
+            Some(_) => {
                 return Err(SqawkError::UnsupportedSqlFeature(
                     "Correlated scalar subquery must select an aggregate function".to_string(),
                 ))
             }
+            None => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Correlated scalar subquery must have a SELECT expression".to_string(),
+                ))
+            }
         };
-
-        // Use a unique cursor ID for the subquery
-        let sub_cursor_idx = outer_cursor_idx + 100;
-
-        // Allocate registers for aggregate computation
-        let acc_reg = self.allocate_register(); // Accumulator
-        let _count_reg = self.allocate_register(); // Count for AVG (unused for now)
-        let val_reg = self.allocate_register(); // Current value
-
-        // Initialize accumulator with Null (like SQLite does)
-        // AggStep/AggFinal will treat Null as "no data yet"
-        self.emit(
-            OpCode::Null,
-            0,
-            acc_reg,
-            acc_reg, // P3=P2 means just set one register
-            None,
-            &format!("r[{}]=NULL; Init {} accumulator", acc_reg, agg_func_name),
-        );
-
-        // Validate aggregate function is supported
         match agg_func_name.as_str() {
             "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" => {}
             _ => {
@@ -4437,76 +3153,67 @@ impl<'a> SqlCompiler<'a> {
                 )))
             }
         }
+        let agg_type = Self::agg_func_type(agg_func_name.as_str());
 
-        // Open the subquery table
+        let sub_cursor = Self::correlated_cursor(outer);
+        let acc_reg = self.allocate_register();
+        let val_reg = self.allocate_register();
+
+        // Initialize accumulator with Null (like SQLite does)
+        // AggStep/AggFinal will treat Null as "no data yet"
+        self.emit(
+            OpCode::Null,
+            0,
+            acc_reg,
+            acc_reg,
+            None,
+            &format!("r[{}]=NULL; Init {} accumulator", acc_reg, agg_func_name),
+        );
         self.emit(
             OpCode::OpenRead,
-            sub_cursor_idx as i64,
+            sub_cursor,
             0,
             0,
             Some(subquery_table_name.clone()),
             &format!("Open {} for correlated scalar", subquery_table_name),
         );
 
-        // Rewind to first row
-        let rewind_addr = self.program.len();
-        self.emit(
+        let done = self.label();
+        self.emit_jump_to(
             OpCode::Rewind,
-            sub_cursor_idx as i64,
-            0, // Will be patched to done_addr
+            sub_cursor,
+            done,
             0,
             None,
             "Rewind subquery cursor",
         );
+        let loop_start = self.label();
+        self.resolve(loop_start);
 
-        let loop_start = self.program.len();
-
-        // Compile WHERE condition if present
-        let cmp_reg = self.allocate_register();
-        let has_where = select.selection.is_some();
-
+        let next_row = self.label();
         if let Some(where_expr) = &select.selection {
-            self.compile_correlated_where(
-                where_expr,
-                subquery_table,
-                sub_cursor_idx,
-                outer_table,
-                outer_cursor_idx,
-                outer_refs,
-                cmp_reg,
-            )?;
-        }
-
-        // If WHERE fails, skip to next row
-        let skip_agg_addr = if has_where {
-            let addr = self.program.len();
-            self.emit(
+            let ctx = Self::correlated_ctx(subquery_table, sub_cursor, outer, outer_refs);
+            let cmp_reg = self.code_expr(where_expr, &ctx, None)?;
+            self.emit_jump_to(
                 OpCode::IfZ,
                 cmp_reg,
-                0, // Will be patched
+                next_row,
                 0,
                 None,
                 "Skip if WHERE false",
             );
-            Some(addr)
-        } else {
-            None
-        };
-
-        // Load the value for aggregation
+        }
         self.emit(
             OpCode::Column,
-            sub_cursor_idx as i64,
+            sub_cursor,
             agg_col_idx as i64,
             val_reg,
             None,
             &format!("r[{}] = subquery column for agg", val_reg),
         );
-
-        // Update accumulator based on aggregate type
         self.emit(
             OpCode::AggStep,
-            Self::agg_func_type(agg_func_name.as_str()),
+            agg_type,
             val_reg,
             acc_reg,
             None,
@@ -4515,72 +3222,49 @@ impl<'a> SqlCompiler<'a> {
                 agg_func_name, val_reg, acc_reg
             ),
         );
-
-        // Next row
-        let next_row_addr = self.program.len();
-        if let Some(skip_addr) = skip_agg_addr {
-            if let Some(inst) = self.program.instructions.get_mut(skip_addr) {
-                inst.p2 = next_row_addr as i64;
-            }
-        }
-
-        self.emit(
+        self.resolve(next_row);
+        self.emit_jump_to(
             OpCode::Next,
-            sub_cursor_idx as i64,
-            loop_start as i64,
+            sub_cursor,
+            loop_start,
             0,
             None,
             "Next subquery row",
         );
+        self.resolve(done);
 
-        // Done - finalize aggregate
-        let done_addr = self.program.len();
-        if let Some(inst) = self.program.instructions.get_mut(rewind_addr) {
-            inst.p2 = done_addr as i64;
-        }
-
-        // Finalize aggregate into result_reg
         // P3 = function type hint for when no AggStep was called (register still Null)
         self.emit(
             OpCode::AggFinal,
             acc_reg,
             result_reg,
-            Self::agg_func_type(agg_func_name.as_str()),
+            agg_type,
             None,
             &format!("r[{}] = final {} result", result_reg, agg_func_name),
         );
-
-        // Close the subquery cursor
         self.emit(
             OpCode::Close,
-            sub_cursor_idx as i64,
+            sub_cursor,
             0,
             0,
             None,
             "Close subquery cursor",
         );
-
         Ok(())
     }
 
-    /// Compile a LIKE/ILIKE pattern match operation
+    /// Compile `expr [NOT] LIKE pattern` (or ILIKE) into `dest`.
+    ///
+    /// A NULL operand yields NULL for both LIKE and NOT LIKE.
     fn compile_like_pattern(
         &mut self,
         expr: &Expr,
         pattern: &Expr,
         negated: bool,
-        table: &Table,
-        cursor_idx: usize,
         case_insensitive: bool,
-    ) -> SqawkResult<i64> {
-        // Allocate registers for the value and result
-        let value_reg = self.allocate_register();
-        let result_reg = self.allocate_register();
-
-        // Compile the expression (usually a column reference)
-        self.compile_where_operand(expr, table, cursor_idx, value_reg)?;
-
-        // Get the pattern string
+        ctx: &NameCtx<'_>,
+        dest: i64,
+    ) -> SqawkResult<()> {
         let pattern_str = match pattern {
             Expr::Value(ValueWithSpan {
                 value: Value::SingleQuotedString(s),
@@ -4592,305 +3276,105 @@ impl<'a> SqlCompiler<'a> {
                 ))
             }
         };
+        let value_reg = self.code_expr(expr, ctx, None)?;
 
-        // Generate the Like opcode
-        // P1 = value register, P3 = result register, P4 = pattern string
         // P2 encodes: bit 0 = negated, bit 1 = case_insensitive
-        let flags = (if negated { 1 } else { 0 }) | (if case_insensitive { 2 } else { 0 });
-
+        let flags = (negated as i64) | ((case_insensitive as i64) << 1);
         self.emit(
             OpCode::Like,
             value_reg,
             flags,
-            result_reg,
+            dest,
             Some(pattern_str.clone()),
             &format!(
                 "r[{}] = r[{}] {}LIKE '{}'",
-                result_reg,
+                dest,
                 value_reg,
                 if negated { "NOT " } else { "" },
                 pattern_str
             ),
         );
-
-        Ok(result_reg)
+        Ok(())
     }
 
-    /// Compile a BETWEEN expression: expr BETWEEN low AND high
+    /// Compile `expr [NOT] BETWEEN low AND high` into `dest`.
     ///
-    /// This compiles to: (expr >= low) AND (expr <= high)
-    /// Uses conditional jumps for short-circuit evaluation.
+    /// Exactly `expr >= low AND expr <= high` under three-valued logic, so a
+    /// NULL anywhere gives NULL unless the other bound already decides false.
     fn compile_between(
         &mut self,
         expr: &Expr,
         low: &Expr,
         high: &Expr,
         negated: bool,
-        table: &Table,
-        cursor_idx: usize,
-    ) -> SqawkResult<i64> {
-        // Allocate registers
-        let expr_reg = self.allocate_register();
-        let low_reg = self.allocate_register();
-        let high_reg = self.allocate_register();
-        let result_reg = self.allocate_register();
-        let temp_reg = self.allocate_register();
-
-        // Compile the expression value
-        self.compile_where_operand(expr, table, cursor_idx, expr_reg)?;
-
-        // Compile the low bound
-        self.compile_where_operand(low, table, cursor_idx, low_reg)?;
-
-        // Compile the high bound
-        self.compile_where_operand(high, table, cursor_idx, high_reg)?;
-
-        // Compare expr >= low (result in temp_reg)
+        ctx: &NameCtx<'_>,
+        dest: i64,
+    ) -> SqawkResult<()> {
+        let x = self.code_expr(expr, ctx, None)?;
+        let lo = self.code_expr(low, ctx, None)?;
+        let hi = self.code_expr(high, ctx, None)?;
+        let ge = self.allocate_register();
+        let le = self.allocate_register();
         self.emit(
             OpCode::Ge,
-            expr_reg,
-            low_reg,
-            temp_reg,
+            x,
+            lo,
+            ge,
             None,
-            &format!("r[{}] = r[{}] >= r[{}]", temp_reg, expr_reg, low_reg),
+            &format!("r[{}] = r[{}] >= r[{}]", ge, x, lo),
         );
-
-        // If expr < low, result is false (0)
-        // Jump past the second comparison if first is false
-        let jump_to_false = self.program.len();
-        self.emit(
-            OpCode::IfZ,
-            temp_reg,
-            0, // Will be patched
-            0,
-            None,
-            "if first comparison false, skip to result",
-        );
-
-        // Compare expr <= high (result in result_reg)
         self.emit(
             OpCode::Le,
-            expr_reg,
-            high_reg,
-            result_reg,
+            x,
+            hi,
+            le,
             None,
-            &format!("r[{}] = r[{}] <= r[{}]", result_reg, expr_reg, high_reg),
+            &format!("r[{}] = r[{}] <= r[{}]", le, x, hi),
         );
-
-        // Jump past the "set to false" instruction
-        let jump_to_end = self.program.len();
-        self.emit(
-            OpCode::Goto,
-            0,
-            0, // Will be patched
-            0,
-            None,
-            "skip false assignment",
-        );
-
-        // Set result to 0 (false) - this is where we jump if first comparison fails
-        let false_label = self.program.len();
-        self.emit(
-            OpCode::Integer,
-            0,
-            result_reg,
-            0,
-            None,
-            &format!("r[{}] = 0 (BETWEEN false)", result_reg),
-        );
-
-        let end_label = self.program.len();
-
-        // Patch the jump addresses
-        if let Some(inst) = self.program.instructions.get_mut(jump_to_false) {
-            inst.p2 = false_label as i64;
-        }
-        if let Some(inst) = self.program.instructions.get_mut(jump_to_end) {
-            inst.p2 = end_label as i64;
-        }
-
-        // Handle negation: if NOT BETWEEN, invert the result
-        // NOT BETWEEN is true when BETWEEN is false (result == 0)
+        self.emit(OpCode::And, ge, le, dest, None, "BETWEEN");
         if negated {
-            let zero_reg = self.allocate_register();
-            self.emit(
-                OpCode::Integer,
-                0,
-                zero_reg,
-                0,
-                None,
-                &format!("r[{}] = 0 for NOT BETWEEN", zero_reg),
-            );
-            self.emit(
-                OpCode::Eq,
-                result_reg,
-                zero_reg,
-                result_reg,
-                None,
-                &format!(
-                    "r[{}] = (r[{}] == 0) for NOT BETWEEN",
-                    result_reg, result_reg
-                ),
-            );
+            self.emit(OpCode::Not, dest, dest, 0, None, "NOT BETWEEN");
         }
-
-        Ok(result_reg)
+        Ok(())
     }
 
-    /// Compile an IN list expression: expr IN (val1, val2, ...)
-    ///
-    /// This compiles to a series of equality checks with short-circuit OR logic.
+    /// Compile `expr [NOT] IN (list)` into `dest` (see [`Self::emit_in_step`]).
     fn compile_in_list(
         &mut self,
         expr: &Expr,
         list: &[Expr],
         negated: bool,
-        table: &Table,
-        cursor_idx: usize,
-    ) -> SqawkResult<i64> {
+        ctx: &NameCtx<'_>,
+        dest: i64,
+    ) -> SqawkResult<()> {
         if list.is_empty() {
-            // Empty list: IN () is always false, NOT IN () is always true
-            let result_reg = self.allocate_register();
-            self.emit(
-                OpCode::Integer,
-                if negated { 1 } else { 0 },
-                result_reg,
-                0,
-                None,
-                &format!(
-                    "r[{}] = {} (empty IN list)",
-                    result_reg,
-                    if negated { 1 } else { 0 }
-                ),
-            );
-            return Ok(result_reg);
+            self.emit_empty_in(negated, dest);
+            return Ok(());
         }
-
-        // Allocate registers
-        let expr_reg = self.allocate_register();
-        let result_reg = self.allocate_register();
-        let temp_reg = self.allocate_register();
-
-        // Compile the expression value
-        self.compile_where_operand(expr, table, cursor_idx, expr_reg)?;
-
-        // Initialize result to 0 (false, not found in list)
-        self.emit(
-            OpCode::Integer,
-            0,
-            result_reg,
-            0,
-            None,
-            &format!("r[{}] = 0 (IN list initial)", result_reg),
-        );
-
-        // Track jump addresses that need to be patched to skip to end when match found
-        let mut jump_to_end_addrs = Vec::new();
-
-        // Compare against each value in the list
-        for item in list {
-            let item_reg = self.allocate_register();
-
-            // Compile the list item value
-            self.compile_where_operand(item, table, cursor_idx, item_reg)?;
-
-            // Compare expr == item
-            self.emit(
-                OpCode::Eq,
-                expr_reg,
-                item_reg,
-                temp_reg,
-                None,
-                &format!("r[{}] = (r[{}] == r[{}])", temp_reg, expr_reg, item_reg),
-            );
-
-            // If match found (temp_reg != 0), set result to 1 and jump to end
-            // We use IfZ to skip setting result if no match
-            let skip_set_addr = self.program.len();
-            self.emit(
-                OpCode::IfZ,
-                temp_reg,
-                0, // Will be patched to skip the next instructions
-                0,
-                None,
-                "if no match, skip to next item",
-            );
-
-            // Set result to 1 (found)
-            self.emit(
-                OpCode::Integer,
-                1,
-                result_reg,
-                0,
-                None,
-                &format!("r[{}] = 1 (found in list)", result_reg),
-            );
-
-            // Jump to end (skip remaining comparisons)
-            jump_to_end_addrs.push(self.program.len());
-            self.emit(
-                OpCode::Goto,
-                0,
-                0, // Will be patched to end
-                0,
-                None,
-                "skip to end",
-            );
-
-            // Patch the skip address to continue to next comparison
-            let continue_addr = self.program.len();
-            if let Some(inst) = self.program.instructions.get_mut(skip_set_addr) {
-                inst.p2 = continue_addr as i64;
-            }
+        let x = self.code_expr(expr, ctx, None)?;
+        let item = self.allocate_register();
+        let hit = self.allocate_register();
+        self.emit(OpCode::Integer, 0, dest, 0, None, "IN list init");
+        for value in list {
+            self.code_expr(value, ctx, Some(item))?;
+            self.emit_in_step(x, item, hit, dest);
         }
-
-        // End label - all "found" jumps come here
-        let end_label = self.program.len();
-
-        // Patch all jump-to-end addresses
-        for addr in jump_to_end_addrs {
-            if let Some(inst) = self.program.instructions.get_mut(addr) {
-                inst.p2 = end_label as i64;
-            }
-        }
-
-        // Handle negation: if NOT IN, invert the result
         if negated {
-            let zero_reg = self.allocate_register();
-            self.emit(
-                OpCode::Integer,
-                0,
-                zero_reg,
-                0,
-                None,
-                &format!("r[{}] = 0 for NOT IN", zero_reg),
-            );
-            self.emit(
-                OpCode::Eq,
-                result_reg,
-                zero_reg,
-                result_reg,
-                None,
-                &format!("r[{}] = (r[{}] == 0) for NOT IN", result_reg, result_reg),
-            );
+            self.emit(OpCode::Not, dest, dest, 0, None, "NOT IN");
         }
-
-        Ok(result_reg)
+        Ok(())
     }
 
     /// Compile a SUBSTRING/SUBSTR expression into `target_reg`.
     ///
-    /// Shared by the projection and WHERE paths: `SUBSTR(x, 1, 3)` and
-    /// `SUBSTRING(x FROM 1 FOR 3)` are the same `Expr::Substring` node, and
-    /// both positions need to compile it identically.
-    #[allow(clippy::too_many_arguments)]
+    /// `SUBSTR(x, 1, 3)` and `SUBSTRING(x FROM 1 FOR 3)` are the same
+    /// `Expr::Substring` node.
     fn compile_substring(
         &mut self,
         sub_expr: &Expr,
         substring_from: Option<&Expr>,
         substring_for: Option<&Expr>,
-        table: &Table,
-        cursor_idx: usize,
+        ctx: &NameCtx<'_>,
         target_reg: i64,
     ) -> SqawkResult<()> {
         // A start position is required.
@@ -4898,36 +3382,18 @@ impl<'a> SqlCompiler<'a> {
         // sqlparser 0.62 parses `SUBSTR(x)` into this node with no start, and
         // defaulting it to 1 returned the whole string unchanged -- so a
         // dropped or mistyped argument silently produced untruncated output.
-        // The arity check in compile_func_substr became unreachable for this
-        // spelling, since SUBSTR no longer arrives as a Function call.
-        if substring_from.is_none() {
+        let Some(from_expr) = substring_from else {
             return Err(SqawkError::InvalidSqlQuery(
                 "SUBSTR requires at least two arguments".to_string(),
             ));
-        }
+        };
 
-        let src_reg = self.allocate_register();
-        self.compile_where_operand(sub_expr, table, cursor_idx, src_reg)?;
-
-        // Start position defaults to 1 when omitted.
-        let start_reg = self.allocate_register();
-        if let Some(from_expr) = substring_from {
-            self.compile_where_operand(from_expr, table, cursor_idx, start_reg)?;
-        } else {
-            self.emit(
-                OpCode::Integer,
-                1,
-                start_reg,
-                0,
-                None,
-                &format!("r[{}] = 1 (default start)", start_reg),
-            );
-        }
+        let src_reg = self.code_expr(sub_expr, ctx, None)?;
+        let start_reg = self.code_expr(from_expr, ctx, None)?;
 
         // A length, if given, is passed to the engine via the P4 spec.
         let func_spec = if let Some(for_expr) = substring_for {
-            let len_reg = self.allocate_register();
-            self.compile_where_operand(for_expr, table, cursor_idx, len_reg)?;
+            let len_reg = self.code_expr(for_expr, ctx, None)?;
             format!("SUBSTR:{}", len_reg)
         } else {
             "SUBSTR".to_string()
@@ -4944,122 +3410,74 @@ impl<'a> SqlCompiler<'a> {
         Ok(())
     }
 
-    /// Compile a CASE expression
+    /// Compile a CASE expression into `dest`.
     ///
     /// Supports both:
     /// - Simple CASE: CASE expr WHEN val1 THEN res1 ... ELSE default END
     /// - Searched CASE: CASE WHEN cond1 THEN res1 ... ELSE default END
+    ///
+    /// A WHEN whose test is NULL (UNKNOWN) does not match, in both forms.
     fn compile_case(
         &mut self,
         operand: Option<&Expr>,
         conditions: &[CaseWhen],
         else_result: Option<&Expr>,
-        table: &Table,
-        cursor_idx: usize,
-        target_reg: Option<i64>,
-    ) -> SqawkResult<i64> {
-        let result_reg = target_reg.unwrap_or_else(|| self.allocate_register());
-        let temp_reg = self.allocate_register();
-
-        // For simple CASE, compile the operand once
-        let operand_reg = if let Some(op_expr) = operand {
-            let reg = self.allocate_register();
-            self.compile_where_operand(op_expr, table, cursor_idx, reg)?;
-            Some(reg)
-        } else {
-            None
+        ctx: &NameCtx<'_>,
+        dest: i64,
+    ) -> SqawkResult<()> {
+        // For simple CASE, compile the operand once.
+        let operand_reg = match operand {
+            Some(op_expr) => Some(self.code_expr(op_expr, ctx, None)?),
+            None => None,
         };
+        let end = self.label();
 
-        // Track jump addresses that need to go to the end
-        let mut jump_to_end_addrs = Vec::new();
-
-        // Process each WHEN clause
-        for CaseWhen {
-            condition,
-            result: result_expr,
-        } in conditions.iter()
-        {
-            let cond_reg = self.allocate_register();
-
-            if let Some(op_reg) = operand_reg {
-                // Simple CASE: compare operand with condition value
-                self.compile_where_operand(condition, table, cursor_idx, cond_reg)?;
-                self.emit(
-                    OpCode::Eq,
-                    op_reg,
-                    cond_reg,
-                    temp_reg,
-                    None,
-                    &format!(
-                        "r[{}] = (r[{}] == r[{}]) for CASE",
-                        temp_reg, op_reg, cond_reg
-                    ),
-                );
-            } else {
-                // Searched CASE: evaluate condition directly
-                // For now, we only support simple boolean conditions
-                // The condition should evaluate to a boolean/integer result
-                self.compile_where_operand(condition, table, cursor_idx, temp_reg)?;
-            }
-
-            // If condition is false (temp_reg == 0), skip to next branch
-            let skip_addr = self.program.len();
-            self.emit(
+        for CaseWhen { condition, result } in conditions {
+            let test_reg = match operand_reg {
+                Some(op_reg) => {
+                    let val_reg = self.code_expr(condition, ctx, None)?;
+                    let eq_reg = self.allocate_register();
+                    self.emit(
+                        OpCode::Eq,
+                        op_reg,
+                        val_reg,
+                        eq_reg,
+                        None,
+                        &format!("r[{}] = (r[{}] == r[{}]) for CASE", eq_reg, op_reg, val_reg),
+                    );
+                    eq_reg
+                }
+                None => self.code_expr(condition, ctx, None)?,
+            };
+            let next = self.label();
+            self.emit_jump_to(
                 OpCode::IfZ,
-                temp_reg,
-                0, // Will be patched
+                test_reg,
+                next,
                 0,
                 None,
                 "if WHEN condition false, try next",
             );
-
-            // Condition is true - compile the result value into result_reg
-            self.compile_where_operand(result_expr, table, cursor_idx, result_reg)?;
-
-            // Jump to end
-            jump_to_end_addrs.push(self.program.len());
-            self.emit(
-                OpCode::Goto,
-                0,
-                0, // Will be patched to end
-                0,
-                None,
-                "jump to CASE end",
-            );
-
-            // Patch skip address to continue to next WHEN
-            let next_addr = self.program.len();
-            if let Some(inst) = self.program.instructions.get_mut(skip_addr) {
-                inst.p2 = next_addr as i64;
-            }
+            self.code_expr(result, ctx, Some(dest))?;
+            self.emit_jump_to(OpCode::Goto, 0, end, 0, None, "jump to CASE end");
+            self.resolve(next);
         }
 
-        // ELSE clause (or NULL if no ELSE)
-        if let Some(else_expr) = else_result {
-            self.compile_where_operand(else_expr, table, cursor_idx, result_reg)?;
-        } else {
-            // No ELSE - result is NULL
-            self.emit(
+        match else_result {
+            Some(else_expr) => {
+                self.code_expr(else_expr, ctx, Some(dest))?;
+            }
+            None => self.emit(
                 OpCode::Null,
                 0,
-                result_reg,
+                dest,
                 0,
                 None,
-                &format!("r[{}] = NULL (no ELSE in CASE)", result_reg),
-            );
+                &format!("r[{}] = NULL (no ELSE in CASE)", dest),
+            ),
         }
-
-        // End label
-        let end_label = self.program.len();
-
-        // Patch all jump-to-end addresses
-        for addr in jump_to_end_addrs {
-            if let Some(inst) = self.program.instructions.get_mut(addr) {
-                inst.p2 = end_label as i64;
-            }
-        }
-
-        Ok(result_reg)
+        self.resolve(end);
+        Ok(())
     }
 
     /// Extract function name from a Function AST node
@@ -5621,201 +4039,6 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// Compile a binary comparison operation (e.g., column > value)
-    fn compile_binary_comparison(
-        &mut self,
-        left: &Expr,
-        op: &BinaryOperator,
-        right: &Expr,
-        table: &Table,
-        cursor_idx: usize,
-    ) -> SqawkResult<i64> {
-        // Handle logical operators (AND, OR) specially
-        match op {
-            BinaryOperator::And => {
-                // For AND, both conditions must be true.
-                //
-                // The result register MUST be initialized before the
-                // short-circuit test on the left operand. Registers persist
-                // across loop iterations, so if the left-false jump skips the
-                // initialization, the register still holds this expression's
-                // result from a PREVIOUS row -- and a row failing the left
-                // condition inherits the previous row's verdict.
-                let result_reg = self.allocate_register();
-                self.emit(
-                    OpCode::Integer,
-                    0,
-                    result_reg,
-                    0,
-                    None,
-                    &format!("r[{}] = 0 (default AND result)", result_reg),
-                );
-
-                let end_label = self.label();
-
-                // Compile left condition
-                let left_result = self.compile_where_condition(left, table, cursor_idx)?;
-
-                // If left is false, the result stays 0; skip right entirely.
-                self.emit_jump_to(
-                    OpCode::IfZ,
-                    left_result,
-                    end_label,
-                    0,
-                    None,
-                    "if left is false, AND is false",
-                );
-
-                // Compile right condition
-                let right_result = self.compile_where_condition(right, table, cursor_idx)?;
-
-                // If right is false, the result stays 0.
-                self.emit_jump_to(
-                    OpCode::IfZ,
-                    right_result,
-                    end_label,
-                    0,
-                    None,
-                    "if right is false, AND is false",
-                );
-
-                // Both are true, set result to 1
-                self.emit(
-                    OpCode::Integer,
-                    1,
-                    result_reg,
-                    0,
-                    None,
-                    &format!("r[{}] = 1 (AND true)", result_reg),
-                );
-
-                self.resolve(end_label);
-                return Ok(result_reg);
-            }
-            BinaryOperator::Or => {
-                // For OR, at least one condition must be true
-                let result_reg = self.allocate_register();
-
-                // Initialize result to 0
-                self.emit(
-                    OpCode::Integer,
-                    0,
-                    result_reg,
-                    0,
-                    None,
-                    &format!("r[{}] = 0 (default OR result)", result_reg),
-                );
-
-                // Compile left condition
-                let left_result = self.compile_where_condition(left, table, cursor_idx)?;
-
-                // If left is true, set result to 1 and skip right
-                let skip_if_left_true = self.program.len();
-                self.emit(
-                    OpCode::IfZ,
-                    left_result,
-                    0, // Will be patched to check right
-                    0,
-                    None,
-                    "if left is false, check right",
-                );
-
-                // Left is true, set result to 1
-                self.emit(
-                    OpCode::Integer,
-                    1,
-                    result_reg,
-                    0,
-                    None,
-                    &format!("r[{}] = 1 (OR left true)", result_reg),
-                );
-
-                // Jump to end
-                let goto_end = self.program.len();
-                self.emit(
-                    OpCode::Goto,
-                    0,
-                    0, // Will be patched
-                    0,
-                    None,
-                    "goto end",
-                );
-
-                // Check right label
-                let check_right_label = self.program.len();
-                if let Some(inst) = self.program.instructions.get_mut(skip_if_left_true) {
-                    inst.p2 = check_right_label as i64;
-                }
-
-                // Compile right condition
-                let right_result = self.compile_where_condition(right, table, cursor_idx)?;
-
-                // If right is false, skip setting result to 1
-                let skip_to_end = self.program.len();
-                self.emit(
-                    OpCode::IfZ,
-                    right_result,
-                    0, // Will be patched to skip to end
-                    0,
-                    None,
-                    "if right is false, skip to end",
-                );
-
-                // Right is true, set result to 1
-                self.emit(
-                    OpCode::Integer,
-                    1,
-                    result_reg,
-                    0,
-                    None,
-                    &format!("r[{}] = 1 (OR right true)", result_reg),
-                );
-
-                // End label
-                let end_label = self.program.len();
-                if let Some(inst) = self.program.instructions.get_mut(goto_end) {
-                    inst.p2 = end_label as i64;
-                }
-                if let Some(inst) = self.program.instructions.get_mut(skip_to_end) {
-                    inst.p2 = end_label as i64;
-                }
-
-                return Ok(result_reg);
-            }
-            _ => {}
-        }
-
-        // Handle comparison operators
-        // Allocate registers for operands and result
-        let left_reg = self.allocate_register();
-        let right_reg = self.allocate_register();
-        let result_reg = self.allocate_register();
-
-        // Compile left operand (usually a column reference)
-        self.compile_where_operand(left, table, cursor_idx, left_reg)?;
-
-        // Compile right operand (usually a literal value)
-        self.compile_where_operand(right, table, cursor_idx, right_reg)?;
-
-        // Generate comparison instruction based on operator
-        let opcode = Self::binary_op_to_comparison_opcode(op)?;
-
-        self.emit(
-            opcode,
-            left_reg,
-            right_reg,
-            result_reg,
-            None,
-            &format!(
-                "r[{}] = r[{}] {:?} r[{}]",
-                result_reg, left_reg, op, right_reg
-            ),
-        );
-
-        Ok(result_reg)
-    }
-
-    /// Compile a WHERE clause operand (column reference or literal)
     /// Compile `expr` into a register, returning that register.
     ///
     /// This is the single expression compiler -- the analogue of SQLite's
@@ -5928,54 +4151,31 @@ impl<'a> SqlCompiler<'a> {
                 );
             }
 
-            // Logical AND / OR, short-circuiting.
-            //
-            // The result register is initialized BEFORE the short-circuit
-            // test. Registers persist across loop iterations, so a jump that
-            // skips the initialization leaves this expression holding its
-            // verdict from the PREVIOUS row -- which is exactly how AND came
-            // to report true for a row failing both operands.
+            // Logical AND / OR with SQL three-valued logic: both operands are
+            // evaluated and combined by the And / Or opcodes, so
+            // `NULL AND 1` is NULL and `NULL OR 1` is 1. The old
+            // short-circuit form collapsed UNKNOWN to false, which made
+            // `NOT (a OR b)` true for a row where `a` was NULL.
             Expr::BinaryOp {
                 left,
                 op: op @ (BinaryOperator::And | BinaryOperator::Or),
                 right,
             } => {
-                let is_and = matches!(op, BinaryOperator::And);
-                // AND starts false and is set true only if both hold; OR
-                // starts false and is set true as soon as either does.
-                self.emit(
-                    OpCode::Integer,
-                    0,
-                    dest,
-                    0,
-                    None,
-                    &format!("r[{}] = 0 ({:?} init)", dest, op),
-                );
-                let done = self.label();
-
                 let left_reg = self.code_expr(left, ctx, None)?;
-                if is_and {
-                    self.emit_jump_to(OpCode::IfZ, left_reg, done, 0, None, "AND: left false");
-                } else {
-                    let check_right = self.label();
-                    self.emit_jump_to(
-                        OpCode::IfZ,
-                        left_reg,
-                        check_right,
-                        0,
-                        None,
-                        "OR: left false, try right",
-                    );
-                    self.emit(OpCode::Integer, 1, dest, 0, None, "OR: left true");
-                    self.emit_jump_to(OpCode::Goto, 0, done, 0, None, "");
-                    self.resolve(check_right);
-                }
-
                 let right_reg = self.code_expr(right, ctx, None)?;
-                self.emit_jump_to(OpCode::IfZ, right_reg, done, 0, None, "right false");
-                self.emit(OpCode::Integer, 1, dest, 0, None, "both/either true");
-
-                self.resolve(done);
+                let opcode = if matches!(op, BinaryOperator::And) {
+                    OpCode::And
+                } else {
+                    OpCode::Or
+                };
+                self.emit(
+                    opcode,
+                    left_reg,
+                    right_reg,
+                    dest,
+                    None,
+                    &format!("r[{}] = r[{}] {:?} r[{}]", dest, left_reg, op, right_reg),
+                );
             }
 
             // Arithmetic and comparison operators, compiled here rather than
@@ -6098,44 +4298,213 @@ impl<'a> SqlCompiler<'a> {
                 );
             }
 
-            // Predicate-shaped expressions used as VALUES.
-            //
-            // These are compiled by the condition compiler, which is a third
-            // parallel path. Routing them here means `SELECT x IS NULL`,
-            // `SELECT name LIKE 'A%'` and `SELECT age BETWEEN 1 AND 2` work as
-            // projected values, not just as filters -- SQL makes no
-            // distinction between the two positions.
-            Expr::IsNull(_)
-            | Expr::IsNotNull(_)
-            | Expr::Like { .. }
-            | Expr::ILike { .. }
-            | Expr::Between { .. }
-            | Expr::InList { .. } => {
-                let (table, cursor) = self.legacy_single_source(ctx, expr)?;
-                let src = self.compile_where_condition(expr, table, cursor)?;
-                if src != dest {
+            Expr::UnaryOp {
+                op: UnaryOperator::Minus,
+                expr: inner,
+            } => {
+                // 0 - value, so integer and float operands keep their type.
+                let inner_reg = self.code_expr(inner, ctx, None)?;
+                let zero_reg = self.allocate_register();
+                self.emit(OpCode::Integer, 0, zero_reg, 0, None, "0 for negation");
+                self.emit(
+                    OpCode::Subtract,
+                    zero_reg,
+                    inner_reg,
+                    dest,
+                    None,
+                    &format!("r[{}] = -r[{}]", dest, inner_reg),
+                );
+            }
+            Expr::UnaryOp {
+                op: UnaryOperator::Plus,
+                expr: inner,
+            } => {
+                return self.code_expr(inner, ctx, Some(dest));
+            }
+
+            // Predicates are values like any other: 1, 0, or NULL for
+            // UNKNOWN. Filters (WHERE / ON / HAVING) test the result with
+            // IfZ, which rejects NULL along with 0.
+            Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+                let src = self.code_expr(inner, ctx, None)?;
+                self.emit(
+                    OpCode::IsNull,
+                    src,
+                    dest,
+                    0,
+                    None,
+                    &format!("r[{}] = (r[{}] IS NULL)", dest, src),
+                );
+                if matches!(expr, Expr::IsNotNull(_)) {
+                    self.emit(OpCode::Not, dest, dest, 0, None, "IS NOT NULL");
+                }
+            }
+            Expr::Like {
+                negated,
+                expr: inner,
+                pattern,
+                ..
+            } => self.compile_like_pattern(inner, pattern, *negated, false, ctx, dest)?,
+            Expr::ILike {
+                negated,
+                expr: inner,
+                pattern,
+                ..
+            } => self.compile_like_pattern(inner, pattern, *negated, true, ctx, dest)?,
+            Expr::Between {
+                expr: inner,
+                negated,
+                low,
+                high,
+            } => self.compile_between(inner, low, high, *negated, ctx, dest)?,
+            Expr::InList {
+                expr: inner,
+                list,
+                negated,
+            } => self.compile_in_list(inner, list, *negated, ctx, dest)?,
+            Expr::InSubquery {
+                expr: inner,
+                subquery,
+                negated,
+            } => {
+                let values = self.evaluate_in_subquery_values(subquery)?;
+                if values.is_empty() {
+                    self.emit_empty_in(*negated, dest);
+                } else {
+                    let x = self.code_expr(inner, ctx, None)?;
+                    let item = self.allocate_register();
+                    let hit = self.allocate_register();
+                    self.emit(OpCode::Integer, 0, dest, 0, None, "IN subquery init");
+                    for value in &values {
+                        self.emit_value_literal(item, value)?;
+                        self.emit_in_step(x, item, hit, dest);
+                    }
+                    if *negated {
+                        self.emit(OpCode::Not, dest, dest, 0, None, "NOT IN");
+                    }
+                }
+            }
+            Expr::Exists { subquery, negated } => {
+                let outer_refs = self.detect_outer_references(subquery, ctx);
+                if outer_refs.is_empty() {
+                    let exists = self.evaluate_exists_subquery(subquery, *negated)?;
                     self.emit(
-                        OpCode::Copy,
-                        src,
+                        OpCode::Integer,
+                        exists as i64,
                         dest,
                         0,
                         None,
-                        &format!("r[{}] = r[{}]", dest, src),
+                        &format!("r[{}] = {} (EXISTS result)", dest, exists as i64),
                     );
+                } else {
+                    self.compile_correlated_exists_subquery(
+                        subquery,
+                        *negated,
+                        ctx,
+                        &outer_refs,
+                        dest,
+                    )?;
+                }
+            }
+            Expr::Subquery(subquery) => {
+                let outer_refs = self.detect_outer_references(subquery, ctx);
+                if outer_refs.is_empty() {
+                    let value = self.evaluate_scalar_subquery(subquery)?;
+                    self.emit_value_literal(dest, &value)?;
+                } else {
+                    self.compile_correlated_scalar_subquery(subquery, ctx, &outer_refs, dest)?;
                 }
             }
 
-            // Everything else still goes through the original operand
-            // compiler. Arms migrate out of it into the match above as the
-            // pipeline work proceeds; routing through here first means every
-            // call site picks up the new capabilities immediately.
+            Expr::Case {
+                operand,
+                conditions,
+                else_result,
+                ..
+            } => self.compile_case(
+                operand.as_deref(),
+                conditions,
+                else_result.as_deref(),
+                ctx,
+                dest,
+            )?,
+            Expr::Cast {
+                expr: inner,
+                data_type,
+                ..
+            } => {
+                let src = self.code_expr(inner, ctx, None)?;
+                let type_name = self.sql_data_type_to_string(data_type);
+                self.emit(
+                    OpCode::Cast,
+                    src,
+                    dest,
+                    0,
+                    Some(type_name.clone()),
+                    &format!("r[{}] = CAST(r[{}] AS {})", dest, src, type_name),
+                );
+            }
+            // `SUBSTR(x, 1, 3)` parses as `Expr::Substring`, not as a
+            // `Expr::Function`, so it needs an arm of its own.
+            Expr::Substring {
+                expr: inner,
+                substring_from,
+                substring_for,
+                ..
+            } => self.compile_substring(
+                inner,
+                substring_from.as_deref(),
+                substring_for.as_deref(),
+                ctx,
+                dest,
+            )?,
+
             other => {
-                let (table, cursor) = self.legacy_single_source(ctx, other)?;
-                self.compile_operand_legacy(other, table, cursor, dest)?;
+                return Err(SqawkError::UnsupportedSqlFeature(format!(
+                    "Unsupported expression: {}",
+                    other
+                )))
             }
         }
 
         Ok(dest)
+    }
+
+    /// `IN ()` over an empty set: false, or true for NOT IN -- even for a
+    /// NULL left operand, as in SQLite.
+    fn emit_empty_in(&mut self, negated: bool, dest: i64) {
+        self.emit(
+            OpCode::Integer,
+            negated as i64,
+            dest,
+            0,
+            None,
+            &format!("r[{}] = {} (empty IN set)", dest, negated as i64),
+        );
+    }
+
+    /// One element of an IN test: `dest = dest OR (x = item)`.
+    ///
+    /// Folding with three-valued OR gives exactly SQL's IN semantics: 1 if
+    /// any element equals `x`; otherwise NULL if `x` or any element is NULL;
+    /// otherwise 0.
+    fn emit_in_step(&mut self, x: i64, item: i64, hit: i64, dest: i64) {
+        self.emit(
+            OpCode::Eq,
+            x,
+            item,
+            hit,
+            None,
+            &format!("r[{}] = (r[{}] == r[{}])", hit, x, item),
+        );
+        self.emit(
+            OpCode::Or,
+            dest,
+            hit,
+            dest,
+            None,
+            &format!("r[{}] = r[{}] OR r[{}] (IN)", dest, dest, hit),
+        );
     }
 
     /// Emit whatever loads a resolved column into `dest`.
@@ -6172,512 +4541,6 @@ impl<'a> SqlCompiler<'a> {
         target_reg: i64,
     ) -> SqawkResult<()> {
         self.code_expr(expr, ctx, Some(target_reg)).map(|_| ())
-    }
-
-    /// Compile `expr` as a boolean predicate, returning its register.
-    #[allow(dead_code)] // wired up by the staged SELECT pipeline
-    pub(crate) fn code_predicate(&mut self, expr: &Expr, ctx: &NameCtx<'_>) -> SqawkResult<i64> {
-        let (table, cursor) = self.legacy_single_source(ctx, expr)?;
-        self.compile_where_condition(expr, table, cursor)
-    }
-
-    /// Extract the single `(table, cursor)` pair the not-yet-migrated code
-    /// still expects.
-    ///
-    /// With one FROM source this is trivial. With several, the arms that have
-    /// not yet been migrated -- function calls above all -- still take a single
-    /// `(table, cursor)`, so the source is inferred from the column references
-    /// inside `expr`. A function almost always applies to columns of one
-    /// table, and when it genuinely spans two this errors rather than
-    /// resolving against an arbitrary one.
-    fn legacy_single_source<'t>(
-        &self,
-        ctx: &NameCtx<'t>,
-        expr: &Expr,
-    ) -> SqawkResult<(&'t Table, usize)> {
-        match ctx.srcs.len() {
-            1 => return Ok((ctx.srcs[0].table, ctx.srcs[0].cursor as usize)),
-            0 => {
-                return Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Expression requires a FROM clause: {:?}",
-                    expr
-                )))
-            }
-            _ => {}
-        }
-
-        let mut found: Option<usize> = None;
-        let mut ambiguous = false;
-        Self::for_each_column_ref(expr, &mut |qualifier, name| {
-            let idx = match qualifier {
-                Some(q) => ctx
-                    .srcs
-                    .iter()
-                    .position(|s| s.refname == q.to_ascii_lowercase()),
-                None => ctx.srcs.iter().position(|s| {
-                    s.table
-                        .column_metadata()
-                        .iter()
-                        .any(|c| c.name.eq_ignore_ascii_case(name))
-                }),
-            };
-            if let Some(i) = idx {
-                match found {
-                    Some(prev) if prev != i => ambiguous = true,
-                    _ => found = Some(i),
-                }
-            }
-        });
-
-        match (found, ambiguous) {
-            (Some(i), false) => Ok((ctx.srcs[i].table, ctx.srcs[i].cursor as usize)),
-            (_, true) => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Expression spans multiple tables: {:?}",
-                expr
-            ))),
-            (None, _) => Ok((ctx.srcs[0].table, ctx.srcs[0].cursor as usize)),
-        }
-    }
-
-    /// Visit every column reference in `expr` as `(qualifier, name)`.
-    fn for_each_column_ref(expr: &Expr, f: &mut impl FnMut(Option<&str>, &str)) {
-        match expr {
-            Expr::Identifier(ident) => f(None, &ident.value),
-            Expr::CompoundIdentifier(parts) if parts.len() >= 2 => f(
-                Some(&parts[parts.len() - 2].value),
-                &parts[parts.len() - 1].value,
-            ),
-            Expr::BinaryOp { left, right, .. } => {
-                Self::for_each_column_ref(left, f);
-                Self::for_each_column_ref(right, f);
-            }
-            Expr::UnaryOp { expr: inner, .. }
-            | Expr::Nested(inner)
-            | Expr::Cast { expr: inner, .. }
-            | Expr::IsNull(inner)
-            | Expr::IsNotNull(inner) => Self::for_each_column_ref(inner, f),
-            Expr::Function(func) => {
-                for arg in func_args(func) {
-                    if let FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) = arg {
-                        Self::for_each_column_ref(e, f);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Shim preserving the old operand entry point.
-    ///
-    /// Every existing caller keeps working and gains the new capabilities
-    /// (qualified names, case-insensitive resolution, `||`, `NOT`) for free.
-    pub(crate) fn compile_where_operand(
-        &mut self,
-        expr: &Expr,
-        table: &Table,
-        cursor_idx: usize,
-        target_reg: i64,
-    ) -> SqawkResult<()> {
-        let ctx = NameCtx::single(table, cursor_idx as i64);
-        self.code_expr(expr, &ctx, Some(target_reg)).map(|_| ())
-    }
-
-    fn compile_operand_legacy(
-        &mut self,
-        expr: &Expr,
-        table: &Table,
-        cursor_idx: usize,
-        target_reg: i64,
-    ) -> SqawkResult<()> {
-        match expr {
-            Expr::Identifier(ident) => {
-                // This is a column reference
-                let column_name = &ident.value;
-                let column_idx = self.find_column_index(table, column_name)?;
-
-                self.emit(
-                    OpCode::Column,
-                    cursor_idx as i64,
-                    column_idx as i64,
-                    target_reg,
-                    None,
-                    &format!(
-                        "r[{}] = column {} ({})",
-                        target_reg, column_idx, column_name
-                    ),
-                );
-            }
-            Expr::Value(ValueWithSpan { value, .. }) => {
-                // This is a literal value
-                match value {
-                    Value::Number(num, _) => {
-                        if let Ok(int_val) = num.parse::<i64>() {
-                            self.emit(
-                                OpCode::Integer,
-                                int_val,
-                                target_reg,
-                                0,
-                                None,
-                                &format!("r[{}] = {}", target_reg, int_val),
-                            );
-                        } else if let Ok(float_val) = num.parse::<f64>() {
-                            // Store float as string for runtime conversion
-                            self.emit(
-                                OpCode::String,
-                                0,
-                                target_reg,
-                                0,
-                                Some(float_val.to_string()),
-                                &format!("r[{}] = {} (float)", target_reg, float_val),
-                            );
-                        } else {
-                            return Err(SqawkError::UnsupportedSqlFeature(format!(
-                                "Invalid numeric literal in WHERE: {}",
-                                num
-                            )));
-                        }
-                    }
-                    Value::SingleQuotedString(s) => {
-                        self.emit(
-                            OpCode::String,
-                            0,
-                            target_reg,
-                            0,
-                            Some(s.clone()),
-                            &format!("r[{}] = '{}'", target_reg, s),
-                        );
-                    }
-                    Value::Null => {
-                        self.emit(
-                            OpCode::Null,
-                            0,
-                            target_reg,
-                            0,
-                            None,
-                            &format!("r[{}] = NULL", target_reg),
-                        );
-                    }
-                    _ => {
-                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                            "Unsupported literal type in WHERE: {:?}",
-                            value
-                        )));
-                    }
-                }
-            }
-            Expr::Case {
-                operand,
-                conditions,
-                else_result,
-                ..
-            } => {
-                // Compile CASE expression, storing result directly in target_reg
-                self.compile_case(
-                    operand.as_deref(),
-                    conditions,
-                    else_result.as_deref(),
-                    table,
-                    cursor_idx,
-                    Some(target_reg),
-                )?;
-            }
-            Expr::BinaryOp { left, op, right } => {
-                // Handle binary operations as operands (e.g., in CASE WHEN conditions or arithmetic)
-                let left_reg = self.allocate_register();
-                let right_reg = self.allocate_register();
-
-                self.compile_where_operand(left, table, cursor_idx, left_reg)?;
-                self.compile_where_operand(right, table, cursor_idx, right_reg)?;
-
-                let opcode = match op {
-                    // Comparison operators
-                    BinaryOperator::Gt => OpCode::Gt,
-                    BinaryOperator::Lt => OpCode::Lt,
-                    BinaryOperator::GtEq => OpCode::Ge,
-                    BinaryOperator::LtEq => OpCode::Le,
-                    BinaryOperator::Eq => OpCode::Eq,
-                    BinaryOperator::NotEq => OpCode::Ne,
-                    // Arithmetic operators
-                    BinaryOperator::Plus => OpCode::Add,
-                    BinaryOperator::Minus => OpCode::Subtract,
-                    BinaryOperator::Multiply => OpCode::Multiply,
-                    BinaryOperator::Divide => OpCode::Divide,
-                    BinaryOperator::Modulo => OpCode::Remainder,
-                    _ => {
-                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                            "Unsupported binary operator in operand: {:?}",
-                            op
-                        )));
-                    }
-                };
-
-                self.emit(
-                    opcode,
-                    left_reg,
-                    right_reg,
-                    target_reg,
-                    None,
-                    &format!(
-                        "r[{}] = (r[{}] {:?} r[{}])",
-                        target_reg, left_reg, op, right_reg
-                    ),
-                );
-            }
-            Expr::Cast {
-                expr, data_type, ..
-            } => {
-                // Compile the expression to cast
-                let src_reg = self.allocate_register();
-                self.compile_where_operand(expr, table, cursor_idx, src_reg)?;
-
-                // Get the target type name
-                let type_name = self.sql_data_type_to_string(data_type);
-
-                // Emit Cast instruction
-                self.emit(
-                    OpCode::Cast,
-                    src_reg,
-                    target_reg,
-                    0,
-                    Some(type_name.clone()),
-                    &format!("r[{}] = CAST(r[{}] AS {})", target_reg, src_reg, type_name),
-                );
-            }
-            Expr::Function(func) => {
-                // Handle COALESCE and NULLIF functions
-                self.compile_function(
-                    func,
-                    &NameCtx::single(table, cursor_idx as i64),
-                    target_reg,
-                )?;
-            }
-            Expr::Subquery(subquery) => {
-                // Handle scalar subquery as an operand
-                // Check for correlation first
-                let outer_refs = self.detect_outer_references(subquery, table.name(), None);
-                if outer_refs.is_empty() {
-                    // Non-correlated: Execute subquery at compile time
-                    let result_value = self.evaluate_scalar_subquery(subquery)?;
-                    self.emit_value_literal(target_reg, &result_value)?;
-                } else {
-                    // Correlated: emit runtime execution bytecode
-                    self.compile_correlated_scalar_subquery(
-                        subquery,
-                        table,
-                        cursor_idx,
-                        &outer_refs,
-                        target_reg,
-                    )?;
-                }
-            }
-            Expr::Exists { subquery, negated } => {
-                // Handle EXISTS (SELECT ...) as an operand
-                // Check for correlation first
-                let outer_refs = self.detect_outer_references(subquery, table.name(), None);
-                if outer_refs.is_empty() {
-                    // Non-correlated: Evaluate at compile time and emit 1 or 0
-                    let exists_result = self.evaluate_exists_subquery(subquery, *negated)?;
-                    self.emit(
-                        OpCode::Integer,
-                        if exists_result { 1 } else { 0 },
-                        target_reg,
-                        0,
-                        None,
-                        &format!(
-                            "r[{}] = {} ({}EXISTS result)",
-                            target_reg,
-                            if exists_result { 1 } else { 0 },
-                            if *negated { "NOT " } else { "" }
-                        ),
-                    );
-                } else {
-                    // Correlated: emit runtime execution bytecode
-                    self.compile_correlated_exists_subquery(
-                        subquery,
-                        *negated,
-                        table,
-                        cursor_idx,
-                        &outer_refs,
-                        target_reg,
-                    )?;
-                }
-            }
-            Expr::InSubquery {
-                expr: inner_expr,
-                subquery,
-                negated,
-            } => {
-                // Handle IN (SELECT ...) as an operand when combined with other conditions
-                // We need to evaluate this at compile time for non-correlated subqueries
-                let subquery_values = self.evaluate_in_subquery_values(subquery)?;
-                if subquery_values.is_empty() {
-                    // Empty subquery: IN is false, NOT IN is true
-                    self.emit(
-                        OpCode::Integer,
-                        if *negated { 1 } else { 0 },
-                        target_reg,
-                        0,
-                        None,
-                        &format!(
-                            "r[{}] = {} (empty IN subquery)",
-                            target_reg,
-                            if *negated { 1 } else { 0 }
-                        ),
-                    );
-                } else {
-                    // Get the expression value
-                    let expr_reg = self.allocate_register();
-                    self.compile_where_operand(inner_expr, table, cursor_idx, expr_reg)?;
-
-                    // Initialize result
-                    self.emit(
-                        OpCode::Integer,
-                        0,
-                        target_reg,
-                        0,
-                        None,
-                        &format!("r[{}] = 0 (IN subquery initial)", target_reg),
-                    );
-
-                    let temp_reg = self.allocate_register();
-                    let mut jump_to_end_addrs = Vec::new();
-
-                    for value in &subquery_values {
-                        let item_reg = self.allocate_register();
-                        self.emit_value_literal(item_reg, value)?;
-
-                        self.emit(
-                            OpCode::Eq,
-                            expr_reg,
-                            item_reg,
-                            temp_reg,
-                            None,
-                            &format!("r[{}] = (r[{}] == r[{}])", temp_reg, expr_reg, item_reg),
-                        );
-
-                        let skip_set_addr = self.program.len();
-                        self.emit(OpCode::IfZ, temp_reg, 0, 0, None, "if no match, skip");
-
-                        self.emit(
-                            OpCode::Integer,
-                            1,
-                            target_reg,
-                            0,
-                            None,
-                            &format!("r[{}] = 1 (found)", target_reg),
-                        );
-
-                        jump_to_end_addrs.push(self.program.len());
-                        self.emit(OpCode::Goto, 0, 0, 0, None, "skip to end");
-
-                        let continue_addr = self.program.len();
-                        if let Some(inst) = self.program.instructions.get_mut(skip_set_addr) {
-                            inst.p2 = continue_addr as i64;
-                        }
-                    }
-
-                    let end_label = self.program.len();
-                    for addr in jump_to_end_addrs {
-                        if let Some(inst) = self.program.instructions.get_mut(addr) {
-                            inst.p2 = end_label as i64;
-                        }
-                    }
-
-                    if *negated {
-                        let zero_reg = self.allocate_register();
-                        self.emit(
-                            OpCode::Integer,
-                            0,
-                            zero_reg,
-                            0,
-                            None,
-                            &format!("r[{}] = 0 for NOT IN", zero_reg),
-                        );
-                        self.emit(
-                            OpCode::Eq,
-                            target_reg,
-                            zero_reg,
-                            target_reg,
-                            None,
-                            &format!("r[{}] = (r[{}] == 0) for NOT IN", target_reg, target_reg),
-                        );
-                    }
-                }
-            }
-            Expr::UnaryOp { op, expr: inner } => {
-                match op {
-                    UnaryOperator::Minus => {
-                        // Handle unary minus using 0 - value (avoids Integer -1 special case)
-                        let inner_reg = self.allocate_register();
-                        self.compile_where_operand(inner, table, cursor_idx, inner_reg)?;
-                        let zero_reg = self.allocate_register();
-                        self.emit(
-                            OpCode::Integer,
-                            0,
-                            zero_reg,
-                            0,
-                            None,
-                            &format!("r[{}] = 0", zero_reg),
-                        );
-                        self.emit(
-                            OpCode::Subtract,
-                            zero_reg,
-                            inner_reg,
-                            target_reg,
-                            None,
-                            &format!("r[{}] = -r[{}]", target_reg, inner_reg),
-                        );
-                    }
-                    UnaryOperator::Plus => {
-                        // Unary plus is a no-op, just compile the inner expression
-                        self.compile_where_operand(inner, table, cursor_idx, target_reg)?;
-                    }
-                    _ => {
-                        return Err(SqawkError::UnsupportedSqlFeature(format!(
-                            "Unsupported unary operator: {:?}",
-                            op
-                        )));
-                    }
-                }
-            }
-            // `SUBSTR(x, 1, 3)` parses as `Expr::Substring`, not as a
-            // `Expr::Function`, so it needs an arm of its own here. (Older
-            // sqlparser reserved this variant for the `SUBSTRING(x FROM 1 FOR
-            // 3)` spelling and routed the comma form through Function.)
-            Expr::Substring {
-                expr: sub_expr,
-                substring_from,
-                substring_for,
-                ..
-            } => {
-                self.compile_substring(
-                    sub_expr,
-                    substring_from.as_deref(),
-                    substring_for.as_deref(),
-                    table,
-                    cursor_idx,
-                    target_reg,
-                )?;
-            }
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Unsupported WHERE operand: {:?}",
-                    expr
-                )));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Find column index by name
-    pub(crate) fn find_column_index(&self, table: &Table, column_name: &str) -> SqawkResult<usize> {
-        for (i, column) in table.column_metadata().iter().enumerate() {
-            if column.name == column_name {
-                return Ok(i);
-            }
-        }
-        Err(SqawkError::ColumnNotFound(column_name.to_string()))
     }
 
     /// Convert a SQL DataType to a string representation for the VM

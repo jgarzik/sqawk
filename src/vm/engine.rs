@@ -2392,8 +2392,9 @@ impl<'a> VmEngine<'a> {
                     Register::Float(f) => f.to_string(),
                     Register::Boolean(b) => b.to_string(),
                     Register::Null => {
-                        // NULL LIKE anything is NULL (treated as false for filtering)
-                        self.set_register(result_reg, Register::Integer(0))?;
+                        // NULL [NOT] LIKE anything is NULL (UNKNOWN). Filters
+                        // reject it via IfZ; NOT keeps it NULL.
+                        self.set_register(result_reg, Register::Null)?;
                         return Ok(ExecuteResult::Continue);
                     }
                 };
@@ -2544,6 +2545,35 @@ impl<'a> VmEngine<'a> {
                     }),
                 };
                 self.set_register(inst.p2 as usize, out)?;
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::And | OpCode::Or => {
+                // SQL three-valued logic: None is UNKNOWN.
+                let truth = |r: Register| match r {
+                    Register::Null => None,
+                    other => Some(Self::register_is_truthy(&other)),
+                };
+                let a = truth(self.get_register(inst.p1 as usize)?);
+                let b = truth(self.get_register(inst.p2 as usize)?);
+                let out = if inst.opcode == OpCode::And {
+                    match (a, b) {
+                        (Some(false), _) | (_, Some(false)) => Some(false),
+                        (Some(true), Some(true)) => Some(true),
+                        _ => None,
+                    }
+                } else {
+                    match (a, b) {
+                        (Some(true), _) | (_, Some(true)) => Some(true),
+                        (Some(false), Some(false)) => Some(false),
+                        _ => None,
+                    }
+                };
+                let out = match out {
+                    None => Register::Null,
+                    Some(t) => Register::Integer(t as i64),
+                };
+                self.set_register(inst.p3 as usize, out)?;
                 Ok(ExecuteResult::Continue)
             }
 

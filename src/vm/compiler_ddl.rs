@@ -8,7 +8,7 @@ use sqlparser::ast::{
 
 use super::ast_compat::sql_option_key_value;
 use super::bytecode::OpCode;
-use super::compiler::SqlCompiler;
+use super::compiler::{NameCtx, SqlCompiler};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::DataType;
 
@@ -279,8 +279,11 @@ impl<'a> SqlCompiler<'a> {
         let mut skip_insert_addr: Option<usize> = None;
         if let Some(selection) = &select.selection {
             // Compile the WHERE clause condition (returns the result register)
-            let cond_reg =
-                self.compile_where_condition(selection, source_table, source_cursor as usize)?;
+            let cond_reg = self.code_expr(
+                selection,
+                &NameCtx::single(source_table, source_cursor),
+                None,
+            )?;
 
             // If condition is false (zero), skip the insert
             skip_insert_addr = Some(self.program.len());
@@ -334,15 +337,14 @@ impl<'a> SqlCompiler<'a> {
                 }
                 _ => {
                     // For other expressions, try to compile them
-                    self.compile_where_operand(
+                    self.code_expr(
                         match item {
                             SelectItem::UnnamedExpr(e) => e,
                             SelectItem::ExprWithAlias { expr, .. } => expr,
                             _ => continue,
                         },
-                        source_table,
-                        source_cursor as usize,
-                        start_reg + reg_idx as i64,
+                        &NameCtx::single(source_table, source_cursor),
+                        Some(start_reg + reg_idx as i64),
                     )?;
                     reg_idx += 1;
                 }

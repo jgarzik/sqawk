@@ -60,6 +60,27 @@ fn select_literal() -> Result<(), Box<dyn std::error::Error>> {
     )
 }
 
+/// A FROM-less SELECT goes through the same expression compiler as any
+/// other, so string functions, CAST, CASE and `||` all work without FROM.
+#[test]
+fn select_literal_expressions() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT UPPER('ab') || 'c', CAST('12' AS INTEGER) + 1, CASE WHEN 1 > 2 THEN 'x' ELSE 'y' END, SUBSTR('hello', 2, 3), -ABS(-4)",
+        concat!("col0,col1,col2,col3,col4", "\nABc,13,y,ell,-4"),
+    )
+}
+
+/// Predicates are values under three-valued logic, in any position.
+#[test]
+fn select_three_valued_predicates() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT NULL AND 0, NULL OR 1, NULL OR 0, 2 IN (1, NULL), 1 IN (1, NULL), NULL BETWEEN 1 AND 2, NULL LIKE 'a%'",
+        concat!("col0,col1,col2,col3,col4,col5,col6", "\n0,1,,,1,,"),
+    )
+}
+
 #[test]
 fn where_eq() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
