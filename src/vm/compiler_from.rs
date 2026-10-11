@@ -265,6 +265,9 @@ pub(crate) struct FromPlan<'t> {
     /// NATURAL join instead merges the shared columns into one, and SQL names
     /// its columns bare (`k,a,b`), which is what this selects.
     pub bare_star: bool,
+    /// WHERE conjuncts of a SELECT without FROM: no loop to place them in,
+    /// so they decide whether its single row exists.
+    const_where: Vec<Expr>,
 }
 
 impl<'t> FromPlan<'t> {
@@ -410,6 +413,25 @@ impl<'a> SqlCompiler<'a> {
             }
         }
 
+        // No FROM: zero sources, one row.
+        if from.is_empty() {
+            let mut const_where = Vec::new();
+            if let Some(w) = selection {
+                split_conjuncts(w, &mut const_where);
+            }
+            return Ok(FromPlan {
+                srcs: Vec::new(),
+                table_names: Vec::new(),
+                levels: Vec::new(),
+                groups: Vec::new(),
+                using: Vec::new(),
+                hidden: Vec::new(),
+                full_where: None,
+                bare_star: false,
+                const_where,
+            });
+        }
+
         // ---- Sources and the operator joining each to what precedes it.
         let mut factors: Vec<(&TableFactor, Option<(JoinKind, &JoinConstraint)>)> = Vec::new();
         for (i, twj) in from.iter().enumerate() {
@@ -549,6 +571,7 @@ impl<'a> SqlCompiler<'a> {
             hidden,
             full_where: None,
             bare_star,
+            const_where: Vec::new(),
         };
         let ctx = plan.ctx();
 
@@ -763,7 +786,18 @@ impl<'a> SqlCompiler<'a> {
             .map(|_| self.allocate_register())
             .collect();
         let match_labels: Vec<Label> = plan.groups.iter().map(|_| self.label()).collect();
-        self.emit_level(plan, &ctx, 0, &match_regs, &match_labels, body)?;
+        if plan.levels.is_empty() {
+            // No FROM: the body runs once, if WHERE holds.
+            let skip = self.label();
+            for term in &plan.const_where {
+                let r = self.code_expr(term, &ctx, None)?;
+                self.emit_jump_to(OpCode::IfZ, r, skip, 0, None, "WHERE");
+            }
+            body(self, &ctx)?;
+            self.resolve(skip);
+        } else {
+            self.emit_level(plan, &ctx, 0, &match_regs, &match_labels, body)?;
+        }
 
         // FULL JOIN: right rows no left row matched, with the left side NULL.
         if let Some(where_terms) = &plan.full_where {

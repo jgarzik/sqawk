@@ -7,28 +7,19 @@ use sqlparser::ast::{Expr, Select, SelectItem, Value, ValueWithSpan, WindowType}
 use super::ast_compat::{func_args, order_by_is_asc};
 use super::bytecode::{OpCode, ResultSchema};
 use super::compiler::{NameCtx, SqlCompiler};
+use crate::aggregate::AggregateFunction;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{DataType, Table};
 
-/// Whether a window function is one of the aggregates, as opposed to a
-/// ranking or offset function.
-///
-/// Defined once: this list was spelled out at two sites, so adding an
-/// aggregate window function meant editing both, and missing the second left
-/// running totals in the output with nothing to indicate it.
-fn is_aggregate_window_fn(name: &str) -> bool {
-    matches!(
-        name.to_uppercase().as_str(),
-        "SUM" | "COUNT" | "AVG" | "MIN" | "MAX"
-    )
-}
-
 impl<'a> SqlCompiler<'a> {
+    /// The window stage: compute every output row of a window query into the
+    /// ephemeral table `staging`, from which the output stage reads them.
     pub(crate) fn compile_select_with_window(
         &mut self,
         select: &Select,
         table: &Table,
         table_name: &str,
+        staging: i64,
     ) -> SqawkResult<()> {
         let cursor_idx = 0i64;
         let ephemeral_cursor = 1i64;
@@ -364,7 +355,7 @@ impl<'a> SqlCompiler<'a> {
         self.emit(
             OpCode::WindowAggStep,
             first_func_type,
-            0,
+            staging,
             ephemeral_cursor,
             Some(window_spec_base.clone()),
             "Update window state for current row",
@@ -488,14 +479,14 @@ impl<'a> SqlCompiler<'a> {
             output_idx += 1;
         }
 
-        // Output the row
+        // Stage the row
         self.emit(
-            OpCode::ResultRow,
+            OpCode::IdxInsert,
+            staging,
             output_start_reg,
             output_col_count as i64,
-            0,
             None,
-            "",
+            "stage window row",
         );
 
         // Next row in ephemeral
@@ -540,7 +531,10 @@ impl<'a> SqlCompiler<'a> {
                     | SelectItem::ExprWithAlias {
                         expr: Expr::Function(f),
                         ..
-                    } => f.over.is_some() && is_aggregate_window_fn(&f.name.to_string()),
+                    } => {
+                        f.over.is_some()
+                            && AggregateFunction::is_aggregate_name(&f.name.to_string())
+                    }
                     _ => false,
                 })
                 .map(|(i, _)| i)
@@ -552,16 +546,13 @@ impl<'a> SqlCompiler<'a> {
                 self.emit(
                     OpCode::WindowFinalize,
                     pos as i64,
-                    0,
+                    staging,
                     0,
                     None,
                     "Give every row its partition's final window value",
                 );
             }
         }
-
-        // Halt
-        self.emit(OpCode::Halt, 0, 0, 0, None, "");
 
         Ok(())
     }

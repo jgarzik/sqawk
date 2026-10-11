@@ -48,6 +48,26 @@ impl AggregateFunction {
         }
     }
 
+    /// The AggStep/AggFinal function-type constant for this aggregate.
+    pub fn vm_type(self) -> i64 {
+        use crate::vm::bytecode::{AGG_AVG, AGG_COUNT, AGG_MAX, AGG_MIN, AGG_SUM};
+        match self {
+            AggregateFunction::Count => AGG_COUNT,
+            AggregateFunction::Sum => AGG_SUM,
+            AggregateFunction::Avg => AGG_AVG,
+            AggregateFunction::Min => AGG_MIN,
+            AggregateFunction::Max => AGG_MAX,
+        }
+    }
+
+    /// Whether `name` (any case) is an aggregate function.
+    ///
+    /// The single source of the aggregate name list: every site that needs to
+    /// recognise an aggregate asks here.
+    pub fn is_aggregate_name(name: &str) -> bool {
+        Self::from_name(name).is_some()
+    }
+
     /// Execute the aggregate function on a column of values
     ///
     /// # Arguments

@@ -12,14 +12,25 @@
 //! `ROUND(AVG(x), 1)`, `UPPER(key)` and arbitrary HAVING expressions work.
 
 use sqlparser::ast::{
-    Expr, FunctionArg, FunctionArgExpr, Select, SelectItem, Value, ValueWithSpan,
+    Expr, FunctionArg, FunctionArgExpr, OrderByExpr, Select, Value, ValueWithSpan,
 };
 
 use super::ast_compat::{func_args, group_by_exprs};
-use super::bytecode::{OpCode, ResultSchema};
-use super::compiler::{NameCtx, SqlCompiler};
+use super::bytecode::{OpCode, AGG_TYPE_MASK};
+use super::compiler::{NameCtx, OutCol, SqlCompiler};
 use super::compiler_from::{expr_children, FromPlan};
+use super::compiler_select::{Dest, OutputStage};
 use crate::error::{SqawkError, SqawkResult};
+
+/// What a grouped query's output step needs, shared by its flush points.
+struct Group<'g, 'a> {
+    plan: &'g FromPlan<'a>,
+    having: Option<&'g Expr>,
+    outs: &'g [OutCol],
+    keys: &'g [Expr],
+    aggs: &'g [Agg],
+    stage: &'g OutputStage,
+}
 
 /// One aggregate call of a grouped query.
 struct Agg {
@@ -77,29 +88,20 @@ impl<'a> SqlCompiler<'a> {
     }
 
     /// Compile a SELECT with aggregates and/or GROUP BY.
+    ///
+    /// Aggregates are collected from the SELECT list, HAVING and the ORDER BY
+    /// keys that are not output columns, so `ORDER BY COUNT(*)` works without
+    /// projecting the count.
     pub(crate) fn compile_select_grouped(
         &mut self,
         select: &Select,
         plan: &FromPlan<'a>,
+        order_by: &[OrderByExpr],
+        distinct: bool,
+        dest: Dest,
     ) -> SqawkResult<()> {
         let ctx = plan.ctx();
-        let multi = plan.srcs.len() > 1;
-
-        let mut items: Vec<(&Expr, String)> = Vec::with_capacity(select.projection.len());
-        for item in &select.projection {
-            match item {
-                SelectItem::UnnamedExpr(e) => items.push((e, self.output_name(e, multi))),
-                SelectItem::ExprWithAlias { expr, alias } => {
-                    items.push((expr, alias.value.clone()))
-                }
-                _ => {
-                    return Err(SqawkError::UnsupportedSqlFeature(
-                        "Only expressions are supported in a GROUP BY or aggregate projection"
-                            .into(),
-                    ))
-                }
-            }
-        }
+        let outs = self.select_outputs(select, plan)?;
 
         // GROUP BY keys. `GROUP BY 2` names the second output column, and a
         // name that is no column but is a SELECT alias names that column.
@@ -111,25 +113,22 @@ impl<'a> SqlCompiler<'a> {
                     ..
                 }) => {
                     let pos: usize = n.parse().unwrap_or(0);
-                    if pos == 0 || pos > items.len() {
+                    if pos == 0 || pos > outs.len() {
                         return Err(SqawkError::InvalidSqlQuery(format!(
                             "GROUP BY position {} is out of range (1..{})",
                             n,
-                            items.len()
+                            outs.len()
                         )));
                     }
-                    items[pos - 1].0.clone()
+                    outs[pos - 1].expr.clone()
                 }
                 Expr::Identifier(ident) if ctx.resolve_unqualified(&ident.value).is_err() => {
-                    match select.projection.iter().find_map(|item| match item {
-                        SelectItem::ExprWithAlias { expr, alias }
-                            if alias.value.eq_ignore_ascii_case(&ident.value) =>
-                        {
-                            Some(expr)
-                        }
-                        _ => None,
+                    match outs.iter().find(|o| {
+                        o.alias
+                            .as_deref()
+                            .is_some_and(|a| a.eq_ignore_ascii_case(&ident.value))
                     }) {
-                        Some(expr) => expr.clone(),
+                        Some(o) => o.expr.clone(),
                         None => g.clone(),
                     }
                 }
@@ -138,23 +137,30 @@ impl<'a> SqlCompiler<'a> {
             keys.push(key);
         }
 
+        let st = self.output_stage(&outs, order_by, distinct, dest, Some(&ctx))?;
+
         let mut calls = Vec::new();
-        for (e, _) in &items {
-            Self::collect_aggregates(e, &mut calls);
+        for out in &outs {
+            Self::collect_aggregates(&out.expr, &mut calls);
         }
         if let Some(h) = &select.having {
             Self::collect_aggregates(h, &mut calls);
+        }
+        for e in st.key_exprs() {
+            Self::collect_aggregates(e, &mut calls);
         }
         let aggs = calls
             .into_iter()
             .map(Self::describe_aggregate)
             .collect::<SqawkResult<Vec<_>>>()?;
-
-        let mut schema = ResultSchema::new();
-        for (e, name) in &items {
-            schema.add_column(name.clone(), self.infer_expr_type(e, &ctx));
-        }
-        self.program.set_result_schema(schema);
+        let group = Group {
+            plan,
+            having: select.having.as_ref(),
+            outs: &outs,
+            keys: &keys,
+            aggs: &aggs,
+            stage: &st,
+        };
 
         let nk = keys.len();
         let na = aggs.len();
@@ -181,11 +187,13 @@ impl<'a> SqlCompiler<'a> {
                 }
                 Ok(())
             })?;
-            return self.emit_group_output(plan, select, &items, &keys, -1, &aggs, acc);
+            self.emit_group_output(&group, -1, acc)?;
+            self.finish_stage(&st);
+            return Ok(());
         }
 
         self.add_comment("GROUP BY query");
-        let sorter_id = 0i64;
+        let sorter_id = self.alloc_sorter();
         let total = nk + na;
         let spec: String = (0..nk)
             .map(|i| format!("{}:asc", i))
@@ -262,7 +270,7 @@ impl<'a> SqlCompiler<'a> {
         );
         self.emit_jump_to_three(flush, step, flush, "Group changed?");
         self.resolve(flush);
-        self.emit_group_output(plan, select, &items, &keys, key_reg, &aggs, acc)?;
+        self.emit_group_output(&group, key_reg, acc)?;
         for j in 0..na {
             self.emit(OpCode::AggReset, acc + j as i64, 0, 0, None, "");
         }
@@ -291,34 +299,27 @@ impl<'a> SqlCompiler<'a> {
         }
         self.emit_jump_to(OpCode::SorterNext, sorter_id, top, 0, None, "");
         // The last group, which no key change ever flushed.
-        self.emit_group_output(plan, select, &items, &keys, key_reg, &aggs, acc)?;
+        self.emit_group_output(&group, key_reg, acc)?;
         self.resolve(done);
+        self.finish_stage(&st);
         Ok(())
     }
 
-    /// Emit one output row of a grouped query: finalize the aggregates, test
-    /// HAVING, compute the SELECT list, ResultRow.
+    /// Emit one output row of a grouped query: finalize the aggregates and
+    /// hand the row to the output stage, which tests HAVING.
     ///
     /// Called from both flush points of the GROUP BY drain loop, and once for
     /// an aggregate query without GROUP BY.
-    #[allow(clippy::too_many_arguments)]
-    fn emit_group_output(
-        &mut self,
-        plan: &FromPlan<'a>,
-        select: &Select,
-        items: &[(&Expr, String)],
-        keys: &[Expr],
-        key_reg: i64,
-        aggs: &[Agg],
-        acc: i64,
-    ) -> SqawkResult<()> {
-        let fin = self.allocate_registers(aggs.len().max(1));
-        for j in 0..aggs.len() {
+    fn emit_group_output(&mut self, g: &Group<'_, 'a>, key_reg: i64, acc: i64) -> SqawkResult<()> {
+        let fin = self.allocate_registers(g.aggs.len().max(1));
+        for (j, agg) in g.aggs.iter().enumerate() {
+            // p3: the function, for an accumulator no row ever stepped --
+            // COUNT of nothing is 0, every other aggregate of nothing NULL.
             self.emit(
                 OpCode::AggFinal,
                 acc + j as i64,
                 fin + j as i64,
-                0,
+                agg.func_type & AGG_TYPE_MASK,
                 None,
                 "",
             );
@@ -326,13 +327,13 @@ impl<'a> SqlCompiler<'a> {
 
         // Post-aggregation scope: aggregates and keys are values in
         // registers; any other column reference is an error.
-        let mut ctx = plan.ctx();
-        for (j, agg) in aggs.iter().enumerate() {
+        let mut ctx = g.plan.ctx();
+        for (j, agg) in g.aggs.iter().enumerate() {
             ctx.agg_bindings
                 .push((NameCtx::agg_key(&agg.call), fin + j as i64));
         }
         let mut cols = Vec::new();
-        for (i, k) in keys.iter().enumerate() {
+        for (i, k) in g.keys.iter().enumerate() {
             let reg = key_reg + i as i64;
             ctx.agg_bindings.push((NameCtx::agg_key(k), reg));
             let col = match k {
@@ -347,18 +348,6 @@ impl<'a> SqlCompiler<'a> {
             }
         }
         ctx.col_bindings = Some(cols);
-
-        let skip = self.label();
-        if let Some(having) = &select.having {
-            let r = self.code_expr(having, &ctx, None)?;
-            self.emit_jump_to(OpCode::IfZ, r, skip, 0, None, "HAVING failed");
-        }
-        let out = self.allocate_registers(items.len().max(1));
-        for (i, (e, _)) in items.iter().enumerate() {
-            self.code_expr(e, &ctx, Some(out + i as i64))?;
-        }
-        self.emit(OpCode::ResultRow, out, items.len() as i64, 0, None, "");
-        self.resolve(skip);
-        Ok(())
+        self.emit_stage_row(g.stage, g.outs, &ctx, g.having)
     }
 }

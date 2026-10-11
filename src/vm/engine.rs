@@ -31,7 +31,40 @@ enum CursorData<'a> {
         sorted: bool,
         sequence: i64,
         name: Option<String>, // Optional name for pending tables
+        /// A KEYED ephemeral table (OpenEphemeral P3 = 1): each distinct
+        /// row once, by its [`RowKey`]. `rows` is filled from it, sorted, on
+        /// Rewind.
+        set: Option<HashMap<Vec<RowKey>, Vec<Value>>>,
     },
+}
+
+/// One column of a keyed ephemeral row, normalized so that rows SQL calls
+/// equal for DISTINCT and the compound operators hash alike: NULL equals
+/// NULL, and a REAL equal to an integer is that integer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum RowKey {
+    Null,
+    Int(i64),
+    Real(u64),
+    Text(String),
+}
+
+fn row_key(v: &Value) -> RowKey {
+    match v {
+        Value::Null => RowKey::Null,
+        Value::Integer(i) => RowKey::Int(*i),
+        Value::Boolean(b) => RowKey::Int(*b as i64),
+        Value::Float(f) => {
+            if f.fract() == 0.0 && f.abs() < 9.0e18 {
+                RowKey::Int(*f as i64)
+            } else if f.is_nan() {
+                RowKey::Null
+            } else {
+                RowKey::Real(f.to_bits())
+            }
+        }
+        Value::String(s) => RowKey::Text(s.to_string()),
+    }
 }
 
 /// Unified cursor for VM execution
@@ -135,8 +168,8 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Create ephemeral cursor
-    fn ephemeral(col_count: usize, sort_keys: Vec<(usize, bool)>) -> Self {
+    /// Create ephemeral cursor; `keyed` makes it a set of distinct rows.
+    fn ephemeral(col_count: usize, sort_keys: Vec<(usize, bool)>, keyed: bool) -> Self {
         Self {
             data: CursorData::Ephemeral {
                 rows: Vec::with_capacity(DEFAULT_SORTER_ROWS_CAPACITY),
@@ -145,6 +178,7 @@ impl<'a> Cursor<'a> {
                 sorted: false,
                 sequence: 0,
                 name: None,
+                set: keyed.then(HashMap::new),
             },
             position: 0,
             valid: false,
@@ -165,6 +199,7 @@ impl<'a> Cursor<'a> {
                 sorted: false,
                 sequence: 0,
                 name: Some(table_name),
+                set: None,
             },
             position: 0,
             valid: false,
@@ -176,7 +211,27 @@ impl<'a> Cursor<'a> {
     }
 
     /// Move to the first row (Rewind opcode)
+    ///
+    /// A keyed ephemeral table is walked in sorted row order, as SQLite's
+    /// ephemeral index is, so a UNION without ORDER BY comes out sorted.
     fn rewind(&mut self) -> bool {
+        if let CursorData::Ephemeral {
+            rows,
+            set: Some(set),
+            ..
+        } = &mut self.data
+        {
+            if !set.is_empty() {
+                rows.extend(set.drain().map(|(_, row)| row));
+                rows.sort_by(|a, b| {
+                    a.iter()
+                        .zip(b)
+                        .map(|(x, y)| compare_values(x, y))
+                        .find(|o| o.is_ne())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+        }
         self.position = 0;
         self.null_row = false;
         self.valid = match &self.data {
@@ -293,6 +348,12 @@ impl<'a> Cursor<'a> {
     /// Insert row into ephemeral cursor (IdxInsert opcode)
     fn insert_row(&mut self, row: Vec<Value>) -> Result<(), SqawkError> {
         match &mut self.data {
+            CursorData::Ephemeral { set: Some(set), .. } => {
+                // A row already present is replaced, as SQLite's IdxInsert
+                // does: `SELECT 1 UNION SELECT 1.0` yields 1.0.
+                set.insert(row.iter().map(row_key).collect(), row);
+                Ok(())
+            }
             CursorData::Ephemeral { rows, sorted, .. } => {
                 rows.push(row);
                 *sorted = false;
@@ -300,6 +361,16 @@ impl<'a> Cursor<'a> {
             }
             CursorData::Table { .. } => Err(SqawkError::VmError(
                 "Cannot insert into table cursor".into(),
+            )),
+        }
+    }
+
+    /// The keyed-set of a keyed ephemeral cursor (Found, NotFound, IdxDelete).
+    fn key_set(&mut self) -> Result<&mut HashMap<Vec<RowKey>, Vec<Value>>, SqawkError> {
+        match &mut self.data {
+            CursorData::Ephemeral { set: Some(set), .. } => Ok(set),
+            _ => Err(SqawkError::VmError(
+                "Cursor is not a keyed ephemeral table".into(),
             )),
         }
     }
@@ -355,8 +426,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Get row count (for debugging/validation)
-    #[allow(dead_code)]
+    /// Number of rows in the cursor.
     fn row_count(&self) -> usize {
         match &self.data {
             CursorData::Table { table } => table.row_count(),
@@ -678,16 +748,6 @@ pub struct VmEngine<'a> {
     accumulators: HashMap<usize, AggAccumulator>,
     results: Vec<Vec<Value>>,
 
-    /// Index-based results (Phase 4C parallel path)
-    /// Each entry contains row indices from each cursor for that result row
-    /// Option<usize> handles NULL rows in outer joins
-    #[allow(dead_code)]
-    result_row_indices: Vec<Vec<Option<usize>>>,
-
-    /// Order of cursor IDs as sources (maps position to cursor ID)
-    #[allow(dead_code)]
-    cursor_source_order: Vec<usize>,
-
     /// Index into `results` at which each window partition begins.
     ///
     /// Recorded during the streaming window pass so a following WindowFinalize
@@ -730,8 +790,6 @@ impl<'a> VmEngine<'a> {
             sorters: HashMap::with_capacity(DEFAULT_SORTER_CAPACITY),
             accumulators: HashMap::with_capacity(DEFAULT_ACCUMULATOR_CAPACITY),
             results: Vec::with_capacity(DEFAULT_RESULT_CAPACITY),
-            result_row_indices: Vec::with_capacity(DEFAULT_RESULT_CAPACITY),
-            cursor_source_order: Vec::with_capacity(DEFAULT_CURSOR_CAPACITY),
             transaction_state: TransactionState::None,
             pending_modifications: Vec::with_capacity(DEFAULT_MODIFICATIONS_CAPACITY),
             verbose,
@@ -754,8 +812,6 @@ impl<'a> VmEngine<'a> {
         self.sorters.clear();
         self.accumulators.clear();
         self.results.clear();
-        self.result_row_indices.clear();
-        self.cursor_source_order.clear();
         self.pending_modifications.clear();
         self.once_flags.clear();
         self.window_partition_starts.clear();
@@ -876,11 +932,6 @@ impl<'a> VmEngine<'a> {
                 // Create a cursor for the table (borrows, no clone)
                 let cursor = Cursor::from_table(table);
                 self.cursors.insert(cursor_idx, cursor);
-
-                // Track cursor source order for index-based results (Phase 4C)
-                if !self.cursor_source_order.contains(&cursor_idx) {
-                    self.cursor_source_order.push(cursor_idx);
-                }
 
                 Ok(ExecuteResult::Continue)
             }
@@ -1719,9 +1770,9 @@ impl<'a> VmEngine<'a> {
 
             OpCode::WindowAggStep => {
                 // Window aggregate step: update window state based on current row
-                // P1 = func type, P2 = value reg, P3 = cursor, P4 = window spec
+                // P1 = func type, P2 = staging cursor, P3 = cursor, P4 = window spec
                 let func_type = inst.p1;
-                let _value_reg = inst.p2 as usize;
+                let staging = inst.p2 as usize;
                 let cursor_id = inst.p3 as usize;
                 let window_spec = inst.p4.clone().unwrap_or_default();
 
@@ -1821,7 +1872,8 @@ impl<'a> VmEngine<'a> {
 
                 if partition_changed {
                     // The row about to be emitted starts a new partition.
-                    self.window_partition_starts.push(self.results.len());
+                    let staged = self.cursors.get(&staging).map_or(0, |c| c.row_count());
+                    self.window_partition_starts.push(staged);
                 }
 
                 // Check if order value changed (for RANK)
@@ -2009,17 +2061,26 @@ impl<'a> VmEngine<'a> {
                 // RUNNING total. SQL defines the frame in that case as the
                 // whole partition, so every row should see the same value.
                 let col = inst.p1 as usize;
-                let starts = self.window_partition_starts.clone();
+                let staging = inst.p2 as usize;
+                let starts = &self.window_partition_starts;
+                let Some(CursorData::Ephemeral { rows, .. }) =
+                    self.cursors.get_mut(&staging).map(|c| &mut c.data)
+                else {
+                    return Err(SqawkError::VmError(format!(
+                        "WindowFinalize: cursor {} is not an ephemeral table",
+                        staging
+                    )));
+                };
                 for (i, &start) in starts.iter().enumerate() {
-                    let end = starts.get(i + 1).copied().unwrap_or(self.results.len());
+                    let end = starts.get(i + 1).copied().unwrap_or(rows.len());
                     if end == 0 || start >= end {
                         continue;
                     }
-                    let final_value = match self.results[end - 1].get(col) {
+                    let final_value = match rows[end - 1].get(col) {
                         Some(v) => v.clone(),
                         None => continue,
                     };
-                    for row in &mut self.results[start..end] {
+                    for row in &mut rows[start..end] {
                         if col < row.len() {
                             row[col] = final_value.clone();
                         }
@@ -2205,12 +2266,7 @@ impl<'a> VmEngine<'a> {
 
             OpCode::Integer => {
                 // Load integer constant into register
-                // Special case: p1=-1 means "use current result count as the value"
-                let value = if inst.p1 == -1 {
-                    self.results.len() as i64
-                } else {
-                    inst.p1
-                };
+                let value = inst.p1;
                 let register_idx = inst.p2 as usize;
 
                 if register_idx < self.registers.len() {
@@ -2276,21 +2332,7 @@ impl<'a> VmEngine<'a> {
                     }
                 }
 
-                // Add the row to results
                 self.results.push(row);
-
-                // Phase 4C: Also record row indices from each cursor (parallel path)
-                // This collects the current row index from each cursor in source order
-                let row_indices: Vec<Option<usize>> = self
-                    .cursor_source_order
-                    .iter()
-                    .map(|cursor_id| {
-                        self.cursors
-                            .get(cursor_id)
-                            .and_then(|c| c.current_row_idx())
-                    })
-                    .collect();
-                self.result_row_indices.push(row_indices);
 
                 Ok(ExecuteResult::Continue)
             }
@@ -2750,239 +2792,6 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Continue)
             }
 
-            OpCode::SortResults => {
-                // Sort the accumulated result rows.
-                //
-                // A post-processing opcode in the same family as Distinct and
-                // Limit: it runs over self.results after the producing loop has
-                // finished, so it is independent of how those rows were
-                // produced. That is what lets ORDER BY work over GROUP BY
-                // output and over joins, neither of which can feed the
-                // cursor-based sorter used by a plain table scan.
-                let spec = inst.p4.as_deref().unwrap_or("");
-                let keys: Vec<(usize, bool)> = spec
-                    .split(',')
-                    .filter(|s| !s.is_empty())
-                    .filter_map(|part| {
-                        let (idx, dir) = part.split_once(':')?;
-                        Some((
-                            idx.trim().parse().ok()?,
-                            !dir.trim().eq_ignore_ascii_case("desc"),
-                        ))
-                    })
-                    .collect();
-
-                if !keys.is_empty() {
-                    // Sort results and their index tracking together so the
-                    // two do not drift apart.
-                    let track = self.result_row_indices.len() == self.results.len();
-                    let mut order: Vec<usize> = (0..self.results.len()).collect();
-                    order.sort_by(|&a, &b| {
-                        for &(col, asc) in &keys {
-                            let va = self.results[a].get(col).unwrap_or(&Value::Null);
-                            let vb = self.results[b].get(col).unwrap_or(&Value::Null);
-                            let ord = compare_values(va, vb);
-                            let ord = if asc { ord } else { ord.reverse() };
-                            if ord != std::cmp::Ordering::Equal {
-                                return ord;
-                            }
-                        }
-                        std::cmp::Ordering::Equal
-                    });
-                    self.results = order.iter().map(|&i| self.results[i].clone()).collect();
-                    if track {
-                        self.result_row_indices = order
-                            .iter()
-                            .map(|&i| self.result_row_indices[i].clone())
-                            .collect();
-                    }
-                }
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::Distinct => {
-                // Remove duplicate rows from results
-                // This is used by UNION (without ALL) to deduplicate combined results
-                let mut seen = std::collections::HashSet::with_capacity(self.results.len());
-                let mut unique_results = Vec::with_capacity(self.results.len());
-
-                for row in &self.results {
-                    // Create a hashable key from the row values
-                    let key: Vec<String> = row.iter().map(|v| format!("{:?}", v)).collect();
-                    let key_str = key.join("|");
-
-                    if seen.insert(key_str) {
-                        unique_results.push(row.clone());
-                    }
-                }
-
-                self.results = unique_results;
-
-                if self.verbose {
-                    eprintln!(
-                        "DISTINCT: {} unique rows after deduplication",
-                        self.results.len()
-                    );
-                }
-
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::Limit => {
-                // Limit results to P1 rows, skip first P2 rows (post-processing opcode)
-                // This is used after DISTINCT to apply LIMIT/OFFSET correctly
-                let limit = inst.p1 as usize;
-                let offset = inst.p2 as usize;
-
-                // Index tracking is trimmed alongside the rows. It used to be
-                // left untouched, so after a post-processing LIMIT the two
-                // vectors disagreed and the debug validator reported a
-                // mismatch on every limited query.
-                let track = self.result_row_indices.len() == self.results.len();
-
-                // First apply OFFSET - skip first N rows
-                if offset > 0 && !self.results.is_empty() {
-                    if offset >= self.results.len() {
-                        self.results.clear();
-                        if track {
-                            self.result_row_indices.clear();
-                        }
-                    } else {
-                        self.results = self.results.drain(offset..).collect();
-                        if track {
-                            self.result_row_indices =
-                                self.result_row_indices.drain(offset..).collect();
-                        }
-                    }
-                }
-
-                // Then apply LIMIT - truncate to N rows
-                if self.results.len() > limit {
-                    self.results.truncate(limit);
-                    if track && self.result_row_indices.len() > limit {
-                        self.result_row_indices.truncate(limit);
-                    }
-                }
-
-                if self.verbose {
-                    eprintln!(
-                        "LIMIT: offset {} then truncated to {} rows",
-                        offset,
-                        self.results.len()
-                    );
-                }
-
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::Intersect => {
-                // Keep only rows that exist in both left and right result sets
-                // P1 contains the register with the count of left-side results (-1 means no marker)
-                let left_count = if inst.p1 >= 0 {
-                    match self.get_register(inst.p1 as usize)? {
-                        Register::Integer(n) => n as usize,
-                        _ => {
-                            return Err(SqawkError::VmError(
-                                "Invalid left count register for INTERSECT".to_string(),
-                            ))
-                        }
-                    }
-                } else {
-                    // If no marker, assume half the results are from each side (fallback)
-                    self.results.len() / 2
-                };
-
-                // Split results into left and right sets
-                let left_rows: Vec<_> = self.results.iter().take(left_count).cloned().collect();
-                let right_rows: Vec<_> = self.results.iter().skip(left_count).cloned().collect();
-
-                // Create a set of right rows for fast lookup
-                let right_set: std::collections::HashSet<_> = right_rows
-                    .iter()
-                    .map(|row| {
-                        row.iter()
-                            .map(|v| format!("{:?}", v))
-                            .collect::<Vec<_>>()
-                            .join("|")
-                    })
-                    .collect();
-
-                // Keep only left rows that also appear in right
-                let mut intersection = Vec::with_capacity(left_rows.len());
-                let mut seen = std::collections::HashSet::with_capacity(left_rows.len());
-
-                for row in &left_rows {
-                    let key: Vec<String> = row.iter().map(|v| format!("{:?}", v)).collect();
-                    let key_str = key.join("|");
-
-                    if right_set.contains(&key_str) && seen.insert(key_str) {
-                        intersection.push(row.clone());
-                    }
-                }
-
-                self.results = intersection;
-
-                if self.verbose {
-                    eprintln!("INTERSECT: {} rows in intersection", self.results.len());
-                }
-
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::Except => {
-                // Keep only rows from left that don't exist in right result set
-                // P1 contains the register with the count of left-side results (-1 means no marker)
-                let left_count = if inst.p1 >= 0 {
-                    match self.get_register(inst.p1 as usize)? {
-                        Register::Integer(n) => n as usize,
-                        _ => {
-                            return Err(SqawkError::VmError(
-                                "Invalid left count register for EXCEPT".to_string(),
-                            ))
-                        }
-                    }
-                } else {
-                    // If no marker, assume half the results are from each side (fallback)
-                    self.results.len() / 2
-                };
-
-                // Split results into left and right sets
-                let left_rows: Vec<_> = self.results.iter().take(left_count).cloned().collect();
-                let right_rows: Vec<_> = self.results.iter().skip(left_count).cloned().collect();
-
-                // Create a set of right rows for fast lookup
-                let right_set: std::collections::HashSet<_> = right_rows
-                    .iter()
-                    .map(|row| {
-                        row.iter()
-                            .map(|v| format!("{:?}", v))
-                            .collect::<Vec<_>>()
-                            .join("|")
-                    })
-                    .collect();
-
-                // Keep only left rows that don't appear in right
-                let mut difference = Vec::with_capacity(left_rows.len());
-                let mut seen = std::collections::HashSet::with_capacity(left_rows.len());
-
-                for row in &left_rows {
-                    let key: Vec<String> = row.iter().map(|v| format!("{:?}", v)).collect();
-                    let key_str = key.join("|");
-
-                    if !right_set.contains(&key_str) && seen.insert(key_str) {
-                        difference.push(row.clone());
-                    }
-                }
-
-                self.results = difference;
-
-                if self.verbose {
-                    eprintln!("EXCEPT: {} rows in difference", self.results.len());
-                }
-
-                Ok(ExecuteResult::Continue)
-            }
-
             OpCode::NullRow => {
                 // Put cursor P1 on a virtual all-NULL row, as SQLite's
                 // OP_NullRow does. It is also left exhausted, so the Next or
@@ -3111,7 +2920,8 @@ impl<'a> VmEngine<'a> {
             OpCode::DecrJumpZero => {
                 // Decrement register P1. If result is zero, jump to P2.
                 // Used for LIMIT - when counter hits zero, stop outputting rows.
-                // Note: LIMIT 0 is handled at compile time with a Goto.
+                // LIMIT 0 is tested before the scan; a negative LIMIT (no
+                // limit) only moves further from zero.
                 let reg = inst.p1 as usize;
                 let jump_addr = inst.p2 as usize;
 
@@ -3120,7 +2930,7 @@ impl<'a> VmEngine<'a> {
                     _ => 0,
                 };
 
-                let new_val = current - 1;
+                let new_val = current.saturating_sub(1);
                 self.set_register(reg, Register::Integer(new_val))?;
 
                 if self.verbose {
@@ -3134,6 +2944,37 @@ impl<'a> VmEngine<'a> {
                     Ok(ExecuteResult::Jump(jump_addr))
                 } else {
                     Ok(ExecuteResult::Continue)
+                }
+            }
+
+            OpCode::MustBeInt => {
+                // LIMIT / OFFSET operands, as SQLite's OP_MustBeInt: an
+                // integer, an integral REAL, or text spelling an integer.
+                let reg = inst.p1 as usize;
+                let v = match self.get_register(reg)? {
+                    Register::Integer(i) => Some(i),
+                    Register::Boolean(b) => Some(b as i64),
+                    Register::Float(f) if f.fract() == 0.0 && f.abs() < 9.0e18 => Some(f as i64),
+                    Register::String(s) => match s.trim().parse::<i64>() {
+                        Ok(i) => Some(i),
+                        Err(_) => s
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
+                            .filter(|f| f.fract() == 0.0 && f.abs() < 9.0e18)
+                            .map(|f| f as i64),
+                    },
+                    _ => None,
+                };
+                match v {
+                    Some(i) => {
+                        self.set_register(reg, Register::Integer(i))?;
+                        Ok(ExecuteResult::Continue)
+                    }
+                    None => Err(SqawkError::InvalidSqlQuery(format!(
+                        "datatype mismatch: {} must be an integer",
+                        inst.p4.as_deref().unwrap_or("value")
+                    ))),
                 }
             }
 
@@ -3315,7 +3156,7 @@ impl<'a> VmEngine<'a> {
                     .collect();
 
                 // Create ephemeral cursor in the unified cursors map
-                let cursor = Cursor::ephemeral(col_count, sort_keys);
+                let cursor = Cursor::ephemeral(col_count, sort_keys, inst.p3 == 1);
                 self.cursors.insert(cursor_id, cursor);
 
                 if self.verbose {
@@ -3355,6 +3196,41 @@ impl<'a> VmEngine<'a> {
                 }
 
                 Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::IdxDelete | OpCode::Found | OpCode::NotFound => {
+                // Membership in keyed ephemeral cursor P1. IdxDelete reads its
+                // row from r[P2..P2+P3]; Found/NotFound from r[P3..P3+P4] and
+                // jump to P2.
+                let (start, count) = if inst.opcode == OpCode::IdxDelete {
+                    (inst.p2 as usize, inst.p3 as usize)
+                } else {
+                    let n = inst.p4.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
+                    (inst.p3 as usize, n)
+                };
+                let mut key = Vec::with_capacity(count);
+                for i in 0..count {
+                    key.push(row_key(&Value::from(self.get_register(start + i)?)));
+                }
+                let cursor_id = inst.p1 as usize;
+                let set = self
+                    .cursors
+                    .get_mut(&cursor_id)
+                    .ok_or_else(|| SqawkError::VmError(format!("Cursor {} not found", cursor_id)))?
+                    .key_set()?;
+                let jump = match inst.opcode {
+                    OpCode::IdxDelete => {
+                        set.remove(&key);
+                        false
+                    }
+                    OpCode::Found => set.contains_key(&key),
+                    _ => !set.contains_key(&key),
+                };
+                Ok(if jump {
+                    ExecuteResult::Jump(inst.p2 as usize)
+                } else {
+                    ExecuteResult::Continue
+                })
             }
 
             OpCode::Sort => {
@@ -3858,133 +3734,7 @@ impl<'a> VmEngine<'a> {
             table.add_row(row.clone())?;
         }
 
-        // Phase 4D: Debug validation - verify index tracking is correct
-        // Only validate in debug builds to avoid performance impact
-        #[cfg(debug_assertions)]
-        self.validate_index_tracking();
-
         Ok(Some(table))
-    }
-
-    /// Validate that the index-based result tracking matches the materialized results
-    ///
-    /// This method is used in debug builds to ensure the index tracking in Phase 4C
-    /// is producing correct results before we can fully switch to index-only mode.
-    #[cfg(debug_assertions)]
-    fn validate_index_tracking(&self) {
-        // Skip validation if we have no results or no index tracking
-        if self.results.is_empty() || self.result_row_indices.is_empty() {
-            return;
-        }
-
-        // Verify counts match
-        if self.results.len() != self.result_row_indices.len() {
-            eprintln!(
-                "Index tracking mismatch: {} results vs {} index entries",
-                self.results.len(),
-                self.result_row_indices.len()
-            );
-            return;
-        }
-
-        // For single-table queries (one cursor), validate that indices point to correct rows
-        if self.cursor_source_order.len() == 1 {
-            let cursor_id = self.cursor_source_order[0];
-            if let Some(cursor) = self.cursors.get(&cursor_id) {
-                let rows = cursor.rows();
-
-                for row_indices in self.result_row_indices.iter() {
-                    if let Some(Some(row_idx)) = row_indices.first() {
-                        // Verify the row exists
-                        if *row_idx < rows.len() {
-                            // The index tracking is recording correctly
-                            // (We can't fully validate column values here since ResultRow
-                            // may include computed expressions, not just column references)
-                        }
-                    }
-                }
-            }
-        }
-
-        // For multi-table queries (JOINs), verify the index structure is consistent
-        if self.cursor_source_order.len() > 1 {
-            // Verify all row_indices entries have the expected number of cursor entries
-            for row_indices in &self.result_row_indices {
-                if row_indices.len() != self.cursor_source_order.len() {
-                    eprintln!(
-                        "JOIN index tracking mismatch: expected {} cursor indices, got {}",
-                        self.cursor_source_order.len(),
-                        row_indices.len()
-                    );
-                }
-            }
-        }
-    }
-
-    /// Materialize a JOIN row from tracked indices (Phase 4E)
-    ///
-    /// This method reconstructs a result row by reading values directly from
-    /// source tables using the tracked row indices. This is more memory-efficient
-    /// than storing cloned row data for each result.
-    ///
-    /// # Arguments
-    /// * `row_idx` - Index into result_row_indices
-    ///
-    /// # Returns
-    /// The materialized row, or None if indices are invalid
-    #[allow(dead_code)]
-    fn materialize_join_row_from_indices(
-        &self,
-        row_idx: usize,
-    ) -> Option<Vec<crate::table::Value>> {
-        let indices = self.result_row_indices.get(row_idx)?;
-        // Estimate total column count from all cursors
-        let total_cols: usize = self
-            .cursor_source_order
-            .iter()
-            .filter_map(|id| self.cursors.get(id))
-            .map(|c| c.column_count())
-            .sum();
-        let mut row = Vec::with_capacity(total_cols);
-
-        // For each cursor in source order, get the row and append its columns
-        for (cursor_pos, cursor_id) in self.cursor_source_order.iter().enumerate() {
-            if let Some(cursor) = self.cursors.get(cursor_id) {
-                let source_row_idx = indices.get(cursor_pos).copied().flatten();
-
-                if let Some(row_idx) = source_row_idx {
-                    // Get row from source cursor
-                    let cursor_rows = cursor.rows();
-                    if let Some(source_row) = cursor_rows.get(row_idx) {
-                        row.extend(source_row.iter().cloned());
-                    } else {
-                        // Row index out of bounds - fill with NULLs
-                        for _ in 0..cursor.column_count() {
-                            row.push(crate::table::Value::Null);
-                        }
-                    }
-                } else {
-                    // NULL row (outer join) - fill with NULLs
-                    for _ in 0..cursor.column_count() {
-                        row.push(crate::table::Value::Null);
-                    }
-                }
-            }
-        }
-
-        Some(row)
-    }
-
-    /// Get the number of cursors (tables) involved in the current query
-    #[allow(dead_code)]
-    fn cursor_count(&self) -> usize {
-        self.cursor_source_order.len()
-    }
-
-    /// Check if this is a JOIN query (multiple cursors)
-    #[allow(dead_code)]
-    fn is_join_query(&self) -> bool {
-        self.cursor_source_order.len() > 1
     }
 
     /// The cursor numbered `idx`, for opcodes that modify it.

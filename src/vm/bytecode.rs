@@ -172,13 +172,6 @@ pub enum OpCode {
     // Utility opcodes
     Noop, // No operation
 
-    // Set operations
-    SortResults, // Sort accumulated results. P4 = "col:asc,col:desc,..." over RESULT columns.
-    Distinct,    // Remove duplicate rows from results
-    Limit, // Limit results to P1 rows. P2 = offset (rows to skip, already applied). Post-processing opcode.
-    Intersect, // Keep only rows that exist in both left and right result sets
-    Except, // Keep only rows from left that don't exist in right result set
-
     // Join operations
     //
     // NullRow follows SQLite's OP_NullRow: it puts cursor P1 on a virtual
@@ -221,6 +214,7 @@ pub enum OpCode {
 
     // Counter operations (LIMIT/OFFSET)
     DecrJumpZero, // Decrement register P1. If result is zero, jump to P2.
+    MustBeInt, // Make r[P1] an integer (integral REAL or integer text converts); else error. P4 = clause name.
 
     // Sorter operations (ORDER BY)
     SorterOpen, // Open a sorter. P1 = sorter ID, P2 = number of columns, P4 = sort key spec
@@ -231,8 +225,18 @@ pub enum OpCode {
 
     // Ephemeral table operations (for ORDER BY results, temp storage)
     // Ephemeral tables use cursor IDs and work with Column/Next/Rewind opcodes
-    OpenEphemeral, // Open ephemeral cursor P1 with P2 columns. P4 = sort key spec for ordering.
+    //
+    // With P3 = 1 an ephemeral table is KEYED, like SQLite's ephemeral index:
+    // it holds each distinct row once (IdxInsert of a row already present is a
+    // no-op), Found/NotFound test membership, IdxDelete removes a row, and
+    // Rewind walks the rows in sorted order. DISTINCT and the compound
+    // operators (UNION, INTERSECT, EXCEPT) are built from these. Rows are
+    // equal when every column is: NULL equals NULL and 1 equals 1.0.
+    OpenEphemeral, // Open ephemeral cursor P1 with P2 columns. P4 = sort key spec; P3 = 1: keyed.
     IdxInsert,     // Insert into ephemeral cursor P1. P2 = start register, P3 = column count.
+    IdxDelete,     // Remove row r[P2..P2+P3] from keyed ephemeral cursor P1, if present.
+    Found,         // Jump to P2 if row r[P3..P3+P4] is in keyed ephemeral cursor P1.
+    NotFound,      // Jump to P2 if row r[P3..P3+P4] is NOT in keyed ephemeral cursor P1.
     Sort,          // Sort ephemeral cursor P1. Jump to P2 when empty, else continue.
     Sequence,      // P1 = ephemeral cursor, P2 = dest register. Generate next sequence number.
 
@@ -259,10 +263,10 @@ pub enum OpCode {
     Remainder, // P1 = left reg, P2 = right reg, P3 = dest reg. dest = left % right
 
     // Window function operations
-    WindowAggStep, // P1 = func type, P2 = value reg, P3 = accum reg, P4 = window spec. Step window aggregate.
+    WindowAggStep, // P1 = func type, P2 = staging cursor, P3 = window cursor, P4 = window spec. Step window state.
     WindowValue,   // P1 = accum reg, P2 = dest reg, P3 = func type. Get current window value.
-    WindowFinalize, // P1 = result column index. Give every row of a partition that partition's
-                   // final window value, which for an unordered frame is the partition total.
+    WindowFinalize, // P1 = column, P2 = staging cursor. Give every staged row of a partition that
+                   // partition's final window value, which for an unordered frame is the total.
 }
 
 /// A SQL VM instruction with opcode and parameters
