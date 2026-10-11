@@ -103,4 +103,10 @@ Two suites carry the correctness contract:
   defects. Run with `cargo test --test mod defects -- --ignored`. Remove the
   `#[ignore]` when a defect is fixed; the list only shrinks.
 
+`tests/sqlite_diff/harness.py` is a differential tester against SQLite (via
+python3's `sqlite3` module), not part of `cargo test`. Run
+`cargo build --release && python3 -I tests/sqlite_diff/harness.py
+tests/sqlite_diff/queries.sql tests/sqlite_diff/queries2.sql`; the SUMMARY
+line counts pass / DIFF (wrong answer) / sqawk_err.
+
 Tests use `assert_cmd` for CLI testing and `tempfile` for temporary test data.
