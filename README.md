@@ -91,7 +91,6 @@ counts. The same seed always produces the same data.
 - [User Guide](doc/user_guide.md) - Installation, CLI options, and examples
 - [SQL Reference](doc/sql_reference.md) - Complete SQL syntax and functions
 - [Database Architecture](doc/database.md) - Technical internals (for contributors)
-- [Changelog](CHANGELOG.md) - What changed in each release, including breaking changes
 
 ## License
 
