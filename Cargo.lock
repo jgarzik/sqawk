@@ -595,7 +595,6 @@ dependencies = [
  "clap",
  "csv",
  "predicates",
- "regex",
  "rustyline",
  "sqlparser",
  "stacker",

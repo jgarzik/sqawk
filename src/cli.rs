@@ -74,7 +74,12 @@ pub struct SqawkArgs {
     /// When enabled, launches an interactive shell for entering SQL commands.
     /// This mode allows exploration of data with immediate feedback.
     /// Type .help in the interactive shell to see available commands.
-    #[clap(short, long, help = "Start in interactive mode")]
+    #[clap(
+        short,
+        long,
+        conflicts_with_all = ["sql", "file"],
+        help = "Start in interactive mode (cannot be combined with -s or -f)"
+    )]
     pub interactive: bool,
 
     /// Input files to process - format: [table_name=]file_path

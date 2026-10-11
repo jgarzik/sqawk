@@ -1269,7 +1269,6 @@ fn field_separator_long_flag() -> TestResult {
 /// `-i` with `-s` silently ignores `-s` and starts the REPL. It is a usage
 /// error (exit 2).
 #[test]
-#[ignore]
 fn interactive_with_sql_is_usage_error() -> TestResult {
     let dir = create_temp_dir()?;
     write_files(dir.path(), &[("one.csv", b"id\n1\n")])?;
@@ -1406,7 +1405,6 @@ fn verbose_with_closed_stderr_does_not_panic() -> TestResult {
 /// Piped REPL stdout carries the banner, "Query returned 1 rows" and
 /// "CTRL-D" around the result. Only query results belong on stdout.
 #[test]
-#[ignore]
 fn repl_piped_stdout_is_results_only() -> TestResult {
     let (out, _d) = run_repl(&[("rw.csv", "a,b\n1,2\n")], "SELECT a FROM rw;\n")?;
     assert!(out.status.success());
@@ -1416,7 +1414,6 @@ fn repl_piped_stdout_is_results_only() -> TestResult {
 
 /// `.exit 3` exits with status 0.
 #[test]
-#[ignore]
 fn repl_exit_code() -> TestResult {
     let (out, _d) = run_repl(&[("rw.csv", "a,b\n1,2\n")], ".exit 3\n")?;
     assert_eq!(out.status.code(), Some(3));
@@ -1425,7 +1422,6 @@ fn repl_exit_code() -> TestResult {
 
 /// A SQL error in a piped script still exits 0.
 #[test]
-#[ignore]
 fn repl_script_error_exits_nonzero() -> TestResult {
     let (out, _d) = run_repl(&[("rw.csv", "a,b\n1,2\n")], "SELECT nope FROM rw;\n")?;
     assert!(!out.status.success(), "exit 0 after SQL error");
@@ -1434,7 +1430,6 @@ fn repl_script_error_exits_nonzero() -> TestResult {
 
 /// A final statement without `;` at EOF is silently dropped.
 #[test]
-#[ignore]
 fn repl_unterminated_last_statement_runs() -> TestResult {
     let (out, _d) = run_repl(&[("rw.csv", "a,b\n1,2\n")], "SELECT 2 AS v")?;
     assert!(
@@ -1449,7 +1444,6 @@ fn repl_unterminated_last_statement_runs() -> TestResult {
 /// is kept only for a tty (in `$XDG_STATE_HOME/sqawk/history` or
 /// `~/.sqawk_history`).
 #[test]
-#[ignore]
 fn repl_piped_writes_no_history() -> TestResult {
     let (_out, dir) = run_repl(&[("rw.csv", "a,b\n1,2\n")], "SELECT a FROM rw;\n")?;
     fn walk(p: &Path, found: &mut Vec<PathBuf>) {
@@ -1474,7 +1468,6 @@ fn repl_piped_writes_no_history() -> TestResult {
 
 /// `.tables e%` misses `Ebig`: LIKE is ASCII case-insensitive.
 #[test]
-#[ignore]
 fn repl_tables_pattern_case_insensitive() -> TestResult {
     assert_eq!(repl_tables("e%")?, vec!["Ebig", "emp", "exa"]);
     Ok(())
@@ -1482,7 +1475,6 @@ fn repl_tables_pattern_case_insensitive() -> TestResult {
 
 /// `.tables e.a` lists `exa`: `.` is a literal in LIKE.
 #[test]
-#[ignore]
 fn repl_tables_pattern_dot_is_literal() -> TestResult {
     assert_eq!(repl_tables("e.a")?, Vec::<String>::new());
     Ok(())

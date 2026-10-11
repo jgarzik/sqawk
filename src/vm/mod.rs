@@ -30,7 +30,7 @@ mod datetime;
 pub mod dialect;
 pub mod engine;
 mod func;
-mod like;
+pub(crate) mod like;
 pub mod parse;
 mod window;
 
@@ -45,6 +45,11 @@ use std::sync::Arc;
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
+
+/// The names of the built-in scalar functions (upper case).
+pub(crate) fn scalar_function_names() -> impl Iterator<Item = &'static str> {
+    func::names()
+}
 
 /// Result of VM execution including both the result table and modified table names
 pub struct VmExecutionResult {

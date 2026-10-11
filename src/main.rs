@@ -72,7 +72,7 @@ const MAIN_STACK_BYTES: usize = 256 * 1024 * 1024;
 fn main() -> ExitCode {
     let args = cli::parse_args();
     match stacker::grow(MAIN_STACK_BYTES, || run(args)) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(status) => ExitCode::from(status),
         Err(e) => {
             diag!("sqawk: {}", one_line(&e.to_string()));
             ExitCode::FAILURE
@@ -160,9 +160,10 @@ fn read_source(source: &SqlSource, stdin_read: &mut bool) -> SqawkResult<String>
 /// - Files → In-memory Tables → SQL Processing → Results → (Optional) File Writeback
 ///
 /// # Returns
-/// * `Ok(())` if all operations completed successfully
+/// * `Ok(status)` with the exit status: 0 for a completed run, or what the
+///   REPL session ended with (see [`Repl::run`])
 /// * `Err` with the first error; `main` prints it as one line
-fn run(args: SqawkArgs) -> SqawkResult<()> {
+fn run(args: SqawkArgs) -> SqawkResult<u8> {
     // Create a centralized application configuration
     // This will be passed to all components that need configuration settings
     let config = AppConfig::new(
@@ -235,7 +236,7 @@ fn run(args: SqawkArgs) -> SqawkResult<()> {
     if args.interactive {
         // Start REPL (Read-Eval-Print Loop) for interactive SQL entry
         let mut repl = Repl::new(sql_executor, &config);
-        return repl.run().map_err(|e| SqawkError::VmError(e.to_string()));
+        return Ok(repl.run());
     }
 
     let mut stdout_open = true;
@@ -295,5 +296,5 @@ fn run(args: SqawkArgs) -> SqawkResult<()> {
     drop(file_handler);
     std::mem::forget(database);
 
-    Ok(())
+    Ok(0)
 }

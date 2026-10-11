@@ -241,13 +241,20 @@ This opens an interactive SQL prompt where you can:
 - Execute multiple statements in sequence
 - Toggle settings like write mode
 
+`-i` cannot be combined with `-s` or `-f`; that is a usage error (exit
+status 2).
+
+A statement runs once its text ends with `;` (outside quotes and comments);
+until then Enter continues it on the next line. A dot-command is always a
+single line.
+
 **REPL Commands:**
 
 | Command | Description |
 |---------|-------------|
 | `.cd DIRECTORY` | Change the working directory |
 | `.changes [on\|off]` | Show the number of rows changed by each statement |
-| `.exit [CODE]` | Exit the REPL, optionally with an exit code |
+| `.exit [CODE]` | Exit the REPL, with exit status `CODE` when given |
 | `.help` | List the available commands |
 | `.load [TABLE=]FILE` | Load `FILE`, optionally under the name `TABLE` |
 | `.print STRING...` | Print a literal string |
@@ -256,7 +263,7 @@ This opens an interactive SQL prompt where you can:
 | `.schema [TABLE]` | Show the schema for `TABLE`, or for every table |
 | `.show [WHAT]` | Show current settings and status |
 | `.stats [on\|off]` | Toggle statistics display |
-| `.tables [PATTERN]` | List tables, optionally matching a LIKE pattern |
+| `.tables [PATTERN]` | List tables, optionally only those matching a LIKE pattern (`%`, `_`; case-insensitive) |
 | `.version` | Show source, library and compiler versions |
 | `.write [on\|off]` | Toggle writing changes to files (default off) |
 
@@ -273,12 +280,10 @@ sqawk> SELECT name, department FROM employees WHERE salary > 70000;
 name,department
 Alice,Engineering
 Charlie,Engineering
-
 sqawk> .tables
 Tables:
   employees
   sales
-
 sqawk> .schema employees
 CREATE TABLE employees (
   id TEXT,
@@ -286,27 +291,71 @@ CREATE TABLE employees (
   department TEXT,
   salary TEXT
 );
-
 sqawk> .changes on
 Changes display enabled
-
 sqawk> UPDATE employees SET salary = salary * 1.1 WHERE department = 'Engineering';
 2 rows affected
 Changes not saved: use .write to save changes to files
-
+sqawk> SELECT nmae FROM employees;
+sqawk: no such column: nmae
 sqawk> .save employees
 Changes saved to table 'employees'
-
 sqawk> .exit
 ```
 
-Two things in that transcript are worth calling out:
+Things in that transcript worth calling out:
 
 - `.schema` reports every column as `TEXT`. Loaded files carry no declared
   schema -- types are inferred per value at comparison time, not per column, so
   there is no column type for `.schema` to report. See
   [Type coercion](sql_reference.md#type-coercion).
 - Row counts are only printed after `.changes on`; the default is off.
+- Query results print exactly as with `-s`: the header line, then the rows.
+- An error is printed as `sqawk: <message>` on standard error and the
+  session continues.
+
+**Line editing, completion and history.** When standard input is a
+terminal, the REPL is a line editor. Tab completes dot-commands, SQL
+keywords, function names, table names and column names (case-insensitive
+prefix match); after `table.` it completes that table's columns, and after
+`.schema`, `.save` or `.tables` it completes table names. Ctrl-C abandons
+the line being typed; Ctrl-D (end of input) leaves the REPL.
+
+History is kept only when standard input is a terminal, in
+`$XDG_STATE_HOME/sqawk/history` when `XDG_STATE_HOME` is set (the directory
+is created as needed), otherwise in `~/.sqawk_history`. With neither
+`XDG_STATE_HOME` nor `HOME` set, no history is kept.
+
+**Piping a script.** When standard input is not a terminal, `sqawk -i`
+reads commands from it line by line and prints no banner, no prompts and no
+status messages (`Changes display enabled`, `Changes not saved ...`,
+`Loaded table ...`: with `-v` they go to standard error). Standard output
+carries only what the commands produce -- query results, `.changes` row
+counts, and the output of `.tables`, `.schema`, `.print`, `.show`, `.help`
+and `.version`:
+
+```
+$ printf 'SELECT name FROM employees LIMIT 2;\n.tables\nSELECT COUNT(*) FROM employees' | sqawk -i employees.csv
+name
+Alice
+Bob
+Tables:
+  employees
+COUNT(*)
+8
+```
+
+A final statement with no `;` runs at end of input. Like sqlite3, an error
+does not stop the script: it is reported, the remaining commands run, and
+the exit status is 1.
+
+**Exit status.**
+
+- `.exit CODE` exits with status `CODE` (taken modulo 256), in a terminal
+  session or a script, whatever errors came before
+- otherwise a piped script exits with status 1 if any SQL statement or
+  dot-command failed, else 0
+- a terminal session exits with status 0 (errors there do not change it)
 
 The interactive mode is particularly useful for:
 - Exploring datasets without writing multiple commands
@@ -478,7 +527,8 @@ sqawk: cannot open 'missing.csv': No such file or directory
 Command-line usage errors (an unknown option, a missing argument, an invalid
 `-F` value) are reported by the argument parser with a usage hint and exit
 status 2. A run that succeeds exits with status 0. In the REPL, an error is
-printed in the same `sqawk: <message>` form and the session continues.
+printed in the same `sqawk: <message>` form and the session continues; see
+[Interactive Mode](#interactive-mode--i) for the REPL's exit status.
 
 ### Help (--help)
 
@@ -941,26 +991,22 @@ sqawk> .tables
 Tables:
   customers
   sales
-
 sqawk> .schema sales
 CREATE TABLE sales (
   id TEXT,
   customer_id TEXT,
   amount TEXT
 );
-
 sqawk> SELECT COUNT(*) FROM sales;
 COUNT(*)
 1250
-
 sqawk> SELECT c.name, SUM(s.amount) AS total
        FROM customers c JOIN sales s ON c.id = s.customer_id
        GROUP BY c.name ORDER BY total DESC LIMIT 3;
 name,total
 Enterprise Corp,58750.25
 Acme Inc,45620.75
-Globex,31004.10
-
+Globex,31004.1
 sqawk> .exit
 ```
 

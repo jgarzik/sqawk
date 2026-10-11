@@ -94,6 +94,15 @@ static FUNCS: &[FuncDef] = &[
     f!("NOW", 0, 0, datetime::current_timestamp),
 ];
 
+/// The names of the built-in scalar functions callable by name (upper case;
+/// operator entries such as `||` are left out).
+pub(crate) fn names() -> impl Iterator<Item = &'static str> {
+    FUNCS
+        .iter()
+        .map(|f| f.name)
+        .filter(|n| n.chars().all(|c| c.is_ascii_alphabetic() || c == '_'))
+}
+
 /// The built-in scalar function named `name` (upper case).
 pub(crate) fn lookup(name: &str) -> Option<&'static FuncDef> {
     FUNCS.iter().find(|f| f.name == name)

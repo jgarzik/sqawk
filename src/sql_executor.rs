@@ -218,29 +218,6 @@ impl<'a> SqlExecutor<'a> {
         self.file_handler.load_file(file_spec)
     }
 
-    /// Execute SQL statement and return a ResultSet for REPL mode
-    ///
-    /// # Arguments
-    /// * `sql` - SQL statement to execute
-    ///
-    /// # Returns
-    /// * One ResultSet per statement that produced rows, in order.
-    ///
-    /// Returning only the last one hid earlier result sets AND suppressed the
-    /// change count of a trailing DML statement, because the caller treated
-    /// "there is a result set" as "this line produced no changes".
-    pub fn execute_sql(&mut self, sql: &str) -> SqawkResult<Vec<ResultSet>> {
-        let result = self.execute(sql)?;
-
-        Ok(result
-            .iter()
-            .map(|table| ResultSet {
-                columns: table.columns().to_vec(),
-                rows: table.rows_as_strings(),
-            })
-            .collect())
-    }
-
     /// Whether the last executed script ran a row-counting DML statement.
     ///
     /// Distinguishes "a DML ran and changed nothing" from "no DML ran", which
@@ -297,13 +274,4 @@ impl<'a> SqlExecutor<'a> {
     pub fn get_affected_row_count(&self) -> SqawkResult<usize> {
         Ok(self.affected_rows)
     }
-}
-
-/// Result set structure for REPL output
-#[derive(Debug)]
-pub struct ResultSet {
-    /// Column names
-    pub columns: Vec<String>,
-    /// Rows as strings
-    pub rows: Vec<Vec<String>>,
 }

@@ -1465,24 +1465,6 @@ impl Table {
         self.modified = true;
         Ok(())
     }
-
-    /// Convert all rows to string representation
-    ///
-    /// This method converts all table rows to a vector of string vectors,
-    /// useful for displaying in the REPL interface.
-    ///
-    /// # Returns
-    /// * Vec<Vec<String>> - All rows converted to strings
-    pub fn rows_as_strings(&self) -> Vec<Vec<String>> {
-        self.rows()
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|value| value.field_str().into_owned())
-                    .collect()
-            })
-            .collect()
-    }
 }
 
 /// The delimiter byte for a table's delimiter string.

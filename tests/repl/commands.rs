@@ -256,9 +256,11 @@ fn test_repl_reports_changes_for_trailing_dml() {
         ["1 rows affected"],
         "the DELETE must report once and the SELECTs not at all, got:\n{stdout}"
     );
-    assert!(
-        stdout.contains("Query returned 3 rows") && stdout.contains("Query returned 2 rows"),
-        "both SELECT result sets should print, got:\n{stdout}"
+    // Both SELECT result sets print; a piped session's stdout carries
+    // nothing else.
+    assert_eq!(
+        stdout,
+        "id,name,age\n1,Alice,32\n2,Bob,25\n3,Charlie,35\n1 rows affected\nid\n2\n3\n"
     );
 }
 
