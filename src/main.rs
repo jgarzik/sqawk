@@ -210,6 +210,7 @@ fn run(args: SqawkArgs) -> SqawkResult<()> {
     for file_spec in &args.files {
         file_handler.load_file(file_spec)?;
     }
+    file_handler.check_table_definitions_used()?;
 
     // Log table loading results in verbose mode
     if config.verbose() {
@@ -274,11 +275,14 @@ fn run(args: SqawkArgs) -> SqawkResult<()> {
         }
     }
 
+    // A transaction left open by the last statement is rolled back, so its
+    // changes are neither written back nor kept.
+    sql_executor.finish();
+
     // Handle file writeback based on the configuration
     // By default, Sqawk operates in read-only mode unless explicitly told to write
     if config.write_changes() {
-        // Only tables that were actually modified (by UPDATE, INSERT, DELETE)
-        // will be written back to their source files
+        // Only modified tables with a file are written back
         sql_executor.save_modified_tables()?;
     } else if config.verbose() {
         // In verbose mode, remind the user that changes weren't saved

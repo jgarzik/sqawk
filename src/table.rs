@@ -769,7 +769,10 @@ impl<'a> Default for IndexedResultBuilder<'a> {
 // =============================================================================
 
 /// Represents an in-memory table
-#[derive(Debug)]
+///
+/// `Clone` is a deep copy (rows, source bytes and layout); a transaction
+/// keeps one of each table it changes, for ROLLBACK.
+#[derive(Debug, Clone)]
 pub struct Table {
     /// Name of the table
     name: String,
@@ -810,7 +813,7 @@ pub struct Table {
 /// [`RawSpan::NONE`] (inserted, or changed by UPDATE) is written by the
 /// [`RecordWriter`]; every other row is written as the exact bytes it was read
 /// from, line ending included -- quoting, padding, invalid UTF-8 and all.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RawRows {
     /// The file contents as read (byte order mark included).
     pub buf: Vec<u8>,

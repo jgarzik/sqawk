@@ -34,7 +34,10 @@ use clap::{CommandFactory, FromArgMatches, Parser};
                   or after the name given as [table_name=]file_path. Statements run in \
                   the order given, and each one sees the effects of those before it.\n\n\
                   Input files are never modified unless --write is given, and then only \
-                  the tables an INSERT, UPDATE or DELETE actually changed.\n\n\
+                  the tables that INSERT, UPDATE, DELETE, ALTER TABLE or TRUNCATE changed \
+                  (and tables created with CREATE TABLE ... LOCATION). BEGIN / COMMIT / \
+                  ROLLBACK group statements; a transaction still open at the end is \
+                  rolled back before anything is written.\n\n\
                   Errors are reported on standard error as one line, `sqawk: <message>`, \
                   with exit status 1; command-line usage errors exit with status 2."
 )]

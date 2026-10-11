@@ -291,6 +291,13 @@ impl FileHandler {
         db.table_count()
     }
 
+    /// Fail if a `--tabledef` names a table that no input file loaded.
+    pub fn check_table_definitions_used(&self) -> SqawkResult<()> {
+        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
+        let db = unsafe { &*self.database };
+        db.check_table_definitions_used()
+    }
+
     /// Explain why `table_name` has no writeback target.
     fn unwritable_table_error(&self, table_name: &str) -> SqawkError {
         if self.stdin_table.as_deref() == Some(table_name) {
@@ -305,16 +312,29 @@ impl FileHandler {
         SqawkError::NoFilePath(table_name.to_string())
     }
 
-    /// Report whether `table_name` could be written back, without writing it.
+    /// Report whether `table_name` can be written back, without writing it.
     ///
     /// Lets a caller reject the whole writeback up front instead of failing
     /// part-way through and leaving some source files rewritten and others not.
-    pub fn check_table_writable(&self, table_name: &str) -> SqawkResult<()> {
+    ///
+    /// # Returns
+    /// * `Ok(true)` - the table has a file and that file can be written
+    /// * `Ok(false)` - a scratch table (CREATE TABLE without LOCATION, or
+    ///   CREATE TABLE ... AS): it has no file, and writeback skips it
+    /// * `Err` - a table read from standard input, or a file that is
+    ///   read-only or in a directory that cannot be written
+    pub fn check_table_writable(&self, table_name: &str) -> SqawkResult<bool> {
         let table = self.get_table(table_name)?;
-        if table.file_path().is_none() {
-            return Err(self.unwritable_table_error(table_name));
+        match table.file_path() {
+            Some(path) => {
+                csv_handler::check_writable(path)?;
+                Ok(true)
+            }
+            None if self.stdin_table.as_deref() == Some(table_name) => {
+                Err(self.unwritable_table_error(table_name))
+            }
+            None => Ok(false),
         }
-        Ok(())
     }
 
     /// Check if a table exists
@@ -393,6 +413,8 @@ impl FileHandler {
             }
         }
 
+        // The rename in save_table would replace even a read-only file.
+        csv_handler::check_writable(file_path)?;
         csv_handler::save_table(table, file_path)
     }
 }

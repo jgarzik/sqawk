@@ -42,7 +42,6 @@ mod tests;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::capacity::DEFAULT_TABLE_CAPACITY;
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
@@ -55,8 +54,6 @@ pub struct VmExecutionResult {
     /// them into a single table would print every statement's rows under one
     /// header.
     pub tables: Vec<Table>,
-    /// Names of tables that were modified (INSERT, UPDATE, DELETE, CREATE TABLE)
-    pub modified_tables: HashSet<String>,
     /// Number of rows affected by the last DML statement (INSERT, UPDATE, DELETE)
     pub affected_rows: usize,
     /// Whether any statement in this script was a row-counting DML.
@@ -141,11 +138,21 @@ fn execute_statements(
     in_derived: bool,
 ) -> SqawkResult<VmExecutionResult> {
     let mut tables: Vec<Table> = Vec::new();
-    let mut modified_tables = HashSet::with_capacity(DEFAULT_TABLE_CAPACITY);
     let mut affected_rows: usize = 0;
     let mut dml_executed = false;
 
     for mut statement in statements {
+        // BEGIN / COMMIT / ROLLBACK act on the database directly; they have
+        // no bytecode.
+        if let Some(control) = compiler_check::transaction_control(&statement)? {
+            match control {
+                compiler_check::TransactionControl::Begin => database.begin()?,
+                compiler_check::TransactionControl::Commit => database.commit()?,
+                compiler_check::TransactionControl::Rollback => database.rollback()?,
+            }
+            continue;
+        }
+
         // PHASE 0: MATERIALIZE DERIVED TABLES.
         //
         // `FROM (SELECT ...) t` has no representation in the compiler, which
@@ -195,7 +202,6 @@ fn execute_statements(
         }
 
         let (result_table, applied) = outcome?;
-        modified_tables.extend(applied.modified_tables);
 
         // A DML statement reports its own count, INCLUDING zero.
         //
@@ -219,7 +225,6 @@ fn execute_statements(
 
     Ok(VmExecutionResult {
         tables,
-        modified_tables,
         affected_rows,
         dml_executed,
     })
@@ -522,22 +527,20 @@ fn is_row_counting_dml(statement: &sqlparser::ast::Statement) -> bool {
     )
 }
 
-/// Tables touched and rows affected by one statement's modifications.
+/// Rows affected by one statement's modifications.
 struct AppliedModifications {
-    modified_tables: HashSet<String>,
     affected_rows: usize,
 }
 
-/// Apply a statement's pending modifications to the database.
+/// Apply a statement's pending modifications to the database, marking each
+/// table they change as modified (DROP TABLE takes the mark away with the
+/// table).
 fn apply_modifications(
     database: &mut Database,
     modifications: Vec<engine::TableModification>,
     verbose: bool,
 ) -> SqawkResult<AppliedModifications> {
     // PHASE 3: APPLY MODIFICATIONS TO DATABASE
-
-    // Track which tables were modified
-    let mut modified_tables = HashSet::with_capacity(DEFAULT_TABLE_CAPACITY);
 
     // Track affected rows count for DML operations
     let mut affected_rows: usize = 0;
@@ -563,7 +566,7 @@ fn apply_modifications(
                 *insert_counts_by_table
                     .entry(table_name.clone())
                     .or_insert(0) += 1;
-                modified_tables.insert(table_name);
+                database.mark_modified(&table_name);
             }
             engine::TableModification::Replace {
                 table_name,
@@ -576,7 +579,7 @@ fn apply_modifications(
                 *replace_counts_by_table
                     .entry(table_name.clone())
                     .or_insert(0) += 1;
-                modified_tables.insert(table_name);
+                database.mark_modified(&table_name);
             }
             engine::TableModification::Delete {
                 table_name,
@@ -619,14 +622,15 @@ fn apply_modifications(
 
                 // Add to database
                 database.add_table(table_name.clone(), table)?;
-                modified_tables.insert(table_name);
+                database.mark_modified(&table_name);
             }
             engine::TableModification::DropTable { table_name } => {
                 // Remove table from database
                 if !database.remove_table(&table_name) {
                     return Err(crate::error::SqawkError::TableNotFound(table_name));
                 }
-                // Note: we don't add to modified_tables since the table is gone
+                // remove_table also drops the table from the modified set:
+                // a dropped table is not written back.
             }
             engine::TableModification::AlterTableAddColumn {
                 table_name,
@@ -641,14 +645,14 @@ fn apply_modifications(
                     _ => crate::table::DataType::Text,
                 };
                 table.add_column_with_default(column_name, data_type, crate::table::Value::Null)?;
-                modified_tables.insert(table_name);
+                database.mark_modified(&table_name);
             }
             engine::TableModification::Truncate { table_name } => {
                 let table = database.get_table_mut(&table_name)?;
                 let row_count = table.row_count();
                 table.clear_rows()?;
                 affected_rows += row_count;
-                modified_tables.insert(table_name);
+                database.mark_modified(&table_name);
             }
         }
     }
@@ -673,7 +677,7 @@ fn apply_modifications(
 
         // Keep the rows not being deleted (and their comment lines in place)
         table.retain_rows(|idx| !indices_to_delete.contains(&idx));
-        modified_tables.insert(table_name.clone());
+        database.mark_modified(&table_name);
 
         // If we have equal deletes and inserts for this table, it's an UPDATE
         // Otherwise it's a DELETE
@@ -703,8 +707,5 @@ fn apply_modifications(
         }
     }
 
-    Ok(AppliedModifications {
-        modified_tables,
-        affected_rows,
-    })
+    Ok(AppliedModifications { affected_rows })
 }

@@ -137,13 +137,6 @@ pub enum OpCode {
     ResultRow, // Return result row to client
     Copy,      // Copy register P1 to register P2 (SCopy in SQLite)
 
-    // Transaction operations
-    Begin, // Begin a transaction - marks the start of a set of changes that can be committed or rolled back
-    Commit, // Commit a transaction - permanently applies all changes made since the Begin operation
-    Rollback, // Rollback a transaction - discards all changes made since the Begin operation
-    SavePoint, // Create a savepoint in the transaction - establishes a point to which a transaction can be partially rolled back
-    Release,   // Release a savepoint - confirms changes up to the specified savepoint
-
     // Comparison operations
     Lt, // Less than comparison (P1 < P2, result in P3)
     Le, // Less than or equal comparison (P1 <= P2, result in P3)

@@ -983,7 +983,6 @@ fn repl_save_after_cd_writes_original_file() -> TestResult {
 
 /// `STORED AS PARQUET` is ignored: a CSV is written to `p.pq`.
 #[test]
-#[ignore]
 fn stored_as_parquet_is_error() -> TestResult {
     let dir = create_temp_dir()?;
     write_files(dir.path(), &[("al.csv", b"a\n1\n")])?;
@@ -1014,14 +1013,12 @@ fn tabledef_fails(def: &str, extra: &[&str]) -> TestResult {
 
 /// `--tabledef=bad` (no `:`) is ignored.
 #[test]
-#[ignore]
 fn tabledef_without_colon_is_error() -> TestResult {
     tabledef_fails("--tabledef=bad", &[])
 }
 
 /// `--tabledef=nosuch:a,b` names no loaded table and is ignored.
 #[test]
-#[ignore]
 fn tabledef_unknown_table_is_error() -> TestResult {
     tabledef_fails("--tabledef=nosuch:a,b", &[])
 }
@@ -1039,7 +1036,6 @@ fn tabledef_empty_column_is_error() -> TestResult {
 /// A read-only (0444) file is replaced by the atomic rename. --write must
 /// refuse up front and write nothing, including other modified files.
 #[test]
-#[ignore]
 fn write_to_read_only_file_is_refused() -> TestResult {
     let dir = create_temp_dir()?;
     if !perms_enforced(dir.path()) {
@@ -1074,7 +1070,6 @@ fn write_to_read_only_file_is_refused() -> TestResult {
 /// "has no associated file path", and the real modified file is not written.
 /// The scratch table must be skipped.
 #[test]
-#[ignore]
 fn write_skips_scratch_table() -> TestResult {
     assert_write_back(
         "rw.csv",
@@ -1092,7 +1087,6 @@ fn write_skips_scratch_table() -> TestResult {
 /// DROP of a modified table makes --write fail with "Table 'rw' not found".
 /// The dropped table is not written; the run succeeds.
 #[test]
-#[ignore]
 fn write_after_drop_of_modified_table() -> TestResult {
     assert_write_back(
         "rw.csv",
@@ -1612,12 +1606,10 @@ fn bitwise_operator_precedence() -> TestResult {
 
 // ===========================================================================
 // D. Transactions: BEGIN / COMMIT / ROLLBACK over the in-memory tables
-// (rejected today as "BEGIN statements are not supported")
 // ===========================================================================
 
 /// BEGIN; UPDATE; ROLLBACK restores the original values.
 #[test]
-#[ignore]
 fn rollback_restores_values() -> TestResult {
     assert_sqls(
         &[("tx.csv", TX)],
@@ -1634,7 +1626,6 @@ fn rollback_restores_values() -> TestResult {
 
 /// BEGIN; INSERT; COMMIT keeps the insert (statements in one `-s`).
 #[test]
-#[ignore]
 fn commit_keeps_changes() -> TestResult {
     assert_sqls(
         &[("tx.csv", TX)],
@@ -1646,7 +1637,6 @@ fn commit_keeps_changes() -> TestResult {
 
 /// A committed change is written back.
 #[test]
-#[ignore]
 fn commit_is_written_back() -> TestResult {
     assert_write_back(
         "tx.csv",
@@ -1659,7 +1649,6 @@ fn commit_is_written_back() -> TestResult {
 
 /// After ROLLBACK, --write leaves the file byte-identical.
 #[test]
-#[ignore]
 fn rollback_is_not_written_back() -> TestResult {
     let content = b"k,n\n1,\"10\"\n2,20\n";
     assert_write_back(
@@ -1673,7 +1662,6 @@ fn rollback_is_not_written_back() -> TestResult {
 
 /// A transaction still open at exit is rolled back before --write.
 #[test]
-#[ignore]
 fn open_transaction_at_exit_is_rolled_back() -> TestResult {
     assert_write_back(
         "tx.csv",
@@ -1687,7 +1675,6 @@ fn open_transaction_at_exit_is_rolled_back() -> TestResult {
 /// BEGIN inside BEGIN is an error (SQLite: "cannot start a transaction
 /// within a transaction").
 #[test]
-#[ignore]
 fn nested_begin_is_error() -> TestResult {
     let out = run_sqls(&[("tx.csv", TX)], &[], &["BEGIN", "BEGIN"])?;
     assert_clean_error(&out, &["within a transaction"]);
@@ -1697,7 +1684,6 @@ fn nested_begin_is_error() -> TestResult {
 /// COMMIT without BEGIN is an error (SQLite: "cannot commit - no transaction
 /// is active").
 #[test]
-#[ignore]
 fn commit_without_begin_is_error() -> TestResult {
     let out = run_sqls(&[("tx.csv", TX)], &[], &["COMMIT"])?;
     assert_clean_error(&out, &["no transaction is active"]);
@@ -1707,7 +1693,6 @@ fn commit_without_begin_is_error() -> TestResult {
 /// ROLLBACK without BEGIN is an error (SQLite: "cannot rollback - no
 /// transaction is active").
 #[test]
-#[ignore]
 fn rollback_without_begin_is_error() -> TestResult {
     let out = run_sqls(&[("tx.csv", TX)], &[], &["ROLLBACK"])?;
     assert_clean_error(&out, &["no transaction is active"]);
@@ -1717,7 +1702,6 @@ fn rollback_without_begin_is_error() -> TestResult {
 /// SAVEPOINT, RELEASE and ROLLBACK TO are rejected with a clean
 /// "not supported" error.
 #[test]
-#[ignore]
 fn savepoints_are_not_supported() -> TestResult {
     for stmt in ["SAVEPOINT s", "RELEASE s", "ROLLBACK TO s"] {
         let out = run_sqls(&[("tx.csv", TX)], &[], &["BEGIN", stmt])?;
@@ -1729,7 +1713,6 @@ fn savepoints_are_not_supported() -> TestResult {
 /// A piped REPL script: BEGIN; UPDATE; ROLLBACK; SELECT shows the original
 /// values.
 #[test]
-#[ignore]
 fn repl_rollback_restores_values() -> TestResult {
     let (out, _d) = run_repl(
         &[("tx.csv", TX)],

@@ -644,18 +644,6 @@ impl Sorter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum TransactionState {
-    /// No active transaction - the default state when no transaction has been started
-    None,
-    /// Transaction in progress - changes are being tracked but not yet permanent
-    Active,
-    /// Transaction has been committed - changes have been permanently applied
-    Committed,
-    /// Transaction has been rolled back - changes have been discarded
-    RolledBack,
-}
-
 /// Column definition for CREATE TABLE
 #[derive(Debug, Clone)]
 pub struct ColumnDef {
@@ -720,10 +708,6 @@ pub struct VmEngine<'a> {
     /// OP_Jump rather than materializing it into a register.
     compare_flag: std::cmp::Ordering,
 
-    /// Current transaction state (None, Active, Committed, or RolledBack)
-    /// Tracks the lifecycle of a transaction and enforces proper operation sequencing
-    transaction_state: TransactionState,
-
     /// Pending modifications to be applied after execution
     pending_modifications: Vec<TableModification>,
 
@@ -756,7 +740,6 @@ impl<'a> VmEngine<'a> {
             sorters: HashMap::with_capacity(DEFAULT_SORTER_CAPACITY),
             accumulators: HashMap::with_capacity(DEFAULT_ACCUMULATOR_CAPACITY),
             results: Vec::with_capacity(DEFAULT_RESULT_CAPACITY),
-            transaction_state: TransactionState::None,
             pending_modifications: Vec::with_capacity(DEFAULT_MODIFICATIONS_CAPACITY),
             verbose,
             once_flags: HashMap::with_capacity(DEFAULT_CURSOR_CAPACITY),
@@ -816,9 +799,6 @@ impl<'a> VmEngine<'a> {
                 .min(10000)
         };
         self.registers = vec![Register::Null; (reg_count + 5) as usize];
-
-        // Reset transaction state
-        self.transaction_state = TransactionState::None;
 
         if self.verbose {
             diag!("VM initialized with program:\n{}", self.program);
@@ -1535,121 +1515,6 @@ impl<'a> VmEngine<'a> {
                 }
 
                 self.results.push(row);
-
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::Begin => {
-                // Begin a transaction - initiates a new atomic unit of work
-                // All operations performed between BEGIN and COMMIT/ROLLBACK are treated as a single
-                // logical operation from the perspective of database consistency
-                if self.transaction_state == TransactionState::Active {
-                    return Err(SqawkError::VmError(
-                        "Transaction already in progress".to_string(),
-                    ));
-                }
-
-                // Initialize transaction state to track changes
-                self.transaction_state = TransactionState::Active;
-
-                if self.verbose {
-                    diag!("BEGIN TRANSACTION");
-                }
-
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::Commit => {
-                // Commit a transaction - makes all changes permanent
-                // Finalizes the changes made during the transaction and ensures they
-                // become permanent, durable parts of the database state
-                if self.transaction_state != TransactionState::Active {
-                    return Err(SqawkError::VmError(
-                        "No transaction in progress to commit".to_string(),
-                    ));
-                }
-
-                // Finalize transaction
-                self.transaction_state = TransactionState::Committed;
-
-                if self.verbose {
-                    diag!("COMMIT TRANSACTION");
-                }
-
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::Rollback => {
-                // Rollback a transaction - abandons all changes made during the transaction
-                // Undoes all operations since BEGIN, returning the database to its prior state
-                if self.transaction_state != TransactionState::Active {
-                    return Err(SqawkError::VmError(
-                        "No transaction in progress to rollback".to_string(),
-                    ));
-                }
-
-                // Update transaction state to reflect rollback completion
-                self.transaction_state = TransactionState::RolledBack;
-
-                if self.verbose {
-                    diag!("ROLLBACK TRANSACTION");
-                }
-
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::SavePoint => {
-                // Create a savepoint within the current transaction
-                // A savepoint marks a point within a transaction to which you can later roll back
-                // without rolling back the entire transaction
-                if self.transaction_state != TransactionState::Active {
-                    return Err(SqawkError::VmError(
-                        "No active transaction for savepoint".to_string(),
-                    ));
-                }
-
-                // In a full implementation, we would:
-                // 1. Create a marker in the transaction log to identify this position
-                // 2. Allow for multiple savepoints with different names
-                // 3. Support rolling back to any specific savepoint
-                // 4. Properly handle nested savepoints in a hierarchical manner
-                let savepoint_name = inst
-                    .p4
-                    .as_deref()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("sp_{}", inst.p1));
-
-                if self.verbose {
-                    diag!("SAVEPOINT {}", savepoint_name);
-                }
-
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::Release => {
-                // Release a savepoint (commit changes up to the savepoint)
-                // This permanently applies all changes made since the savepoint was created
-                // while keeping the transaction active for further operations
-                if self.transaction_state != TransactionState::Active {
-                    return Err(SqawkError::VmError(
-                        "No active transaction for savepoint release".to_string(),
-                    ));
-                }
-
-                // In a complete implementation, we would:
-                // 1. Find the specified savepoint in our transaction log
-                // 2. Make all changes permanent up to that point
-                // 3. Remove this savepoint and any subsequent nested savepoints
-                // 4. Maintain the active transaction state for further operations
-                let savepoint_name = inst
-                    .p4
-                    .as_deref()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("sp_{}", inst.p1));
-
-                if self.verbose {
-                    diag!("RELEASE SAVEPOINT {}", savepoint_name);
-                }
 
                 Ok(ExecuteResult::Continue)
             }

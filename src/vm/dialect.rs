@@ -102,6 +102,11 @@ impl Dialect for SqawkDialect {
         HIVE.supports_from_first_insert()
     }
 
+    /// SQLite's `BEGIN DEFERRED | IMMEDIATE | EXCLUSIVE`.
+    fn supports_start_transaction_modifier(&self) -> bool {
+        true
+    }
+
     fn prec_value(&self, prec: Precedence) -> u8 {
         match prec {
             Precedence::Period => 100,

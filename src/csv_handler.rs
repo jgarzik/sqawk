@@ -348,31 +348,97 @@ fn read_record(
     }
 }
 
+/// Where a writeback of `file_path` lands.
+struct WriteTarget {
+    /// The file rewritten: `file_path` with symlinks resolved.
+    target: PathBuf,
+    /// The directory the temp file is created in.
+    parent: PathBuf,
+    /// How errors name the file: relative to the working directory when it
+    /// is inside it. Never the temp file.
+    shown: PathBuf,
+}
+
+impl WriteTarget {
+    fn of(file_path: &Path) -> Self {
+        let target = match std::fs::canonicalize(file_path) {
+            Ok(real) => real,
+            // A file that does not exist yet (CREATE TABLE ... LOCATION).
+            Err(_) => file_path.to_path_buf(),
+        };
+        let parent = match target.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let shown = std::env::current_dir()
+            .and_then(std::fs::canonicalize)
+            .ok()
+            .and_then(|cwd| target.strip_prefix(cwd).ok().map(Path::to_path_buf))
+            .unwrap_or_else(|| target.clone());
+        WriteTarget {
+            target,
+            parent,
+            shown,
+        }
+    }
+}
+
+/// Fail unless [`save_table`] can replace `file_path`, writing nothing: the
+/// file must not be read-only (by its mode bits, or because opening it for
+/// writing is refused), and its directory must take a new file (checked by
+/// creating and removing an empty temp file there). A file that does not
+/// exist yet passes when its directory does not exist either; `save_table`
+/// creates it.
+///
+/// The atomic rename would replace even a read-only file, so this check is
+/// what keeps --write from overwriting one.
+pub fn check_writable(file_path: &Path) -> SqawkResult<()> {
+    let WriteTarget {
+        target,
+        parent,
+        shown,
+    } = WriteTarget::of(file_path);
+    let read_only = || {
+        SqawkError::write(
+            &shown,
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "file is read-only"),
+        )
+    };
+    if let Ok(meta) = std::fs::metadata(&target) {
+        if meta.permissions().readonly() {
+            return Err(read_only());
+        }
+        if let Err(e) = std::fs::OpenOptions::new().append(true).open(&target) {
+            return Err(if e.kind() == std::io::ErrorKind::PermissionDenied {
+                read_only()
+            } else {
+                SqawkError::write(&shown, e)
+            });
+        }
+    }
+    if parent.is_dir() {
+        NamedTempFile::new_in(&parent).map_err(|e| SqawkError::write(&shown, e))?;
+    }
+    Ok(())
+}
+
 /// Write `table` back to `file_path`, reproducing the source layout.
 ///
 /// The write is atomic: a temp file in the target's directory is written,
 /// synced, given the original file's permissions, and renamed over the
 /// target. A symlink is resolved first, so the link survives and its target
 /// is what gets rewritten.
+///
+/// The rename replaces the directory entry, so a file with several hard
+/// links is split from them: the other links keep the old contents.
 pub fn save_table(table: &Table, file_path: &Path) -> SqawkResult<()> {
-    let target = match std::fs::canonicalize(file_path) {
-        Ok(real) => real,
-        // A file that does not exist yet (CREATE TABLE ... LOCATION).
-        Err(_) => file_path.to_path_buf(),
-    };
-    let parent = match target.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    // Every failure names the target file, never the temp file; relative to
-    // the working directory when it is inside it.
-    let shown = std::env::current_dir()
-        .and_then(std::fs::canonicalize)
-        .ok()
-        .and_then(|cwd| target.strip_prefix(cwd).ok().map(Path::to_path_buf))
-        .unwrap_or_else(|| target.clone());
+    let WriteTarget {
+        target,
+        parent,
+        shown,
+    } = WriteTarget::of(file_path);
     let fail = |e: std::io::Error| SqawkError::write(&shown, e);
-    let temp_file = NamedTempFile::new_in(parent).map_err(fail)?;
+    let temp_file = NamedTempFile::new_in(&parent).map_err(fail)?;
 
     {
         let mut out = BufWriter::new(temp_file.as_file());

@@ -142,6 +142,48 @@ fn create_table_clauses() -> R {
     ])
 }
 
+/// CREATE TABLE options sqawk would otherwise ignore: a storage format other
+/// than TEXTFILE, a WITH option other than DELIMITER, other option forms, a
+/// comment, and file options or a column list on CREATE TABLE ... AS (which
+/// never has a file).
+#[test]
+fn create_table_options() -> R {
+    assert_rejected(&[
+        "CREATE TABLE z (id INTEGER) LOCATION 'z.pq' STORED AS PARQUET",
+        "CREATE TABLE z (id INTEGER) STORED AS ORC",
+        "CREATE TABLE z (id INTEGER) STORED AS INPUTFORMAT 'a' OUTPUTFORMAT 'b'",
+        "CREATE TABLE z (id INTEGER) WITH (header = 'false')",
+        "CREATE TABLE z (id INTEGER) TBLPROPERTIES ('delimiter' = '|')",
+        "CREATE TABLE z (id INTEGER) COMMENT 'c'",
+        "CREATE TEMPORARY TABLE z (id INTEGER) LOCATION 'z.csv'",
+        "CREATE TABLE z LOCATION 'z.csv' AS SELECT * FROM emp",
+        "CREATE TABLE z (a INT) AS SELECT * FROM emp",
+    ])
+}
+
+/// Transaction forms with semantics sqawk does not implement. Each runs
+/// after a working BEGIN and a change, which must not be written.
+#[test]
+fn transaction_clauses() -> R {
+    let mut sqls = Vec::new();
+    for stmt in [
+        "SAVEPOINT s",
+        "RELEASE s",
+        "RELEASE SAVEPOINT s",
+        "ROLLBACK TO s",
+        "ROLLBACK TO SAVEPOINT s",
+        "COMMIT AND CHAIN",
+        "ROLLBACK AND CHAIN",
+    ] {
+        sqls.push(format!("BEGIN; UPDATE emp SET salary = 0; {stmt}; COMMIT"));
+    }
+    sqls.push("START TRANSACTION".to_string());
+    sqls.push("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE".to_string());
+    sqls.push("BEGIN TRY".to_string());
+    let refs: Vec<&str> = sqls.iter().map(String::as_str).collect();
+    assert_rejected(&refs)
+}
+
 /// The red-list case: `UPDATE ... FROM` used to update every row from
 /// nothing; the documentation said it was "accepted without effect".
 #[test]

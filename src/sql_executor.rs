@@ -10,9 +10,6 @@
 //! The module implements a non-destructive approach, modifying only in-memory tables
 //! until explicitly requested to save changes back to the original files.
 
-use std::collections::HashSet;
-
-use crate::capacity::DEFAULT_TABLE_CAPACITY;
 use crate::config::AppConfig;
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
@@ -29,9 +26,6 @@ pub struct SqlExecutor<'a> {
 
     /// File handler for loading and saving tables
     file_handler: &'a mut FileHandler,
-
-    /// Names of tables that have been modified
-    modified_tables: HashSet<String>,
 
     /// Application configuration for global settings
     config: AppConfig,
@@ -52,7 +46,6 @@ impl<'a> SqlExecutor<'a> {
         SqlExecutor {
             database,
             file_handler,
-            modified_tables: HashSet::with_capacity(DEFAULT_TABLE_CAPACITY),
             config: config.clone(),
             affected_rows: 0,
             dml_executed: false,
@@ -78,13 +71,9 @@ impl<'a> SqlExecutor<'a> {
             diag!("Executing SQL: {}", sql);
         }
 
-        // Execute via VM engine
+        // Execute via VM engine (which also records the modified tables in
+        // the database)
         let result = crate::vm::execute_vm(sql, self.database, self.config.verbose())?;
-
-        // Track modified tables
-        for table_name in result.modified_tables {
-            self.modified_tables.insert(table_name);
-        }
 
         // Track affected rows from the last statement
         self.affected_rows = result.affected_rows;
@@ -102,35 +91,56 @@ impl<'a> SqlExecutor<'a> {
 
     /// Save all modified tables back to their source files
     ///
-    /// This function writes any tables that have been modified during execution
-    /// (e.g., through INSERT, UPDATE, or DELETE statements) back to their source files.
-    /// Only tables that have been modified will be saved, preserving the original
-    /// files if no changes were made.
+    /// Writes every table changed by INSERT, UPDATE, DELETE, ALTER TABLE,
+    /// TRUNCATE or CREATE TABLE ... LOCATION back to its file. A scratch
+    /// table (no file: CREATE TABLE without LOCATION, CREATE TABLE ... AS)
+    /// is skipped.
     ///
-    /// Every table is checked for a writeback target before any of them is
-    /// written. An unwritable table (one read from standard input, say) used
-    /// to surface on its own turn in the loop, after an arbitrary number of
-    /// real source files had already been rewritten -- and since
-    /// `modified_tables` is a `HashSet`, which ones varied between runs of the
-    /// same command. Sorting makes the writes themselves ordered too.
+    /// Every table is checked before any of them is written: a table read
+    /// from standard input, a read-only file, or a directory that cannot
+    /// take the temp file fails the whole writeback with nothing written.
+    /// Writes happen in table-name order.
     ///
     /// # Returns
     /// * `Ok(usize)` - Number of tables saved
     /// * `Err` if any error occurs during saving
     pub fn save_modified_tables(&self) -> SqawkResult<usize> {
-        let mut names: Vec<&String> = self.modified_tables.iter().collect();
-        names.sort();
-
-        for table_name in &names {
-            self.file_handler.check_table_writable(table_name)?;
+        let mut targets = Vec::new();
+        for table_name in self.database.modified_tables() {
+            if self.file_handler.check_table_writable(&table_name)? {
+                targets.push(table_name);
+            } else if self.config.verbose() {
+                diag!(
+                    "Table '{}' has no file (CREATE TABLE without LOCATION); not written",
+                    table_name
+                );
+            }
         }
 
-        for table_name in &names {
+        for table_name in &targets {
             // Use the file handler to write the table back to its source file
             self.file_handler.save_table(table_name)?;
         }
 
-        Ok(names.len())
+        Ok(targets.len())
+    }
+
+    /// Whether a transaction (BEGIN without COMMIT / ROLLBACK yet) is open.
+    pub fn in_transaction(&self) -> bool {
+        self.database.in_transaction()
+    }
+
+    /// End of input: roll back a transaction left open, as SQLite discards
+    /// uncommitted work when the connection closes. Called before the final
+    /// writeback, so --write never saves uncommitted changes.
+    pub fn finish(&mut self) {
+        if self.database.in_transaction() {
+            if self.config.verbose() {
+                diag!("Transaction still open at exit: rolled back");
+            }
+            // Cannot fail: a transaction is open.
+            let _ = self.database.rollback();
+        }
     }
 
     /// Check if a specific table has been modified
@@ -141,7 +151,7 @@ impl<'a> SqlExecutor<'a> {
     /// # Returns
     /// * `bool` - True if the table has been modified
     pub fn is_table_modified(&self, table_name: &str) -> bool {
-        self.modified_tables.contains(table_name)
+        self.database.is_modified(table_name)
     }
 
     /// Get a list of all available table names
@@ -186,7 +196,7 @@ impl<'a> SqlExecutor<'a> {
     /// # Returns
     /// * `bool` - True if any tables have been modified
     pub fn has_modified_tables(&self) -> bool {
-        !self.modified_tables.is_empty()
+        !self.database.modified_tables().is_empty()
     }
 
     /// Load a file as a table
@@ -196,7 +206,15 @@ impl<'a> SqlExecutor<'a> {
     ///
     /// # Returns
     /// * `SqawkResult<Option<(String, String)>>` - Tuple of (table_name, file_path) if successful
+    ///
+    /// Refused inside a transaction: ROLLBACK restores the tables as they
+    /// were at BEGIN, which would silently unload the file.
     pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<Option<(String, String)>> {
+        if self.database.in_transaction() {
+            return Err(SqawkError::InvalidSqlQuery(
+                "cannot load a file within a transaction".to_string(),
+            ));
+        }
         self.file_handler.load_file(file_spec)
     }
 
@@ -250,7 +268,7 @@ impl<'a> SqlExecutor<'a> {
     /// # Returns
     /// * `bool` - True if the table has been modified
     pub fn table_is_modified(&self, table_name: &str) -> bool {
-        self.modified_tables.contains(table_name)
+        self.database.is_modified(table_name)
     }
 
     /// Save a specific table
@@ -265,7 +283,7 @@ impl<'a> SqlExecutor<'a> {
             return Err(SqawkError::TableNotFound(table_name.to_string()));
         }
 
-        if !self.modified_tables.contains(table_name) {
+        if !self.database.is_modified(table_name) {
             // Table exists but isn't modified, just return success
             return Ok(());
         }

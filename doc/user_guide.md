@@ -29,6 +29,7 @@
    - [Table Naming](#table-naming)
    - [Handling Multiple Files](#handling-multiple-files)
    - [File Writeback Behavior](#file-writeback-behavior)
+   - [Transactions](#transactions)
    - [Defining Schemas with CREATE TABLE](#defining-schemas-with-create-table)
 6. [Examples](#examples)
    - [Basic Queries](#basic-queries)
@@ -322,7 +323,16 @@ sqawk -s "DELETE FROM data WHERE status = 'expired'" data.csv --write
 ```
 
 Important notes about the write behavior:
-- Only tables that were actually modified by an operation (INSERT, UPDATE, DELETE) are saved
+- Only tables that were actually modified are saved: by INSERT, UPDATE,
+  DELETE, ALTER TABLE or TRUNCATE, or created by `CREATE TABLE ...
+  LOCATION 'file'`. A table created without `LOCATION` (including `CREATE
+  TABLE ... AS SELECT`) is a scratch table: it has no file and is skipped. A
+  table that was modified and then dropped is not written
+- Every file is checked before any is written: if one is read-only (or its
+  directory cannot be written), sqawk reports `cannot write 'x.csv': file is
+  read-only`, exits with status 1 and writes no file at all
+- A transaction (`BEGIN`) still open after the last statement is rolled back
+  first, so uncommitted changes are never written
 - Rows the statements did not change are written back byte-for-byte as they
   were read: quoting (even quotes a field did not need), unquoted spaces,
   short (ragged) rows, line endings, invalid UTF-8 -- all kept. A row that
@@ -334,6 +344,9 @@ Important notes about the write behavior:
   order are preserved. A row appended after a last line that had no line
   ending starts on a new line. Writing through a symlink updates the file it
   points to and leaves the link in place
+- The file is replaced atomically (a temp file renamed over it), so a file
+  with several hard links is split from them: the file named on the command
+  line gets the new contents, and the other links keep the old ones
 - NULL is written as an empty field
 - Without `--write`, your files remain untouched regardless of the SQL operations
 
@@ -393,6 +406,10 @@ sqawk -F: --tabledef=passwd:username,password,uid,gid,gecos,home,shell \
 ```
 
 Format: `--tabledef=table_name:col1,col2,col3,...`
+
+A definition without `:`, with an empty table or column name, naming a
+column twice, or defining the same table twice is an error, and so is a
+definition for a table that no input file loads.
 
 This is useful for:
 - System files like `/etc/passwd` and `/etc/group` (files separated by runs
@@ -549,8 +566,8 @@ CREATE TABLE table_name (
     column2 data_type,
     ...
 ) [LOCATION 'file_path'] 
-  [STORED AS file_format]
-  [WITH (option_name='option_value', ...)]
+  [STORED AS TEXTFILE]
+  [WITH (DELIMITER='...')]
 ```
 
 Example:
@@ -588,7 +605,8 @@ CREATE TABLE logs (
 ) LOCATION './logs/app.log'
 ```
 
-Currently, only TEXTFILE format is supported:
+TEXTFILE is the only format: `STORED AS PARQUET` (or any other format) is an
+error. Likewise `WITH` takes only `DELIMITER`; any other option is an error:
 
 ```sql
 CREATE TABLE users (
@@ -628,7 +646,9 @@ INSERT INTO products VALUES (1, 'Keyboard', 49.99), (2, 'Mouse', 29.99);
 SELECT * FROM products WHERE price < 40;
 ```
 
-Use the `--write` flag to save changes to the specified location:
+A table created without `LOCATION` (like `products` above, or any `CREATE
+TABLE ... AS SELECT`) is a scratch table: `--write` skips it. Use `LOCATION`
+and the `--write` flag to save a new table to a file:
 
 ```sh
 sqawk -s "CREATE TABLE data (id INT, value FLOAT) LOCATION './output.csv';
@@ -685,6 +705,8 @@ Sqawk follows a safe-by-default approach to file modification:
   - Column and row order remain the same
   - NULL is written as an empty field
   - The file keeps its permissions; a symlink keeps pointing at the rewritten file
+  - Hard links to the file are broken: the file is replaced, not rewritten in place
+- A read-only target file fails the whole run before any file is written
 
 Example of safe write behavior:
 
@@ -695,9 +717,9 @@ sqawk -s "DELETE FROM data WHERE code NOT IN (SELECT code FROM lookup)" \
       data.csv lookup.csv --write
 ```
 
-`UPDATE ... FROM other_table` is **not** supported, and is silently accepted
-without doing anything -- no error, no rows changed. A cross-table update has
-to go through a correlated subquery in the SET expression:
+`UPDATE ... FROM other_table` is **not** supported (it is an error). A
+cross-table update has to go through a correlated subquery in the SET
+expression:
 
 ```sh
 sqawk -s "UPDATE data SET category =
@@ -707,6 +729,26 @@ sqawk -s "UPDATE data SET category =
 
 A row with no matching lookup row gets NULL (written back as an empty field);
 add `WHERE code IN (SELECT code FROM lookup)` to leave such rows untouched.
+
+### Transactions
+
+`BEGIN` opens a transaction, `COMMIT` (or `END`) keeps its changes and
+`ROLLBACK` puts every table back as it was at `BEGIN`, as in SQLite. The
+statements may come in one `-s`, several `-s` / `-f` arguments or separate
+REPL lines:
+
+```sh
+sqawk -s "BEGIN" -s "DELETE FROM data WHERE year < 2020" \
+      -s "SELECT COUNT(*) FROM data" -s "ROLLBACK" data.csv --write
+```
+
+- `BEGIN DEFERRED`, `IMMEDIATE` and `EXCLUSIVE` all act as `BEGIN`
+- `BEGIN` inside a transaction, and `COMMIT` / `ROLLBACK` outside one, are errors
+- A transaction still open when the statements run out (or the REPL exits)
+  is rolled back, and with `--write` nothing it changed is written
+- In the REPL with `.write on`, nothing is saved until `COMMIT`; `.save` and
+  `.load` are refused inside a transaction
+- Savepoints (`SAVEPOINT`, `RELEASE`, `ROLLBACK TO`) are not supported
 
 ## Examples
 

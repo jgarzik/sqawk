@@ -269,6 +269,9 @@ impl<'a> Repl<'a> {
             }
         }
 
+        // Uncommitted work is discarded, as when SQLite closes a connection.
+        self.executor.finish();
+
         self.editor.save_history(HISTORY_FILE).unwrap_or_else(|e| {
             diag!("sqawk: cannot save history: {}", e);
         });
@@ -470,15 +473,18 @@ impl<'a> Repl<'a> {
             outln!("Run Time: {:.3} ms", execution_time.as_secs_f64() * 1000.0);
         }
 
-        // Save changes if write mode is enabled
-        if self.config.write_changes() {
-            let saved_count = self.executor.save_modified_tables()?;
+        // Save changes if write mode is enabled. Inside a transaction nothing
+        // is saved until COMMIT: uncommitted changes never reach a file.
+        if !self.executor.in_transaction() {
+            if self.config.write_changes() {
+                let saved_count = self.executor.save_modified_tables()?;
 
-            if saved_count > 0 {
-                outln!("Changes saved to {} tables", saved_count);
+                if saved_count > 0 {
+                    outln!("Changes saved to {} tables", saved_count);
+                }
+            } else if self.executor.has_modified_tables() {
+                outln!("Changes not saved: use .write to save changes to files");
             }
-        } else if self.executor.has_modified_tables() {
-            outln!("Changes not saved: use .write to save changes to files");
         }
 
         Ok(())
@@ -710,6 +716,11 @@ impl<'a> Repl<'a> {
     /// if one is specified. This is useful when write mode is off but you want to
     /// save specific changes.
     fn save_tables(&mut self, table_name: Option<&str>) -> Result<()> {
+        if self.executor.in_transaction() {
+            return Err(ReplError::Sqawk(crate::error::SqawkError::InvalidSqlQuery(
+                "cannot save within a transaction: COMMIT or ROLLBACK first".to_string(),
+            )));
+        }
         match table_name {
             Some(name) => {
                 // Save a specific table if it exists and is modified

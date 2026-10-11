@@ -499,7 +499,10 @@ CREATE TABLE name AS SELECT ... FROM ...
 
 The new table's columns are the query's result columns. Column and table
 constraints (`PRIMARY KEY`, `NOT NULL`, `DEFAULT`, ...) are rejected: sqawk
-does not enforce them.
+does not enforce them. `STORED AS` takes only `TEXTFILE` and `WITH` only
+`DELIMITER`; anything else there is an error. A table without `LOCATION`
+(every `CREATE TABLE ... AS` table among them) has no file and lasts for the
+run; `CREATE TEMP TABLE` is accepted for such a table.
 
 ## DROP TABLE
 
@@ -579,12 +582,40 @@ a condition (WHERE, `NOT`, `AND`, CASE), text is likewise read as a number, so
 
 ## Writeback
 
-Modifications (INSERT, UPDATE, DELETE) remain in-memory unless `--write` flag is specified.
+Modifications remain in memory unless the `--write` flag is specified. Then
+every table that INSERT, UPDATE, DELETE, ALTER TABLE or TRUNCATE changed, or
+that `CREATE TABLE ... LOCATION` created, is written to its file. A table
+with no file (CREATE TABLE without LOCATION, CREATE TABLE ... AS) is
+skipped, and a table dropped by DROP TABLE is not written.
 Rows no statement changed are written back byte for byte, exactly as they
 were read; a changed or inserted row is written from its values, NULL as an
 empty field. The source file's delimiter, header line (or its absence), byte
 order mark, line endings, blank lines, `#` comment lines (under
 `--comments`) and permissions are kept.
+
+Every target file is checked before any is written: a read-only file fails
+the run (`cannot write 'x.csv': file is read-only`) and no file is written.
+Each file is replaced atomically by renaming a temp file over it, so a file
+with several hard links is split from them (the other links keep the old
+contents); a symlink is followed and stays in place.
+
+## Transactions
+
+```sql
+BEGIN [DEFERRED | IMMEDIATE | EXCLUSIVE] [TRANSACTION]
+COMMIT [TRANSACTION]
+END [TRANSACTION]
+ROLLBACK [TRANSACTION]
+```
+
+`ROLLBACK` restores every table (rows, schema, created and dropped tables) to
+its state at `BEGIN`; `COMMIT` / `END` keeps the changes. The three `BEGIN`
+modifiers are accepted and mean plain `BEGIN`. As in SQLite, `BEGIN` inside a
+transaction is an error (`cannot start a transaction within a transaction`),
+as are `COMMIT` and `ROLLBACK` outside one (`cannot commit - no transaction
+is active`). A transaction still open after the last statement, or when the
+REPL exits, is rolled back, before any `--write` writeback. `SAVEPOINT`,
+`RELEASE` and `ROLLBACK TO` are not supported.
 
 ## Unsupported syntax
 
@@ -606,10 +637,14 @@ nothing is modified. That includes:
   function
 - `CAST ... FORMAT`, `LIKE ANY`, blob literals (`X'00'`) and parameters
 - table and column constraints, `CREATE TABLE IF NOT EXISTS`,
-  `PARTITIONED BY`, `ROW FORMAT`
+  `PARTITIONED BY`, `ROW FORMAT`, `STORED AS` any format but `TEXTFILE`,
+  `WITH` options other than `DELIMITER`, table comments, and `LOCATION` /
+  `STORED AS` / `WITH` or a column list on `CREATE TABLE ... AS`
+- savepoints, transaction modes (`ISOLATION LEVEL`, `READ ONLY`) and
+  `START TRANSACTION`
 - statements other than SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, DROP
-  TABLE, ALTER TABLE ADD COLUMN and TRUNCATE (no views, indexes, triggers or
-  transactions)
+  TABLE, ALTER TABLE ADD COLUMN, TRUNCATE and BEGIN / COMMIT / ROLLBACK (no
+  views, indexes or triggers)
 
 ## Differences from SQLite
 

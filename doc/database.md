@@ -49,13 +49,36 @@ Tables maintain an internal mapping of column names to their indices for efficie
 Tables are loaded from delimiter-separated files at startup and can be modified through SQL operations. Sqawk uses a safe, sed-like writeback model:
 
 1. **Default Behavior**: All modifications remain in memory only
-2. **Tracking Changes**: The system tracks which tables have been modified by any operation
+2. **Tracking Changes**: The database keeps the set of modified tables
+   (`Database::modified`): INSERT, UPDATE, DELETE, ALTER TABLE and TRUNCATE
+   mark a table, CREATE TABLE marks the new one, and DROP TABLE removes the
+   mark with the table
 3. **Write on Exit**: Modified tables are only written back to their source files if:
    - The `--write` (or `-w`) flag is explicitly provided
-   - The table was actually modified by an SQL operation (INSERT, UPDATE, DELETE)
+   - The table was actually modified by one of those statements
+   - The table has a file: a scratch table (CREATE TABLE without LOCATION,
+     CREATE TABLE ... AS) is skipped. A table read from standard input is an
+     error instead
 4. **Safe Execution**: Without the `--write` flag, source files remain untouched regardless of operations performed
 5. **Write Only Modified**: Only tables that were changed are written; unmodified tables are not rewritten
-6. **Format Preservation**: Original file formats and delimiters are preserved during writeback
+6. **Check First**: Every target is checked before any file is written; a
+   read-only file, or a directory that cannot take the temp file, fails the
+   run with no file written
+7. **Format Preservation**: Original file formats and delimiters are preserved during writeback
+
+### Transactions
+
+`BEGIN` / `COMMIT` (`END`) / `ROLLBACK` are handled in `vm/mod.rs` before
+compilation and act on the `Database` directly. The undo state is
+copy-on-write: `BEGIN` records only the modified-table set; the first
+`get_table_mut` of a table inside the transaction stores a deep copy of it
+(rows, source bytes, layout), `remove_table` moves the dropped table into
+the undo state, and `add_table` records that the name did not exist.
+`ROLLBACK` puts every recorded table back and restores the modified set;
+`COMMIT` discards the undo state. A transaction that only reads copies
+nothing, and one that changes a table copies it once. A transaction still
+open at the end of the run (or REPL session) is rolled back before writeback.
+Savepoints are not supported.
 
 This design ensures that users can experiment with data manipulations while maintaining the integrity of source files. The verbose mode (`-v`) provides additional confirmation about whether changes were saved or not.
 
@@ -214,7 +237,9 @@ This pattern provides several safety guarantees:
 - **Disk Full Protection**: If the disk runs out of space, the original file is preserved
 - **All-or-Nothing Semantics**: Either the complete new file exists, or the original file is unchanged
 
-The temporary file is created in the same directory as the target file to ensure the rename operation is atomic (same filesystem requirement on POSIX systems). A symlinked path is resolved first, so the link's target is rewritten and the link itself is left in place.
+The temporary file is created in the same directory as the target file to ensure the rename operation is atomic (same filesystem requirement on POSIX systems). A symlinked path is resolved first, so the link's target is rewritten and the link itself is left in place. The rename replaces the directory entry, so a file with several hard links is split from them: the other links keep the old contents.
+
+Because the rename would replace even a read-only file, `csv_handler::check_writable` runs for every target before anything is written: a file whose mode is read-only, or that cannot be opened for appending, is refused (`cannot write 'x.csv': file is read-only`), and a temp file is created and removed in its directory to prove the rename can happen.
 
 ### Delimiter Consistency
 
@@ -232,7 +257,7 @@ Sqawk supports two primary output modes:
 1. **Stdout Output**: Query results (SELECT) are written to standard output using
    the `-F` delimiter, or comma when `-F` was not given. This is independent of
    the delimiter a source table was parsed with
-2. **File Writeback**: Modified tables (via INSERT, UPDATE, DELETE) are written back to their source files when `--write` is specified, preserving that file's delimiter
+2. **File Writeback**: Modified tables (via INSERT, UPDATE, DELETE, ALTER TABLE, TRUNCATE) are written back to their source files when `--write` is specified, preserving that file's delimiter
 
 For stdout output, the data is streamed directly without buffering concerns. For file writeback, the atomic write pattern described above is used.
 
@@ -362,8 +387,9 @@ The database engine has several architectural limitations:
 
 - **No Index Structure**: Tables are scanned in full; the only index is the
   temporary hash index an equi-join builds for its inner table
-- **No Transaction Support**: A statement's modifications are applied once it
-  completes; there is no BEGIN/COMMIT and no rollback across statements
+- **Transactions without savepoints**: BEGIN / COMMIT / ROLLBACK are
+  supported (see "Transactions" above); SAVEPOINT, RELEASE and ROLLBACK TO
+  are not
 - **Schema Flexibility**: Types are inferred per value rather than enforced
 - **No Constraints System**: Referential integrity not enforced
 - **Whole-dataset residency**: A table must fit in memory

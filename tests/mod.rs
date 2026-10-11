@@ -59,6 +59,7 @@ mod ddl; // Tests for DDL operations (DROP TABLE, ALTER TABLE, TRUNCATE, CREATE 
 mod file_io; // File-type rules, table specs, byte-exact writeback
 mod headerless; // Tests for --no-header files (a, b, c column naming)
 mod tabledef; // Tests for --tabledef CLI option
+mod transaction; // BEGIN / COMMIT / ROLLBACK, and which tables --write writes
 
 mod output; // Tests for stdout and file output (atomic writes)
 mod repl; // Tests for interactive REPL functionality with pre-generated input
