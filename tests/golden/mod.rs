@@ -1207,7 +1207,7 @@ fn err_syntax() -> Result<(), Box<dyn std::error::Error>> {
     assert_query_fails(
         &["tests/data/employees.csv"],
         "SELECT FROM WHERE",
-        "Failed to execute SQL",
+        "sqawk: Expected an expression, found: FROM",
     )
 }
 

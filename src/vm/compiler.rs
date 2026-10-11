@@ -286,7 +286,7 @@ impl<'t> NameCtx<'t> {
                     // Silently picking the first would make the result
                     // depend on FROM order.
                     return Err(SqawkError::InvalidSqlQuery(format!(
-                        "Column '{}' is ambiguous across the tables in FROM",
+                        "ambiguous column name: {}",
                         name
                     )));
                 }
@@ -798,7 +798,9 @@ impl<'a> SqlCompiler<'a> {
             Statement::Insert(insert) => {
                 check_insert(insert)?;
                 let source = insert.source.as_ref().ok_or_else(|| {
-                    SqawkError::UnsupportedSqlFeature("INSERT without a source".into())
+                    SqawkError::UnsupportedSqlFeature(
+                        "INSERT without VALUES or SELECT is not supported".into(),
+                    )
                 })?;
                 // `Insert::columns` became Vec<ObjectName>; sqawk only accepts
                 // bare column names, so flatten each to its last segment.
@@ -1307,9 +1309,8 @@ impl<'a> SqlCompiler<'a> {
         ctx: &NameCtx<'a>,
         dest: i64,
     ) -> SqawkResult<()> {
-        let def = func::lookup(name).ok_or_else(|| {
-            SqawkError::UnsupportedSqlFeature(format!("Unsupported function: {}", name))
-        })?;
+        let def = func::lookup(name)
+            .ok_or_else(|| SqawkError::InvalidSqlQuery(format!("no such function: {}", name)))?;
         func::check_arity(def, args.len())?;
         let base = self.allocate_registers(args.len().max(1));
         for (i, arg) in args.iter().enumerate() {
@@ -1435,6 +1436,18 @@ impl<'a> SqlCompiler<'a> {
         dest: i64,
     ) -> SqawkResult<()> {
         let name = Self::get_function_name(func);
+        // An aggregate somewhere only a scalar can be (WHERE, GROUP BY, an
+        // aggregate's own argument). Checked before the arguments, so
+        // `COUNT(*)` gets this message too. One-argument MIN/MAX is the
+        // aggregate; with more arguments they are scalar functions.
+        if AggregateFunction::is_aggregate_name(&name)
+            && (func::lookup(&name).is_none() || func_args(func).len() == 1)
+        {
+            return Err(SqawkError::InvalidSqlQuery(format!(
+                "misuse of aggregate function {}()",
+                name
+            )));
+        }
         let args = Self::scalar_call_args(func)?;
         let arity = |min: usize, max: usize| -> SqawkResult<()> {
             if args.len() < min || args.len() > max {
@@ -1463,13 +1476,8 @@ impl<'a> SqlCompiler<'a> {
                 self.compile_iif(&args, ctx, dest)
             }
             _ if func::lookup(&name).is_some() => self.emit_call(&name, &args, ctx, dest),
-            // An aggregate somewhere only a scalar can be (WHERE, GROUP BY,
-            // an aggregate's own argument).
-            _ if AggregateFunction::is_aggregate_name(&name) => Err(SqawkError::InvalidSqlQuery(
-                format!("misuse of aggregate function {}()", name),
-            )),
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported function: {}",
+            _ => Err(SqawkError::InvalidSqlQuery(format!(
+                "no such function: {}",
                 name
             ))),
         }

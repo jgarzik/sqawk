@@ -12,12 +12,16 @@
    - [Your First Sqawk Command](#your-first-sqawk-command)
    - [How Sqawk Processes Files](#how-sqawk-processes-files)
 4. [Command Line Options](#command-line-options)
+   - [Options at a Glance](#options-at-a-glance)
    - [SQL Statement Option (-s)](#sql-statement-option--s)
+   - [SQL File Option (-f)](#sql-file-option--f)
    - [Interactive Mode (-i)](#interactive-mode--i)
    - [Write Flag (--write)](#write-flag---write)
    - [Field Separator Option (-F)](#field-separator-option--f)
+   - [Output Options](#output-options)
    - [Table Definition Option (--tabledef)](#table-definition-option---tabledef)
    - [Verbose Mode (-v)](#verbose-mode--v)
+   - [Errors and Exit Status](#errors-and-exit-status)
    - [Help (--help)](#help---help)
 5. [Working with Files](#working-with-files)
    - [File Format Support](#file-format-support)
@@ -163,6 +167,25 @@ When you run a Sqawk command:
 
 ## Command Line Options
 
+### Options at a Glance
+
+| Option | Description |
+|--------|-------------|
+| `-s SQL`, `--sql SQL` | SQL statement(s) to run; repeatable |
+| `-f FILE`, `--file FILE` | Run the SQL statements in FILE (`-` reads standard input); repeatable, runs in order with `-s` |
+| `-i`, `--interactive` | Start the interactive REPL |
+| `-w`, `--write` | Write modified tables back to their files |
+| `-F SEP`, `--field-separator SEP` | Input field separator (one character, or `\t`); also the output delimiter unless `--output-delimiter` is given |
+| `--output-delimiter SEP` | Delimiter for query results (default: the `-F` separator, else comma) |
+| `--no-output-header` | Omit the header line of every result set |
+| `--no-header` | Input files have no header row |
+| `--comments` | Skip lines starting with `#` (kept on `--write`) |
+| `--tabledef NAME:COL,...` | Name the columns of a headerless table |
+| `-v`, `--verbose` | Debugging output on stderr; its format is not stable |
+| `-h`, `--help` / `-V`, `--version` | Help / version |
+
+At least one `-s` or `-f` is required unless `-i` is given.
+
 ### SQL Statement Option (-s)
 
 The `-s` option specifies an SQL statement to execute:
@@ -178,6 +201,30 @@ sqawk -s "SELECT COUNT(*) FROM data" -s "SELECT AVG(value) FROM data" data.csv
 ```
 
 Statements are executed in sequence, with each operating on the current state of the tables.
+
+### SQL File Option (-f)
+
+`-f FILE` (or `--file FILE`) runs the SQL statements in a file. A file may
+hold several statements separated by `;`, and a file with no statements
+(empty, or only whitespace) runs nothing:
+
+```sh
+sqawk -f report.sql employees.csv
+
+# Read the statements from standard input
+echo "SELECT COUNT(*) FROM employees" | sqawk -f - employees.csv
+```
+
+`-s` and `-f` may be mixed and repeated; they run in the order they appear
+on the command line, so here the UPDATE in `fix.sql` runs between the two
+SELECTs:
+
+```sh
+sqawk -s "SELECT COUNT(*) FROM data" -f fix.sql -s "SELECT COUNT(*) FROM data" data.csv
+```
+
+`-f -` and a `-` file operand cannot be used together: standard input can
+supply the SQL or a table, not both.
 
 ### Interactive Mode (-i)
 
@@ -292,7 +339,7 @@ Important notes about the write behavior:
 
 ### Field Separator Option (-F)
 
-The `-F` option allows you to specify a custom field separator for your files:
+The `-F` option (long form `--field-separator`) allows you to specify a custom field separator for your files:
 
 ```sh
 # Process a tab-delimited file that does not end in .tsv
@@ -308,11 +355,31 @@ Notes on field separators:
 - Common separators include tab (`\t`), comma (`,`), colon (`:`), and pipe (`|`)
 - The separator must be a single ASCII character other than a quote or line
   break; the two-character escape `\t` means tab. Anything else (including an
-  empty `-F ''`) is rejected with an error
+  empty `-F ''`) is a usage error (exit status 2)
 - `-F` applies to every input file in the invocation, not per file
 - The input separator is preserved when writing a table back with `--write`
-- Query results on stdout use `-F` when it is given, and comma otherwise --
-  reading a tab-separated file without `-F` prints comma-separated results
+- Query results on stdout use `--output-delimiter` when it is given, else
+  `-F`, else comma -- reading a tab-separated file without either prints
+  comma-separated results (see [Output Options](#output-options))
+
+### Output Options
+
+Query results are written to stdout as a delimited file, one result set per
+statement, each starting with a header line of column names.
+
+- `--output-delimiter SEP` sets the delimiter between result fields. It
+  follows the same rules as `-F` (one ASCII character other than a quote or
+  line break, or `\t`). Without it, results use the `-F` separator when one
+  is given, and comma otherwise
+- `--no-output-header` omits the header line of every result set
+
+Both apply in the REPL too.
+
+```sh
+# Read a pipe-separated file, print tab-separated results without a header
+sqawk -F '|' --output-delimiter '\t' --no-output-header \
+    -s "SELECT name, total FROM sales" sales.txt
+```
 
 ### Table Definition Option (--tabledef)
 
@@ -365,20 +432,36 @@ sqawk -F: --no-header -s "SELECT a, f FROM passwd WHERE c >= 1000" /etc/passwd
 
 ### Verbose Mode (-v)
 
-The verbose mode provides additional information about the operations being performed:
+`-v` (or `--verbose`) prints debugging output about what sqawk is doing:
 
 ```sh
 sqawk -s "SELECT * FROM data WHERE id > 1000" data.csv -v
 ```
 
 Verbose output goes to standard error, so it never mixes with query results.
-It includes:
-- SQL statements being executed
-- Number of rows affected or returned
-- Table loading information
-- Write status (whether changes were saved)
+It includes the tables loaded, each SQL statement, its compiled bytecode and
+every executed instruction, row counts, and whether changes were saved.
+Expect a lot of it on large inputs.
 
-This mode is particularly useful for debugging or understanding exactly what Sqawk is doing with your data.
+The output is for debugging; its format is not stable, so do not parse it.
+A closed or failing stderr never stops a run.
+
+### Errors and Exit Status
+
+Every error is reported on standard error as a single line, and sqawk exits
+with status 1:
+
+```
+$ sqawk -s "SELECT nmae FROM employees" employees.csv
+sqawk: no such column: nmae
+$ sqawk -s "SELECT 1" missing.csv
+sqawk: cannot open 'missing.csv': No such file or directory
+```
+
+Command-line usage errors (an unknown option, a missing argument, an invalid
+`-F` value) are reported by the argument parser with a usage hint and exit
+status 2. A run that succeeds exits with status 0. In the REPL, an error is
+printed in the same `sqawk: <message>` form and the session continues.
 
 ### Help (--help)
 
@@ -442,7 +525,8 @@ Fields are read per RFC 4180: a quoted field may contain the delimiter, line
 breaks, and doubled quotes (`"say ""hi"""`). Fields are never trimmed, and a
 UTF-8 byte order mark at the start of the file is not part of the first
 column name (it is kept on `--write`). A quoted field whose closing quote is
-missing is an error (*"unterminated quoted field starting at line N"*), since
+missing is an error (*"FILE: line N: unterminated quoted field"*, N being the
+line where the field starts), since
 otherwise the rest of the file would load as one field.
 
 Completely empty input is a different matter. The first line is the header, so
@@ -756,9 +840,14 @@ sqawk -s "SELECT DISTINCT * FROM data" data.csv > deduped.csv
 sqawk -s "SELECT * FROM data" data.tsv > data.csv
 ```
 
-The output delimiter is whatever `-F` says, and comma when `-F` is absent. It
-does not follow the input file's delimiter, which is what makes the conversion
-above work.
+The output delimiter is whatever `--output-delimiter` says, else `-F`, and
+comma when neither is given. It does not follow the input file's delimiter,
+which is what makes the conversion above work. `--no-output-header` drops
+the header line, for appending to an existing file:
+
+```sh
+sqawk --no-output-header -s "SELECT * FROM today" today.csv >> all.csv
+```
 
 Output is a well-formed delimited file: a field containing the delimiter, a
 quote or a line break, or with leading or trailing spaces, is quoted
@@ -898,11 +987,11 @@ worth planning for with large files:
    - `COUNT(*)` counts rows while `COUNT(col)` counts non-NULL values
 
 5. **CSV parsing errors with malformed rows**:
+   - Load errors have the form `FILE: line N: MESSAGE`
    - *"record has N fields, but the table has M columns"* means a row has
      more fields than the header
-   - *"unterminated quoted field starting at line N"* means a quote opened
-     at line N is never closed
-   - Error messages include line numbers to help locate problematic rows
+   - *"unterminated quoted field"* means a quote opened at the reported line
+     is never closed
    - Common causes include extra delimiters, improperly escaped quotes inside
      fields, and the wrong delimiter (`.tsv`/`.tab` are tab-separated, every
      other file comma-separated, unless `-F` is given)
@@ -927,7 +1016,8 @@ worth planning for with large files:
 
 9. **SQL syntax errors**:
    - Try running your query in interactive mode to get immediate feedback
-   - Use the `-v` verbose flag to see the exact SQL being executed
+   - The error message names the token where parsing failed, with its line
+     and column
    - Verify SQL statement syntax, particularly quotes, parentheses, and required clauses
 
 10. **Special characters in files**:

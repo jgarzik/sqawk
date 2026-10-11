@@ -25,6 +25,12 @@
 //! 3. Execute SQL statements in sequence
 //! 4. Print query results to stdout
 //! 5. Save modified tables back to disk if requested
+//!
+//! Any error ends the run with one line on stderr, `sqawk: <message>`, and
+//! exit status 1 (clap's own usage errors exit with status 2).
+
+#[macro_use]
+mod diag;
 
 mod aggregate;
 mod capacity;
@@ -39,10 +45,12 @@ mod sql_executor;
 mod table;
 mod vm;
 
-use anyhow::{Context, Result};
-// Not explicitly importing SqawkArgs as it's not directly used
+use std::process::ExitCode;
+
+use cli::{SqawkArgs, SqlSource};
 use config::AppConfig;
 use database::Database;
+use error::{SqawkError, SqawkResult};
 use file_handler::FileHandler;
 use repl::Repl;
 use sql_executor::SqlExecutor;
@@ -56,100 +64,159 @@ use sql_executor::SqlExecutor;
 /// actually goes.
 const MAIN_STACK_BYTES: usize = 256 * 1024 * 1024;
 
-/// Run [`run`] on a freshly mapped [`MAIN_STACK_BYTES`] stack, on this
-/// thread. (A second thread with a large stack would work too, but once a
-/// process has two threads glibc's malloc takes a lock on every call, which
-/// slows a large load or GROUP BY by several percent.)
-fn main() -> Result<()> {
-    stacker::grow(MAIN_STACK_BYTES, run)
+/// Parse the command line, then run [`run`] on a freshly mapped
+/// [`MAIN_STACK_BYTES`] stack, on this thread. (A second thread with a large
+/// stack would work too, but once a process has two threads glibc's malloc
+/// takes a lock on every call, which slows a large load or GROUP BY by
+/// several percent.)
+fn main() -> ExitCode {
+    let args = cli::parse_args();
+    match stacker::grow(MAIN_STACK_BYTES, || run(args)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            diag!("sqawk: {}", one_line(&e.to_string()));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `msg` on a single line: line breaks (which an error quoting multi-line
+/// SQL could contain) become spaces, so every error is exactly one line.
+pub fn one_line(msg: &str) -> String {
+    if !msg.contains(['\n', '\r']) {
+        return msg.to_string();
+    }
+    msg.replace("\r\n", " ").replace(['\n', '\r'], " ")
+}
+
+/// Whether a file operand reads standard input.
+fn reads_stdin(spec: &str) -> bool {
+    file_handler::parse_table_spec(spec)
+        .is_ok_and(|(_, path)| path.as_os_str() == file_handler::STDIN_SPEC)
+}
+
+/// The text of every `-s` / `-f` argument, in command-line order. Files are
+/// read up front, so a mistyped `-f` path fails before anything runs.
+fn read_script(args: &SqawkArgs) -> SqawkResult<Vec<String>> {
+    let sql_from_stdin = args
+        .script
+        .iter()
+        .any(|s| matches!(s, SqlSource::File(f) if f == file_handler::STDIN_SPEC));
+    if sql_from_stdin && args.files.iter().any(|spec| reads_stdin(spec)) {
+        return Err(SqawkError::InvalidFileSpec(
+            "standard input cannot supply both SQL (-f -) and a table (-)".to_string(),
+        ));
+    }
+    let mut stdin_read = false;
+    let texts: Vec<(bool, String)> = args
+        .script
+        .iter()
+        .map(|source| {
+            let is_file = matches!(source, SqlSource::File(_));
+            read_source(source, &mut stdin_read).map(|text| (is_file, text))
+        })
+        .collect::<SqawkResult<_>>()?;
+    // A file with no statements (empty, or only whitespace) runs nothing;
+    // an empty `-s` is still an error.
+    Ok(texts
+        .into_iter()
+        .filter(|(is_file, text)| !(*is_file && text.trim().is_empty()))
+        .map(|(_, text)| text)
+        .collect())
+}
+
+/// The SQL text of one `-s` / `-f` argument.
+fn read_source(source: &SqlSource, stdin_read: &mut bool) -> SqawkResult<String> {
+    match source {
+        SqlSource::Text(sql) => Ok(sql.clone()),
+        SqlSource::File(path) if path == file_handler::STDIN_SPEC => {
+            if *stdin_read {
+                return Err(SqawkError::InvalidFileSpec(
+                    "standard input can only be read once; '-f -' was given more than once"
+                        .to_string(),
+                ));
+            }
+            *stdin_read = true;
+            let mut sql = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut sql)
+                .map_err(|e| SqawkError::open("standard input", e))?;
+            Ok(sql)
+        }
+        SqlSource::File(path) => {
+            std::fs::read_to_string(path).map_err(|e| SqawkError::open(path, e))
+        }
+    }
 }
 
 /// Main entry point for the sqawk utility
 ///
 /// This function orchestrates the entire application flow:
-/// 1. Parses command line arguments
-/// 2. Loads input files according to specifications
-/// 3. Executes SQL statements against the in-memory tables
-/// 4. Outputs results to stdout
-/// 5. Handles errors with context for better diagnostics
-/// 6. Optionally saves modified tables back to disk
+/// 1. Loads input files according to specifications
+/// 2. Executes SQL statements against the in-memory tables
+/// 3. Outputs results to stdout
+/// 4. Optionally saves modified tables back to disk
 ///
 /// The design follows a functional pipeline approach:
 /// - Files → In-memory Tables → SQL Processing → Results → (Optional) File Writeback
 ///
 /// # Returns
 /// * `Ok(())` if all operations completed successfully
-/// * `Err` with context if any step fails
-fn run() -> Result<()> {
-    // Step 1: Parse command-line arguments
-    // This handles -s/--sql, file specs, -F (field separator), --write, and -v flags
-    let args = cli::parse_args()?;
-
-    // Step 1b: Create a centralized application configuration
+/// * `Err` with the first error; `main` prints it as one line
+fn run(args: SqawkArgs) -> SqawkResult<()> {
+    // Create a centralized application configuration
     // This will be passed to all components that need configuration settings
-    let field_separator = args
-        .field_separator
-        .as_deref()
-        .map(cli::validate_separator)
-        .transpose()?;
     let config = AppConfig::new(
-        args.verbose,          // Verbose output flag
-        field_separator,       // Field separator for tables
-        args.tabledef.clone(), // Table column definitions
-        args.write,            // Whether to write changes to files
+        args.verbose,                 // Verbose output flag
+        args.field_separator.clone(), // Field separator for tables
+        args.tabledef.clone(),        // Table column definitions
+        args.write,                   // Whether to write changes to files
     )
     .with_no_header(args.no_header)
-    .with_comments(args.comments);
+    .with_comments(args.comments)
+    .with_output_delimiter(args.output_delimiter.clone())
+    .with_no_output_header(args.no_output_header);
 
-    // Configure diagnostics output if verbose mode is enabled (-v flag)
-    // This is important for debugging and understanding the execution flow
+    // Debugging output (-v); its format is not stable.
     if config.verbose() {
-        eprintln!("Running in verbose mode");
-        eprintln!("Arguments: {args:?}");
+        diag!("Running in verbose mode");
+        diag!("Arguments: {args:?}");
     }
 
-    // Step 2a: Create a new Database instance to serve as the central store for tables
+    let script = read_script(&args)?;
+
+    // Create a new Database instance to serve as the central store for tables
     let mut database = Database::new();
 
-    // Step 2b: Compile table definitions from the CLI arguments
+    // Compile table definitions from the CLI arguments
     // This makes Database the source of truth for table schemas defined via CLI
-    database
-        .compile_table_definitions(&config)
-        .context("Failed to compile table definitions")?;
+    database.compile_table_definitions(&config)?;
 
-    // Step 2c: Initialize the file handler with the application configuration
+    // Initialize the file handler with the application configuration
     // The file handler uses config for field separator and verbosity
-    // Note: table definitions are now handled by Database directly
     let mut file_handler = FileHandler::new(&config, &mut database);
 
     // The REPL reads its commands from stdin, so it cannot also consume stdin
     // as table data: whichever got there first would starve the other.
-    if args.interactive
-        && args.files.iter().any(|spec| {
-            file_handler::parse_table_spec(spec)
-                .is_ok_and(|(_, path)| path.as_os_str() == file_handler::STDIN_SPEC)
-        })
-    {
-        anyhow::bail!(
+    if args.interactive && args.files.iter().any(|spec| reads_stdin(spec)) {
+        return Err(SqawkError::InvalidFileSpec(
             "cannot read a table from standard input in interactive mode: \
              the REPL reads its own commands from stdin"
-        );
+                .to_string(),
+        ));
     }
 
-    // Step 2b: Load all specified files into in-memory tables
+    // Load all specified files into in-memory tables
     // Each file can specify its table name with table_name=file_path syntax
     for file_spec in &args.files {
-        file_handler
-            .load_file(file_spec)
-            .with_context(|| format!("Failed to load file: {file_spec}"))?;
+        file_handler.load_file(file_spec)?;
     }
 
     // Log table loading results in verbose mode
     if config.verbose() {
         let table_count = file_handler.table_count();
-        eprintln!("Loaded {table_count} tables");
+        diag!("Loaded {table_count} tables");
         for table_name in file_handler.table_names() {
-            eprintln!("Table '{table_name}' loaded");
+            diag!("Table '{table_name}' loaded");
         }
     }
 
@@ -159,7 +226,7 @@ fn run() -> Result<()> {
         file_handler.disable_stdin();
     }
 
-    // Step 3: Create SQL executor
+    // Create SQL executor
     // The executor maintains state across statements, allowing multi-statement operations
     let mut sql_executor = SqlExecutor::new(&mut database, &mut file_handler, &config);
 
@@ -167,24 +234,20 @@ fn run() -> Result<()> {
     if args.interactive {
         // Start REPL (Read-Eval-Print Loop) for interactive SQL entry
         let mut repl = Repl::new(sql_executor, &config);
-        match repl.run() {
-            Ok(_) => return Ok(()),
-            Err(e) => return Err(anyhow::anyhow!("Failed to run interactive mode: {}", e)),
-        }
+        return repl.run().map_err(|e| SqawkError::VmError(e.to_string()));
     }
 
     let mut stdout_open = true;
+    let header = !config.no_output_header();
 
     // Process each SQL statement in the order specified on the command line
     // This allows operations like: UPDATE -> DELETE -> SELECT to see the effects
-    for sql in &args.sql {
+    for sql in &script {
         // Execute the SQL statement against the in-memory tables
         // The result may be a table (for SELECT) or None (for UPDATE, DELETE, INSERT)
-        let result = sql_executor
-            .execute(sql)
-            .with_context(|| format!("Failed to execute SQL: {sql}"))?;
+        let result = sql_executor.execute(sql)?;
 
-        // Step 4: Output results to stdout (for SELECT queries).
+        // Output results to stdout (for SELECT queries).
         //
         // One result set per statement, each with its own header. They used to
         // share a single buffer and schema, so `SELECT a; SELECT b` printed
@@ -192,36 +255,34 @@ fn run() -> Result<()> {
         for table in &result {
             if config.verbose() {
                 let row_count = table.row_count();
-                eprintln!("Query returned {row_count} rows");
+                diag!("Query returned {row_count} rows");
             }
             // Print the result table in delimiter-separated format. Once the
             // reader of a pipe has gone away (`sqawk ... | head`), stop
             // printing but keep going: later statements and --write still run.
             if stdout_open {
-                if let Err(e) = table.print_to_stdout() {
+                if let Err(e) = table.print_to_stdout(header) {
                     if e.kind() != std::io::ErrorKind::BrokenPipe {
-                        return Err(e).context("Failed to write results");
+                        return Err(SqawkError::write("standard output", e));
                     }
                     stdout_open = false;
                 }
             }
         }
         if result.is_empty() && config.verbose() {
-            eprintln!("Query executed successfully (no results to display)");
+            diag!("Query executed successfully (no results to display)");
         }
     }
 
-    // Step 5: Handle file writeback based on the configuration
+    // Handle file writeback based on the configuration
     // By default, Sqawk operates in read-only mode unless explicitly told to write
     if config.write_changes() {
         // Only tables that were actually modified (by UPDATE, INSERT, DELETE)
         // will be written back to their source files
-        sql_executor
-            .save_modified_tables()
-            .context("Failed to save modified tables")?;
+        sql_executor.save_modified_tables()?;
     } else if config.verbose() {
         // In verbose mode, remind the user that changes weren't saved
-        eprintln!("Changes not saved: use --write to save changes to files");
+        diag!("Changes not saved: use --write to save changes to files");
     }
 
     // The process is about to exit, so freeing every loaded cell one by one

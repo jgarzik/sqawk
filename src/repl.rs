@@ -13,10 +13,10 @@ use crate::config::AppConfig;
 use crate::error::SqawkError;
 use crate::sql_executor::SqlExecutor;
 
-// Define a custom error type for the REPL
+/// An error from one REPL command. Its `Display` is the bare message; the
+/// REPL prints it as `sqawk: <message>`, the CLI's error form.
 #[derive(Debug)]
 pub enum ReplError {
-    SqlExecutor(anyhow::Error),
     Readline(ReadlineError),
     Io(std::io::Error),
     Sqawk(SqawkError),
@@ -25,21 +25,14 @@ pub enum ReplError {
 impl fmt::Display for ReplError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ReplError::SqlExecutor(err) => write!(f, "SQL execution error: {}", err),
-            ReplError::Readline(err) => write!(f, "Input error: {}", err),
-            ReplError::Io(err) => write!(f, "I/O error: {}", err),
-            ReplError::Sqawk(err) => write!(f, "Sqawk error: {}", err),
+            ReplError::Readline(err) => write!(f, "{}", err),
+            ReplError::Io(err) => write!(f, "{}", crate::error::io_reason(err)),
+            ReplError::Sqawk(err) => write!(f, "{}", err),
         }
     }
 }
 
 impl std::error::Error for ReplError {}
-
-impl From<anyhow::Error> for ReplError {
-    fn from(err: anyhow::Error) -> Self {
-        ReplError::SqlExecutor(err)
-    }
-}
 
 impl From<ReadlineError> for ReplError {
     fn from(err: ReadlineError) -> Self {
@@ -250,34 +243,34 @@ impl<'a> Repl<'a> {
 
     /// Run the REPL
     pub fn run(&mut self) -> Result<()> {
-        println!("Welcome to Sqawk interactive mode!");
-        println!("Enter SQL statements or commands, terminate with ';'.");
-        println!("Type .help for available commands.");
+        outln!("Welcome to Sqawk interactive mode!");
+        outln!("Enter SQL statements or commands, terminate with ';'.");
+        outln!("Type .help for available commands.");
 
         while self.running {
             match self.read_command() {
                 Ok(command) => {
                     if let Err(e) = self.execute_command(command) {
-                        eprintln!("Error: {}", e);
+                        diag!("sqawk: {}", crate::one_line(&e.to_string()));
                     }
                 }
                 Err(ReadlineError::Interrupted) => {
-                    println!("CTRL-C");
+                    outln!("CTRL-C");
                     break;
                 }
                 Err(ReadlineError::Eof) => {
-                    println!("CTRL-D");
+                    outln!("CTRL-D");
                     break;
                 }
                 Err(err) => {
-                    eprintln!("Error: {:?}", err);
+                    diag!("sqawk: {}", crate::one_line(&err.to_string()));
                     break;
                 }
             }
         }
 
         self.editor.save_history(HISTORY_FILE).unwrap_or_else(|e| {
-            eprintln!("Failed to save history: {}", e);
+            diag!("sqawk: cannot save history: {}", e);
         });
 
         Ok(())
@@ -410,12 +403,12 @@ impl<'a> Repl<'a> {
             ReplCommand::Show(option) => self.show_settings(option.as_deref()),
             ReplCommand::Stats(option) => self.show_stats(option.as_deref()),
             ReplCommand::Print(text) => {
-                println!("{}", text);
+                outln!("{}", text);
                 Ok(())
             }
             ReplCommand::Version => self.show_version(),
             ReplCommand::Unknown(msg) => {
-                eprintln!("{}", msg);
+                diag!("sqawk: {}", msg);
                 Ok(())
             }
         }
@@ -430,27 +423,27 @@ impl<'a> Repl<'a> {
             None
         };
 
-        let result = match self.executor.execute_sql(sql) {
-            Ok(result) => result,
-            Err(err) => return Err(ReplError::SqlExecutor(err)),
-        };
+        let result = self.executor.execute_sql(sql)?;
 
         // Print every statement's result set, each with its own header.
         for result_set in &result {
             if result_set.rows.is_empty() {
-                println!("Query returned no rows");
+                outln!("Query returned no rows");
             } else {
-                println!("Query returned {} rows", result_set.rows.len());
-                // Header and rows as CSV, quoted where a field needs it
-                // (NULL is already an empty field in a ResultSet).
+                outln!("Query returned {} rows", result_set.rows.len());
+                // Header and rows with the output delimiter, quoted where a
+                // field needs it (NULL is already an empty field in a
+                // ResultSet).
                 let writer = crate::table::RecordWriter {
-                    delimiter: b',',
+                    delimiter: crate::table::delimiter_byte(&self.config.output_delimiter()),
                     terminator: b"\n",
                     comments: false,
                 };
                 let stdout = std::io::stdout();
                 let mut out = stdout.lock();
-                let _ = writer.write(&mut out, result_set.columns.iter().map(String::as_str));
+                if !self.config.no_output_header() {
+                    let _ = writer.write(&mut out, result_set.columns.iter().map(String::as_str));
+                }
                 for row in &result_set.rows {
                     let _ = writer.write(&mut out, row.iter().map(String::as_str));
                 }
@@ -467,28 +460,25 @@ impl<'a> Repl<'a> {
             // matched nothing otherwise produced no output at all, leaving it
             // ambiguous whether it had run.
             if let Ok(affected_rows) = self.executor.get_affected_row_count() {
-                println!("{} rows affected", affected_rows);
+                outln!("{} rows affected", affected_rows);
             }
         }
 
         // Display query statistics if enabled
         if let Some(start_time) = start_time {
             let execution_time = start_time.elapsed();
-            println!("Run Time: {:.3} ms", execution_time.as_secs_f64() * 1000.0);
+            outln!("Run Time: {:.3} ms", execution_time.as_secs_f64() * 1000.0);
         }
 
         // Save changes if write mode is enabled
         if self.config.write_changes() {
-            let saved_count = match self.executor.save_modified_tables() {
-                Ok(count) => count,
-                Err(err) => return Err(ReplError::SqlExecutor(err)),
-            };
+            let saved_count = self.executor.save_modified_tables()?;
 
             if saved_count > 0 {
-                println!("Changes saved to {} tables", saved_count);
+                outln!("Changes saved to {} tables", saved_count);
             }
         } else if self.executor.has_modified_tables() {
-            println!("Changes not saved: use .write to save changes to files");
+            outln!("Changes not saved: use .write to save changes to files");
         }
 
         Ok(())
@@ -498,18 +488,15 @@ impl<'a> Repl<'a> {
     fn load_file(&mut self, file_spec: &str) -> Result<()> {
         // The file load now needs to pass the field separator
         // Since our SqlExecutor's load_file method has been updated to handle it
-        let result = match self.executor.load_file(file_spec) {
-            Ok(result) => result,
-            Err(err) => return Err(ReplError::Sqawk(err)),
-        };
+        let result = self.executor.load_file(file_spec)?;
 
         match result {
             Some((table_name, file_path)) => {
-                println!("Loaded table '{}' from '{}'", table_name, file_path);
+                outln!("Loaded table '{}' from '{}'", table_name, file_path);
                 Ok(())
             }
             None => {
-                println!("No table created");
+                outln!("No table created");
                 Ok(())
             }
         }
@@ -519,11 +506,11 @@ impl<'a> Repl<'a> {
     fn show_tables(&self, pattern: Option<&str>) -> Result<()> {
         let tables = self.executor.table_names();
         if tables.is_empty() {
-            println!("No tables loaded");
+            outln!("No tables loaded");
             return Ok(());
         }
 
-        println!("Tables:");
+        outln!("Tables:");
         match pattern {
             Some(pat) => {
                 // Filter tables matching the pattern (SQL LIKE pattern)
@@ -536,7 +523,7 @@ impl<'a> Repl<'a> {
                     tables.iter().filter(|name| regex.is_match(name)).collect();
 
                 if matching_tables.is_empty() {
-                    println!("  No tables match pattern: {}", pat);
+                    outln!("  No tables match pattern: {}", pat);
                 } else {
                     for table in matching_tables {
                         let modified = if self.executor.is_table_modified(table) {
@@ -544,7 +531,7 @@ impl<'a> Repl<'a> {
                         } else {
                             ""
                         };
-                        println!("  {}{}", table, modified);
+                        outln!("  {}{}", table, modified);
                     }
                 }
             }
@@ -556,7 +543,7 @@ impl<'a> Repl<'a> {
                     } else {
                         ""
                     };
-                    println!("  {}{}", table, modified);
+                    outln!("  {}{}", table, modified);
                 }
             }
         }
@@ -568,27 +555,27 @@ impl<'a> Repl<'a> {
 
     /// Show help message
     fn show_help(&self) -> Result<()> {
-        println!("Available commands:");
-        println!("  .cd DIRECTORY         Change the working directory to DIRECTORY");
-        println!(
+        outln!("Available commands:");
+        outln!("  .cd DIRECTORY         Change the working directory to DIRECTORY");
+        outln!(
             "  .changes [on|off]     Show number of rows changed by SQL (currently: {})",
             if self.show_changes { "ON" } else { "OFF" }
         );
-        println!("  .exit ?CODE?          Exit the REPL with optional code");
-        println!("  .help                 Show this help message");
-        println!("  .load [TABLE=]FILE    Load FILE into TABLE");
-        println!("  .print STRING...      Print literal STRING");
-        println!("  .quit                 Exit the REPL");
-        println!("  .save ?TABLE?         Save changes to all tables or a specific TABLE");
-        println!("  .schema ?TABLE?       Show schema for a specific table or all tables");
-        println!("  .show ?WHAT?          Show current settings and status information");
-        println!(
+        outln!("  .exit ?CODE?          Exit the REPL with optional code");
+        outln!("  .help                 Show this help message");
+        outln!("  .load [TABLE=]FILE    Load FILE into TABLE");
+        outln!("  .print STRING...      Print literal STRING");
+        outln!("  .quit                 Exit the REPL");
+        outln!("  .save ?TABLE?         Save changes to all tables or a specific TABLE");
+        outln!("  .schema ?TABLE?       Show schema for a specific table or all tables");
+        outln!("  .show ?WHAT?          Show current settings and status information");
+        outln!(
             "  .stats [on|off]       Toggle statistics display (currently: {})",
             if self.show_stats { "ON" } else { "OFF" }
         );
-        println!("  .tables ?TABLE?       List names of tables matching LIKE pattern TABLE");
-        println!("  .version              Show source, library and compiler versions");
-        println!(
+        outln!("  .tables ?TABLE?       List names of tables matching LIKE pattern TABLE");
+        outln!("  .version              Show source, library and compiler versions");
+        outln!(
             "  .write [on|off]       Toggle writing changes to files (currently: {})",
             if self.config.write_changes() {
                 "ON"
@@ -596,7 +583,7 @@ impl<'a> Repl<'a> {
                 "OFF"
             }
         );
-        println!("  SQL_STATEMENT         Execute SQL statement");
+        outln!("  SQL_STATEMENT         Execute SQL statement");
         Ok(())
     }
 
@@ -609,10 +596,10 @@ impl<'a> Repl<'a> {
         if let Some(code_str) = code {
             match code_str.parse::<i32>() {
                 Ok(code) => {
-                    println!("Exit code set to: {}", code);
+                    outln!("Exit code set to: {}", code);
                 }
                 Err(_) => {
-                    eprintln!("Invalid exit code: {}", code_str);
+                    diag!("sqawk: invalid exit code: {}", code_str);
                 }
             }
         }
@@ -627,18 +614,18 @@ impl<'a> Repl<'a> {
                 // Show schema for specific table
                 match self.executor.get_table_column_types(name) {
                     Ok(column_types) => {
-                        println!("CREATE TABLE {} (", name);
+                        outln!("CREATE TABLE {} (", name);
                         for (i, (column_name, data_type)) in column_types.iter().enumerate() {
                             if i < column_types.len() - 1 {
-                                println!("  {} {},", column_name, data_type);
+                                outln!("  {} {},", column_name, data_type);
                             } else {
-                                println!("  {} {}", column_name, data_type);
+                                outln!("  {} {}", column_name, data_type);
                             }
                         }
-                        println!(");");
+                        outln!(");");
                     }
                     Err(_) => {
-                        eprintln!("No such table: {}", name);
+                        diag!("sqawk: no such table: {}", name);
                     }
                 }
             }
@@ -646,15 +633,15 @@ impl<'a> Repl<'a> {
                 // Show schema for all tables
                 for name in self.executor.table_names() {
                     if let Ok(column_types) = self.executor.get_table_column_types(&name) {
-                        println!("CREATE TABLE {} (", name);
+                        outln!("CREATE TABLE {} (", name);
                         for (i, (column_name, data_type)) in column_types.iter().enumerate() {
                             if i < column_types.len() - 1 {
-                                println!("  {} {},", column_name, data_type);
+                                outln!("  {} {},", column_name, data_type);
                             } else {
-                                println!("  {} {}", column_name, data_type);
+                                outln!("  {} {}", column_name, data_type);
                             }
                         }
-                        println!(");");
+                        outln!(");");
                     }
                 }
             }
@@ -666,11 +653,15 @@ impl<'a> Repl<'a> {
     fn change_directory(&self, dir: &str) -> Result<()> {
         match std::env::set_current_dir(dir) {
             Ok(_) => {
-                println!("Changed directory to {}", dir);
+                outln!("Changed directory to {}", dir);
                 Ok(())
             }
             Err(e) => {
-                eprintln!("Failed to change directory: {}", e);
+                diag!(
+                    "sqawk: cannot change directory to '{}': {}",
+                    dir,
+                    crate::error::io_reason(&e)
+                );
                 Ok(())
             }
         }
@@ -681,16 +672,16 @@ impl<'a> Repl<'a> {
         match arg {
             Some("on") => {
                 self.show_changes = true;
-                println!("Changes display enabled");
+                outln!("Changes display enabled");
             }
             Some("off") => {
                 self.show_changes = false;
-                println!("Changes display disabled");
+                outln!("Changes display disabled");
             }
             _ => {
                 // Toggle current state
                 self.show_changes = !self.show_changes;
-                println!(
+                outln!(
                     "Changes display {}",
                     if self.show_changes {
                         "enabled"
@@ -708,8 +699,8 @@ impl<'a> Repl<'a> {
     /// Read from the manifest rather than written out, so it cannot drift.
     /// This reported 0.1.1 for a long time while the crate was at 0.8.0.
     fn show_version(&self) -> Result<()> {
-        println!("Sqawk version {}", env!("CARGO_PKG_VERSION"));
-        println!("sqlparser {}", crate::vm::SQLPARSER_VERSION);
+        outln!("Sqawk version {}", env!("CARGO_PKG_VERSION"));
+        outln!("sqlparser {}", crate::vm::SQLPARSER_VERSION);
         Ok(())
     }
 
@@ -729,48 +720,24 @@ impl<'a> Repl<'a> {
                 }
 
                 if !self.executor.table_is_modified(name) {
-                    println!("Table '{}' has no changes to save", name);
+                    outln!("Table '{}' has no changes to save", name);
                     return Ok(());
                 }
 
-                match self.executor.save_table(name) {
-                    Ok(_) => {
-                        println!("Changes saved to table '{}'", name);
-                        Ok(())
-                    }
-                    Err(err) => {
-                        // Print specific guidance for NoFilePath errors related to CREATE TABLE usage
-                        if let crate::error::SqawkError::NoFilePath(table) = &err {
-                            eprintln!("Error: Table '{}' has no associated file path", table);
-                            eprintln!("Hint: When creating tables with CREATE TABLE, use the LOCATION clause");
-                            eprintln!(
-                                "Example: CREATE TABLE {} (...) LOCATION './file.csv';",
-                                table
-                            );
-                        } else {
-                            eprintln!("Error saving table '{}': {}", name, err);
-                        }
-                        Err(ReplError::Sqawk(err))
-                    }
-                }
+                self.executor.save_table(name)?;
+                outln!("Changes saved to table '{}'", name);
+                Ok(())
             }
             None => {
                 // Save all modified tables
                 if !self.executor.has_modified_tables() {
-                    println!("No modified tables to save");
+                    outln!("No modified tables to save");
                     return Ok(());
                 }
 
-                match self.executor.save_modified_tables() {
-                    Ok(count) => {
-                        println!("Changes saved to {} tables", count);
-                        Ok(())
-                    }
-                    Err(err) => {
-                        eprintln!("Error saving modified tables: {}", err);
-                        Err(ReplError::SqlExecutor(err))
-                    }
-                }
+                let count = self.executor.save_modified_tables()?;
+                outln!("Changes saved to {} tables", count);
+                Ok(())
             }
         }
     }
@@ -782,17 +749,17 @@ impl Repl<'_> {
         match arg {
             Some("on") => {
                 self.config.set_write_changes(true);
-                println!("Write mode enabled - changes will be saved to files");
+                outln!("Write mode enabled - changes will be saved to files");
             }
             Some("off") => {
                 self.config.set_write_changes(false);
-                println!("Write mode disabled - changes will not be saved to files");
+                outln!("Write mode disabled - changes will not be saved to files");
             }
             _ => {
                 // Toggle current state
                 let current = self.config.write_changes();
                 self.config.set_write_changes(!current);
-                println!(
+                outln!(
                     "Write mode {}",
                     if self.config.write_changes() {
                         "enabled"
@@ -814,8 +781,8 @@ impl Repl<'_> {
             }
             _ => {
                 // Show general settings
-                println!("Sqawk Settings:");
-                println!(
+                outln!("Sqawk Settings:");
+                outln!(
                     "  Write Mode:   {}",
                     if self.config.write_changes() {
                         "ON"
@@ -823,24 +790,24 @@ impl Repl<'_> {
                         "OFF"
                     }
                 );
-                println!(
+                outln!(
                     "  Changes Display: {}",
                     if self.show_changes { "ON" } else { "OFF" }
                 );
-                println!(
+                outln!(
                     "  Statistics:  {}",
                     if self.show_stats { "ON" } else { "OFF" }
                 );
-                println!(
+                outln!(
                     "  Verbose:     {}",
                     if self.config.verbose() { "ON" } else { "OFF" }
                 );
 
                 // Show field separator if defined
                 if let Some(sep) = self.config.field_separator() {
-                    println!("  Field Separator: '{}'", sep);
+                    outln!("  Field Separator: '{}'", sep);
                 } else {
-                    println!("  Field Separator: Default (tab for .tsv/.tab, else comma)");
+                    outln!("  Field Separator: Default (tab for .tsv/.tab, else comma)");
                 }
 
                 // Show counts
@@ -850,8 +817,8 @@ impl Repl<'_> {
                     .filter(|t| self.executor.is_table_modified(t))
                     .count();
 
-                println!("  Tables Loaded: {}", tables.len());
-                println!("  Modified Tables: {}", modified_count);
+                outln!("  Tables Loaded: {}", tables.len());
+                outln!("  Modified Tables: {}", modified_count);
 
                 Ok(())
             }
@@ -862,11 +829,11 @@ impl Repl<'_> {
     fn show_tables_metadata(&self) -> Result<()> {
         let tables = self.executor.table_names();
         if tables.is_empty() {
-            println!("No tables loaded");
+            outln!("No tables loaded");
             return Ok(());
         }
 
-        println!("Table Information:");
+        outln!("Table Information:");
         for table_name in tables {
             // Get table metadata
             let is_modified = self.executor.is_table_modified(&table_name);
@@ -875,16 +842,16 @@ impl Repl<'_> {
                 Err(_) => 0,
             };
 
-            println!("  Table: {}", table_name);
-            println!(
+            outln!("  Table: {}", table_name);
+            outln!(
                 "    Status: {}",
                 if is_modified { "MODIFIED" } else { "Unchanged" }
             );
-            println!("    Columns: {}", column_count);
+            outln!("    Columns: {}", column_count);
             // We don't have direct access to row count or filename in current implementation
             // These would be good additions to the API in the future
 
-            println!();
+            outln!();
         }
 
         Ok(())
@@ -895,18 +862,18 @@ impl Repl<'_> {
         match option {
             Some("on") => {
                 self.show_stats = true;
-                println!("Statistics display enabled");
+                outln!("Statistics display enabled");
                 Ok(())
             }
             Some("off") => {
                 self.show_stats = false;
-                println!("Statistics display disabled");
+                outln!("Statistics display disabled");
                 Ok(())
             }
             None => {
                 // Toggle the current state
                 self.show_stats = !self.show_stats;
-                println!(
+                outln!(
                     "Statistics display {}",
                     if self.show_stats {
                         "enabled"
@@ -917,8 +884,8 @@ impl Repl<'_> {
                 Ok(())
             }
             Some(_) => {
-                println!("Unknown option for .stats");
-                println!("Usage: .stats [on|off]");
+                outln!("Unknown option for .stats");
+                outln!("Usage: .stats [on|off]");
                 Ok(())
             }
         }

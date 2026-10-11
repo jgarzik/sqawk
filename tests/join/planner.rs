@@ -141,7 +141,7 @@ fn on_clause_cannot_reference_a_later_table() -> TestResult {
 fn right_join_after_outer_join_is_unsupported() -> TestResult {
     assert_on_fails(
         "SELECT lt.a FROM lt LEFT JOIN rt ON lt.k = rt.k RIGHT JOIN xt ON xt.k = lt.k",
-        "Unsupported",
+        "not supported",
     )
 }
 

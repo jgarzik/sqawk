@@ -171,15 +171,16 @@ impl Database {
                     self.add_table(table_name.to_string(), table)?;
 
                     if config.verbose() {
-                        eprintln!(
+                        diag!(
                             "Compiled table definition for '{}' with {} columns",
-                            table_name, columns_len
+                            table_name,
+                            columns_len
                         );
                     }
                 }
             } else if config.verbose() {
-                eprintln!("Invalid table definition format: {}", tabledef);
-                eprintln!("Expected format: table_name:col1,col2,...");
+                diag!("Invalid table definition format: {}", tabledef);
+                diag!("Expected format: table_name:col1,col2,...");
             }
         }
 

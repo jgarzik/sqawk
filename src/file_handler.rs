@@ -103,7 +103,8 @@ impl FileHandler {
         }
         self.stdin_consumed = true;
         let mut data = Vec::new();
-        std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut data)?;
+        std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut data)
+            .map_err(|e| SqawkError::open("standard input", e))?;
         Ok(data)
     }
 
@@ -157,13 +158,13 @@ impl FileHandler {
         let canonical = if from_stdin {
             None
         } else {
-            let real = std::fs::canonicalize(&file_path)
-                .map_err(|_| SqawkError::FileNotFound(file_path_str.clone()))?;
+            let real =
+                std::fs::canonicalize(&file_path).map_err(|e| SqawkError::open(&file_path, e))?;
             if real.is_dir() {
-                return Err(SqawkError::InvalidFileSpec(format!(
-                    "'{}' is a directory, not a file",
-                    file_path_str
-                )));
+                return Err(SqawkError::open(
+                    &file_path,
+                    std::io::Error::new(std::io::ErrorKind::IsADirectory, "Is a directory"),
+                ));
             }
             Some(real)
         };
@@ -194,7 +195,7 @@ impl FileHandler {
 
         let verbose = self.config.verbose();
         if predefined_columns.is_some() && verbose {
-            eprintln!(
+            diag!(
                 "Table '{}' has predefined schema, using those column names",
                 table_name
             );
@@ -216,7 +217,7 @@ impl FileHandler {
 
         let data = match &canonical {
             None => self.read_stdin()?,
-            Some(real) => std::fs::read(real)?,
+            Some(real) => std::fs::read(real).map_err(|e| SqawkError::open(&file_path, e))?,
         };
         let table = csv_handler::read_table(
             &table_name,
@@ -245,7 +246,7 @@ impl FileHandler {
         if predefined_columns.is_some() {
             // Replace the --tabledef placeholder with the loaded table.
             if verbose {
-                eprintln!(
+                diag!(
                     "Replacing predefined schema for '{}' with loaded data",
                     table_name
                 );
@@ -341,21 +342,22 @@ impl FileHandler {
         let table = self.get_table(table_name)?;
 
         if self.config.verbose() {
-            eprintln!("In FileHandler::save_table for table '{}'", table_name);
+            diag!("In FileHandler::save_table for table '{}'", table_name);
 
             // Access database directly to check if the table exists there
             let db = unsafe { &*self.database };
             if let Ok(db_table) = db.get_table(table_name) {
                 if let Some(path) = db_table.file_path() {
-                    eprintln!(
+                    diag!(
                         "Database has table '{}' with file_path '{:?}'",
-                        table_name, path
+                        table_name,
+                        path
                     );
                 } else {
-                    eprintln!("Database has table '{}' but NO file_path", table_name);
+                    diag!("Database has table '{}' but NO file_path", table_name);
                 }
             } else {
-                eprintln!("Table '{}' not found in database", table_name);
+                diag!("Table '{}' not found in database", table_name);
             }
         }
 
@@ -363,15 +365,15 @@ impl FileHandler {
         let file_path = match table.file_path() {
             Some(path) => {
                 if self.config.verbose() {
-                    eprintln!("Table '{}' has file_path '{:?}'", table_name, path);
+                    diag!("Table '{}' has file_path '{:?}'", table_name, path);
                 }
                 path
             }
             None => {
                 // Log debugging information
                 if self.config.verbose() {
-                    eprintln!("Table '{}' has NO file_path", table_name);
-                    eprintln!(
+                    diag!("Table '{}' has NO file_path", table_name);
+                    diag!(
                         "  Table details - Name: {}, Columns: {}, Delimiter: '{}'",
                         table.name(),
                         table.columns().join(","),
@@ -387,7 +389,7 @@ impl FileHandler {
         // Make sure parent directories exist
         if let Some(parent) = file_path.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(SqawkError::IoError)?;
+                std::fs::create_dir_all(parent).map_err(|e| SqawkError::write(file_path, e))?;
             }
         }
 

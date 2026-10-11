@@ -196,7 +196,7 @@ fn unclosed_quote_is_load_error() -> TestResult {
     let (_out, stderr, ok) = run_sql("DELETE FROM u", &[&p], &["--write"])?;
     assert!(!ok);
     assert!(
-        stderr.contains("unterminated quoted field starting at line 3"),
+        stderr.contains("u.csv: line 3: unterminated quoted field"),
         "{stderr}"
     );
     assert_eq!(fs::read(&p)?, content);

@@ -4,9 +4,15 @@
 //! It provides a comprehensive error handling system that categorizes
 //! different failure modes, supports error propagation, and supplies
 //! helpful error messages to users.
+//!
+//! Every error's `Display` is one complete, self-contained line: the CLI
+//! prints it as `sqawk: <message>`. No variant exposes an inner error through
+//! `source()`, because its message is already part of the line; a caller
+//! that walked the chain would print the cause twice.
 
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
 
 /// SqawkError represents all possible errors that can occur in the sqawk application
 ///
@@ -23,6 +29,14 @@ use std::fmt;
 pub enum SqawkError {
     /// Error during file system operations (reading/writing files)
     IoError(std::io::Error),
+
+    /// An I/O error on a named file: `<action> '<path>': <reason>`, e.g.
+    /// `cannot open 'x.csv': Permission denied`
+    FileError {
+        action: &'static str,
+        path: String,
+        error: std::io::Error,
+    },
 
     /// Error while parsing or processing delimited file data
     CsvError(csv::Error),
@@ -43,9 +57,6 @@ pub enum SqawkError {
     /// Error when trying to create a table that already exists
     TableAlreadyExists(String),
 
-    /// Error when a file doesn't exist
-    FileNotFound(String),
-
     /// Error when a table doesn't have an associated file path
     NoFilePath(String),
 
@@ -55,7 +66,7 @@ pub enum SqawkError {
     /// Error for invalid file=table specifications
     InvalidFileSpec(String),
 
-    /// Error for SQL features that aren't implemented yet
+    /// Error for SQL that sqawk parses but does not implement
     UnsupportedSqlFeature(String),
 
     /// Error for semantically invalid SQL queries
@@ -65,42 +76,82 @@ pub enum SqawkError {
     VmError(String),
 }
 
-impl fmt::Display for SqawkError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SqawkError::IoError(e) => write!(f, "I/O error: {}", e),
-            SqawkError::CsvError(e) => write!(f, "File parsing error: {}", e),
-            SqawkError::CsvParseError { file, line, error } => {
-                write!(f, "CSV parse error in {} at line {}: {}", file, line, error)
-            }
-            SqawkError::SqlParseError(e) => write!(f, "SQL parsing error: {}", e),
-            SqawkError::TableNotFound(name) => write!(f, "no such table: {}", name),
-            SqawkError::TableAlreadyExists(name) => write!(f, "Table '{}' already exists", name),
-            SqawkError::FileNotFound(path) => write!(f, "File not found: {}", path),
-            SqawkError::NoFilePath(name) => {
-                write!(f, "Table '{}' has no associated file path", name)
-            }
-            SqawkError::ColumnNotFound(name) => write!(f, "no such column: {}", name),
-            SqawkError::InvalidFileSpec(spec) => write!(f, "Invalid file specification: {}", spec),
-            SqawkError::UnsupportedSqlFeature(feature) => {
-                write!(f, "Unsupported SQL feature: {}", feature)
-            }
-            SqawkError::InvalidSqlQuery(msg) => write!(f, "Invalid SQL query: {}", msg),
-            SqawkError::VmError(msg) => write!(f, "VM execution error: {}", msg),
+impl SqawkError {
+    /// An I/O error opening (reading) the file at `path`.
+    pub fn open(path: impl AsRef<Path>, error: std::io::Error) -> Self {
+        SqawkError::FileError {
+            action: "cannot open",
+            path: path.as_ref().display().to_string(),
+            error,
+        }
+    }
+
+    /// An I/O error writing the file at `path`.
+    pub fn write(path: impl AsRef<Path>, error: std::io::Error) -> Self {
+        SqawkError::FileError {
+            action: "cannot write",
+            path: path.as_ref().display().to_string(),
+            error,
         }
     }
 }
 
-impl Error for SqawkError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
+/// The reason part of an I/O error, without the `(os error N)` suffix the
+/// standard library appends, and without the `at path "..."` suffix the
+/// tempfile crate appends (which names an internal temporary file).
+pub fn io_reason(e: &std::io::Error) -> String {
+    let mut s = e.to_string();
+    if let Some(i) = s.find(" at path \"") {
+        s.truncate(i);
+    }
+    if let Some(i) = s.find(" (os error ") {
+        s.truncate(i);
+    }
+    s
+}
+
+impl fmt::Display for SqawkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SqawkError::IoError(e) => Some(e),
-            SqawkError::CsvError(e) => Some(e),
-            SqawkError::SqlParseError(e) => Some(e),
-            _ => None,
+            SqawkError::IoError(e) => write!(f, "{}", io_reason(e)),
+            SqawkError::FileError {
+                action,
+                path,
+                error,
+            } => write!(f, "{} '{}': {}", action, path, io_reason(error)),
+            SqawkError::CsvError(e) => write!(f, "{}", e),
+            SqawkError::CsvParseError { file, line, error } => {
+                write!(f, "{}: line {}: {}", file, line, error)
+            }
+            SqawkError::SqlParseError(e) => {
+                use sqlparser::parser::ParserError;
+                match e {
+                    ParserError::TokenizerError(s) | ParserError::ParserError(s) => {
+                        write!(f, "{}", s)
+                    }
+                    ParserError::RecursionLimitExceeded => write!(f, "recursion limit exceeded"),
+                }
+            }
+            SqawkError::TableNotFound(name) => write!(f, "no such table: {}", name),
+            SqawkError::TableAlreadyExists(name) => write!(f, "table {} already exists", name),
+            SqawkError::NoFilePath(name) => {
+                write!(
+                    f,
+                    "table '{}' has no associated file path \
+                     (CREATE TABLE ... LOCATION 'file.csv' gives it one)",
+                    name
+                )
+            }
+            SqawkError::ColumnNotFound(name) => write!(f, "no such column: {}", name),
+            SqawkError::InvalidFileSpec(msg)
+            | SqawkError::UnsupportedSqlFeature(msg)
+            | SqawkError::InvalidSqlQuery(msg)
+            | SqawkError::VmError(msg) => write!(f, "{}", msg),
         }
     }
 }
+
+impl Error for SqawkError {}
 
 // From implementations for automatic error conversion (replaces #[from])
 
@@ -128,24 +179,7 @@ impl From<sqlparser::parser::ParserError> for SqawkError {
 // but don't care about the exact error message
 impl PartialEq for SqawkError {
     fn eq(&self, other: &Self) -> bool {
-        // Match on self and other to check if they are the same variant
-        match (self, other) {
-            (SqawkError::IoError(_), SqawkError::IoError(_)) => true,
-            (SqawkError::CsvError(_), SqawkError::CsvError(_)) => true,
-            (SqawkError::CsvParseError { .. }, SqawkError::CsvParseError { .. }) => true,
-            (SqawkError::SqlParseError(_), SqawkError::SqlParseError(_)) => true,
-            (SqawkError::TableNotFound(_), SqawkError::TableNotFound(_)) => true,
-            (SqawkError::TableAlreadyExists(_), SqawkError::TableAlreadyExists(_)) => true,
-            (SqawkError::FileNotFound(_), SqawkError::FileNotFound(_)) => true,
-            (SqawkError::NoFilePath(_), SqawkError::NoFilePath(_)) => true,
-            (SqawkError::ColumnNotFound(_), SqawkError::ColumnNotFound(_)) => true,
-            (SqawkError::InvalidFileSpec(_), SqawkError::InvalidFileSpec(_)) => true,
-            (SqawkError::UnsupportedSqlFeature(_), SqawkError::UnsupportedSqlFeature(_)) => true,
-            (SqawkError::InvalidSqlQuery(_), SqawkError::InvalidSqlQuery(_)) => true,
-            (SqawkError::VmError(_), SqawkError::VmError(_)) => true,
-            // If variants are different, they are not equal
-            _ => false,
-        }
+        std::mem::discriminant(self) == std::mem::discriminant(other)
     }
 }
 
@@ -154,3 +188,22 @@ impl PartialEq for SqawkError {
 /// This type alias simplifies function signatures and error handling throughout the codebase.
 /// It represents either a successful result of type `T` or a `SqawkError`.
 pub type SqawkResult<T> = std::result::Result<T, SqawkError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn io_reason_strips_os_error_and_temp_path() {
+        let e = std::io::Error::from_raw_os_error(13);
+        assert_eq!(io_reason(&e), "Permission denied");
+        let e = std::io::Error::other("Permission denied (os error 13) at path \"/d/.tmpAb12\"");
+        assert_eq!(io_reason(&e), "Permission denied");
+    }
+
+    #[test]
+    fn file_error_names_file_once() {
+        let e = SqawkError::open("np.csv", std::io::Error::from_raw_os_error(13));
+        assert_eq!(e.to_string(), "cannot open 'np.csv': Permission denied");
+    }
+}

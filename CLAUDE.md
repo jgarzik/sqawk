@@ -39,7 +39,10 @@ Sqawk is an SQL-based CLI tool for processing delimiter-separated files (CSV, TS
 
 ### Core Components
 
-- **`main.rs`**: Entry point orchestrating the pipeline: CLI parsing → file loading → SQL execution → output → optional writeback
+- **`main.rs`**: Entry point orchestrating the pipeline: CLI parsing → file loading → SQL execution → output → optional writeback. Any error is printed once as `sqawk: <message>` (one line, exit 1); clap usage errors exit 2
+- **`cli.rs`**: clap arguments; `-s`/`-f` are merged into one ordered script by command-line position
+- **`error.rs`**: `SqawkError`; each `Display` is one complete line and no variant exposes a `source()` (that would print the cause twice). File I/O errors name the user's file (`SqawkError::open` / `write`), never a temp file
+- **`diag.rs`**: `diag!` / `outln!` -- every stderr diagnostic (errors, `-v`) and REPL stdout line goes through them; write errors are ignored, so a closed stream never panics. Do not use `eprintln!`/`println!`
 - **`database.rs`**: Central store for in-memory tables, manages table definitions and schemas
 - **`table.rs`**: In-memory table representation with columns, rows, and projection capabilities
 - **`sql_executor.rs`**: SQL parsing (via `sqlparser` crate) and execution against in-memory tables

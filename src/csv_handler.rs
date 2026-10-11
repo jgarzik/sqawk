@@ -179,7 +179,7 @@ pub fn read_table(
             return Err(SqawkError::CsvParseError {
                 file: source.to_string(),
                 line: quote_line,
-                error: format!("unterminated quoted field starting at line {quote_line}"),
+                error: "unterminated quoted field".to_string(),
             });
         }
     }
@@ -364,21 +364,30 @@ pub fn save_table(table: &Table, file_path: &Path) -> SqawkResult<()> {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
-    let temp_file = NamedTempFile::new_in(parent)?;
+    // Every failure names the target file, never the temp file; relative to
+    // the working directory when it is inside it.
+    let shown = std::env::current_dir()
+        .and_then(std::fs::canonicalize)
+        .ok()
+        .and_then(|cwd| target.strip_prefix(cwd).ok().map(Path::to_path_buf))
+        .unwrap_or_else(|| target.clone());
+    let fail = |e: std::io::Error| SqawkError::write(&shown, e);
+    let temp_file = NamedTempFile::new_in(parent).map_err(fail)?;
 
     {
         let mut out = BufWriter::new(temp_file.as_file());
-        table.write_source_layout(&mut out)?;
-        out.flush()?;
+        table.write_source_layout(&mut out).map_err(fail)?;
+        out.flush().map_err(fail)?;
     }
 
     if let Ok(meta) = std::fs::metadata(&target) {
-        temp_file.as_file().set_permissions(meta.permissions())?;
+        temp_file
+            .as_file()
+            .set_permissions(meta.permissions())
+            .map_err(fail)?;
     }
-    temp_file.as_file().sync_all()?;
-    temp_file
-        .persist(&target)
-        .map_err(|e| SqawkError::IoError(e.error))?;
+    temp_file.as_file().sync_all().map_err(fail)?;
+    temp_file.persist(&target).map_err(|e| fail(e.error))?;
     Ok(())
 }
 

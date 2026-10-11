@@ -821,7 +821,7 @@ impl<'a> VmEngine<'a> {
         self.transaction_state = TransactionState::None;
 
         if self.verbose {
-            eprintln!("VM initialized with program:\n{}", self.program);
+            diag!("VM initialized with program:\n{}", self.program);
         }
     }
 
@@ -851,7 +851,7 @@ impl<'a> VmEngine<'a> {
                 .clone(); // Clone the instruction to avoid borrowing issues
 
             if self.verbose {
-                eprintln!("Executing [{}]: {}", self.pc, inst_clone);
+                diag!("Executing [{}]: {}", self.pc, inst_clone);
             }
 
             // Execute the instruction
@@ -1060,9 +1060,10 @@ impl<'a> VmEngine<'a> {
                     .push(TableModification::Insert { table_name, row });
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "InsertRow: queued insert of {} columns into cursor {}",
-                        col_count, cursor_idx
+                        col_count,
+                        cursor_idx
                     );
                 }
 
@@ -1128,9 +1129,10 @@ impl<'a> VmEngine<'a> {
                     });
 
                     if self.verbose {
-                        eprintln!(
+                        diag!(
                             "DeleteRow: queued delete of row {} from cursor {}",
-                            idx, cursor_idx
+                            idx,
+                            cursor_idx
                         );
                     }
                 }
@@ -1196,7 +1198,7 @@ impl<'a> VmEngine<'a> {
                     });
 
                 if self.verbose {
-                    eprintln!("CreateTable: queued creation of table '{}'", table_name);
+                    diag!("CreateTable: queued creation of table '{}'", table_name);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1230,10 +1232,10 @@ impl<'a> VmEngine<'a> {
                         });
 
                     if self.verbose {
-                        eprintln!("DropTable: queued drop of table '{}'", table_name);
+                        diag!("DropTable: queued drop of table '{}'", table_name);
                     }
                 } else if self.verbose {
-                    eprintln!(
+                    diag!(
                         "DropTable: table '{}' does not exist (IF EXISTS)",
                         table_name
                     );
@@ -1268,9 +1270,11 @@ impl<'a> VmEngine<'a> {
                     });
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "AlterTableAdd: queued add column '{}' ({}) to table '{}'",
-                        column_name, column_type, table_name
+                        column_name,
+                        column_type,
+                        table_name
                     );
                 }
 
@@ -1295,7 +1299,7 @@ impl<'a> VmEngine<'a> {
                     });
 
                 if self.verbose {
-                    eprintln!("Truncate: queued truncate of table '{}'", table_name);
+                    diag!("Truncate: queued truncate of table '{}'", table_name);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1333,7 +1337,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result)?;
 
                 if self.verbose {
-                    eprintln!("Add: r[{}] + r[{}] -> r[{}]", left_reg, right_reg, dest_reg);
+                    diag!("Add: r[{}] + r[{}] -> r[{}]", left_reg, right_reg, dest_reg);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1349,9 +1353,11 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result)?;
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "Subtract: r[{}] - r[{}] -> r[{}]",
-                        left_reg, right_reg, dest_reg
+                        left_reg,
+                        right_reg,
+                        dest_reg
                     );
                 }
 
@@ -1368,9 +1374,11 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result)?;
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "Multiply: r[{}] * r[{}] -> r[{}]",
-                        left_reg, right_reg, dest_reg
+                        left_reg,
+                        right_reg,
+                        dest_reg
                     );
                 }
 
@@ -1387,9 +1395,11 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result)?;
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "Divide: r[{}] / r[{}] -> r[{}]",
-                        left_reg, right_reg, dest_reg
+                        left_reg,
+                        right_reg,
+                        dest_reg
                     );
                 }
 
@@ -1406,9 +1416,11 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result)?;
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "Remainder: r[{}] %% r[{}] -> r[{}]",
-                        left_reg, right_reg, dest_reg
+                        left_reg,
+                        right_reg,
+                        dest_reg
                     );
                 }
 
@@ -1448,7 +1460,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, value)?;
 
                 if self.verbose {
-                    eprintln!("Copy: r[{}] -> r[{}]", src_reg, dest_reg);
+                    diag!("Copy: r[{}] -> r[{}]", src_reg, dest_reg);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1541,7 +1553,7 @@ impl<'a> VmEngine<'a> {
                 self.transaction_state = TransactionState::Active;
 
                 if self.verbose {
-                    eprintln!("BEGIN TRANSACTION");
+                    diag!("BEGIN TRANSACTION");
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1561,7 +1573,7 @@ impl<'a> VmEngine<'a> {
                 self.transaction_state = TransactionState::Committed;
 
                 if self.verbose {
-                    eprintln!("COMMIT TRANSACTION");
+                    diag!("COMMIT TRANSACTION");
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1580,7 +1592,7 @@ impl<'a> VmEngine<'a> {
                 self.transaction_state = TransactionState::RolledBack;
 
                 if self.verbose {
-                    eprintln!("ROLLBACK TRANSACTION");
+                    diag!("ROLLBACK TRANSACTION");
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1608,7 +1620,7 @@ impl<'a> VmEngine<'a> {
                     .unwrap_or_else(|| format!("sp_{}", inst.p1));
 
                 if self.verbose {
-                    eprintln!("SAVEPOINT {}", savepoint_name);
+                    diag!("SAVEPOINT {}", savepoint_name);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1636,7 +1648,7 @@ impl<'a> VmEngine<'a> {
                     .unwrap_or_else(|| format!("sp_{}", inst.p1));
 
                 if self.verbose {
-                    eprintln!("RELEASE SAVEPOINT {}", savepoint_name);
+                    diag!("RELEASE SAVEPOINT {}", savepoint_name);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -2036,9 +2048,12 @@ impl<'a> VmEngine<'a> {
                 self.set_register(reg, Register::Integer(new_val))?;
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "DecrJumpZero: r[{}] = {} -> {}, jump if zero to {}",
-                        reg, current, new_val, jump_addr
+                        reg,
+                        current,
+                        new_val,
+                        jump_addr
                     );
                 }
 
@@ -2092,9 +2107,11 @@ impl<'a> VmEngine<'a> {
                 self.sorters.insert(sorter_id, sorter);
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "SorterOpen: Created sorter {} with {} columns, spec: {}",
-                        sorter_id, col_count, sort_spec
+                        sorter_id,
+                        col_count,
+                        sort_spec
                     );
                 }
 
@@ -2118,7 +2135,7 @@ impl<'a> VmEngine<'a> {
                 if let Some(sorter) = self.sorters.get_mut(&sorter_id) {
                     sorter.insert(row);
                     if self.verbose {
-                        eprintln!("SorterInsert: Added row to sorter {}", sorter_id);
+                        diag!("SorterInsert: Added row to sorter {}", sorter_id);
                     }
                 } else {
                     return Err(SqawkError::VmError(format!(
@@ -2142,7 +2159,7 @@ impl<'a> VmEngine<'a> {
                         return Ok(ExecuteResult::Jump(inst.p2 as usize));
                     }
                     if self.verbose {
-                        eprintln!(
+                        diag!(
                             "SorterSort: Sorted {} rows in sorter {}",
                             sorter.rows.len(),
                             sorter_id
@@ -2179,7 +2196,7 @@ impl<'a> VmEngine<'a> {
                 }
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "SorterData: Copied row {} from sorter {} to r[{}..{}]",
                         position,
                         sorter_id,
@@ -2199,15 +2216,17 @@ impl<'a> VmEngine<'a> {
                 if let Some(sorter) = self.sorters.get_mut(&sorter_id) {
                     if sorter.next() {
                         if self.verbose {
-                            eprintln!(
+                            diag!(
                                 "SorterNext: Advanced to row {} in sorter {}, jumping to {}",
-                                sorter.position, sorter_id, jump_addr
+                                sorter.position,
+                                sorter_id,
+                                jump_addr
                             );
                         }
                         Ok(ExecuteResult::Jump(jump_addr))
                     } else {
                         if self.verbose {
-                            eprintln!(
+                            diag!(
                                 "SorterNext: No more rows in sorter {}, continuing",
                                 sorter_id
                             );
@@ -2236,9 +2255,11 @@ impl<'a> VmEngine<'a> {
                 self.cursors.insert(cursor_id, cursor);
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "OpenEphemeral: Created ephemeral cursor {} with {} columns, spec: {}",
-                        cursor_id, col_count, sort_spec
+                        cursor_id,
+                        col_count,
+                        sort_spec
                     );
                 }
 
@@ -2262,7 +2283,7 @@ impl<'a> VmEngine<'a> {
                 if let Some(cursor) = self.cursors.get_mut(&cursor_id) {
                     cursor.insert_row(row)?;
                     if self.verbose {
-                        eprintln!("IdxInsert: Added row to cursor {}", cursor_id);
+                        diag!("IdxInsert: Added row to cursor {}", cursor_id);
                     }
                 } else {
                     return Err(SqawkError::VmError(format!(
@@ -2319,7 +2340,7 @@ impl<'a> VmEngine<'a> {
                     let has_rows = cursor.sort()?;
                     if has_rows {
                         if self.verbose {
-                            eprintln!(
+                            diag!(
                                 "Sort: Sorted {} rows in cursor {}",
                                 cursor.row_count(),
                                 cursor_id
@@ -2328,9 +2349,10 @@ impl<'a> VmEngine<'a> {
                         Ok(ExecuteResult::Continue)
                     } else {
                         if self.verbose {
-                            eprintln!(
+                            diag!(
                                 "Sort: Cursor {} is empty, jumping to {}",
-                                cursor_id, jump_if_empty
+                                cursor_id,
+                                jump_if_empty
                             );
                         }
                         Ok(ExecuteResult::Jump(jump_if_empty))
@@ -2352,9 +2374,11 @@ impl<'a> VmEngine<'a> {
                     let seq = cursor.next_sequence()?;
                     self.set_register(dest_reg, Register::Integer(seq))?;
                     if self.verbose {
-                        eprintln!(
+                        diag!(
                             "Sequence: Generated sequence {} from cursor {} into r[{}]",
-                            seq, cursor_id, dest_reg
+                            seq,
+                            cursor_id,
+                            dest_reg
                         );
                     }
                 } else {
@@ -2418,7 +2442,7 @@ impl<'a> VmEngine<'a> {
                 self.accumulators.remove(&acc_reg);
 
                 if self.verbose {
-                    eprintln!("AggReset: cleared accumulator at reg {}", acc_reg);
+                    diag!("AggReset: cleared accumulator at reg {}", acc_reg);
                 }
 
                 Ok(ExecuteResult::Continue)

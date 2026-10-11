@@ -951,7 +951,7 @@ fn delete_with_join_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv(), orders_csv()],
         "DELETE users FROM users JOIN orders ON users.id = orders.user_id",
-        "Unsupported",
+        "not supported",
     )
 }
 
@@ -1020,7 +1020,7 @@ fn insert_returning_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv()],
         "INSERT INTO users VALUES (3, 'Zed', 'z@x') RETURNING id",
-        "Unsupported",
+        "not supported",
     )
 }
 
@@ -1030,7 +1030,7 @@ fn insert_on_conflict_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv()],
         "INSERT INTO users VALUES (1, 'Zed', 'z@x') ON CONFLICT DO NOTHING",
-        "Unsupported",
+        "not supported",
     )
 }
 
@@ -1041,7 +1041,7 @@ fn insert_or_replace_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv()],
         "INSERT OR REPLACE INTO users VALUES (1, 'Zed', 'z@x')",
-        "Unsupported",
+        "not supported",
     )
 }
 
@@ -1051,7 +1051,7 @@ fn update_from_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv(), orders_csv()],
         "UPDATE users SET name = 'X' FROM orders WHERE users.id = 1",
-        "Unsupported",
+        "not supported",
     )
 }
 
@@ -1061,7 +1061,7 @@ fn delete_using_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv(), orders_csv()],
         "DELETE FROM users USING orders WHERE users.id = 1",
-        "Unsupported",
+        "not supported",
     )
 }
 

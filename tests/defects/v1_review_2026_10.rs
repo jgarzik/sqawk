@@ -846,7 +846,6 @@ fn writeback_noop_update_is_identity() -> TestResult {
 /// `1,"2\n3,4\n` loads as one row with b = `2\n3,4\n`. Must be an error
 /// naming the line where the quoted field starts.
 #[test]
-#[ignore]
 fn unclosed_quote_is_error() -> TestResult {
     let out = run_sqls(
         &[("uq.csv", "a,b\n1,\"2\n3,4\n")],
@@ -1176,7 +1175,6 @@ fn comments_flag_writeback_keeps_hash_lines() -> TestResult {
 
 /// `-f FILE` runs SQL from a file.
 #[test]
-#[ignore]
 fn sql_from_file() -> TestResult {
     let dir = create_temp_dir()?;
     write_files(
@@ -1195,7 +1193,6 @@ fn sql_from_file() -> TestResult {
 
 /// `-f -` reads SQL from stdin.
 #[test]
-#[ignore]
 fn sql_from_stdin() -> TestResult {
     let dir = create_temp_dir()?;
     write_files(dir.path(), &[("one.csv", b"id\n1\n")])?;
@@ -1211,7 +1208,6 @@ fn sql_from_stdin() -> TestResult {
 
 /// `-s` and `-f` run in command-line order.
 #[test]
-#[ignore]
 fn sql_and_files_run_in_order() -> TestResult {
     let dir = create_temp_dir()?;
     write_files(
@@ -1242,7 +1238,6 @@ fn sql_and_files_run_in_order() -> TestResult {
 
 /// `--output-delimiter` sets the output separator (and overrides -F's).
 #[test]
-#[ignore]
 fn output_delimiter_flag() -> TestResult {
     assert_sqls(
         &[("p.txt", "a|b\n1|2\n")],
@@ -1254,7 +1249,6 @@ fn output_delimiter_flag() -> TestResult {
 
 /// `--no-output-header` omits the header line.
 #[test]
-#[ignore]
 fn no_output_header_flag() -> TestResult {
     assert_sqls(
         &[("rw.csv", "a,b\n1,2\n")],
@@ -1266,7 +1260,6 @@ fn no_output_header_flag() -> TestResult {
 
 /// `--field-separator` is the long form of -F.
 #[test]
-#[ignore]
 fn field_separator_long_flag() -> TestResult {
     assert_sqls(
         &[("c.txt", "a:b\n1:2\n")],
@@ -1296,7 +1289,6 @@ fn interactive_with_sql_is_usage_error() -> TestResult {
 /// A directory as input prints `Error: ... Caused by: 0: I/O error: Is a
 /// directory ... 1: Is a directory ...`.
 #[test]
-#[ignore]
 fn error_directory_input() -> TestResult {
     let dir = create_temp_dir()?;
     fs::create_dir(dir.path().join("adir.csv"))?;
@@ -1309,7 +1301,6 @@ fn error_directory_input() -> TestResult {
 
 /// A syntax error prints a multi-line chain repeating the parser message.
 #[test]
-#[ignore]
 fn error_syntax() -> TestResult {
     let out = run_one("SELEC 1")?;
     assert_clean_error(&out, &["SELEC"]);
@@ -1319,7 +1310,6 @@ fn error_syntax() -> TestResult {
 /// An unknown column prints `Error: Failed to execute SQL: <sql>` plus a
 /// "Caused by" line.
 #[test]
-#[ignore]
 fn error_unknown_column() -> TestResult {
     let out = run_one("SELECT nope FROM one")?;
     assert_clean_error(&out, &["nope"]);
@@ -1329,7 +1319,6 @@ fn error_unknown_column() -> TestResult {
 /// An unknown function reports "Unsupported function: FOO"; SQLite's message
 /// is `no such function: FOO`.
 #[test]
-#[ignore]
 fn error_unknown_function() -> TestResult {
     let out = run_one("SELECT foo(id) FROM one")?;
     assert_clean_error(&out, &["no such function: FOO"]);
@@ -1339,7 +1328,6 @@ fn error_unknown_function() -> TestResult {
 /// An unreadable input file reports "Permission denied" twice and does not
 /// name the file in the cause.
 #[test]
-#[ignore]
 fn error_permission_denied_names_file() -> TestResult {
     let dir = create_temp_dir()?;
     if !perms_enforced(dir.path()) {
@@ -1356,7 +1344,6 @@ fn error_permission_denied_names_file() -> TestResult {
 /// A write failure (read-only directory) names the internal temp file
 /// (`.tmpXXXX`).
 #[test]
-#[ignore]
 fn error_write_failure_hides_temp_file() -> TestResult {
     let dir = create_temp_dir()?;
     if !perms_enforced(dir.path()) {
@@ -1373,11 +1360,13 @@ fn error_write_failure_hides_temp_file() -> TestResult {
     chmod(&rod, 0o755);
     let out = out?;
     assert_clean_error(&out, &["e.csv"]);
-    assert!(
-        !String::from_utf8_lossy(&out.stderr).contains(".tmp"),
-        "temp file name leaked: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    // The test's own directory is a `.tmpXXXX` too; look past it.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let base = fs::canonicalize(dir.path())?;
+    let rest = stderr
+        .replace(&base.display().to_string(), "<dir>")
+        .replace(&dir.path().display().to_string(), "<dir>");
+    assert!(!rest.contains(".tmp"), "temp file name leaked: {stderr}");
     Ok(())
 }
 
@@ -1387,7 +1376,6 @@ fn error_write_failure_hides_temp_file() -> TestResult {
 
 /// With stderr's read end closed, `-v` exits 101 ("failed printing to stderr").
 #[test]
-#[ignore]
 fn verbose_with_closed_stderr_does_not_panic() -> TestResult {
     let dir = create_temp_dir()?;
     // 20,000 rows make -v write megabytes to stderr, far beyond a pipe

@@ -31,7 +31,6 @@ exclude = [
 clap = { version = "4", features = ["derive"] }
 sqlparser = "0.62"
 csv = "1"
-anyhow = "1"
 regex = "1"
 tempfile = "3"
 

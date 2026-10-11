@@ -47,7 +47,13 @@ sqawk -s "UPDATE data SET status = 'archived' WHERE year < 2020" data.csv --writ
 
 # Read standard input as the table "stdin"
 cat employees.csv | sqawk -s "SELECT name FROM stdin WHERE salary > 70000" -
+
+# Run the statements in a file; print tab-separated results without a header
+sqawk -f report.sql --output-delimiter '\t' --no-output-header employees.csv
 ```
+
+Errors are one line on stderr (`sqawk: no such column: nmae`) with exit
+status 1; usage errors exit with status 2.
 
 ## `tsq` - test data generator (development only)
 

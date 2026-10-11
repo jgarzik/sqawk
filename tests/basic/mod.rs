@@ -134,7 +134,7 @@ fn test_custom_table_name() -> Result<(), Box<dyn std::error::Error>> {
 fn test_invalid_sql() -> Result<(), Box<dyn std::error::Error>> {
     let test_case = SqawkTestCase {
         sql: "INVALID SQL".to_string(),
-        expected_stderr: vec!["Failed to execute SQL".to_string()],
+        expected_stderr: vec!["sqawk: Expected: an SQL statement, found: INVALID".to_string()],
         should_succeed: false,
         ..Default::default()
     };

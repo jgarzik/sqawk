@@ -439,7 +439,7 @@ impl<'a> SqlCompiler<'a> {
     ) -> SqawkResult<FromPlan<'a>> {
         if self.verbose {
             if from.len() > 1 {
-                eprintln!("Processing multiple tables in FROM clause as CROSS JOINs");
+                diag!("Processing multiple tables in FROM clause as CROSS JOINs");
             }
             for join in from.iter().flat_map(|twj| &twj.joins) {
                 if let Ok((kind, constraint)) = classify_join(&join.join_operator) {
@@ -452,12 +452,12 @@ impl<'a> SqlCompiler<'a> {
                     };
                     let mut title = kind.to_ascii_lowercase();
                     title[..1].make_ascii_uppercase();
-                    eprintln!("Join type: {}", title);
-                    eprintln!("Processing {} JOIN with ON condition", kind);
+                    diag!("Join type: {}", title);
+                    diag!("Processing {} JOIN with ON condition", kind);
                 }
             }
             if let Some(w) = selection {
-                eprintln!("WHERE comparison: {:?}", w);
+                diag!("WHERE comparison: {:?}", w);
             }
         }
 

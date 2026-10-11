@@ -591,7 +591,6 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 name = "sqawk"
 version = "0.8.2"
 dependencies = [
- "anyhow",
  "assert_cmd",
  "clap",
  "csv",

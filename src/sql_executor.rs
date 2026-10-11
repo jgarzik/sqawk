@@ -12,8 +12,6 @@
 
 use std::collections::HashSet;
 
-use anyhow::Result;
-
 use crate::capacity::DEFAULT_TABLE_CAPACITY;
 use crate::config::AppConfig;
 use crate::database::Database;
@@ -77,7 +75,7 @@ impl<'a> SqlExecutor<'a> {
     ///   deliberately NOT merged, since each has its own column schema.
     pub fn execute(&mut self, sql: &str) -> SqawkResult<Vec<crate::table::Table>> {
         if self.config.verbose() {
-            eprintln!("Executing SQL: {}", sql);
+            diag!("Executing SQL: {}", sql);
         }
 
         // Execute via VM engine
@@ -92,12 +90,11 @@ impl<'a> SqlExecutor<'a> {
         self.affected_rows = result.affected_rows;
         self.dml_executed = result.dml_executed;
 
-        // Set delimiter on each result table to match config
+        // Result tables print with the output delimiter
         let mut tables = result.tables;
-        if let Some(delim) = self.config.field_separator() {
-            for t in &mut tables {
-                t.set_delimiter(delim.clone());
-            }
+        let delim = self.config.output_delimiter();
+        for t in &mut tables {
+            t.set_delimiter(delim.clone());
         }
 
         Ok(tables)
@@ -120,7 +117,7 @@ impl<'a> SqlExecutor<'a> {
     /// # Returns
     /// * `Ok(usize)` - Number of tables saved
     /// * `Err` if any error occurs during saving
-    pub fn save_modified_tables(&self) -> Result<usize> {
+    pub fn save_modified_tables(&self) -> SqawkResult<usize> {
         let mut names: Vec<&String> = self.modified_tables.iter().collect();
         names.sort();
 
@@ -214,7 +211,7 @@ impl<'a> SqlExecutor<'a> {
     /// Returning only the last one hid earlier result sets AND suppressed the
     /// change count of a trailing DML statement, because the caller treated
     /// "there is a result set" as "this line produced no changes".
-    pub fn execute_sql(&mut self, sql: &str) -> Result<Vec<ResultSet>> {
+    pub fn execute_sql(&mut self, sql: &str) -> SqawkResult<Vec<ResultSet>> {
         let result = self.execute(sql)?;
 
         Ok(result

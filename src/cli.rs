@@ -5,13 +5,13 @@
 //! enabling users to specify SQL statements, input files, and processing options.
 //!
 //! Key features of the CLI:
-//! - Support for multiple SQL statements in a single invocation
+//! - SQL given inline (`-s`) or read from files (`-f`), run in command-line order
 //! - Flexible file specification with optional table name overrides
 //! - Opt-in file modification with the --write flag
-//! - Diagnostic output control via the --verbose flag
+//! - Output delimiter and header control
+//! - Debugging output via the --verbose flag
 
-use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 
 /// Command-line arguments for sqawk
 ///
@@ -34,7 +34,9 @@ use clap::Parser;
                   or after the name given as [table_name=]file_path. Statements run in \
                   the order given, and each one sees the effects of those before it.\n\n\
                   Input files are never modified unless --write is given, and then only \
-                  the tables an INSERT, UPDATE or DELETE actually changed."
+                  the tables an INSERT, UPDATE or DELETE actually changed.\n\n\
+                  Errors are reported on standard error as one line, `sqawk: <message>`, \
+                  with exit status 1; command-line usage errors exit with status 2."
 )]
 pub struct SqawkArgs {
     /// SQL statements to execute
@@ -45,10 +47,24 @@ pub struct SqawkArgs {
     #[clap(
         short,
         long,
-        required_unless_present = "interactive",
-        help = "SQL statement to execute"
+        value_name = "SQL",
+        required_unless_present_any = ["interactive", "file"],
+        help = "SQL statement(s) to execute (repeatable)"
     )]
     pub sql: Vec<String>,
+
+    /// Files of SQL statements to execute
+    ///
+    /// Each file may hold several `;`-separated statements. `-f -` reads the
+    /// statements from standard input. `-s` and `-f` may be mixed; they run
+    /// in the order given on the command line.
+    #[clap(
+        short = 'f',
+        long = "file",
+        value_name = "FILE",
+        help = "Read SQL statements from FILE ('-' for stdin; repeatable, runs in order with -s)"
+    )]
+    pub file: Vec<String>,
 
     /// Start in interactive mode (REPL)
     ///
@@ -88,12 +104,39 @@ pub struct SqawkArgs {
 
     /// Specify field separator character
     ///
-    /// Similar to awk's -F option, this sets the field separator for all input files.
+    /// Similar to awk's -F option, this sets the field separator for all input files,
+    /// and the output delimiter unless --output-delimiter is given.
     /// Without it, `.tsv` and `.tab` files are tab-separated and every other file
     /// (and standard input) is comma-separated.
-    /// Examples: -F: for colon-separated files, -F\\t for tab-separated files.
-    #[clap(short = 'F', help = "Field separator character")]
+    /// Examples: -F: for colon-separated files, -F'\t' for tab-separated files.
+    #[clap(
+        short = 'F',
+        long = "field-separator",
+        value_name = "SEP",
+        value_parser = parse_separator,
+        help = "Input field separator, one character or \\t (also the output delimiter by default)"
+    )]
     pub field_separator: Option<String>,
+
+    /// Delimiter between fields of query results
+    ///
+    /// Defaults to the -F separator when one is given, else a comma. Same
+    /// rules as -F: one ASCII character other than a quote or line break, or
+    /// `\t` for tab.
+    #[clap(
+        long = "output-delimiter",
+        value_name = "SEP",
+        value_parser = parse_separator,
+        help = "Delimiter for query results (default: the -F separator, else comma)"
+    )]
+    pub output_delimiter: Option<String>,
+
+    /// Omit the header line of every result set
+    #[clap(
+        long = "no-output-header",
+        help = "Omit the header line of query results"
+    )]
+    pub no_output_header: bool,
 
     /// Input files have no header row
     ///
@@ -110,11 +153,15 @@ pub struct SqawkArgs {
     #[clap(long, help = "Skip lines starting with '#' (kept on --write)")]
     pub comments: bool,
 
-    /// Enable verbose diagnostic output
+    /// Print debugging information on standard error
     ///
-    /// When enabled, shows detailed information about SQL execution,
-    /// table loading, and modifications made to the data.
-    #[clap(short, long, help = "Enable verbose output")]
+    /// Shows table loading, the compiled bytecode and each executed
+    /// instruction. The output is for debugging; its format is not stable.
+    #[clap(
+        short,
+        long,
+        help = "Print debugging output on stderr (format is not stable)"
+    )]
     pub verbose: bool,
 
     /// Write changes back to input files (default is to not modify files)
@@ -125,36 +172,86 @@ pub struct SqawkArgs {
     /// and their original file format and delimiters will be preserved.
     #[clap(short = 'w', long, help = "Write changes back to input files")]
     pub write: bool,
+
+    /// Every `-s` and `-f`, in command-line order (filled in by [`parse_args`]).
+    #[clap(skip)]
+    pub script: Vec<SqlSource>,
+}
+
+/// One `-s` or `-f` argument.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SqlSource {
+    /// `-s SQL`: the statement text itself
+    Text(String),
+    /// `-f FILE`: a file of statements (`-` is standard input)
+    File(String),
 }
 
 /// Parse command-line arguments into the SqawkArgs structure
 ///
-/// This function uses clap to handle argument parsing, validation, and help text generation.
-/// It automatically generates usage information, handles errors for missing required arguments,
-/// and properly validates supported options.
-///
-/// # Returns
-/// * `Ok(SqawkArgs)` - Command-line arguments successfully parsed
-/// * `Err` - Error during argument parsing (handled by clap, usually results in help text display)
-pub fn parse_args() -> Result<SqawkArgs> {
-    Ok(SqawkArgs::parse())
+/// clap handles usage errors itself (message on stderr, exit status 2).
+/// The `-s` and `-f` values are merged into [`SqawkArgs::script`] by their
+/// position on the command line.
+pub fn parse_args() -> SqawkArgs {
+    let matches = SqawkArgs::command().get_matches();
+    let mut args = match SqawkArgs::from_arg_matches(&matches) {
+        Ok(args) => args,
+        Err(e) => e.exit(),
+    };
+    let mut script: Vec<(usize, SqlSource)> = Vec::new();
+    if let Some(idx) = matches.indices_of("sql") {
+        script.extend(idx.zip(args.sql.iter().cloned().map(SqlSource::Text)));
+    }
+    if let Some(idx) = matches.indices_of("file") {
+        script.extend(idx.zip(args.file.iter().cloned().map(SqlSource::File)));
+    }
+    script.sort_by_key(|(i, _)| *i);
+    args.script = script.into_iter().map(|(_, s)| s).collect();
+    args
 }
 
-/// Validate a `-F` field separator and return it in canonical form.
+/// clap value parser for `-F` / `--output-delimiter`.
+fn parse_separator(sep: &str) -> Result<String, String> {
+    validate_separator(sep)
+}
+
+/// Validate a field separator and return it in canonical form.
 ///
 /// The separator must be exactly one ASCII byte, other than a quote or a
 /// line break; the two-character escape `\t` is accepted as a tab.
-pub fn validate_separator(sep: &str) -> Result<String> {
+pub fn validate_separator(sep: &str) -> Result<String, String> {
     let sep = if sep == "\\t" { "\t" } else { sep };
     match sep.as_bytes() {
-        [] => anyhow::bail!("field separator (-F) must not be empty"),
-        [b'"' | b'\n' | b'\r'] => {
-            anyhow::bail!("field separator (-F) cannot be a quote or a line break")
-        }
+        [] => Err("separator must not be empty".to_string()),
+        [b'"' | b'\n' | b'\r'] => Err("separator cannot be a quote or a line break".to_string()),
         [b] if b.is_ascii() => Ok(sep.to_string()),
-        _ => anyhow::bail!(
-            "field separator (-F) must be a single ASCII character (or \\t for tab), got {:?}",
+        _ => Err(format!(
+            "separator must be a single ASCII character (or \\t for tab), got {:?}",
             sep
-        ),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn separators() {
+        assert_eq!(validate_separator("\\t").unwrap(), "\t");
+        assert_eq!(validate_separator(":").unwrap(), ":");
+        assert!(validate_separator("").is_err());
+        assert!(validate_separator("\"").is_err());
+        assert!(validate_separator("ab").is_err());
+    }
+
+    #[test]
+    fn sql_and_files_keep_command_line_order() {
+        let m = SqawkArgs::command()
+            .try_get_matches_from(["sqawk", "-s", "A", "-f", "x.sql", "-s", "B", "t.csv"])
+            .unwrap();
+        let idx: Vec<usize> = m.indices_of("sql").unwrap().collect();
+        let fidx: Vec<usize> = m.indices_of("file").unwrap().collect();
+        assert!(idx[0] < fidx[0] && fidx[0] < idx[1]);
     }
 }
