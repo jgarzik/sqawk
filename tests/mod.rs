@@ -63,7 +63,8 @@ mod tabledef; // Tests for --tabledef CLI option
 mod output; // Tests for stdout and file output (atomic writes)
 mod repl; // Tests for interactive REPL functionality with pre-generated input
 mod stdin; // Tests for reading a table from stdin via the '-' operand
-mod string_functions; // Tests for string functions (UPPER, LOWER, TRIM, SUBSTR, REPLACE)
+mod string_functions;
+mod unsupported; // Parsed-but-unimplemented syntax must be rejected // Tests for string functions (UPPER, LOWER, TRIM, SUBSTR, REPLACE)
 
 // Audit (2026-08): correctness work
 mod defects; // Red list -- #[ignore]d tests encoding CORRECT behaviour for known defects

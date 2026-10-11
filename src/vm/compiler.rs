@@ -18,6 +18,7 @@ use sqlparser::parser::Parser;
 use std::collections::HashMap;
 
 use super::bytecode::{Instruction, OpCode, Program, AGG_COUNT, AGG_DISTINCT};
+use super::compiler_check::{check_create_table, check_delete, check_insert, check_update};
 use super::compiler_from::{expr_children, FromPlan};
 use super::compiler_subquery::Sub;
 use super::compiler_window::window_call_children;
@@ -414,6 +415,20 @@ pub struct SqlCompiler<'a> {
 
     /// Next free sorter id.
     next_sorter: i64,
+
+    /// While an INSERT ... SELECT or CREATE TABLE ... AS is compiled: where
+    /// `Sink::Table` sends the query's rows.
+    pub(crate) insert_target: Option<InsertTarget>,
+}
+
+/// The table an INSERT ... SELECT or CREATE TABLE ... AS writes into.
+#[derive(Debug, Clone)]
+pub(crate) struct InsertTarget {
+    /// Cursor opened for writing on the table.
+    pub cursor: i64,
+    /// The table's column count, and the column each query column fills
+    /// (the others are NULL). `None`: the query's columns, as they are.
+    pub columns: Option<(usize, Vec<usize>)>,
 }
 
 /// First cursor id handed out by [`SqlCompiler::alloc_cursor`].
@@ -435,6 +450,7 @@ impl<'a> SqlCompiler<'a> {
             pending_jumps_three: Vec::new(),
             next_cursor: FIRST_TEMP_CURSOR,
             next_sorter: 0,
+            insert_target: None,
         }
     }
 
@@ -656,6 +672,7 @@ impl<'a> SqlCompiler<'a> {
         self.next_sorter = 0;
         self.outer_scope = None;
         self.correlated.clear();
+        self.insert_target = None;
 
         let init_addr = self.program.len();
         self.emit(OpCode::Init, 0, 0, 0, None, "Start address filled in later");
@@ -746,6 +763,7 @@ impl<'a> SqlCompiler<'a> {
         match statement {
             Statement::Query(query) => self.compile_query(query),
             Statement::Insert(insert) => {
+                check_insert(insert)?;
                 let source = insert.source.as_ref().ok_or_else(|| {
                     SqawkError::UnsupportedSqlFeature("INSERT without a source".into())
                 })?;
@@ -759,14 +777,19 @@ impl<'a> SqlCompiler<'a> {
                 self.compile_insert(insert_target(&insert.table)?, &columns, source)
             }
             Statement::Delete(delete) => {
+                check_delete(delete)?;
                 self.compile_delete(delete_from(&delete.from), delete.selection.as_ref())
             }
-            Statement::Update(update) => self.compile_update(
-                &update.table,
-                &update.assignments,
-                update.selection.as_ref(),
-            ),
+            Statement::Update(update) => {
+                check_update(update)?;
+                self.compile_update(
+                    &update.table,
+                    &update.assignments,
+                    update.selection.as_ref(),
+                )
+            }
             Statement::CreateTable(create) => {
+                check_create_table(create)?;
                 if let Some(q) = &create.query {
                     // CREATE TABLE ... AS SELECT
                     self.compile_create_table_as_select(&create.name, q)
@@ -1477,9 +1500,20 @@ impl<'a> SqlCompiler<'a> {
                     Value::SingleQuotedString(v) | Value::DoubleQuotedString(v) => {
                         TableValue::String(v.clone().into())
                     }
+                    Value::NationalStringLiteral(v) | Value::EscapedStringLiteral(v) => {
+                        TableValue::String(v.clone().into())
+                    }
                     Value::Boolean(b) => TableValue::Boolean(*b),
                     Value::Null => TableValue::Null,
-                    other => TableValue::String(other.to_string().into()),
+                    // Blobs, placeholders, dollar-quoted and other dialect
+                    // literals used to become their SQL text -- X'00' was
+                    // the four-character string "X'00'".
+                    other => {
+                        return Err(SqawkError::UnsupportedSqlFeature(format!(
+                            "Literal {} is not supported",
+                            other
+                        )))
+                    }
                 };
                 self.emit_value_literal(dest, &literal)?;
             }
@@ -1770,8 +1804,14 @@ impl<'a> SqlCompiler<'a> {
             Expr::Cast {
                 expr: inner,
                 data_type,
+                format,
                 ..
             } => {
+                if format.is_some() {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "CAST ... FORMAT is not supported".into(),
+                    ));
+                }
                 let src = self.code_expr(inner, ctx, None)?;
                 let type_name = self.sql_data_type_to_string(data_type);
                 self.emit(
@@ -2055,9 +2095,12 @@ impl<'a> SqlCompiler<'a> {
                         }
                         DataType::Text
                     }
-                    "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "SUBSTR" | "REPLACE" => {
-                        DataType::Text
-                    }
+                    "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "SUBSTR" | "REPLACE"
+                    | "GROUP_CONCAT" | "STRING_AGG" | "TYPEOF" | "HEX" | "PRINTF" | "FORMAT"
+                    | "LPAD" | "RPAD" | "CONCAT" | "CONCAT_WS" | "DATE" | "TIME" | "DATETIME"
+                    | "STRFTIME" => DataType::Text,
+                    "TOTAL" | "JULIANDAY" => DataType::Float,
+                    "INSTR" | "LENGTH" | "UNICODE" | "SIGN" | "UNIXEPOCH" => DataType::Integer,
                     "COALESCE" => {
                         // COALESCE returns the type of its first non-null argument
                         if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))) =

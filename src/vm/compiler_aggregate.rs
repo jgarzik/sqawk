@@ -12,15 +12,17 @@
 //! `ROUND(AVG(x), 1)`, `UPPER(key)` and arbitrary HAVING expressions work.
 
 use sqlparser::ast::{
-    Expr, FunctionArg, FunctionArgExpr, OrderByExpr, Select, Value, ValueWithSpan,
+    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, OrderByExpr, Select, Value,
+    ValueWithSpan,
 };
 
 use super::ast_compat::{func_args, group_by_exprs};
-use super::bytecode::{OpCode, AGG_TYPE_MASK};
+use super::bytecode::{OpCode, AGG_DISTINCT, AGG_SEP, AGG_TYPE_MASK};
 use super::compiler::{NameCtx, OutCol, SqlCompiler};
 use super::compiler_from::{expr_children, FromPlan};
 use super::compiler_select::{Dest, OutputStage};
 use super::compiler_window::{window_call_children, WindowStage};
+use crate::aggregate::AggregateFunction;
 use crate::error::{SqawkError, SqawkResult};
 
 /// What a grouped query's output step needs, shared by its flush points.
@@ -37,10 +39,27 @@ struct Group<'g, 'a> {
 struct Agg {
     /// The call itself, which the post-aggregation scope binds by its text.
     call: Expr,
-    /// AggStep/AggFinal function type, including the DISTINCT flag.
+    /// AggStep/AggFinal function type, including the DISTINCT and
+    /// separator flags.
     func_type: i64,
-    /// The argument, or `None` for `COUNT(*)`.
-    arg: Option<Expr>,
+    /// The arguments; none for `COUNT(*)`. GROUP_CONCAT's separator is the
+    /// second.
+    args: Vec<Expr>,
+    /// `FILTER (WHERE ...)`: only rows for which it is true are aggregated.
+    filter: Option<Expr>,
+}
+
+impl Agg {
+    /// Registers the aggregate's inputs occupy per row: the arguments (one
+    /// placeholder for `COUNT(*)`), then the FILTER condition.
+    fn slots(&self) -> usize {
+        self.args.len().max(1) + self.filter.is_some() as usize
+    }
+
+    /// Offset of the FILTER condition within the aggregate's slots.
+    fn filter_slot(&self) -> usize {
+        self.args.len().max(1)
+    }
 }
 
 impl<'a> SqlCompiler<'a> {
@@ -74,26 +93,75 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// Describe an aggregate call for AggStep.
+    /// Describe an aggregate call for AggStep, rejecting every part of the
+    /// call syntax the aggregate stage does not implement.
     fn describe_aggregate(call: Expr) -> SqawkResult<Agg> {
         let Expr::Function(func) = &call else {
             unreachable!("collect_aggregates only collects function calls")
         };
-        let func_type = Self::agg_func_type_for(func);
-        let arg = match func_args(func).first() {
-            Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) => None,
-            Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(e))) => Some(e.clone()),
-            _ => {
-                return Err(SqawkError::InvalidSqlQuery(format!(
-                    "Unsupported aggregate argument: {}",
-                    call
-                )))
-            }
+        let name = func.name.to_string().to_ascii_uppercase();
+        let unsupported = |what: &str| {
+            Err(SqawkError::UnsupportedSqlFeature(format!(
+                "{} on aggregate {}() is not supported",
+                what, name
+            )))
         };
+        if func.null_treatment.is_some() {
+            return unsupported("IGNORE/RESPECT NULLS");
+        }
+        if !func.within_group.is_empty() {
+            return unsupported("WITHIN GROUP");
+        }
+        if !matches!(func.parameters, FunctionArguments::None) {
+            return unsupported("A parameter list");
+        }
+        match &func.args {
+            FunctionArguments::Subquery(_) => return unsupported("A subquery argument"),
+            FunctionArguments::List(list) if !list.clauses.is_empty() => {
+                return unsupported("ORDER BY / LIMIT inside the argument list")
+            }
+            _ => {}
+        }
+        let is_count = name == "COUNT";
+        let mut args = Vec::new();
+        for a in func_args(func) {
+            match a {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => args.push(e.clone()),
+                // COUNT(*) counts rows: no argument.
+                FunctionArg::Unnamed(FunctionArgExpr::Wildcard) if is_count => {}
+                _ => {
+                    return Err(SqawkError::InvalidSqlQuery(format!(
+                        "Unsupported aggregate argument: {}",
+                        call
+                    )))
+                }
+            }
+        }
+        let agg = AggregateFunction::from_name(&name)
+            .expect("collect_aggregates only collects aggregate calls");
+        let (min, max) = agg.arity(&name);
+        // COUNT() and COUNT(*) both count rows.
+        let min = if is_count { 0 } else { min };
+        if args.len() < min || args.len() > max {
+            return Err(SqawkError::InvalidSqlQuery(format!(
+                "wrong number of arguments to function {}()",
+                name
+            )));
+        }
+        let mut func_type = Self::agg_func_type_for(func);
+        if func_type & AGG_DISTINCT != 0 && args.len() != 1 {
+            return Err(SqawkError::InvalidSqlQuery(
+                "DISTINCT aggregates must have exactly one argument".into(),
+            ));
+        }
+        if args.len() == 2 {
+            func_type |= AGG_SEP;
+        }
         Ok(Agg {
+            filter: func.filter.as_deref().cloned(),
             call,
             func_type,
-            arg,
+            args,
         })
     }
 
@@ -190,10 +258,20 @@ impl<'a> SqlCompiler<'a> {
             self.emit_acc_reset(acc, na);
             self.emit_scan(plan, &mut |c, ctx| {
                 for (j, agg) in aggs.iter().enumerate() {
+                    let skip = c.label();
+                    if let Some(f) = &agg.filter {
+                        let cond = c.code_expr(f, ctx, None)?;
+                        c.emit_jump_to(OpCode::IfZ, cond, skip, 0, None, "FILTER: not true");
+                    }
                     // -1: COUNT(*), which counts rows rather than values.
-                    let val = match &agg.arg {
-                        Some(e) => c.code_expr(e, ctx, None)?,
-                        None => -1,
+                    let val = if agg.args.is_empty() {
+                        -1
+                    } else {
+                        let base = c.allocate_registers(agg.args.len());
+                        for (i, e) in agg.args.iter().enumerate() {
+                            c.code_expr(e, ctx, Some(base + i as i64))?;
+                        }
+                        base
                     };
                     c.emit(
                         OpCode::AggStep,
@@ -203,6 +281,7 @@ impl<'a> SqlCompiler<'a> {
                         None,
                         "",
                     );
+                    c.resolve(skip);
                 }
                 Ok(())
             })?;
@@ -212,7 +291,13 @@ impl<'a> SqlCompiler<'a> {
 
         self.add_comment("GROUP BY query");
         let sorter_id = self.alloc_sorter();
-        let total = nk + na;
+        // Sorter row: [keys.., then each aggregate's slots..].
+        let mut offsets = Vec::with_capacity(na);
+        let mut total = nk;
+        for agg in &aggs {
+            offsets.push(total);
+            total += agg.slots();
+        }
         let spec: String = (0..nk)
             .map(|i| format!("{}:asc", i))
             .collect::<Vec<_>>()
@@ -226,20 +311,22 @@ impl<'a> SqlCompiler<'a> {
             "GROUP BY sorter",
         );
 
-        // Sorter row: [keys.., aggregate arguments..].
         let row = self.allocate_registers(total);
         self.emit_scan(plan, &mut |c, ctx| {
             for (i, k) in keys.iter().enumerate() {
                 c.code_expr(k, ctx, Some(row + i as i64))?;
             }
-            for (j, agg) in aggs.iter().enumerate() {
-                let dest = row + (nk + j) as i64;
-                match &agg.arg {
-                    Some(e) => {
-                        c.code_expr(e, ctx, Some(dest))?;
-                    }
+            for (agg, &off) in aggs.iter().zip(&offsets) {
+                let base = row + off as i64;
+                if agg.args.is_empty() {
                     // COUNT(*): a non-NULL placeholder, counted once per row.
-                    None => c.emit(OpCode::Integer, 1, dest, 0, None, "COUNT(*)"),
+                    c.emit(OpCode::Integer, 1, base, 0, None, "COUNT(*)");
+                }
+                for (i, e) in agg.args.iter().enumerate() {
+                    c.code_expr(e, ctx, Some(base + i as i64))?;
+                }
+                if let Some(f) = &agg.filter {
+                    c.code_expr(f, ctx, Some(base + agg.filter_slot() as i64))?;
                 }
             }
             c.emit(OpCode::SorterInsert, sorter_id, row, total as i64, None, "");
@@ -306,15 +393,28 @@ impl<'a> SqlCompiler<'a> {
         }
         self.emit(OpCode::Integer, 0, first, 0, None, "");
         self.resolve(step);
-        for (j, agg) in aggs.iter().enumerate() {
+        for (j, (agg, &off)) in aggs.iter().zip(&offsets).enumerate() {
+            let base = row + off as i64;
+            let skip = self.label();
+            if agg.filter.is_some() {
+                self.emit_jump_to(
+                    OpCode::IfZ,
+                    base + agg.filter_slot() as i64,
+                    skip,
+                    0,
+                    None,
+                    "FILTER: not true",
+                );
+            }
             self.emit(
                 OpCode::AggStep,
                 agg.func_type,
-                row + (nk + j) as i64,
+                base,
                 acc + j as i64,
                 None,
                 "",
             );
+            self.resolve(skip);
         }
         self.emit_jump_to(OpCode::SorterNext, sorter_id, top, 0, None, "");
         // The last group, which no key change ever flushed.

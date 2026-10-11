@@ -147,3 +147,60 @@ fn test_order_by_with_projection() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// NULLS FIRST / NULLS LAST. Expected values from SQLite 3.45.
+// ---------------------------------------------------------------------------
+
+mod nulls_placement {
+    use crate::helpers::{assert_query_on, ONE};
+
+    type R = Result<(), Box<dyn std::error::Error>>;
+
+    const EMP: (&str, &str) = (
+        "emp.csv",
+        "id,name,dept,salary\n1,Alice,Eng,100\n2,Bob,Eng,80\n3,Carol,Sales,70\n4,Dave,Sales,\n5,Eve,,50\n",
+    );
+
+    #[test]
+    fn order_by_nulls_first_last() -> R {
+        assert_query_on(
+            &[EMP],
+            "SELECT id, salary FROM emp ORDER BY salary NULLS LAST, id",
+            "id,salary\n5,50\n3,70\n2,80\n1,100\n4,",
+        )?;
+        assert_query_on(
+            &[EMP],
+            "SELECT id, salary FROM emp ORDER BY salary DESC NULLS FIRST, id",
+            "id,salary\n4,\n1,100\n2,80\n3,70\n5,50",
+        )?;
+        assert_query_on(
+            &[EMP],
+            "SELECT id, dept FROM emp ORDER BY dept NULLS FIRST, id DESC",
+            "id,dept\n5,\n2,Eng\n1,Eng\n4,Sales\n3,Sales",
+        )
+    }
+
+    #[test]
+    fn window_order_by_nulls() -> R {
+        assert_query_on(
+            &[EMP],
+            "SELECT id, RANK() OVER (ORDER BY salary NULLS LAST) AS r FROM emp",
+            "id,r\n5,1\n3,2\n2,3\n1,4\n4,5",
+        )?;
+        assert_query_on(
+            &[EMP],
+            "SELECT id, ROW_NUMBER() OVER (ORDER BY salary DESC NULLS FIRST, id) AS r FROM emp",
+            "id,r\n4,1\n1,2\n2,3\n3,4\n5,5",
+        )
+    }
+
+    #[test]
+    fn compound_order_by_nulls() -> R {
+        assert_query_on(
+            &[EMP, ONE],
+            "SELECT salary FROM emp UNION SELECT NULL FROM one ORDER BY 1 NULLS LAST",
+            "salary\n50\n70\n80\n100\n\"\"",
+        )
+    }
+}

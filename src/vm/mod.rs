@@ -13,11 +13,13 @@
 /// use is the single most useful thing to know when a statement is rejected.
 pub const SQLPARSER_VERSION: &str = "0.62";
 
+mod agg;
 mod arith;
 pub mod ast_compat;
 pub mod bytecode;
 pub mod compiler;
 mod compiler_aggregate;
+mod compiler_check;
 mod compiler_ddl;
 mod compiler_dml;
 mod compiler_from;
@@ -248,18 +250,33 @@ fn materialize_in_factor(
     registered: &mut Vec<String>,
 ) -> SqawkResult<()> {
     let (subquery, alias) = match factor {
+        sqlparser::ast::TableFactor::Derived { lateral: true, .. } => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "LATERAL subqueries are not supported".into(),
+            ))
+        }
         sqlparser::ast::TableFactor::Derived {
             subquery, alias, ..
         } => (subquery.clone(), alias.clone()),
         _ => return Ok(()),
     };
 
-    // SQL requires a derived table to be named; without one there is nothing
-    // for the outer query to refer to.
-    let alias = alias.ok_or_else(|| {
-        SqawkError::InvalidSqlQuery("Subquery in FROM must have an alias".to_string())
-    })?;
-    let name = alias.name.value.to_ascii_lowercase();
+    // An unnamed derived table (which SQLite accepts) gets a name of its own
+    // that no query can spell, so its columns are reachable only unqualified.
+    let name = match &alias {
+        Some(alias) => {
+            if !alias.columns.is_empty() {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Column aliases on a FROM item are not supported".into(),
+                ));
+            }
+            alias.name.value.to_ascii_lowercase()
+        }
+        None => (1..)
+            .map(|i| format!("(subquery-{})", i))
+            .find(|n| !database.has_table(n))
+            .expect("an unused name"),
+    };
 
     if database.has_table(&name) {
         return Err(SqawkError::InvalidSqlQuery(format!(

@@ -24,15 +24,16 @@
 
 use sqlparser::ast::{
     Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, NamedWindowDefinition,
-    NamedWindowExpr, OrderByExpr, Select, UnaryOperator, Value, ValueWithSpan, WindowFrameBound,
+    NamedWindowExpr, Select, UnaryOperator, Value, ValueWithSpan, WindowFrameBound,
     WindowFrameUnits, WindowSpec, WindowType,
 };
 
 use super::ast_compat::{func_args, func_is_distinct, order_by_is_asc};
 use super::bytecode::{
-    FrameBound, OpCode, WindowDef, WindowFrame, WindowFunc, WindowFuncKind, AGG_COUNT,
+    FrameBound, KeyOrder, OpCode, WindowDef, WindowFrame, WindowFunc, WindowFuncKind, AGG_COUNT,
 };
 use super::compiler::{ColumnRef, NameCtx, OutCol, SqlCompiler};
+use super::compiler_check::check_order_by_expr;
 use super::compiler_from::expr_children;
 use super::compiler_select::OutputStage;
 use crate::aggregate::AggregateFunction;
@@ -327,7 +328,10 @@ fn window_kind(func: &Function, nargs: usize) -> SqawkResult<WindowFuncKind> {
         // COUNT() and COUNT(*) count rows.
         "COUNT" => (WindowFuncKind::Agg(AGG_COUNT), 0, 1),
         _ => match AggregateFunction::from_name(&name) {
-            Some(agg) => (WindowFuncKind::Agg(agg.vm_type()), 1, 1),
+            Some(agg) => {
+                let (min, max) = agg.arity(&name);
+                (WindowFuncKind::Agg(agg.vm_type()), min, max)
+            }
             None => {
                 return Err(SqawkError::UnsupportedSqlFeature(format!(
                     "{}() may not be used as a window function",
@@ -390,22 +394,6 @@ fn window_args(func: &Function) -> SqawkResult<Vec<Expr>> {
     Ok(out)
 }
 
-/// Reject `NULLS FIRST` / `NULLS LAST` in a window's ORDER BY rather than
-/// ignore it.
-fn check_order_key(ob: &OrderByExpr) -> SqawkResult<()> {
-    if ob.options.nulls_first.is_some() {
-        return Err(SqawkError::UnsupportedSqlFeature(
-            "NULLS FIRST / NULLS LAST is not supported".into(),
-        ));
-    }
-    if ob.with_fill.is_some() {
-        return Err(SqawkError::UnsupportedSqlFeature(
-            "WITH FILL is not supported".into(),
-        ));
-    }
-    Ok(())
-}
-
 impl<'a> SqlCompiler<'a> {
     /// Plan the window stage for the window calls in `outs` and in the
     /// output stage's hidden sort keys, and open its ephemeral table.
@@ -443,7 +431,7 @@ impl<'a> SqlCompiler<'a> {
             let over = func.over.as_ref().expect("window call");
             let spec = resolve_window(over, &select.named_window)?;
             for ob in &spec.order_by {
-                check_order_key(ob)?;
+                check_order_by_expr(ob)?;
             }
             let frame = frame_of(&spec)?;
 
@@ -456,7 +444,14 @@ impl<'a> SqlCompiler<'a> {
                     .join(","),
                 spec.order_by
                     .iter()
-                    .map(|o| format!("{} {}", NameCtx::agg_key(&o.expr), order_by_is_asc(o)))
+                    .map(|o| {
+                        format!(
+                            "{} {} {:?}",
+                            NameCtx::agg_key(&o.expr),
+                            order_by_is_asc(o),
+                            o.options.nulls_first
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(",")
             );
@@ -469,7 +464,13 @@ impl<'a> SqlCompiler<'a> {
                         order: spec
                             .order_by
                             .iter()
-                            .map(|o| (push(&o.expr), order_by_is_asc(o)))
+                            .map(|o| {
+                                KeyOrder::new(
+                                    push(&o.expr),
+                                    order_by_is_asc(o),
+                                    o.options.nulls_first,
+                                )
+                            })
                             .collect(),
                         funcs: Vec::new(),
                     });
@@ -569,7 +570,7 @@ impl<'a> SqlCompiler<'a> {
                 }
                 for def in &mut ws.defs {
                     def.partition.iter_mut().for_each(|c| *c = col_of[*c]);
-                    def.order.iter_mut().for_each(|(c, _)| *c = col_of[*c]);
+                    def.order.iter_mut().for_each(|k| k.col = col_of[k.col]);
                     for f in &mut def.funcs {
                         f.args.iter_mut().for_each(|c| *c = col_of[*c]);
                     }

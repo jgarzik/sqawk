@@ -26,8 +26,9 @@ use super::ast_compat::{
     group_by_exprs, is_group_by_all, is_order_by_all, order_by_is_asc, query_limit, query_offset,
     query_order_by,
 };
-use super::bytecode::{OpCode, ResultSchema};
+use super::bytecode::{KeyOrder, OpCode, ResultSchema};
 use super::compiler::{Label, NameCtx, OutCol, SqlCompiler};
+use super::compiler_check::{check_order_by_expr, check_query, check_select};
 use super::compiler_from::FromPlan;
 use super::compiler_window::contains_window;
 use crate::error::{SqawkError, SqawkResult};
@@ -52,6 +53,9 @@ pub(crate) enum Sink {
     /// An IN subquery: each row's first column into this keyed ephemeral
     /// table, and 1 into `nonempty`.
     Set { cursor: i64, nonempty: i64 },
+    /// A table being written by INSERT ... SELECT or CREATE TABLE ... AS:
+    /// each row is inserted as `SqlCompiler::insert_target` describes.
+    Table,
 }
 
 /// Where a SELECT core's finished rows go.
@@ -236,6 +240,10 @@ impl<'a> SqlCompiler<'a> {
         query: &Query,
         to: Sink,
     ) -> SqawkResult<ResultSchema> {
+        check_query(query)?;
+        for ob in query_order_by(query) {
+            check_order_by_expr(ob)?;
+        }
         // `ORDER BY ALL` carries no key list, so it would otherwise look
         // identical to "no ORDER BY" and be silently ignored. Reject it.
         if is_order_by_all(query) {
@@ -273,11 +281,9 @@ impl<'a> SqlCompiler<'a> {
                             ))
                         })?,
                     };
-                    spec.push(format!(
-                        "{}:{}",
-                        pos,
-                        if order_by_is_asc(ob) { "asc" } else { "desc" }
-                    ));
+                    spec.push(
+                        KeyOrder::new(pos, order_by_is_asc(ob), ob.options.nulls_first).spec(),
+                    );
                 }
                 let inst = &mut self.program.instructions[open];
                 inst.p2 = n as i64;
@@ -337,6 +343,7 @@ impl<'a> SqlCompiler<'a> {
         let (op, quantifier, left, right) = match expr {
             SetExpr::Select(select) => return self.compile_select_core(select, &[], dest),
             SetExpr::Query(q) => {
+                check_query(q)?;
                 if q.with.is_some()
                     || !query_order_by(q).is_empty()
                     || query_limit(q).is_some()
@@ -475,6 +482,7 @@ impl<'a> SqlCompiler<'a> {
         order_by: &[OrderByExpr],
         dest: Dest,
     ) -> SqawkResult<ResultSchema> {
+        check_select(select)?;
         // `GROUP BY ALL` carries no key list, so it would otherwise look
         // identical to "no GROUP BY" and silently collapse the query.
         if is_group_by_all(&select.group_by) {
@@ -597,11 +605,7 @@ impl<'a> SqlCompiler<'a> {
                 })?)
             };
             keys.push(key);
-            spec.push(format!(
-                "{}:{}",
-                i,
-                if order_by_is_asc(ob) { "asc" } else { "desc" }
-            ));
+            spec.push(KeyOrder::new(i, order_by_is_asc(ob), ob.options.nulls_first).spec());
         }
         let nk = keys.len();
 
@@ -758,6 +762,36 @@ impl<'a> SqlCompiler<'a> {
         self.resolve(skip);
     }
 
+    /// Insert the `n`-column row at `start` into the INSERT / CREATE TABLE
+    /// AS target, scattering it into the target's column positions.
+    fn emit_table_insert(&mut self, start: i64, n: usize) {
+        let target = self
+            .insert_target
+            .clone()
+            .expect("Sink::Table is used only with an insert target");
+        let (row, width) = match &target.columns {
+            None => (start, n),
+            Some((width, cols)) => {
+                let row = self.allocate_registers((*width).max(1));
+                for i in 0..*width {
+                    self.emit(OpCode::Null, 0, row + i as i64, 0, None, "");
+                }
+                for (i, &c) in cols.iter().enumerate().take(n) {
+                    self.emit(OpCode::Copy, start + i as i64, row + c as i64, 0, None, "");
+                }
+                (row, *width)
+            }
+        };
+        self.emit(
+            OpCode::InsertRow,
+            target.cursor,
+            row,
+            width as i64,
+            None,
+            "Insert row",
+        );
+    }
+
     /// Send the `n`-column row at `start` to `dest`.
     fn emit_to_dest(&mut self, start: i64, n: usize, dest: Dest) {
         let n64 = n as i64;
@@ -789,8 +823,10 @@ impl<'a> SqlCompiler<'a> {
                         self.emit(OpCode::IdxInsert, cursor, start, 1, None, "IN set member");
                         self.emit(OpCode::Integer, 1, nonempty, 0, None, "IN set not empty");
                     }
+                    Sink::Table => self.emit_table_insert(start, n),
                 }
-                if let (Some(lim), Sink::Client | Sink::Set { .. }) = (limits.lim, to) {
+                if let (Some(lim), Sink::Client | Sink::Set { .. } | Sink::Table) = (limits.lim, to)
+                {
                     self.emit_jump_to(OpCode::DecrJumpZero, lim, exit, 0, None, "LIMIT reached");
                 }
                 self.resolve(skip);

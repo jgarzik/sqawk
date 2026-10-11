@@ -23,6 +23,10 @@ pub const AGG_AVG: i64 = 2;
 pub const AGG_MIN: i64 = 3;
 /// MAX aggregate function type
 pub const AGG_MAX: i64 = 4;
+/// TOTAL aggregate function type (SUM as a real, 0.0 over no rows)
+pub const AGG_TOTAL: i64 = 5;
+/// GROUP_CONCAT / STRING_AGG aggregate function type
+pub const AGG_GROUP_CONCAT: i64 = 6;
 
 /// Flag bit OR-ed into an AggStep/AggFinal function type to request DISTINCT.
 ///
@@ -31,6 +35,10 @@ pub const AGG_MAX: i64 = 4;
 /// the rest all use the same mechanism. Mask with `AGG_TYPE_MASK` to recover
 /// the base function.
 pub const AGG_DISTINCT: i64 = 0x100;
+
+/// Flag bit: the aggregate has a second argument (GROUP_CONCAT's
+/// separator), in the register after the value register.
+pub const AGG_SEP: i64 = 0x200;
 
 /// Mask selecting the base aggregate function out of a function-type word.
 pub const AGG_TYPE_MASK: i64 = 0xFF;
@@ -263,6 +271,56 @@ pub enum OpCode {
     WindowCompute, // Compute window definition Program::windows[P2] over ephemeral cursor P1.
 }
 
+/// One sort key: a column, its direction, and where NULLs go.
+///
+/// NULL sorts first ascending and last descending unless the ORDER BY term
+/// says `NULLS FIRST` / `NULLS LAST` (SQLite's default and syntax).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyOrder {
+    pub col: usize,
+    pub asc: bool,
+    pub nulls_first: bool,
+}
+
+impl KeyOrder {
+    /// A key with an optional explicit NULLS FIRST (`Some(true)`) / LAST.
+    pub fn new(col: usize, asc: bool, nulls_first: Option<bool>) -> Self {
+        KeyOrder {
+            col,
+            asc,
+            nulls_first: nulls_first.unwrap_or(asc),
+        }
+    }
+
+    /// This key in a SorterOpen / OpenEphemeral P4 spec: `col:asc|desc`,
+    /// plus `:nf` / `:nl` when NULL placement is not the default.
+    pub fn spec(&self) -> String {
+        let dir = if self.asc { "asc" } else { "desc" };
+        match (self.asc, self.nulls_first) {
+            (true, true) | (false, false) => format!("{}:{}", self.col, dir),
+            (_, true) => format!("{}:{}:nf", self.col, dir),
+            (_, false) => format!("{}:{}:nl", self.col, dir),
+        }
+    }
+
+    /// Parse a comma-separated spec (see [`KeyOrder::spec`]).
+    pub fn parse_spec(spec: &str) -> Vec<KeyOrder> {
+        spec.split(',')
+            .filter_map(|k| {
+                let mut parts = k.split(':');
+                let col = parts.next()?.parse::<usize>().ok()?;
+                let asc = parts.next()? != "desc";
+                let nulls = match parts.next() {
+                    Some("nf") => Some(true),
+                    Some("nl") => Some(false),
+                    _ => None,
+                };
+                Some(KeyOrder::new(col, asc, nulls))
+            })
+            .collect()
+    }
+}
+
 /// A window definition, as WindowCompute executes it: one sort order
 /// (PARTITION BY + ORDER BY) and every window function that shares it.
 ///
@@ -272,9 +330,8 @@ pub enum OpCode {
 pub struct WindowDef {
     /// PARTITION BY key columns.
     pub partition: Vec<usize>,
-    /// ORDER BY key columns, with `true` for ascending. Rows equal on all of
-    /// them are peers.
-    pub order: Vec<(usize, bool)>,
+    /// ORDER BY keys. Rows equal on all of them are peers.
+    pub order: Vec<KeyOrder>,
     pub funcs: Vec<WindowFunc>,
 }
 

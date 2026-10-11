@@ -17,6 +17,10 @@ pub enum AggregateFunction {
     Min,
     /// MAX function - finds the maximum value in a column
     Max,
+    /// TOTAL function - SUM as a real, 0.0 over no rows
+    Total,
+    /// GROUP_CONCAT / STRING_AGG - values joined by a separator
+    GroupConcat,
 }
 
 impl AggregateFunction {
@@ -34,19 +38,34 @@ impl AggregateFunction {
             "AVG" => Some(AggregateFunction::Avg),
             "MIN" => Some(AggregateFunction::Min),
             "MAX" => Some(AggregateFunction::Max),
+            "TOTAL" => Some(AggregateFunction::Total),
+            "GROUP_CONCAT" | "STRING_AGG" => Some(AggregateFunction::GroupConcat),
             _ => None,
         }
     }
 
     /// The AggStep/AggFinal function-type constant for this aggregate.
     pub fn vm_type(self) -> i64 {
-        use crate::vm::bytecode::{AGG_AVG, AGG_COUNT, AGG_MAX, AGG_MIN, AGG_SUM};
+        use crate::vm::bytecode::{
+            AGG_AVG, AGG_COUNT, AGG_GROUP_CONCAT, AGG_MAX, AGG_MIN, AGG_SUM, AGG_TOTAL,
+        };
         match self {
             AggregateFunction::Count => AGG_COUNT,
             AggregateFunction::Sum => AGG_SUM,
             AggregateFunction::Avg => AGG_AVG,
             AggregateFunction::Min => AGG_MIN,
             AggregateFunction::Max => AGG_MAX,
+            AggregateFunction::Total => AGG_TOTAL,
+            AggregateFunction::GroupConcat => AGG_GROUP_CONCAT,
+        }
+    }
+
+    /// The argument counts the aggregate accepts (COUNT(*) counts as one).
+    pub fn arity(self, name: &str) -> (usize, usize) {
+        match self {
+            AggregateFunction::GroupConcat if name.eq_ignore_ascii_case("STRING_AGG") => (2, 2),
+            AggregateFunction::GroupConcat => (1, 2),
+            _ => (1, 1),
         }
     }
 

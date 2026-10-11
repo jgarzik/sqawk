@@ -10,8 +10,9 @@
 
 use std::cmp::Ordering;
 
+use super::agg::AggAccumulator;
 use super::bytecode::{FrameBound, WindowDef, WindowFrame, WindowFunc, WindowFuncKind};
-use super::engine::{compare_values, AggAccumulator};
+use super::engine::{compare_rows, compare_values};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Value;
 
@@ -36,13 +37,7 @@ pub(super) fn compute(rows: &mut [Vec<Value>], def: &WindowDef) -> SqawkResult<(
                     return o;
                 }
             }
-            for &(c, asc) in &def.order {
-                let o = compare_values(&a[c], &b[c]);
-                if o != Ordering::Equal {
-                    return if asc { o } else { o.reverse() };
-                }
-            }
-            Ordering::Equal
+            compare_rows(&def.order, a, b)
         });
     }
     fn same(a: &[Value], b: &[Value], mut cols: impl Iterator<Item = usize>) -> bool {
@@ -63,7 +58,7 @@ pub(super) fn compute(rows: &mut [Vec<Value>], def: &WindowDef) -> SqawkResult<(
         let mut gs = 0;
         while gs < n {
             let mut ge = gs + 1;
-            while ge < n && same(&part[gs], &part[ge], def.order.iter().map(|o| o.0)) {
+            while ge < n && same(&part[gs], &part[ge], def.order.iter().map(|o| o.col)) {
                 ge += 1;
             }
             start[gs..ge].fill(gs);
@@ -242,7 +237,10 @@ fn evaluate(part: &[Vec<Value>], f: &WindowFunc, p: &Peers) -> SqawkResult<Vec<V
                     hi = s;
                 }
                 for row in &part[hi..e] {
-                    acc.step(f.args.first().map(|&c| row[c].clone()))?;
+                    acc.step(
+                        f.args.first().map(|&c| row[c].clone()),
+                        f.args.get(1).map(|&c| row[c].clone()),
+                    )?;
                 }
                 hi = e;
                 out.push(acc.finalize());

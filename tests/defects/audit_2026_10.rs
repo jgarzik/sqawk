@@ -945,7 +945,6 @@ fn correlated_scalar_unaliased_outer_table() -> TestResult {
 /// `DELETE t FROM t JOIN u ...` (multi-table DELETE) is accepted and deletes
 /// every row of `users`; must be rejected.
 #[test]
-#[ignore]
 fn delete_with_join_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv(), orders_csv()],
@@ -979,32 +978,41 @@ fn order_by_over_zero_rows() -> TestResult {
 // Group 3: Accepted-but-ignored clauses (must error)
 // ---------------------------------------------------------------------------
 
-/// `FILTER (WHERE ...)` on an aggregate is parsed and silently ignored
-/// (returns 8, not 4).
+/// `FILTER (WHERE ...)` on an aggregate used to be parsed and silently
+/// ignored (returning 8, not 4). Now implemented in the aggregate stage.
 #[test]
-#[ignore]
-fn aggregate_filter_clause_is_error() -> TestResult {
-    assert_query_fails(
+fn aggregate_filter_clause() -> TestResult {
+    assert_query(
         &[employees_csv()],
         "SELECT COUNT(*) FILTER (WHERE age > 30) AS c FROM employees",
-        "Unsupported",
+        "c\n4",
+    )?;
+    assert_query(
+        &[employees_csv()],
+        "SELECT department, COUNT(*) FILTER (WHERE age > 30) AS c, \
+         SUM(salary) FILTER (WHERE age < 40) AS s FROM employees GROUP BY department",
+        "department,c,s\nEngineering,2,210000\nHR,0,45000\nMarketing,0,115000\nSales,2,",
     )
 }
 
-/// `NULLS FIRST/LAST` in ORDER BY is silently ignored.
+/// `NULLS FIRST/LAST` in ORDER BY used to be silently ignored. Now
+/// implemented (output stage, compound ORDER BY and window ORDER BY).
 #[test]
-#[ignore]
-fn order_by_nulls_last_is_error() -> TestResult {
-    assert_query_fails(
+fn order_by_nulls_first_last() -> TestResult {
+    assert_query(
         &[nullable_csv()],
         "SELECT id FROM nullable ORDER BY score NULLS LAST",
-        "Unsupported",
+        "id\n4\n3\n1\n5\n2",
+    )?;
+    assert_query(
+        &[nullable_csv()],
+        "SELECT id FROM nullable ORDER BY score DESC NULLS FIRST",
+        "id\n2\n1\n5\n3\n4",
     )
 }
 
 /// `INSERT ... RETURNING` performs the insert and emits nothing.
 #[test]
-#[ignore]
 fn insert_returning_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv()],
@@ -1015,7 +1023,6 @@ fn insert_returning_is_error() -> TestResult {
 
 /// `INSERT ... ON CONFLICT DO NOTHING` is silently ignored.
 #[test]
-#[ignore]
 fn insert_on_conflict_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv()],
@@ -1026,7 +1033,6 @@ fn insert_on_conflict_is_error() -> TestResult {
 
 /// `INSERT OR REPLACE` is treated as a plain INSERT.
 #[test]
-#[ignore]
 fn insert_or_replace_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv()],
@@ -1037,7 +1043,6 @@ fn insert_or_replace_is_error() -> TestResult {
 
 /// `UPDATE ... FROM` silently ignores the FROM clause.
 #[test]
-#[ignore]
 fn update_from_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv(), orders_csv()],
@@ -1048,7 +1053,6 @@ fn update_from_is_error() -> TestResult {
 
 /// `DELETE ... USING` silently ignores the USING clause.
 #[test]
-#[ignore]
 fn delete_using_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv(), orders_csv()],
@@ -1438,7 +1442,6 @@ fn having_aggregate_not_in_select() -> TestResult {
 /// GROUP_CONCAT is unsupported. Output is RFC 4180 quoted because the value
 /// contains the delimiter.
 #[test]
-#[ignore]
 fn group_concat() -> TestResult {
     assert_query(
         &[employees_csv()],

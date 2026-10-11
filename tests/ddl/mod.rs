@@ -415,3 +415,89 @@ fn test_create_table_with_location_multiple_operations() -> Result<(), Box<dyn s
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// INSERT ... SELECT and CREATE TABLE ... AS run the full SELECT pipeline.
+// Expected values from SQLite 3.45.
+// ---------------------------------------------------------------------------
+
+mod query_into_table {
+    use crate::helpers::{assert_query_on, assert_query_on_fails, ONE};
+
+    type R = Result<(), Box<dyn std::error::Error>>;
+
+    const EMP: (&str, &str) = (
+        "emp.csv",
+        "id,name,dept,salary\n1,Alice,Eng,100\n2,Bob,Eng,80\n3,Carol,Sales,70\n4,Dave,Sales,\n5,Eve,,50\n",
+    );
+    const DST: (&str, &str) = ("dst.csv", "id,label\n");
+
+    /// ORDER BY / LIMIT, GROUP BY, joins, compounds, aggregates and
+    /// DISTINCT used to be silently dropped by a hand-rolled INSERT ...
+    /// SELECT path that read only the projection and WHERE.
+    #[test]
+    fn insert_select_uses_the_whole_query() -> R {
+        assert_query_on(
+            &[EMP, DST],
+            "INSERT INTO dst SELECT id, name FROM emp WHERE salary > 60 ORDER BY id DESC LIMIT 2; \
+             SELECT * FROM dst",
+            "id,label\n3,Carol\n2,Bob",
+        )?;
+        assert_query_on(
+            &[EMP, DST],
+            "INSERT INTO dst (label) SELECT dept FROM emp GROUP BY dept; SELECT * FROM dst",
+            "id,label\n,\n,Eng\n,Sales",
+        )?;
+        assert_query_on(
+            &[EMP, DST],
+            "INSERT INTO dst SELECT e.id, d.name FROM emp e JOIN emp d ON e.id = d.id + 1; \
+             SELECT * FROM dst",
+            "id,label\n2,Alice\n3,Bob\n4,Carol\n5,Dave",
+        )?;
+        assert_query_on(
+            &[EMP, DST, ONE],
+            "INSERT INTO dst SELECT id, name FROM emp UNION SELECT 9, 'z' FROM one; \
+             SELECT * FROM dst",
+            "id,label\n1,Alice\n2,Bob\n3,Carol\n4,Dave\n5,Eve\n9,z",
+        )?;
+        assert_query_on(
+            &[EMP, DST],
+            "INSERT INTO dst SELECT COUNT(*), MAX(name) FROM emp; SELECT * FROM dst",
+            "id,label\n5,Eve",
+        )
+    }
+
+    #[test]
+    fn insert_select_column_count_must_match() -> R {
+        assert_query_on_fails(
+            &[EMP, DST],
+            "INSERT INTO dst SELECT id FROM emp",
+            "INSERT statement has 1 values but 2 columns were specified",
+        )
+    }
+
+    /// CREATE TABLE ... AS took only bare column names from the projection
+    /// (an expression was skipped, misaligning the columns after it) and
+    /// rejected aggregates.
+    #[test]
+    fn create_table_as_uses_the_whole_query() -> R {
+        assert_query_on(
+            &[EMP],
+            "CREATE TABLE nt AS SELECT dept, COUNT(*) AS c FROM emp GROUP BY dept; \
+             SELECT * FROM nt",
+            "dept,c\n,1\nEng,2\nSales,2",
+        )?;
+        assert_query_on(
+            &[EMP],
+            "CREATE TABLE nt AS SELECT id, salary * 2 AS s2, UPPER(name) AS u FROM emp \
+             WHERE id < 3; SELECT * FROM nt",
+            "id,s2,u\n1,200,ALICE\n2,160,BOB",
+        )?;
+        assert_query_on(
+            &[EMP],
+            "CREATE TABLE nt AS SELECT a.id AS x, b.id AS y FROM emp a JOIN emp b \
+             ON a.id = b.id ORDER BY a.id DESC LIMIT 2; SELECT * FROM nt",
+            "x,y\n5,5\n4,4",
+        )
+    }
+}
