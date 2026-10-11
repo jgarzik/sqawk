@@ -38,7 +38,6 @@ use super::bytecode::OpCode;
 use super::compiler::{ColumnRef, Label, NameCtx, SqlCompiler, Src, UsingCol};
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::Table;
 
 /// The join operator between the sources before a FROM item and the item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -431,13 +430,6 @@ fn column_equality(left_ref: &str, right_ref: &str, col: &str) -> Expr {
     }
 }
 
-fn column_index_ci(table: &Table, name: &str) -> Option<usize> {
-    table
-        .column_metadata()
-        .iter()
-        .position(|c| c.name.eq_ignore_ascii_case(name))
-}
-
 impl<'a> SqlCompiler<'a> {
     /// Plan a FROM clause together with the WHERE clause filtering it.
     pub(crate) fn plan_from(
@@ -592,18 +584,18 @@ impl<'a> SqlCompiler<'a> {
                     .filter(|c| {
                         srcs[..i]
                             .iter()
-                            .any(|s| column_index_ci(s.table, &c.name).is_some())
+                            .any(|s| s.table.column_index(&c.name).is_some())
                     })
                     .map(|c| c.name.clone())
                     .collect(),
             };
             for name in names {
-                let right_col = column_index_ci(srcs[i].table, &name);
+                let right_col = srcs[i].table.column_index(&name);
                 // The leftmost source that has the column.
                 let left = srcs[..i]
                     .iter()
                     .enumerate()
-                    .find_map(|(j, s)| column_index_ci(s.table, &name).map(|c| (j, c)));
+                    .find_map(|(j, s)| s.table.column_index(&name).map(|c| (j, c)));
                 let (Some(right_col), Some((left_src, left_col))) = (right_col, left) else {
                     return Err(SqawkError::InvalidSqlQuery(format!(
                         "Cannot join using column '{}': it must exist on both sides",

@@ -1,52 +1,39 @@
 //! Delimited file reading and writing for sqawk
 //!
-//! Every input -- `.csv`, TSV, `-F`-delimited files and standard input -- is
-//! parsed here by the `csv` crate with one configuration: RFC 4180 quoting
+//! Every input -- `.csv`, `.tsv`, `-F`-delimited files and standard input --
+//! is parsed here by the `csv` crate with one configuration: RFC 4180 quoting
 //! (`""` inside a quoted field is a literal quote), quoted fields may span
-//! lines, fields are never trimmed, a UTF-8 byte order mark is stripped, and
-//! rows may be ragged (short rows are padded with NULL).
+//! lines, fields are never trimmed, and rows may be ragged (short rows are
+//! padded with NULL). A quote that is never closed is an error.
 //!
-//! Writeback goes through the same module, so that a file read and written
-//! back without changes is byte-identical: cells are inferred with a rule
-//! that round-trips (see `Value::from(&str)`), NULL is the empty field, and
-//! the header/line-ending/comment layout of the source is recorded on the
-//! table and reproduced, including the `#` comment lines themselves (see
-//! `CommentLines`).
+//! Writeback goes through the same module. Each table keeps the bytes it was
+//! read from, so every row no statement changed is written back exactly as
+//! it was read (quoting, padding, line ending, invalid UTF-8 and all), as are
+//! the byte order mark, the header, blank lines and `#` comment lines (see
+//! `RawRows` and `CommentLines`). Rows that were inserted or changed are
+//! written with RFC 4180 quoting where a field needs it.
 
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use tempfile::NamedTempFile;
 
-use crate::capacity::{generate_alpha_columns, is_likely_data_row};
+use crate::capacity::generate_alpha_columns;
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::{CommentLines, FileLayout, Table, Value};
-
-/// How the first record of a file is treated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeaderMode {
-    /// The first record is the header (the rule for `.csv` and stdin).
-    Present,
-    /// Every record is data; columns are named a, b, c, ... unless given.
-    Absent,
-    /// Guess from the first record (`is_likely_data_row`); used for
-    /// non-.csv delimited files such as /etc/passwd.
-    Guess,
-}
+use crate::table::{CommentLines, FileLayout, RawRows, RawSpan, Table, Value};
 
 /// Options for reading one delimited file.
 #[derive(Debug, Clone)]
 pub struct ReadOptions {
     /// Field separator byte
     pub delimiter: u8,
-    /// Header policy
-    pub header: HeaderMode,
-    /// Skip lines that start with `#`
+    /// The first record is the header. When false, every record is data and
+    /// the columns are named a, b, c, ... unless `columns` names them.
+    pub header: bool,
+    /// Skip lines that start with `#` (`--comments`)
     pub comments: bool,
     /// Column names to use; implies the file has no header row
     pub columns: Option<Vec<String>>,
-    /// Skip or repair malformed records instead of failing
-    pub recover_errors: bool,
 }
 
 impl Default for ReadOptions {
@@ -54,10 +41,9 @@ impl Default for ReadOptions {
     fn default() -> Self {
         ReadOptions {
             delimiter: b',',
-            header: HeaderMode::Present,
+            header: true,
             comments: false,
             columns: None,
-            recover_errors: false,
         }
     }
 }
@@ -65,12 +51,17 @@ impl Default for ReadOptions {
 /// UTF-8 byte order mark
 const BOM: &[u8] = b"\xef\xbb\xbf";
 
-/// Field bytes to text. Invalid UTF-8 is replaced rather than rejected.
+/// Field bytes to text. Invalid UTF-8 is replaced rather than rejected (the
+/// row's source bytes are kept, so an untouched row is written back as read).
 fn field_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
     String::from_utf8_lossy(bytes)
 }
 
 /// Parse delimited `data` into a table.
+///
+/// The table keeps `data` itself: every record's source bytes (see
+/// `RawRows`), so writeback reproduces the rows no statement changed
+/// byte-for-byte.
 ///
 /// # Arguments
 /// * `table_name` - name of the resulting table
@@ -81,211 +72,257 @@ fn field_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
 /// * `source` - file name used in error messages
 pub fn read_table(
     table_name: &str,
-    data: &[u8],
+    data: Vec<u8>,
     file_path: Option<PathBuf>,
     delimiter: String,
     opts: &ReadOptions,
     source: &str,
 ) -> SqawkResult<Table> {
-    let data = data.strip_prefix(BOM).unwrap_or(data);
+    let bom = data.starts_with(BOM);
+    let base = if bom { BOM.len() } else { 0 };
+    let body = &data[base..];
 
-    // Line ending of the first record decides the writeback terminator.
-    let crlf = data
+    // Line ending of the first record decides the terminator of the records
+    // writeback generates.
+    let crlf = body
         .iter()
         .position(|&b| b == b'\n')
-        .is_some_and(|i| i > 0 && data[i - 1] == b'\r');
+        .is_some_and(|i| i > 0 && body[i - 1] == b'\r');
 
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
         .delimiter(opts.delimiter)
         .comment(if opts.comments { Some(b'#') } else { None })
-        .from_reader(data);
+        .from_reader(body);
 
+    let header = opts.header && opts.columns.is_none();
     let mut record = csv::ByteRecord::new();
     let mut line = 0usize;
-    let mut comment_lines = CommentLines::default();
+    // The bytes between records: blank lines, and `#` lines under
+    // --comments. Kept verbatim, anchored to the record that follows.
+    let mut gaps = CommentLines::default();
+    let mut header_span = RawSpan::NONE;
+    let mut spans: Vec<RawSpan> = Vec::new();
+    let mut rows: Vec<Vec<Value>> = Vec::new();
+    let mut columns: Option<Vec<String>> = None;
+    let mut width = 0;
+    // Where the previous record's bytes end.
+    let mut prev_end = 0usize;
+    // The last record's span within `body`.
+    let mut last: Option<(usize, usize)> = None;
 
-    // First record: the header, or the first data row.
-    let mut pending_first: Option<Vec<Value>> = None;
-    let first = read_record(&mut reader, &mut record, source, &mut line);
-    let mut has_first = first?;
-    if opts.comments {
-        let (lines, to_eof) = skipped_comments(data, &record);
-        comment_lines.head = lines;
-        has_first &= !(to_eof && is_phantom(&record));
-    }
-    let header_mode = if opts.columns.is_some() {
-        HeaderMode::Absent
-    } else {
-        opts.header
-    };
-    let (columns, has_header) = if !has_first {
-        (opts.columns.clone().unwrap_or_default(), false)
-    } else {
-        let fields: Vec<String> = record.iter().map(|f| field_text(f).into_owned()).collect();
-        let is_header = match header_mode {
-            HeaderMode::Present => true,
-            HeaderMode::Absent => false,
-            HeaderMode::Guess => !is_likely_data_row(&fields),
+    loop {
+        let more = read_record(&mut reader, &mut record, source, &mut line)?;
+        let from = record
+            .position()
+            .map_or(prev_end, |p| p.byte() as usize)
+            .clamp(prev_end, body.len());
+        let start = record_start(body, from, opts.comments);
+        // A comment line that ends the input without a line ending comes
+        // back from the csv crate as an empty record; it is not a row.
+        if !more || start >= body.len() {
+            gaps.tail = body[prev_end..].to_vec();
+            break;
+        }
+        let mut end = (reader.position().byte() as usize).clamp(start, body.len());
+        // csv-core ends a CRLF record at the CR; the LF belongs to it too.
+        if end > start && end < body.len() && body[end - 1] == b'\r' && body[end] == b'\n' {
+            end += 1;
+        }
+        let gap = &body[prev_end..start];
+        prev_end = end;
+        last = Some((start, end));
+        let span = RawSpan {
+            start: base + start,
+            end: base + end,
         };
-        if is_header {
-            (fields, true)
-        } else {
-            let cols = opts
-                .columns
-                .clone()
-                .unwrap_or_else(|| generate_alpha_columns(fields.len()));
-            pending_first = Some(fields.into_iter().map(Value::from).collect());
-            (cols, false)
+
+        let Some(cols) = &columns else {
+            // The first record: the header, or the first row.
+            gaps.head = gap.to_vec();
+            let cols = if header {
+                header_span = span;
+                record.iter().map(|f| field_text(f).into_owned()).collect()
+            } else {
+                opts.columns
+                    .clone()
+                    .unwrap_or_else(|| generate_alpha_columns(record.len()))
+            };
+            check_column_names(&cols, source, line)?;
+            width = cols.len();
+            columns = Some(cols);
+            if header {
+                continue;
+            }
+            push_row(&mut rows, &record, width, source, line)?;
+            spans.push(span);
+            continue;
+        };
+        debug_assert_eq!(cols.len(), width);
+        if !gap.is_empty() {
+            gaps.before
+                .entry(rows.len())
+                .or_default()
+                .extend_from_slice(gap);
+        }
+        push_row(&mut rows, &record, width, source, line)?;
+        spans.push(span);
+    }
+
+    // csv-core takes a quote that is never closed as running to the end of
+    // the input, so the rest of the file would load as one field.
+    if let Some((start, end)) = last {
+        if let Some(quote) = unclosed_quote(&body[start..end], opts.delimiter) {
+            let at = start + quote;
+            let quote_line = 1 + body[..at].iter().filter(|&&b| b == b'\n').count();
+            return Err(SqawkError::CsvParseError {
+                file: source.to_string(),
+                line: quote_line,
+                error: format!("unterminated quoted field starting at line {quote_line}"),
+            });
+        }
+    }
+
+    let columns = match columns {
+        Some(cols) => cols,
+        // No records at all (empty input, or only blank/comment lines).
+        None => {
+            let cols = opts.columns.clone().unwrap_or_default();
+            check_column_names(&cols, source, 1)?;
+            gaps.head = std::mem::take(&mut gaps.tail);
+            cols
         }
     };
 
+    drop(reader);
     let mut table = Table::new_with_delimiter(table_name, columns, file_path, delimiter);
     table.set_file_layout(FileLayout {
-        has_header,
+        has_header: header && header_span != RawSpan::NONE,
+        bom,
         crlf,
         comments: opts.comments,
     });
-    let width = table.column_count();
-    let mut sink = RowSink {
-        rows: Vec::new(),
-        width,
-        skipped: 0,
-        recover: opts.recover_errors,
-        source,
-    };
-    if let Some(first) = pending_first {
-        sink.push(first, line)?;
-    }
-
-    loop {
-        let mut next = read_record(&mut reader, &mut record, source, &mut line);
-        if opts.comments {
-            // The comment lines skipped before this record, or before the
-            // end of the file, go in front of the next row to be pushed (or
-            // into the tail, past the last row).
-            let (lines, to_eof) = skipped_comments(data, &record);
-            if !lines.is_empty() {
-                comment_lines
-                    .before
-                    .entry(sink.rows.len())
-                    .or_default()
-                    .extend_from_slice(&lines);
-            }
-            if to_eof && matches!(next, Ok(true)) && is_phantom(&record) {
-                next = Ok(false);
-            }
-        }
-        match next {
-            Ok(true) => {
-                let row: Vec<Value> = record
-                    .iter()
-                    .map(|f| match std::str::from_utf8(f) {
-                        Ok(s) => Value::from(s),
-                        Err(_) => Value::from(field_text(f).into_owned()),
-                    })
-                    .collect();
-                sink.push(row, line)?;
-            }
-            Ok(false) => break,
-            Err(e) if opts.recover_errors => {
-                sink.skipped += 1;
-                eprintln!("Warning: Skipping malformed row: {}", e);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
-    if sink.skipped > 0 {
-        eprintln!(
-            "Note: Skipped {} malformed rows while loading {}",
-            sink.skipped, source
-        );
-    }
-
     // Loading is not a modification.
-    table.replace_rows(sink.rows);
-    table.set_comment_lines(comment_lines);
+    table.replace_rows(rows);
+    table.set_raw(RawRows {
+        buf: data,
+        header: header_span,
+        rows: spans,
+    });
+    table.set_comment_lines(gaps);
     table.mark_unmodified();
     Ok(table)
 }
 
-/// Collects loaded rows, enforcing the table width.
-struct RowSink<'a> {
-    rows: Vec<Vec<Value>>,
-    width: usize,
-    skipped: usize,
-    recover: bool,
-    source: &'a str,
-}
-
-impl RowSink<'_> {
-    fn push(&mut self, mut row: Vec<Value>, line: usize) -> SqawkResult<()> {
-        if row.len() > self.width {
-            if self.recover {
-                self.skipped += 1;
-                eprintln!(
-                    "Warning: Skipping row at line {} of {}: {} fields, expected {}",
-                    line,
-                    self.source,
-                    row.len(),
-                    self.width
-                );
-                return Ok(());
-            }
-            return Err(SqawkError::CsvParseError {
-                file: self.source.to_string(),
-                line,
-                error: format!(
-                    "record has {} fields, but the table has {} columns",
-                    row.len(),
-                    self.width
-                ),
-            });
-        }
-        // A short record is padded: the missing trailing fields are NULL.
-        row.resize(self.width, Value::Null);
-        self.rows.push(row);
-        Ok(())
-    }
-}
-
-/// The `#` comment lines the reader skipped before `record` (which may be the
-/// empty record of end of input), verbatim with their line endings.
-///
-/// A record's position is where the reader stood when it started on it:
-/// just past the previous record. What lies between there and the record
-/// itself is blank lines (or the rest of the previous record's line ending)
-/// and comment lines; the scan stops at the first line that is neither.
-///
-/// Also returns whether the comment lines run to the end of the input.
-fn skipped_comments(data: &[u8], record: &csv::ByteRecord) -> (Vec<u8>, bool) {
-    let Some(pos) = record.position() else {
-        return (Vec::new(), false);
+/// Reject a header (or column list) with an empty or repeated name. Names
+/// are case-insensitive, so `a` and `A` are the same column.
+fn check_column_names(cols: &[String], source: &str, line: usize) -> SqawkResult<()> {
+    let err = |error: String| SqawkError::CsvParseError {
+        file: source.to_string(),
+        line,
+        error,
     };
-    let mut i = (pos.byte() as usize).min(data.len());
-    let mut out = Vec::new();
-    while i < data.len() {
-        let end = data[i..]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map_or(data.len(), |n| i + n + 1);
-        let line = &data[i..end];
-        if line[0] == b'#' {
-            out.extend_from_slice(line);
-        } else if !line.iter().all(|&b| b == b'\r' || b == b'\n') {
-            break;
-        }
-        i = end;
+    if let Some(i) = cols.iter().position(String::is_empty) {
+        return Err(err(format!("column {} has an empty name", i + 1)));
     }
-    (out, i >= data.len())
+    let mut dups: Vec<&str> = Vec::new();
+    for (i, name) in cols.iter().enumerate() {
+        let repeated = cols[..i].iter().any(|n| n.eq_ignore_ascii_case(name));
+        if repeated && !dups.iter().any(|d| d.eq_ignore_ascii_case(name)) {
+            dups.push(name);
+        }
+    }
+    if !dups.is_empty() {
+        return Err(err(format!("duplicate column name: {}", dups.join(", "))));
+    }
+    Ok(())
 }
 
-/// The csv crate reports a comment line that ends the input WITHOUT a line
-/// ending as an empty record. It is not a row: the comment is all there is.
-fn is_phantom(record: &csv::ByteRecord) -> bool {
-    record.len() == 1 && record[0].is_empty()
+/// Append `record` as a row of `width` columns. A short record is padded
+/// with NULL; a long one is an error.
+fn push_row(
+    rows: &mut Vec<Vec<Value>>,
+    record: &csv::ByteRecord,
+    width: usize,
+    source: &str,
+    line: usize,
+) -> SqawkResult<()> {
+    if record.len() > width {
+        return Err(SqawkError::CsvParseError {
+            file: source.to_string(),
+            line,
+            error: format!(
+                "record has {} fields, but the table has {} columns",
+                record.len(),
+                width
+            ),
+        });
+    }
+    let mut row: Vec<Value> = Vec::with_capacity(width);
+    row.extend(record.iter().map(|f| match std::str::from_utf8(f) {
+        Ok(s) => Value::from(s),
+        Err(_) => Value::from(field_text(f).into_owned()),
+    }));
+    // A short record is padded: the missing trailing fields are NULL.
+    row.resize(width, Value::Null);
+    rows.push(row);
+    Ok(())
+}
+
+/// Where the record the csv crate reads from `from` begins: past the blank
+/// lines (CR and LF bytes) and, with `comments`, the `#` lines (each running
+/// to its LF) that csv-core skips first.
+fn record_start(data: &[u8], from: usize, comments: bool) -> usize {
+    let mut i = from;
+    while i < data.len() {
+        match data[i] {
+            b'\r' | b'\n' => i += 1,
+            b'#' if comments => {
+                i = data[i..]
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .map_or(data.len(), |n| i + n + 1);
+            }
+            _ => break,
+        }
+    }
+    i
+}
+
+/// If `rec` (one record's bytes) ends inside a quoted field, the offset of
+/// that field's opening quote. Mirrors csv-core's quoting: a quote opens a
+/// quoted field only at the start of a field, `""` inside one is a literal
+/// quote, and after the closing quote the field continues unquoted up to the
+/// delimiter.
+fn unclosed_quote(rec: &[u8], delimiter: u8) -> Option<usize> {
+    #[derive(PartialEq)]
+    enum S {
+        FieldStart,
+        Unquoted,
+        Quoted,
+        QuoteInQuoted,
+    }
+    let mut state = S::FieldStart;
+    let mut opened = 0;
+    for (i, &b) in rec.iter().enumerate() {
+        state = match state {
+            S::FieldStart if b == b'"' => {
+                opened = i;
+                S::Quoted
+            }
+            S::FieldStart | S::Unquoted | S::QuoteInQuoted if b == delimiter => S::FieldStart,
+            S::FieldStart | S::Unquoted | S::QuoteInQuoted if b == b'\r' || b == b'\n' => {
+                S::FieldStart
+            }
+            S::FieldStart | S::Unquoted => S::Unquoted,
+            S::Quoted if b == b'"' => S::QuoteInQuoted,
+            S::Quoted => S::Quoted,
+            S::QuoteInQuoted if b == b'"' => S::Quoted,
+            S::QuoteInQuoted => S::Unquoted,
+        };
+    }
+    (state == S::Quoted).then_some(opened)
 }
 
 /// Read the next record; false at end of input. `line` tracks the 1-based
@@ -345,241 +382,119 @@ pub fn save_table(table: &Table, file_path: &Path) -> SqawkResult<()> {
     Ok(())
 }
 
-/// Loads and saves CSV files (library convenience API).
-#[allow(dead_code)] // not used by the binary; part of the library API
-pub struct CsvHandler {}
-
-impl Default for CsvHandler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[allow(dead_code)]
-impl CsvHandler {
-    /// Create a new CsvHandler
-    pub fn new() -> Self {
-        CsvHandler {}
-    }
-
-    /// Save a table to a CSV file (see `save_table`)
-    pub fn save_csv(&self, table: &Table, file_path: &Path) -> SqawkResult<()> {
-        save_table(table, file_path)
-    }
-
-    /// Load a CSV file into a table.
-    ///
-    /// * `file_spec` - `[table_name=]file_path`
-    /// * `custom_columns` - column names to use; the file then has no header
-    ///   row and its first line is data
-    /// * `recover_errors` - skip malformed records instead of failing
-    ///
-    /// The first line is the header unless `custom_columns` is given. `#`
-    /// lines are data; use `load_with_options` for comment skipping.
-    pub fn load_csv(
-        &self,
-        file_spec: &str,
-        custom_columns: Option<Vec<String>>,
-        recover_errors: Option<bool>,
-    ) -> SqawkResult<Table> {
-        let opts = ReadOptions {
-            columns: custom_columns,
-            recover_errors: recover_errors.unwrap_or(false),
-            ..ReadOptions::default()
-        };
-        self.load_with_options(file_spec, &opts)
-    }
-
-    /// Load a delimited file with explicit options.
-    pub fn load_with_options(&self, file_spec: &str, opts: &ReadOptions) -> SqawkResult<Table> {
-        let (table_name, file_path) = parse_file_spec(file_spec)?;
-        let data = std::fs::read(&file_path)?;
-        let delimiter = (opts.delimiter as char).to_string();
-        read_table(
-            &table_name,
-            &data,
-            Some(file_path.clone()),
-            delimiter,
-            opts,
-            &file_path.to_string_lossy(),
-        )
-    }
-}
-
-/// Split `[table_name=]file_path`; the table name defaults to the file stem.
-#[allow(dead_code)]
-fn parse_file_spec(file_spec: &str) -> SqawkResult<(String, PathBuf)> {
-    if let Some((table_name, file_path)) = file_spec.split_once('=') {
-        return Ok((table_name.to_string(), PathBuf::from(file_path)));
-    }
-    let path = PathBuf::from(file_spec);
-    let stem = path
-        .file_stem()
-        .ok_or_else(|| {
-            SqawkError::InvalidFileSpec(format!("Invalid file specification: {}", file_spec))
-        })?
-        .to_string_lossy()
-        .to_string();
-    Ok((stem, path))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{CsvHandler, HeaderMode, ReadOptions};
+    use super::{read_table, unclosed_quote, ReadOptions};
     use crate::error::SqawkError;
+    use crate::table::Table;
 
-    /// Options for a comma-separated file with `#` comment lines. Plain `.csv`
-    /// loading treats `#` lines as data; comment skipping is opt-in (the CLI
-    /// enables it for non-.csv delimited files).
-    fn commented_options(columns: Option<Vec<String>>) -> ReadOptions {
-        ReadOptions {
-            delimiter: b',',
-            header: HeaderMode::Present,
+    fn load(data: &[u8], opts: &ReadOptions) -> Result<Table, SqawkError> {
+        read_table("t", data.to_vec(), None, ",".into(), opts, "t.csv")
+    }
+
+    fn written(t: &Table) -> Vec<u8> {
+        let mut out = Vec::new();
+        t.write_source_layout(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn comments_are_skipped_and_kept() {
+        let data = std::fs::read("tests/data/commented.csv").unwrap();
+        let opts = ReadOptions {
             comments: true,
-            columns,
-            recover_errors: false,
-        }
-    }
-
-    #[test]
-    fn test_csv_with_comments() {
-        // Create the CSV handler
-        let csv_handler = CsvHandler::new();
-
-        // Load the commented CSV file with comment skipping enabled
-        let table = csv_handler
-            .load_with_options("tests/data/commented.csv", &commented_options(None))
-            .unwrap();
-
-        // Verify the correct data was loaded (comments should be ignored)
+            ..ReadOptions::default()
+        };
+        let table = load(&data, &opts).unwrap();
         assert_eq!(table.rows().len(), 3);
-        assert_eq!(table.name(), "commented");
-
-        // Check specific row data
-        let rows = table.rows();
-        assert_eq!(rows[0][1].to_string(), "Alice");
-        assert_eq!(rows[1][1].to_string(), "Bob");
-        assert_eq!(rows[2][1].to_string(), "Charlie");
+        assert_eq!(table.rows()[0][1].to_string(), "Alice");
+        assert_eq!(table.rows()[2][1].to_string(), "Charlie");
+        assert_eq!(written(&table), data);
     }
 
     #[test]
-    fn test_malformed_csv_with_error_recovery() {
-        // Create the CSV handler
-        let csv_handler = CsvHandler::new();
-
-        // Try to load the malformed CSV file with error recovery enabled
-        // We need to handle each row separately with flexible mode
-        let result = csv_handler.load_csv("tests/data/malformed.csv", None, Some(true));
-        assert!(result.is_ok(), "Should succeed with error recovery enabled");
-        let table = result.unwrap();
-
-        // In recovery mode we should get all rows that can be recovered
-        // The row with the unclosed quote will be skipped
-        // Row with missing field should be padded with a null
-        // Row with too many fields should be truncated
-
-        // Check row count
-        assert!(table.rows().len() >= 3, "Should have at least 3 valid rows");
-
-        // Check specific row data for the rows we know should be there
-        let rows = table.rows();
-        assert_eq!(
-            rows[0][1].to_string(),
-            "Alice",
-            "First row should have Alice"
-        );
-
-        // Due to the flexible recovery, exact row positions may vary based on implementation
-        // Instead, we'll check that certain expected values exist in the table
-        // Alice, Bob, and Charlie should all be present
-
-        let mut has_alice = false;
-        let mut _has_bob = false; // Renamed to _has_bob since it's not asserted
-        let mut has_charlie = false;
-
-        for row in table.rows() {
-            if row.len() > 1 {
-                let name = row[1].to_string();
-                if name == "Alice" {
-                    has_alice = true;
-                } else if name == "Bob with an unclosed quote\"" {
-                    _has_bob = true;
-                } else if name == "Charlie" {
-                    has_charlie = true;
-                }
-            }
-        }
-
-        assert!(has_alice, "Table should contain Alice");
-        assert!(has_charlie, "Table should contain Charlie");
+    fn hash_lines_are_data_by_default() {
+        let table = load(b"#h\n#x\n1\n", &ReadOptions::default()).unwrap();
+        assert_eq!(table.columns(), vec!["#h"]);
+        assert_eq!(table.rows().len(), 2);
+        assert_eq!(table.rows()[0][0].to_string(), "#x");
     }
 
     #[test]
-    fn test_malformed_csv_without_recovery() {
-        // Create the CSV handler
-        let csv_handler = CsvHandler::new();
-
-        // Try to load the malformed CSV file without error recovery
-        let result = csv_handler.load_csv("tests/data/malformed.csv", None, None);
-
-        // Verify that we get an error
-        assert!(result.is_err());
-
-        // Check that the error contains CSV error information
-        // Type of error may vary by implementation (CsvParseError or InvalidSqlQuery)
-        let err = result.unwrap_err();
-        match err {
-            SqawkError::CsvParseError { file, line, .. } => {
-                assert!(file.contains("malformed.csv"));
-                assert!(line > 0);
-            }
-            SqawkError::InvalidSqlQuery(msg) => {
-                assert!(msg.contains("columns"));
-            }
-            _ => panic!("Unexpected error type: {:?}", err),
-        }
-    }
-
-    #[test]
-    fn test_csv_with_custom_columns() {
-        // Create the CSV handler
-        let csv_handler = CsvHandler::new();
-
-        // Define custom column names
-        let custom_columns = Some(vec![
-            "user_id".to_string(),
-            "full_name".to_string(),
-            "user_age".to_string(),
-        ]);
-
-        // Load the commented CSV file with custom columns
-        let table = csv_handler
-            .load_with_options(
-                "tests/data/commented.csv",
-                &commented_options(custom_columns),
-            )
-            .unwrap();
-
-        // Verify the column names were properly set
-        let columns = table.columns();
-        assert_eq!(columns[0], "user_id");
-        assert_eq!(columns[1], "full_name");
-        assert_eq!(columns[2], "user_age");
-
-        // Custom columns mean the file has no header row, so its first
-        // non-comment line ("id,name,age") is data: 4 rows, not 3.
-        assert_eq!(table.rows().len(), 4);
+    fn custom_columns_make_the_first_line_data() {
+        let opts = ReadOptions {
+            columns: Some(vec!["x".into(), "y".into()]),
+            ..ReadOptions::default()
+        };
+        let table = load(b"id,name\n1,a\n", &opts).unwrap();
+        assert_eq!(table.columns(), vec!["x", "y"]);
+        assert_eq!(table.rows().len(), 2);
         assert_eq!(table.rows()[0][1].to_string(), "name");
-        assert_eq!(table.rows()[1][1].to_string(), "Alice");
     }
 
     #[test]
-    fn test_csv_hash_lines_are_data_by_default() {
-        // Without comment skipping, the first line is the header even though it
-        // starts with '#', and '#' lines are ordinary records.
-        let table = CsvHandler::new()
-            .load_csv("tests/data/commented.csv", None, Some(true))
-            .unwrap();
-        assert_eq!(table.columns(), vec!["# This is a header comment"]);
+    fn too_many_fields_is_an_error() {
+        let data = std::fs::read("tests/data/malformed.csv").unwrap();
+        match load(&data, &ReadOptions::default()) {
+            Err(SqawkError::CsvParseError { file, line, .. }) => {
+                assert_eq!(file, "t.csv");
+                assert_eq!(line, 6);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn untouched_bytes_round_trip() {
+        for data in [
+            &b"k,s\n1,\"abc\"\n2,trail \n"[..],
+            b"\xef\xbb\xbfk,s\r\n1,a\r\n\r\n2,\"x\r\ny\"\n3,\xff",
+            b"k,s,t\n1\n\n\n2,b,c",
+            b"a\n",
+            b"a",
+            b"",
+            b"\n\n",
+            b"a,b\r1,2\r3,4\r",
+        ] {
+            let table = load(data, &ReadOptions::default());
+            let table = match table {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            assert_eq!(written(&table), data, "{:?}", String::from_utf8_lossy(data));
+        }
+        let opts = ReadOptions {
+            comments: true,
+            ..ReadOptions::default()
+        };
+        for data in [&b"#c\na\n#d\n1\n#e"[..], b"#only", b"a\n1\n# tail\n\n"] {
+            let table = load(data, &opts).unwrap();
+            assert_eq!(written(&table), data, "{:?}", String::from_utf8_lossy(data));
+        }
+    }
+
+    #[test]
+    fn unclosed_quote_detection() {
+        assert_eq!(unclosed_quote(b"1,\"2\n3,4\n", b','), Some(2));
+        assert_eq!(unclosed_quote(b"1,\"2\"\n", b','), None);
+        assert_eq!(unclosed_quote(b"1,\"a\"\"b\"\n", b','), None);
+        assert_eq!(unclosed_quote(b"1,\"a\"\"\n", b','), Some(2));
+        assert_eq!(unclosed_quote(b"1,a\"b\n", b','), None);
+        assert_eq!(unclosed_quote(b"\"a\"x\"y", b','), None);
+        assert!(matches!(
+            load(b"a,b\n1,\"2\n3,4\n", &ReadOptions::default()),
+            Err(SqawkError::CsvParseError { line: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn bad_header_names() {
+        for data in [&b"a,a\n"[..], b"a,A\n", b"a,,c\n", b",\n"] {
+            assert!(
+                load(data, &ReadOptions::default()).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(data)
+            );
+        }
     }
 }

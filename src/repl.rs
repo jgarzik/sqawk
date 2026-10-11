@@ -840,7 +840,7 @@ impl Repl<'_> {
                 if let Some(sep) = self.config.field_separator() {
                     println!("  Field Separator: '{}'", sep);
                 } else {
-                    println!("  Field Separator: Default (auto-detect)");
+                    println!("  Field Separator: Default (tab for .tsv/.tab, else comma)");
                 }
 
                 // Show counts

@@ -56,7 +56,8 @@ mod window; // Tests for window functions (ROW_NUMBER, RANK, DENSE_RANK)
 mod ddl; // Tests for DDL operations (DROP TABLE, ALTER TABLE, TRUNCATE, CREATE TABLE AS SELECT, CREATE TABLE LOCATION)
 
 // Table definition modes
-mod headerless; // Tests for headerless file auto-detection (a, b, c column naming)
+mod file_io; // File-type rules, table specs, byte-exact writeback
+mod headerless; // Tests for --no-header files (a, b, c column naming)
 mod tabledef; // Tests for --tabledef CLI option
 
 mod output; // Tests for stdout and file output (atomic writes)

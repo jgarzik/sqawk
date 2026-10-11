@@ -113,7 +113,12 @@ Where:
 - `OPTIONS` include SQL statements and other flags
 - `FILES` are the delimiter-separated files to process. At least one is
   required. Each may be written as `[table_name=]file_path`, and a path of `-`
-  reads [standard input](#reading-standard-input)
+  reads [standard input](#reading-standard-input). The part before `=` names
+  the table only when it is made of letters, digits and `_` (so a path such
+  as `k=v/e.csv` in a directory named `k=v` still works when `v/e.csv` does
+  not exist); otherwise the table is named after the file without its
+  extension. An empty table name (`=e.csv`, or a file named `.csv`) is an
+  error, and so is loading the same file twice under different names
 
 ### Your First Sqawk Command
 
@@ -271,13 +276,17 @@ sqawk -s "DELETE FROM data WHERE status = 'expired'" data.csv --write
 
 Important notes about the write behavior:
 - Only tables that were actually modified by an operation (INSERT, UPDATE, DELETE) are saved
-- Cells the statement did not change are written back exactly as they were
-  read: `007` stays `007`, `1.50` stays `1.50`, quoted text keeps its quotes
-  where they are needed. The one normalisation is that quotes a field did
-  not need (`"plain"`) are dropped
-- The delimiter, the header line (or its absence), CRLF line endings, the
-  file's permissions and row order are preserved. Writing through a symlink
-  updates the file it points to and leaves the link in place
+- Rows the statements did not change are written back byte-for-byte as they
+  were read: quoting (even quotes a field did not need), unquoted spaces,
+  short (ragged) rows, line endings, invalid UTF-8 -- all kept. A row that
+  was changed or inserted is written from its values, with quotes only where
+  a field needs them; its unchanged cells keep their text (`007` stays `007`,
+  `1.50` stays `1.50`)
+- The delimiter, the header line (or its absence), a UTF-8 byte order mark,
+  blank lines, `--comments` comment lines, the file's permissions and row
+  order are preserved. A row appended after a last line that had no line
+  ending starts on a new line. Writing through a symlink updates the file it
+  points to and leaves the link in place
 - NULL is written as an empty field
 - Without `--write`, your files remain untouched regardless of the SQL operations
 
@@ -286,17 +295,16 @@ Important notes about the write behavior:
 The `-F` option allows you to specify a custom field separator for your files:
 
 ```sh
-# Process a tab-delimited file
-sqawk -F '\t' -s "SELECT * FROM data" data.tsv
+# Process a tab-delimited file that does not end in .tsv
+sqawk -F '\t' -s "SELECT * FROM data" data.txt
 
 # Process a pipe-delimited file
 sqawk -F '|' -s "SELECT * FROM logs" logs.txt
 ```
 
 Notes on field separators:
-- Files ending in `.csv` default to comma; **any other extension defaults to
-  tab**, `.tsv` and `.txt` alike. A comma-separated `.txt` file therefore needs
-  an explicit `-F,`. A file with no extension at all defaults to comma
+- Files ending in `.tsv` or `.tab` default to tab; every other file (any
+  other extension, or none) and standard input default to comma
 - Common separators include tab (`\t`), comma (`,`), colon (`:`), and pipe (`|`)
 - The separator must be a single ASCII character other than a quote or line
   break; the two-character escape `\t` means tab. Anything else (including an
@@ -308,7 +316,7 @@ Notes on field separators:
 
 ### Table Definition Option (--tabledef)
 
-The `--tabledef` option allows you to define column names for files that don't have header rows, such as system files like `/etc/passwd`:
+The `--tabledef` option allows you to define column names for files that don't have header rows, such as system files like `/etc/passwd`. A table named by `--tabledef` has no header row: its first line is data.
 
 ```sh
 # Process /etc/passwd with meaningful column names
@@ -320,7 +328,9 @@ sqawk -F: --tabledef=passwd:username,password,uid,gid,gecos,home,shell \
 Format: `--tabledef=table_name:col1,col2,col3,...`
 
 This is useful for:
-- System files like `/etc/passwd`, `/etc/group`, `/etc/hosts`
+- System files like `/etc/passwd` and `/etc/group` (files separated by runs
+  of whitespace, such as `/etc/hosts`, are not delimited files and are not
+  supported)
 - Log files with fixed column formats
 - Any file without a header row
 
@@ -336,20 +346,21 @@ sqawk -F: \
 
 ### Header Rows
 
-- A `.csv` file's first line is always its header, as is the first line of
-  standard input. Lines starting with `#` are data
-- Any other file (`.tsv`, `.txt`, no extension) is checked: if its first line
-  looks like data rather than column names -- a number, a path starting with
-  `/`, `*`, `root` or `nobody` -- it is treated as data and the columns are
-  named `a`, `b`, `c`, ... Lines starting with `#` are comments and skipped
+- The first line of every file, whatever its extension, and of standard
+  input is its header. sqawk never guesses
 - `--no-header` says no input file has a header row: the first line is data
   and the columns are named `a`, `b`, `c`, ... (or by `--tabledef`)
 - `--tabledef` likewise means the file has no header row
+- Column names are case-insensitive, so a header must not repeat a name
+  (`id,ID` is an error) or leave one empty (`a,,c` is an error)
 
 A table loaded without a header row is written back without one.
 
 ```sh
 sqawk --no-header -s "SELECT a, b FROM pairs WHERE b > 10" pairs.csv
+
+# /etc/passwd: colon-separated, no header row
+sqawk -F: --no-header -s "SELECT a, f FROM passwd WHERE c >= 1000" /etc/passwd
 ```
 
 ### Verbose Mode (-v)
@@ -389,15 +400,15 @@ Sqawk supports various delimiter-separated file formats:
 
 File format detection follows these rules:
 1. If a specific delimiter is provided with `-F`, it's used regardless of file extension
-2. Files with a `.csv` extension use comma as the default delimiter
-3. Files with **any other** extension -- `.tsv`, `.txt`, `.log` -- default to tab
-4. Files with **no** extension default to comma, as does standard input
+2. Files with a `.tsv` or `.tab` extension (any case) use tab
+3. Every other file -- `.csv`, `.txt`, `.log`, no extension -- uses comma, as
+   does standard input
 
 #### Comment Support
 
-Delimited files other than `.csv` may contain comment lines. Lines that begin
-with `#` are ignored when such a file is read. In a `.csv` file, a `#` line is
-an ordinary record:
+By default a line starting with `#` is an ordinary record. With
+`--comments`, lines that begin with `#` are skipped when files are read (any
+file type), and `--write` puts them back where they were:
 
 ```
 # This line is a comment and will be ignored
@@ -429,7 +440,10 @@ check the input for short rows.
 
 Fields are read per RFC 4180: a quoted field may contain the delimiter, line
 breaks, and doubled quotes (`"say ""hi"""`). Fields are never trimmed, and a
-UTF-8 byte order mark at the start of the file is ignored.
+UTF-8 byte order mark at the start of the file is not part of the first
+column name (it is kept on `--write`). A quoted field whose closing quote is
+missing is an error (*"unterminated quoted field starting at line N"*), since
+otherwise the rest of the file would load as one field.
 
 Completely empty input is a different matter. The first line is the header, so
 a file or pipe with no content has no column names and is rejected with *"has
@@ -724,10 +738,8 @@ sqawk -F: --tabledef=passwd:user,pass,uid,gid,gecos,home,shell \
     -s "SELECT user, home FROM passwd WHERE uid >= 1000" \
     passwd=/etc/passwd
 
-# Query /etc/hosts
-sqawk --tabledef=hosts:ip,hostname \
-    -s "SELECT * FROM hosts WHERE ip LIKE '192.168.%'" \
-    hosts=/etc/hosts
+# The same without names: columns a, b, c, ...
+sqawk -F: --no-header -s "SELECT a, f FROM passwd WHERE c >= 1000" /etc/passwd
 ```
 
 ### Output Redirection
@@ -886,18 +898,22 @@ worth planning for with large files:
    - `COUNT(*)` counts rows while `COUNT(col)` counts non-NULL values
 
 5. **CSV parsing errors with malformed rows**:
-   - Error messages about "field count mismatch" indicate rows with inconsistent numbers of fields
+   - *"record has N fields, but the table has M columns"* means a row has
+     more fields than the header
+   - *"unterminated quoted field starting at line N"* means a quote opened
+     at line N is never closed
    - Error messages include line numbers to help locate problematic rows
-   - Common causes include:
-     - Missing fields or extra delimiters
-     - Improperly escaped quotes inside fields
-     - Newlines within quoted fields
-   - Use the error recovery options described in the File Format Support section to handle malformed rows
+   - Common causes include extra delimiters, improperly escaped quotes inside
+     fields, and the wrong delimiter (`.tsv`/`.tab` are tab-separated, every
+     other file comma-separated, unless `-F` is given)
+   - sqawk does not skip malformed rows: fix the reported line
 
 6. **Issues with comment lines**:
-   - Comments must start at the beginning of a line with the comment character
-   - Comment characters appearing within data (not at the start of a line) are treated as regular data
-   - If you're seeing unexpected parsing errors, check if comment lines are properly formatted
+   - Lines starting with `#` are data unless `--comments` is given; a `#`
+     header line or `#` rows in a file meant to have comments usually means
+     the flag is missing
+   - Comments must start at the beginning of a line; a `#` anywhere else is
+     regular data
 
 7. **Memory limitations**:
    - If processing very large files, filter data early in your queries

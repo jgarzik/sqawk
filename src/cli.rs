@@ -89,7 +89,8 @@ pub struct SqawkArgs {
     /// Specify field separator character
     ///
     /// Similar to awk's -F option, this sets the field separator for all input files.
-    /// Default behavior is to use commas for .csv files and tabs for other file types.
+    /// Without it, `.tsv` and `.tab` files are tab-separated and every other file
+    /// (and standard input) is comma-separated.
     /// Examples: -F: for colon-separated files, -F\\t for tab-separated files.
     #[clap(short = 'F', help = "Field separator character")]
     pub field_separator: Option<String>,
@@ -100,6 +101,14 @@ pub struct SqawkArgs {
     /// c, ... unless --tabledef names them. Writeback emits no header line.
     #[clap(long = "no-header", help = "Treat the first line of each file as data")]
     pub no_header: bool,
+
+    /// Lines starting with `#` are comments
+    ///
+    /// Without this flag a line starting with `#` is an ordinary record. With
+    /// it, such lines are skipped when files are read, and kept in place when
+    /// a table is written back with --write.
+    #[clap(long, help = "Skip lines starting with '#' (kept on --write)")]
+    pub comments: bool,
 
     /// Enable verbose diagnostic output
     ///

@@ -26,6 +26,9 @@ pub struct AppConfig {
 
     /// Treat the first line of every input file as data (`--no-header`)
     no_header: bool,
+
+    /// Skip lines starting with `#` in input files (`--comments`)
+    comments: bool,
 }
 
 impl AppConfig {
@@ -48,6 +51,7 @@ impl AppConfig {
             table_definitions,
             write_changes,
             no_header: false,
+            comments: false,
         }
     }
 
@@ -60,6 +64,17 @@ impl AppConfig {
     /// Whether input files have no header row
     pub fn no_header(&self) -> bool {
         self.no_header
+    }
+
+    /// Set whether lines starting with `#` are comments
+    pub fn with_comments(mut self, comments: bool) -> Self {
+        self.comments = comments;
+        self
+    }
+
+    /// Whether lines starting with `#` are comments
+    pub fn comments(&self) -> bool {
+        self.comments
     }
 
     /// Get the verbose flag

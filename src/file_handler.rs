@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::AppConfig;
-use crate::csv_handler::{self, HeaderMode, ReadOptions};
+use crate::csv_handler::{self, ReadOptions};
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{delimiter_byte, Table};
@@ -20,15 +20,6 @@ pub const STDIN_SPEC: &str = "-";
 
 /// Table name given to a bare `-` operand.
 pub const STDIN_TABLE: &str = "stdin";
-
-/// Enum representing different file formats supported by sqawk
-#[derive(Debug, Clone, Copy)]
-pub enum FileFormat {
-    /// CSV (comma-separated values)
-    Csv,
-    /// Delimiter-separated values
-    Delimited,
-}
 
 /// Unified file handler that delegates to specific format handlers
 ///
@@ -138,33 +129,43 @@ impl FileHandler {
 
     /// Load a file into an in-memory table and add it to the database
     ///
-    /// This method handles the complete file loading process:
-    /// 1. Parses the file specification to extract table name and file path
-    /// 2. Checks if the table already exists in the database
-    /// 3. Automatically detects file format (CSV or delimiter-separated)
-    /// 4. Delegates to the appropriate handler based on format
-    /// 5. Adds the loaded table to the database
+    /// * `file_spec` - `[table_name=]file_path` (see [`parse_table_spec`]);
+    ///   `-` is standard input
     ///
-    /// If a table with the same name already exists in the database, it will be
-    /// replaced with the newly loaded table.
+    /// The delimiter is -F if given, else tab for `.tsv`/`.tab` files and
+    /// comma for everything else. The first line is the header unless
+    /// `--no-header` or `--tabledef` supplies the column names. `#` lines
+    /// are comments only under `--comments`.
     ///
-    /// # Arguments
-    /// * `file_spec` - File specification in format [table_name=]file_path
+    /// The table records the file's canonical absolute path, so a later
+    /// `.cd` in the REPL does not change which file `.save` writes, and the
+    /// same file cannot be loaded twice under different names (writeback
+    /// would make one copy overwrite the other).
     ///
     /// # Returns
-    /// * `SqawkResult<Option<(String, String)>>` - Tuple of (table_name, file_path) if successful
+    /// * `(table_name, file_path)` as given
     pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<Option<(String, String)>> {
-        let (table_name, file_path) = self.parse_file_spec(file_spec)?;
+        let (table_name, file_path) = parse_table_spec(file_spec)?;
 
         // A "-" operand reads standard input. It is parsed as CSV (comma,
         // header row) unless -F says otherwise, which matches what sqawk
         // itself writes to stdout, so `sqawk ... | sqawk ... -` round-trips.
         // It has no writeback target: --write must never touch it.
         let from_stdin = file_path == Path::new(STDIN_SPEC);
-        let file_path_str = if from_stdin {
-            STDIN_SPEC.to_string()
+        let file_path_str = file_path.to_string_lossy().to_string();
+
+        let canonical = if from_stdin {
+            None
         } else {
-            file_path.to_string_lossy().to_string()
+            let real = std::fs::canonicalize(&file_path)
+                .map_err(|_| SqawkError::FileNotFound(file_path_str.clone()))?;
+            if real.is_dir() {
+                return Err(SqawkError::InvalidFileSpec(format!(
+                    "'{}' is a directory, not a file",
+                    file_path_str
+                )));
+            }
+            Some(real)
         };
 
         // A table that already exists is either a --tabledef placeholder,
@@ -178,6 +179,18 @@ impl FileHandler {
                 Err(_) => None,
             }
         };
+        if let Some(real) = &canonical {
+            let db = self.database_mut();
+            for name in db.table_names() {
+                let table = db.get_table(&name)?;
+                if table.file_path() == Some(real) && !table.is_placeholder() {
+                    return Err(SqawkError::InvalidFileSpec(format!(
+                        "file {} is already loaded as table {}",
+                        file_path_str, name
+                    )));
+                }
+            }
+        }
 
         let verbose = self.config.verbose();
         if predefined_columns.is_some() && verbose {
@@ -187,54 +200,28 @@ impl FileHandler {
             );
         }
 
-        // Delimiter: -F if given, else comma for .csv (and stdin and files
-        // without an extension), tab for anything else.
-        let format = if from_stdin {
-            FileFormat::Csv
-        } else {
-            self.detect_format(&file_path)
-        };
-        let delimiter_str = self
-            .config
-            .field_separator()
-            .unwrap_or_else(|| match format {
-                FileFormat::Csv => ",".to_string(),
-                FileFormat::Delimited => "\t".to_string(),
-            });
-
-        // Header policy: a .csv file (or stdin) always has a header row, and
-        // its '#' lines are data. Other delimited files get the headerless
-        // guess (for files like /etc/passwd) and '#' comment lines.
-        let csv_rules = from_stdin || Self::has_csv_extension(&file_path);
-        let header = if self.config.no_header() {
-            HeaderMode::Absent
-        } else if csv_rules {
-            HeaderMode::Present
-        } else {
-            HeaderMode::Guess
-        };
+        let delimiter_str = self.config.field_separator().unwrap_or_else(|| {
+            if !from_stdin && has_tab_extension(&file_path) {
+                "\t".to_string()
+            } else {
+                ",".to_string()
+            }
+        });
         let opts = ReadOptions {
             delimiter: delimiter_byte(&delimiter_str),
-            header,
-            comments: !csv_rules,
+            header: !self.config.no_header(),
+            comments: self.config.comments(),
             columns: predefined_columns.clone(),
-            recover_errors: false,
         };
 
-        let data = if from_stdin {
-            self.read_stdin()?
-        } else {
-            std::fs::read(&file_path)?
-        };
-        let target = if from_stdin {
-            None
-        } else {
-            Some(file_path.clone())
+        let data = match &canonical {
+            None => self.read_stdin()?,
+            Some(real) => std::fs::read(real)?,
         };
         let table = csv_handler::read_table(
             &table_name,
-            &data,
-            target,
+            data,
+            canonical,
             delimiter_str,
             &opts,
             &file_path_str,
@@ -268,63 +255,6 @@ impl FileHandler {
         db.add_table(table_name.clone(), table)?;
 
         Ok(Some((table_name, file_path_str)))
-    }
-
-    /// Whether `path` has a `.csv` extension (any case).
-    fn has_csv_extension(path: &Path) -> bool {
-        path.extension()
-            .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("csv"))
-    }
-
-    /// Parse a file specification into a table name and path
-    ///
-    /// # Arguments
-    /// * `file_spec` - File specification in format [table_name=]file_path
-    ///
-    /// # Returns
-    /// * `SqawkResult<(String, PathBuf)>` - Tuple of (table_name, file_path)
-    pub fn parse_file_spec(&self, file_spec: &str) -> SqawkResult<(String, PathBuf)> {
-        // Check for explicit table name in format "table_name=file_path"
-        if let Some(pos) = file_spec.find('=') {
-            let (table_name, file_path) = file_spec.split_at(pos);
-
-            // Strip the '=' from the file path
-            let file_path = &file_path[1..];
-
-            // "-" names standard input, which has nothing on disk to check for.
-            let path = PathBuf::from(file_path);
-            if file_path != STDIN_SPEC && !path.exists() {
-                return Err(SqawkError::FileNotFound(file_path.to_string()));
-            }
-
-            Ok((table_name.to_string(), path))
-        } else if file_spec == STDIN_SPEC {
-            // A bare "-" reads standard input into a table called "stdin".
-            Ok((STDIN_TABLE.to_string(), PathBuf::from(STDIN_SPEC)))
-        } else {
-            // No explicit table name, use the file name without extension
-            let path = PathBuf::from(file_spec);
-
-            // Validate that the file exists
-            if !path.exists() {
-                return Err(SqawkError::FileNotFound(file_spec.to_string()));
-            }
-
-            // Get file name without extension as table name
-            let file_name = path
-                .file_name()
-                .ok_or_else(|| SqawkError::InvalidFileSpec(file_spec.to_string()))?
-                .to_string_lossy();
-
-            // Extract name without extension
-            let table_name = if let Some(pos) = file_name.rfind('.') {
-                file_name[..pos].to_string()
-            } else {
-                file_name.to_string()
-            };
-
-            Ok((table_name, path))
-        }
     }
 
     /// Get a reference to a table by name
@@ -463,28 +393,71 @@ impl FileHandler {
 
         csv_handler::save_table(table, file_path)
     }
+}
 
-    /// Detect file format based on file extension
-    ///
-    /// This method examines the file extension to determine the appropriate handler:
-    /// - `.csv` files are treated as CSV (comma-separated values)
-    /// - All other extensions are treated as delimiter-separated files
-    /// - Files without extensions default to CSV format
-    ///
-    /// # Arguments
-    /// * `path` - File path to analyze
-    ///
-    /// # Returns
-    /// * `FileFormat` - Detected format (Csv or Delimited) based on file extension
-    fn detect_format(&self, path: &Path) -> FileFormat {
-        if let Some(ext) = path.extension() {
-            match ext.to_string_lossy().to_lowercase().as_str() {
-                "csv" => FileFormat::Csv,
-                _ => FileFormat::Delimited,
+/// Whether `path` names a tab-separated file: extension `.tsv` or `.tab`
+/// (any case).
+fn has_tab_extension(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| {
+        let ext = ext.to_string_lossy();
+        ext.eq_ignore_ascii_case("tsv") || ext.eq_ignore_ascii_case("tab")
+    })
+}
+
+/// Whether `name` can be the table-name prefix of `NAME=PATH`: non-empty,
+/// letters, digits and `_` only (so never a path).
+fn is_table_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Split a file operand `[table_name=]file_path` into a table name and path.
+///
+/// `NAME=PATH` names the table only when NAME is identifier-like (letters,
+/// digits, `_`); otherwise the whole operand is the path, so a file in a
+/// directory such as `k=v/` loads as expected. When NAME is identifier-like
+/// but PATH does not exist and the whole operand does, the operand is a
+/// path too. Without a name, the table is named after the file without its
+/// extension; `-` is standard input, as the table `stdin`.
+///
+/// Errors: an empty name (`=file.csv`), or a file name that leaves an empty
+/// table name (`.csv`).
+pub fn parse_table_spec(file_spec: &str) -> SqawkResult<(String, PathBuf)> {
+    if let Some((name, path)) = file_spec.split_once('=') {
+        if name.is_empty() {
+            return Err(SqawkError::InvalidFileSpec(format!(
+                "'{}': empty table name before '='",
+                file_spec
+            )));
+        }
+        if is_table_name(name)
+            && (path == STDIN_SPEC || Path::new(path).exists() || !Path::new(file_spec).exists())
+        {
+            if path.is_empty() {
+                return Err(SqawkError::InvalidFileSpec(format!(
+                    "'{}': empty file path after '='",
+                    file_spec
+                )));
             }
-        } else {
-            // Default to CSV if no extension
-            FileFormat::Csv
+            return Ok((name.to_string(), PathBuf::from(path)));
         }
     }
+    if file_spec == STDIN_SPEC {
+        return Ok((STDIN_TABLE.to_string(), PathBuf::from(STDIN_SPEC)));
+    }
+    let path = PathBuf::from(file_spec);
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let table_name = match file_name.rfind('.') {
+        Some(pos) => file_name[..pos].to_string(),
+        None => file_name,
+    };
+    if table_name.is_empty() {
+        return Err(SqawkError::InvalidFileSpec(format!(
+            "'{}': cannot derive a table name from the file name; use NAME={}",
+            file_spec, file_spec
+        )));
+    }
+    Ok((table_name, path))
 }

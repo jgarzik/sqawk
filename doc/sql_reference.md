@@ -580,10 +580,11 @@ a condition (WHERE, `NOT`, `AND`, CASE), text is likewise read as a number, so
 ## Writeback
 
 Modifications (INSERT, UPDATE, DELETE) remain in-memory unless `--write` flag is specified.
-Cells a statement did not change are written back byte for byte; NULL is
-written as an empty field; the source file's delimiter, header line (or its
-absence), line endings, `#` comment lines (in a non-`.csv` file) and
-permissions are kept.
+Rows no statement changed are written back byte for byte, exactly as they
+were read; a changed or inserted row is written from its values, NULL as an
+empty field. The source file's delimiter, header line (or its absence), byte
+order mark, line endings, blank lines, `#` comment lines (under
+`--comments`) and permissions are kept.
 
 ## Unsupported syntax
 

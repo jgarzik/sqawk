@@ -78,6 +78,17 @@ impl<'a> SqlCompiler<'a> {
         match operation {
             AlterTableOperation::AddColumn { column_def, .. } => {
                 let col_name = column_def.name.value.clone();
+                if self
+                    .database
+                    .get_table(&table_name)?
+                    .column_index(&col_name)
+                    .is_some()
+                {
+                    return Err(SqawkError::InvalidSqlQuery(format!(
+                        "duplicate column name: {}",
+                        col_name
+                    )));
+                }
                 let col_type = Self::sql_type_to_internal(&column_def.data_type.to_string());
 
                 let spec = format!(
@@ -209,6 +220,20 @@ impl<'a> SqlCompiler<'a> {
     ) -> SqawkResult<()> {
         // Extract table name
         let table_name = self.get_table_name(name)?;
+
+        // Column names are case-insensitive: `x` and `X` are one column.
+        for (i, col) in columns.iter().enumerate() {
+            let name = &col.name.value;
+            if columns[..i]
+                .iter()
+                .any(|c| c.name.value.eq_ignore_ascii_case(name))
+            {
+                return Err(SqawkError::InvalidSqlQuery(format!(
+                    "duplicate column name: {}",
+                    name
+                )));
+            }
+        }
 
         // Build column specification: "table_name:col1:type1:col2:type2:..."
         let mut spec = spec_escape(&table_name);

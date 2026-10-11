@@ -748,7 +748,6 @@ fn sum_of_tenths() -> TestResult {
 
 /// Unnecessary quotes on an untouched row are dropped (`"abc"` -> `abc`).
 #[test]
-#[ignore]
 fn writeback_keeps_unnecessary_quotes() -> TestResult {
     assert_write_back(
         "q.csv",
@@ -761,7 +760,6 @@ fn writeback_keeps_unnecessary_quotes() -> TestResult {
 
 /// An unquoted trailing space on an untouched row gets quoted (`"trail "`).
 #[test]
-#[ignore]
 fn writeback_keeps_trailing_space_unquoted() -> TestResult {
     assert_write_back(
         "q.csv",
@@ -774,7 +772,6 @@ fn writeback_keeps_trailing_space_unquoted() -> TestResult {
 
 /// A TSV field `a"b` on an untouched row is rewritten as `"a""b"`.
 #[test]
-#[ignore]
 fn writeback_keeps_tsv_quote_char() -> TestResult {
     assert_write_back(
         "t.tsv",
@@ -787,7 +784,6 @@ fn writeback_keeps_tsv_quote_char() -> TestResult {
 
 /// The UTF-8 BOM is dropped on writeback.
 #[test]
-#[ignore]
 fn writeback_keeps_bom() -> TestResult {
     assert_write_back(
         "bom.csv",
@@ -800,7 +796,6 @@ fn writeback_keeps_bom() -> TestResult {
 
 /// A short (ragged) untouched row is padded with a trailing comma.
 #[test]
-#[ignore]
 fn writeback_keeps_short_row() -> TestResult {
     assert_write_back(
         "rag.csv",
@@ -813,7 +808,6 @@ fn writeback_keeps_short_row() -> TestResult {
 
 /// Invalid UTF-8 in an untouched row is replaced by U+FFFD.
 #[test]
-#[ignore]
 fn writeback_keeps_invalid_utf8() -> TestResult {
     assert_write_back(
         "bad.csv",
@@ -827,7 +821,6 @@ fn writeback_keeps_invalid_utf8() -> TestResult {
 /// The original last line (no final newline, quoted) is rewritten when a row
 /// is appended. It must stay `2,"b"`, with the new row on its own line.
 #[test]
-#[ignore]
 fn writeback_insert_after_unterminated_last_line() -> TestResult {
     assert_write_back(
         "nq.csv",
@@ -840,7 +833,6 @@ fn writeback_insert_after_unterminated_last_line() -> TestResult {
 
 /// A no-op UPDATE over every row leaves the file byte-identical.
 #[test]
-#[ignore]
 fn writeback_noop_update_is_identity() -> TestResult {
     let content = b"k,s\n1,\"abc\"\n2,trail \n3,x\n";
     assert_write_back("q.csv", content, &[], &["UPDATE q SET k = k"], content)
@@ -877,28 +869,24 @@ fn assert_load_fails(name: &str, content: &str) -> TestResult {
 
 /// Header `a,a` loads; both columns read as the first.
 #[test]
-#[ignore]
 fn duplicate_header_is_error() -> TestResult {
     assert_load_fails("dh.csv", "a,a\n1,2\n")
 }
 
 /// Header `a,A` loads; column names are case-insensitive, so it is a duplicate.
 #[test]
-#[ignore]
 fn case_insensitive_duplicate_header_is_error() -> TestResult {
     assert_load_fails("dhc.csv", "a,A\n1,2\n")
 }
 
 /// Header `a,,c` loads with an empty column name.
 #[test]
-#[ignore]
 fn empty_header_name_is_error() -> TestResult {
     assert_load_fails("eh.csv", "a,,c\n1,2,3\n")
 }
 
 /// `ALTER TABLE al ADD COLUMN a INT` adds a second column `a`.
 #[test]
-#[ignore]
 fn alter_add_existing_column_is_error() -> TestResult {
     let out = run_sqls(
         &[("al.csv", "a,b\n1,2\n")],
@@ -911,7 +899,6 @@ fn alter_add_existing_column_is_error() -> TestResult {
 
 /// `CREATE TABLE ct (x INT, x INT)` creates two columns named `x`.
 #[test]
-#[ignore]
 fn create_table_duplicate_column_is_error() -> TestResult {
     assert_fails_cleanly(&run_one("CREATE TABLE ct (x INT, x INT)")?);
     Ok(())
@@ -919,7 +906,6 @@ fn create_table_duplicate_column_is_error() -> TestResult {
 
 /// `CREATE TABLE ct (x INT, X INT)`: a case-insensitive duplicate.
 #[test]
-#[ignore]
 fn create_table_case_insensitive_duplicate_is_error() -> TestResult {
     assert_fails_cleanly(&run_one("CREATE TABLE ct (x INT, X INT)")?);
     Ok(())
@@ -933,7 +919,6 @@ fn create_table_case_insensitive_duplicate_is_error() -> TestResult {
 /// `<dir>/k=v/e.csv` is split at `=` into table `<dir>/k` and file `v/e.csv`
 /// ("File not found"). It is a path; the table is `e`.
 #[test]
-#[ignore]
 fn equals_in_directory_is_path() -> TestResult {
     let dir = create_temp_dir()?;
     let p = write_files(dir.path(), &[("k=v/e.csv", b"a\n1\n")])?;
@@ -945,7 +930,6 @@ fn equals_in_directory_is_path() -> TestResult {
 
 /// `=al.csv` (empty table name) is accepted.
 #[test]
-#[ignore]
 fn empty_table_name_is_error() -> TestResult {
     let dir = create_temp_dir()?;
     write_files(dir.path(), &[("al.csv", b"a\n1\n")])?;
@@ -957,7 +941,6 @@ fn empty_table_name_is_error() -> TestResult {
 /// The same file loaded under two names is accepted; with --write the two
 /// copies would overwrite each other. Must be an error.
 #[test]
-#[ignore]
 fn same_file_twice_is_error() -> TestResult {
     let dir = create_temp_dir()?;
     write_files(dir.path(), &[("al.csv", b"a\n1\n")])?;
@@ -973,7 +956,6 @@ fn same_file_twice_is_error() -> TestResult {
 /// REPL `.cd ..` then `.save` writes `s.csv` into the NEW directory (the path
 /// is stored relative). It must write the file that was loaded.
 #[test]
-#[ignore]
 fn repl_save_after_cd_writes_original_file() -> TestResult {
     let dir = create_temp_dir()?;
     let sub = dir.path().join("sub");
@@ -1047,7 +1029,6 @@ fn tabledef_unknown_table_is_error() -> TestResult {
 
 /// `--tabledef=al:x,` creates a column with an empty name.
 #[test]
-#[ignore]
 fn tabledef_empty_column_is_error() -> TestResult {
     tabledef_fails("--tabledef=al:x,", &["--no-header"])
 }
@@ -1131,7 +1112,6 @@ fn write_after_drop_of_modified_table() -> TestResult {
 
 /// A comma-separated `.txt` file is split on tabs (one column `a,b`).
 #[test]
-#[ignore]
 fn txt_file_is_comma_separated() -> TestResult {
     assert_query_on(&[("c.txt", "a,b\n1,2\n")], "SELECT b FROM c", "b\n2")
 }
@@ -1139,7 +1119,6 @@ fn txt_file_is_comma_separated() -> TestResult {
 /// A numeric first line in a `.tsv` is guessed to be data (columns a, b).
 /// It is the header.
 #[test]
-#[ignore]
 fn tsv_first_line_is_header() -> TestResult {
     assert_query_on(
         &[("num.tsv", "1\t2\n3\t4\n")],
@@ -1150,14 +1129,12 @@ fn tsv_first_line_is_header() -> TestResult {
 
 /// Same for a file without an extension.
 #[test]
-#[ignore]
 fn extensionless_first_line_is_header() -> TestResult {
     assert_query_on(&[("numx", "1,2\n3,4\n")], "SELECT * FROM numx", "1,2\n3,4")
 }
 
 /// `#` lines in a `.tsv` are skipped as comments by default; they are data.
 #[test]
-#[ignore]
 fn hash_line_is_data_by_default() -> TestResult {
     assert_query_on(
         &[("h.tsv", "a\tb\n#x\t1\n2\t3\n")],
@@ -1168,7 +1145,6 @@ fn hash_line_is_data_by_default() -> TestResult {
 
 /// `--comments` is rejected as an unknown flag. It skips `#` lines on load ...
 #[test]
-#[ignore]
 fn comments_flag_skips_hash_lines() -> TestResult {
     assert_sqls(
         &[("hx", "a,b\n#x,1\n2,3\n")],
@@ -1180,7 +1156,6 @@ fn comments_flag_skips_hash_lines() -> TestResult {
 
 /// ... and writeback keeps them in place.
 #[test]
-#[ignore]
 fn comments_flag_writeback_keeps_hash_lines() -> TestResult {
     assert_write_back(
         "hx",

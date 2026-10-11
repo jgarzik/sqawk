@@ -168,6 +168,9 @@ fn printf_infinity_prints_inf() -> TestResult {
 // Finding 4: `#` comment lines are dropped by --write (csv_handler.rs:101)
 // ---------------------------------------------------------------------------
 
+/// `#` lines are comments only under `--comments`.
+const C: &[&str] = &["--comments"];
+
 /// A TSV with leading, interleaved and trailing comments.
 const TSV: &str = "# leading comment\n\
                    id\tname\tnote\n\
@@ -183,20 +186,14 @@ const TSV: &str = "# leading comment\n\
 /// A no-op UPDATE must leave the file byte-identical, comments included.
 #[test]
 fn tsv_comments_survive_noop_update() -> TestResult {
-    assert_write_back("t.tsv", TSV, &[], "UPDATE t SET id = id WHERE id = 1", TSV)
+    assert_write_back("t.tsv", TSV, C, "UPDATE t SET id = id WHERE id = 1", TSV)
 }
 
 /// Comments keep their own line endings in a CRLF file.
 #[test]
 fn crlf_tsv_comments_survive_noop_update() -> TestResult {
     let crlf = "#c1\r\nid\tv\r\n#c2\r\n1\ta\r\n2\tb\r\n#end\r\n";
-    assert_write_back(
-        "t.tsv",
-        crlf,
-        &[],
-        "UPDATE t SET id = id WHERE id = 1",
-        crlf,
-    )
+    assert_write_back("t.tsv", crlf, C, "UPDATE t SET id = id WHERE id = 1", crlf)
 }
 
 /// A headerless colon-separated file (the /etc/passwd shape) with comments.
@@ -211,7 +208,7 @@ fn headerless_colon_file_comments_survive_noop_update() -> TestResult {
     assert_write_back(
         "passwd.txt",
         passwd,
-        &["-F", ":"],
+        &["-F", ":", "--no-header", "--comments"],
         "UPDATE passwd SET c = c WHERE a = 'root'",
         passwd,
     )
@@ -223,7 +220,7 @@ fn comments_stay_put_on_update() -> TestResult {
     assert_write_back(
         "t.tsv",
         TSV,
-        &[],
+        C,
         "UPDATE t SET name = 'Zed' WHERE id = 2",
         &TSV.replace("Bob", "Zed"),
     )
@@ -236,7 +233,7 @@ fn comments_stay_put_on_delete() -> TestResult {
     assert_write_back(
         "t.tsv",
         TSV,
-        &[],
+        C,
         "DELETE FROM t WHERE id <> 2",
         "# leading comment\n\
          id\tname\tnote\n\
@@ -255,7 +252,7 @@ fn insert_goes_before_trailing_comments() -> TestResult {
     assert_write_back(
         "t.tsv",
         TSV,
-        &[],
+        C,
         "INSERT INTO t VALUES (4, 'Dan', 'w')",
         "# leading comment\n\
          id\tname\tnote\n\
@@ -272,19 +269,19 @@ fn insert_goes_before_trailing_comments() -> TestResult {
 }
 
 /// Edge cases, written with the fix: a `#` line inside a quoted multi-line
-/// field is data, not a comment; blank lines are dropped (they always were);
-/// a last comment line without a newline is reproduced as it is (the csv
-/// crate reports it as an empty record, which used to load as a phantom
-/// all-NULL row and be written back as a `\t` line).
+/// field is data, not a comment; blank lines are kept; a last comment line
+/// without a newline is reproduced as it is (the csv crate reports it as an
+/// empty record, which used to load as a phantom all-NULL row and be written
+/// back as a `\t` line).
 #[test]
 fn comment_edge_cases_survive_noop_update() -> TestResult {
     let input = "id\tnote\n1\t\"line one\n#not a comment\"\n\n# real comment\n2\tb\n#eof";
     assert_write_back(
         "t.tsv",
         input,
-        &[],
+        C,
         "UPDATE t SET id = id WHERE id = 1",
-        &input.replace("\n\n", "\n"),
+        input,
     )
 }
 
@@ -298,8 +295,8 @@ fn comments_survive_deleting_every_row() -> TestResult {
                          #another\n\
                          # trailing 1\n\
                          # trailing 2\n";
-    assert_write_back("t.tsv", TSV, &[], "DELETE FROM t", comments_only)?;
-    assert_write_back("t.tsv", TSV, &[], "TRUNCATE TABLE t", comments_only)
+    assert_write_back("t.tsv", TSV, C, "DELETE FROM t", comments_only)?;
+    assert_write_back("t.tsv", TSV, C, "TRUNCATE TABLE t", comments_only)
 }
 
 // ---------------------------------------------------------------------------

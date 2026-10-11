@@ -258,12 +258,7 @@ impl<'t> NameCtx<'t> {
     /// the column.
     fn find_here(&self, qualifier: Option<&str>, name: &str) -> SqawkResult<Option<ColumnRef>> {
         let want = name.to_ascii_lowercase();
-        let column_of = |src: &Src<'_>| {
-            src.table
-                .column_metadata()
-                .iter()
-                .position(|c| c.name.to_ascii_lowercase() == want)
-        };
+        let column_of = |src: &Src<'_>| src.table.column_index(name);
         if let Some(qualifier) = qualifier {
             let qual = qualifier.to_ascii_lowercase();
             let Some(src) = self.srcs.iter().find(|s| s.refname == qual) else {

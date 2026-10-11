@@ -337,9 +337,8 @@ fn non_canonical_numbers_display_verbatim() -> TestResult {
     )
 }
 
-/// The headerless auto-detection (file_handler.rs) guesses that a numeric
-/// first line is data and names columns a,b. For .csv files the first line is
-/// always the header.
+/// A numeric first line is the header like any other: sqawk never guesses
+/// that a file has no header row.
 #[test]
 fn csv_first_line_is_always_header() -> TestResult {
     assert_query_on(

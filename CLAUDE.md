@@ -109,10 +109,12 @@ effects of the ones before it.
 
 - **`file_handler.rs`**: Manages loading files into database tables
 - **`csv_handler.rs`**: The single loader (`read_table`, built on the `csv`
-  crate) for every delimiter and for stdin, plus writeback. `.csv` files always
-  have a header; other files keep the header guess and `#`-comment skipping.
-  Fields load as Integer/Float only when the text round-trips exactly, so
-  untouched cells write back byte-for-byte
+  crate) for every delimiter and for stdin, plus writeback. `.tsv`/`.tab` are
+  tab-separated, everything else comma (unless `-F`); the first line is always
+  the header unless `--no-header`/`--tabledef`; `#` lines are comments only
+  under `--comments`. Each table keeps its file's bytes (`RawRows` in
+  `table.rs`: one buffer + per-row offsets), so untouched rows write back
+  byte-for-byte; every row mutation in `table.rs` keeps the offsets in sync
 
 ### SQL Features
 

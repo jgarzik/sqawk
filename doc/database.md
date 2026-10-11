@@ -181,15 +181,20 @@ lasts only for that statement.
 
 ### File Handlers
 
-- `FileHandler` (`file_handler.rs`) resolves `[table_name=]path` operands,
-  chooses the delimiter (`-F`, else comma for `.csv`, no extension and stdin,
-  tab otherwise) and the header policy (`.csv` and stdin: header always;
-  other files: headerless guess and `#` comments; `--no-header`/`--tabledef`:
-  no header), and routes writeback.
+- `FileHandler` (`file_handler.rs`) resolves `[table_name=]path` operands
+  (`parse_table_spec`: the prefix names the table only when it is
+  identifier-like), records each file's canonical absolute path (so the same
+  file cannot be loaded twice, and REPL `.cd` does not change what `.save`
+  writes), chooses the delimiter (`-F`, else tab for `.tsv`/`.tab`, comma for
+  everything else and stdin) and the header policy (the first line is the
+  header unless `--no-header`/`--tabledef`; `#` lines are comments only
+  under `--comments`), and routes writeback.
 - `csv_handler.rs` does all parsing and writing. Every format is read by the
   `csv` crate with one configuration (RFC 4180 quoting, multi-line quoted
-  fields, no trimming, BOM stripped, ragged rows padded), and written back by
-  a small RFC 4180 record writer that also quotes fields with leading or
+  fields, no trimming, ragged rows padded, an unclosed quote is an error,
+  header names must be non-empty and unique ignoring case). Untouched rows
+  are written back as their source bytes; changed and inserted rows by a
+  small RFC 4180 record writer that also quotes fields with leading or
   trailing whitespace.
 
 ## File I/O Patterns
@@ -235,9 +240,18 @@ For stdout output, the data is streamed directly without buffering concerns. For
 
 Every table holds its rows in memory as owned values (`Vec<Row>`). Files are
 read whole and parsed by the `csv` crate -- RFC 4180 quoting, quoted fields
-spanning lines, no trimming, UTF-8 byte order mark stripped -- and each cell's
-type is inferred with a rule that round-trips (see "Type inference" below), so
-an unmodified cell is written back byte for byte.
+spanning lines, no trimming, UTF-8 byte order mark set aside -- and each
+cell's type is inferred with a rule that round-trips (see "Type inference"
+below), so an unmodified cell of a changed row keeps its text.
+
+A loaded table also keeps the file's bytes (`RawRows` in `table.rs`): the
+whole file in one buffer plus a start/end offset per row, parallel to the
+rows. That costs the file's size plus 16 bytes per row. A row keeps its
+offsets while no statement changes it -- an UPDATE that sets every column to
+an identical value (same type, same value) counts as no change -- and is
+written back as exactly those bytes. INSERT adds rows without source bytes;
+DELETE drops a row's offsets with it; ALTER TABLE ADD COLUMN and TRUNCATE
+discard the source bytes of every row (every line changes).
 
 Standard input (the `-` operand) is read the same way, directly from the pipe.
 The resulting table has no file path, so `--write` reports it as unwritable
@@ -260,16 +274,18 @@ numeric text), and sort order.
 ### Source layout
 
 Each table records how its file was laid out -- whether it had a header line,
-whether records ended in CRLF, and whether `#` lines were comments -- and
-writeback reproduces it. Writeback also keeps the file's permissions and, for
-a symlink, rewrites the link's target and leaves the link in place.
+a UTF-8 byte order mark, whether records ended in CRLF, and whether `#` lines
+were comments -- and writeback reproduces it. Writeback also keeps the file's
+permissions and, for a symlink, rewrites the link's target and leaves the
+link in place. When the file's last line had no line ending and a row is
+written after it, the file's line ending is inserted first.
 
-In a file read with comment skipping (any delimited file that is not `.csv`),
-each `#` comment line is kept verbatim, with its own line ending, and
-anchored to the data that follows it: comments before the header (or, in a
-headerless file, before the first row) stay at the top, comments before a
-row stay with that row, and comments after the last row stay at the end. So
-a no-op UPDATE writes such a file back byte for byte. When rows change:
+The lines between records -- blank lines, and under `--comments` each `#`
+comment line -- are kept verbatim, with their own line endings, and anchored
+to the data that follows: lines before the header (or, in a headerless file,
+before the first row) stay at the top, lines before a row stay with that
+row, and lines after the last row stay at the end. So a no-op UPDATE writes
+any file back byte for byte. When rows change:
 
 - UPDATE replaces rows in place, so every comment stays where it was.
 - DELETE leaves a deleted row's comments where they were: in front of the
@@ -277,8 +293,7 @@ a no-op UPDATE writes such a file back byte for byte. When rows change:
   TRUNCATE) keeps all comments, in order.
 - INSERT appends rows after the last row and before the trailing comments.
 
-Blank lines are not kept (the reader skips them), and `#` lines in a `.csv`
-file are data, not comments.
+Without `--comments`, `#` lines are data, not comments.
 
 ### Row Identity Across Updates
 

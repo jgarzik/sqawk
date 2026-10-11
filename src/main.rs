@@ -98,7 +98,8 @@ fn run() -> Result<()> {
         args.tabledef.clone(), // Table column definitions
         args.write,            // Whether to write changes to files
     )
-    .with_no_header(args.no_header);
+    .with_no_header(args.no_header)
+    .with_comments(args.comments);
 
     // Configure diagnostics output if verbose mode is enabled (-v flag)
     // This is important for debugging and understanding the execution flow
@@ -125,8 +126,8 @@ fn run() -> Result<()> {
     // as table data: whichever got there first would starve the other.
     if args.interactive
         && args.files.iter().any(|spec| {
-            // Same split as parse_file_spec: table name is before the first '='.
-            spec.split_once('=').map_or(spec.as_str(), |(_, path)| path) == file_handler::STDIN_SPEC
+            file_handler::parse_table_spec(spec)
+                .is_ok_and(|(_, path)| path.as_os_str() == file_handler::STDIN_SPEC)
         })
     {
         anyhow::bail!(

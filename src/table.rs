@@ -10,7 +10,7 @@
 //! - Column resolution with qualified names (table.column)
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -777,9 +777,6 @@ pub struct Table {
     /// Complete column metadata including name and type
     cols: Vec<Column>,
 
-    /// Map of column names to their indices
-    column_map: HashMap<String, usize>,
-
     /// Row data
     rows: Vec<Row>,
 
@@ -800,15 +797,72 @@ pub struct Table {
 
     /// A `--tabledef` schema with no data yet, waiting for its file
     placeholder: bool,
+
+    /// The source bytes of the header and of each loaded row, so writeback
+    /// reproduces untouched rows byte-for-byte (see [`RawRows`]).
+    raw: Option<Box<RawRows>>,
+}
+
+/// The bytes each record of a table's source file was read from.
+///
+/// The whole file is kept in one buffer and every row points into it by
+/// [`RawSpan`], parallel to `Table::rows`. A row whose span is
+/// [`RawSpan::NONE`] (inserted, or changed by UPDATE) is written by the
+/// [`RecordWriter`]; every other row is written as the exact bytes it was read
+/// from, line ending included -- quoting, padding, invalid UTF-8 and all.
+#[derive(Debug)]
+pub struct RawRows {
+    /// The file contents as read (byte order mark included).
+    pub buf: Vec<u8>,
+    /// The header record's bytes, if the file has a header.
+    pub header: RawSpan,
+    /// One span per row of the table.
+    pub rows: Vec<RawSpan>,
+}
+
+/// A byte range `start..end` of [`RawRows::buf`]; `NONE` when there is none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawSpan {
+    /// First byte of the record
+    pub start: usize,
+    /// One past the last byte (the line ending, when there is one)
+    pub end: usize,
+}
+
+impl RawSpan {
+    /// No source bytes: the record is written from its values.
+    pub const NONE: RawSpan = RawSpan {
+        start: usize::MAX,
+        end: usize::MAX,
+    };
+
+    fn get(self, buf: &[u8]) -> Option<&[u8]> {
+        buf.get(self.start..self.end)
+    }
+}
+
+/// Whether two values are the same value of the same type, so a row that
+/// UPDATE rewrote with them is unchanged and keeps its source bytes. Stricter
+/// than `==`, which equates 1 and 1.0.
+fn identical(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::Integer(x), Value::Integer(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => x.to_bits() == y.to_bits(),
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::Boolean(x), Value::Boolean(y)) => x == y,
+        _ => false,
+    }
 }
 
 /// Layout details of a table's source file that writeback must reproduce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileLayout {
-    /// Whether the file has a header line. Headerless files (`--no-header`,
-    /// `--tabledef`, or a guessed headerless non-.csv file) are written back
-    /// without one.
+    /// Whether the file has a header line. Headerless files (`--no-header`
+    /// or `--tabledef`) are written back without one.
     pub has_header: bool,
+    /// Whether the file starts with a UTF-8 byte order mark.
+    pub bom: bool,
     /// Whether records end in CRLF rather than LF.
     pub crlf: bool,
     /// Whether `#` lines are comments when the file is read. If so, a data
@@ -817,15 +871,16 @@ pub struct FileLayout {
     pub comments: bool,
 }
 
-/// The `#` comment lines of a source file read with comment skipping, each
-/// kept verbatim (with its own line ending) and anchored to the data around
-/// it, so that writeback puts it back where it was.
+/// The lines of a source file between its records -- blank lines, and the
+/// `#` comment lines of a file read with `--comments` -- each kept verbatim
+/// (with its own line ending) and anchored to the data around it, so that
+/// writeback puts it back where it was.
 ///
-/// A comment line is anchored to the row that follows it. Rows keep their
-/// identity through UPDATE, so their comments stay with them; a deleted row
-/// leaves its comments in place, in front of the next surviving row (or of
-/// the trailing comments); rows appended by INSERT go after the last row and
-/// before the trailing comments. Blank lines are not kept.
+/// A line is anchored to the row that follows it. Rows keep their identity
+/// through UPDATE, so their lines stay with them; a deleted row leaves its
+/// lines in place, in front of the next surviving row (or of the trailing
+/// lines); rows appended by INSERT go after the last row and before the
+/// trailing lines.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommentLines {
     /// Lines before the first record (the header, or the first row).
@@ -854,6 +909,7 @@ impl Default for FileLayout {
     fn default() -> Self {
         FileLayout {
             has_header: true,
+            bom: false,
             crlf: false,
             comments: false,
         }
@@ -913,13 +969,6 @@ impl Table {
     ///
     /// This constructor defaults all columns to Text type
     pub fn new(name: &str, column_names: Vec<String>, file_path: Option<PathBuf>) -> Self {
-        // Create column_map from column names
-        let column_map = column_names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), i))
-            .collect();
-
         // Create full column metadata objects
         let cols = column_names
             .iter()
@@ -932,7 +981,6 @@ impl Table {
         Table {
             name: name.to_string(),
             cols,
-            column_map,
             rows: Vec::new(),
             file_path,
             modified: false,
@@ -940,6 +988,7 @@ impl Table {
             format: FileLayout::default(),
             comments: CommentLines::default(),
             placeholder: false,
+            raw: None,
         }
     }
 
@@ -962,9 +1011,6 @@ impl Table {
         file_path: Option<PathBuf>,
         delimiter: Option<String>,
     ) -> Self {
-        // Extract column names from the schema
-        let columns: Vec<String> = schema.iter().map(|col_def| col_def.name.clone()).collect();
-
         // Create full column metadata objects
         let cols = schema
             .iter()
@@ -974,17 +1020,9 @@ impl Table {
             })
             .collect();
 
-        // Create column_map from column names
-        let column_map = columns
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), i))
-            .collect();
-
         Table {
             name: name.to_string(),
             cols,
-            column_map,
             rows: Vec::new(),
             file_path,
             modified: true, // Tables created with schema are considered modified
@@ -992,6 +1030,7 @@ impl Table {
             format: FileLayout::default(),
             comments: CommentLines::default(),
             placeholder: false,
+            raw: None,
         }
     }
 
@@ -1001,8 +1040,6 @@ impl Table {
     /// The column names maintain their original order as specified when
     /// the table was created or loaded from a file.
     pub fn columns(&self) -> Vec<String> {
-        // Get column names from Column objects
-        // This prepares for future removal of the columns field
         self.cols.iter().map(|col| col.name.clone()).collect()
     }
 
@@ -1080,6 +1117,9 @@ impl Table {
         }
 
         self.rows.push(row);
+        if let Some(raw) = &mut self.raw {
+            raw.rows.push(RawSpan::NONE);
+        }
         self.modified = true;
         Ok(())
     }
@@ -1149,20 +1189,16 @@ impl Table {
         self.comments.flush_from(self.rows.len());
     }
 
-    /// Get the index of a column by name
+    /// The index of the column called `name`.
     ///
-    /// Looks up a column by name and returns its index in the table.
-    /// This is essential for implementing SQL operations that reference
-    /// columns by name rather than position.
-    ///
-    /// # Arguments
-    /// * `name` - The name of the column to look up
-    ///
-    /// # Returns
-    /// * `Some(usize)` with the column index if found
-    /// * `None` if no column with that name exists
+    /// Column names are case-insensitive (ASCII), as in SQLite; this is the
+    /// one lookup every statement uses, so a name resolves the same way in a
+    /// SELECT, an INSERT column list and an UPDATE SET. A loaded or created
+    /// table cannot have two columns that match the same name.
     pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.column_map.get(name).copied()
+        self.cols
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(name))
     }
 
     /// Make the column names unique as SQLite names the columns of a
@@ -1170,11 +1206,10 @@ impl Table {
     pub fn dedup_column_names(&mut self) {
         let mut names: Vec<String> = self.cols.iter().map(|c| c.name.clone()).collect();
         unique_column_names(&mut names);
-        self.column_map.clear();
-        for (i, (col, name)) in self.cols.iter_mut().zip(names).enumerate() {
-            self.column_map.insert(name.clone(), i);
+        for (col, name) in self.cols.iter_mut().zip(names) {
             col.name = name;
         }
+        self.raw = None;
     }
 
     /// Print the table to stdout as a delimited file
@@ -1205,23 +1240,69 @@ impl Table {
         comments: bool,
         lines: Option<&CommentLines>,
     ) -> std::io::Result<()> {
+        self.write_records(out, header, crlf, comments, lines, None)
+    }
+
+    /// `write_delimited`, writing each record that has source bytes in
+    /// `raw` as those bytes.
+    fn write_records<W: std::io::Write>(
+        &self,
+        out: &mut W,
+        header: bool,
+        crlf: bool,
+        comments: bool,
+        lines: Option<&CommentLines>,
+        raw: Option<&RawRows>,
+    ) -> std::io::Result<()> {
         let delim = delimiter_byte(&self.delimiter);
+        let terminator: &'static [u8] = if crlf { b"\r\n" } else { b"\n" };
         let w = RecordWriter {
             delimiter: delim,
-            terminator: if crlf { b"\r\n" } else { b"\n" },
+            terminator,
             comments,
         };
         let empty = CommentLines::default();
         let lines = lines.unwrap_or(&empty);
-        out.write_all(&lines.head)?;
+        let source = |span: RawSpan| raw.and_then(|r| span.get(&r.buf));
+        // The last record of a file may have no line ending. Its bytes are
+        // written as they were, so anything written after it must first end
+        // its line.
+        let mut open_line = false;
+        let put = |out: &mut W, bytes: &[u8], open: &mut bool| -> std::io::Result<()> {
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            if *open {
+                out.write_all(terminator)?;
+            }
+            out.write_all(bytes)?;
+            *open = !matches!(bytes.last(), Some(b'\n' | b'\r'));
+            Ok(())
+        };
+        put(out, &lines.head, &mut open_line)?;
         if header {
-            let names = self.columns();
-            w.write(out, names.iter().map(String::as_str))?;
+            match source(raw.map_or(RawSpan::NONE, |r| r.header)) {
+                Some(bytes) => put(out, bytes, &mut open_line)?,
+                None => {
+                    let names = self.columns();
+                    let mut rec = Vec::new();
+                    w.write(&mut rec, names.iter().map(String::as_str))?;
+                    put(out, &rec, &mut open_line)?;
+                }
+            }
         }
         let mut fields: Vec<std::borrow::Cow<'_, str>> = Vec::with_capacity(self.cols.len());
         for (i, row) in self.rows.iter().enumerate() {
             if let Some(before) = lines.before.get(&i) {
-                out.write_all(before)?;
+                put(out, before, &mut open_line)?;
+            }
+            if let Some(bytes) = source(raw.map_or(RawSpan::NONE, |r| r.rows[i])) {
+                put(out, bytes, &mut open_line)?;
+                continue;
+            }
+            if open_line {
+                out.write_all(terminator)?;
+                open_line = false;
             }
             fields.clear();
             fields.extend(row.iter().map(Value::field_str));
@@ -1230,22 +1311,34 @@ impl Table {
         // A comment line anchored past the last row (none should be) is
         // still written rather than lost.
         for (_, before) in lines.before.range(self.rows.len()..) {
-            out.write_all(before)?;
+            put(out, before, &mut open_line)?;
         }
-        out.write_all(&lines.tail)
+        put(out, &lines.tail, &mut open_line)
     }
 
-    /// Write the table back to its file format: `write_delimited` with the
-    /// recorded layout and comment lines.
+    /// Write the table back to its file format: the recorded layout (byte
+    /// order mark, header, line endings) and comment lines, with every row
+    /// that still has its source bytes written as those bytes.
     pub fn write_source_layout<W: std::io::Write>(&self, out: &mut W) -> std::io::Result<()> {
         let layout = self.file_layout();
-        self.write_delimited(
+        if layout.bom {
+            out.write_all(b"\xef\xbb\xbf")?;
+        }
+        self.write_records(
             out,
             layout.has_header,
             layout.crlf,
             layout.comments,
             Some(&self.comments),
+            self.raw.as_deref(),
         )
+    }
+
+    /// Record the source bytes of the header and rows (see [`RawRows`]).
+    /// `raw.rows` must have one span per row.
+    pub fn set_raw(&mut self, raw: RawRows) {
+        debug_assert_eq!(raw.rows.len(), self.rows.len());
+        self.raw = Some(Box::new(raw));
     }
 
     /// Replace all rows with a new set
@@ -1257,6 +1350,7 @@ impl Table {
     /// * `new_rows` - The new set of rows to replace the existing ones
     pub fn replace_rows(&mut self, new_rows: Vec<Row>) {
         self.rows = new_rows;
+        self.raw = None;
         self.comments.flush_from(self.rows.len());
         self.modified = true;
     }
@@ -1267,6 +1361,13 @@ impl Table {
     /// move to the next surviving row, or to the tail.
     pub fn retain_rows(&mut self, keep: impl Fn(usize) -> bool) {
         let old = std::mem::take(&mut self.rows);
+        if let Some(raw) = &mut self.raw {
+            let mut i = 0;
+            raw.rows.retain(|_| {
+                i += 1;
+                keep(i - 1)
+            });
+        }
         let mut before = std::mem::take(&mut self.comments.before);
         let mut pending: Vec<u8> = Vec::new();
         for (i, row) in old.into_iter().enumerate() {
@@ -1302,6 +1403,16 @@ impl Table {
                 row_index, self.name
             )));
         }
+        if let Some(raw) = &mut self.raw {
+            let same = rows[row_index].len() == row.len()
+                && rows[row_index]
+                    .iter()
+                    .zip(&row)
+                    .all(|(a, b)| identical(a, b));
+            if !same {
+                raw.rows[row_index] = RawSpan::NONE;
+            }
+        }
         rows[row_index] = row;
         self.modified = true;
         Ok(())
@@ -1316,13 +1427,9 @@ impl Table {
             "BOOL" | "BOOLEAN" => DataType::Boolean,
             _ => DataType::Text,
         };
-        let column = Column {
-            name: name.clone(),
-            data_type,
-        };
+        let column = Column { name, data_type };
         self.cols.push(column);
-        let new_index = self.cols.len() - 1;
-        self.column_map.insert(name, new_index);
+        self.raw = None;
         self.modified = true;
     }
 
@@ -1333,13 +1440,10 @@ impl Table {
         data_type: DataType,
         default_value: Value,
     ) -> crate::error::SqawkResult<()> {
-        let column = Column {
-            name: name.clone(),
-            data_type,
-        };
+        let column = Column { name, data_type };
         self.cols.push(column);
-        let new_index = self.cols.len() - 1;
-        self.column_map.insert(name, new_index);
+        // Every line of the file gains a field.
+        self.raw = None;
 
         // Add default value to all existing rows
         for row in &mut self.rows {
@@ -1353,6 +1457,7 @@ impl Table {
     /// Clear all rows from the table (TRUNCATE TABLE)
     pub fn clear_rows(&mut self) -> crate::error::SqawkResult<()> {
         self.rows.clear();
+        self.raw = None;
         self.comments.flush_from(0);
         self.modified = true;
         Ok(())
