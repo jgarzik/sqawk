@@ -9,7 +9,7 @@ use super::bytecode::{spec_escape, OpCode, ResultSchema};
 use super::compiler::{InsertTarget, SqlCompiler};
 use super::compiler_select::Sink;
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::{unique_column_names, DataType};
+use crate::table::unique_column_names;
 
 impl<'a> SqlCompiler<'a> {
     /// Compile a DROP statement (DROP TABLE)
@@ -89,13 +89,12 @@ impl<'a> SqlCompiler<'a> {
                         col_name
                     )));
                 }
-                let col_type = Self::sql_type_to_internal(&column_def.data_type.to_string());
-
+                // The declared type name is recorded as written.
                 let spec = format!(
                     "{}:{}:{}",
                     spec_escape(&table_name),
                     spec_escape(&col_name),
-                    col_type
+                    spec_escape(&column_def.data_type.to_string())
                 );
 
                 self.emit(
@@ -196,13 +195,7 @@ impl<'a> SqlCompiler<'a> {
         unique_column_names(&mut names);
         let mut spec = spec_escape(&table_name);
         for (col, name) in schema.columns.iter().zip(&names) {
-            let type_str = match col.data_type {
-                DataType::Integer => "INTEGER",
-                DataType::Float => "REAL",
-                DataType::Boolean => "BOOLEAN",
-                _ => "TEXT",
-            };
-            spec.push_str(&format!(":{}:{}", spec_escape(name), type_str));
+            spec.push_str(&format!(":{}:{}", spec_escape(name), col.data_type));
         }
         spec.push_str("||");
         self.program.instructions[create].p4 = Some(spec.into());
@@ -236,13 +229,13 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // Build column specification: "table_name:col1:type1:col2:type2:..."
+        // Each type is the declared name as written; it is not enforced.
         let mut spec = spec_escape(&table_name);
         for col in columns {
             spec.push(':');
             spec.push_str(&spec_escape(&col.name.value));
             spec.push(':');
-            let type_str = Self::sql_type_to_internal(&col.data_type.to_string());
-            spec.push_str(type_str);
+            spec.push_str(&spec_escape(&col.data_type.to_string()));
         }
 
         // Get location from hive_formats or direct location

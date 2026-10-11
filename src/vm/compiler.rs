@@ -666,16 +666,6 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// Convert SQL type to internal type string
-    pub(crate) fn sql_type_to_internal(data_type: &str) -> &'static str {
-        match data_type.to_uppercase().as_str() {
-            "INTEGER" | "INT" => "INTEGER",
-            "REAL" | "FLOAT" | "DOUBLE" => "REAL",
-            "BOOLEAN" | "BOOL" => "BOOLEAN",
-            _ => "TEXT",
-        }
-    }
-
     /// Add a comment to the program if verbose mode is enabled
     pub(crate) fn add_comment(&mut self, comment: &str) {
         if self.verbose {

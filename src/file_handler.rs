@@ -421,7 +421,7 @@ impl FileHandler {
 
 /// Whether `path` names a tab-separated file: extension `.tsv` or `.tab`
 /// (any case).
-fn has_tab_extension(path: &Path) -> bool {
+pub(crate) fn has_tab_extension(path: &Path) -> bool {
     path.extension().is_some_and(|ext| {
         let ext = ext.to_string_lossy();
         ext.eq_ignore_ascii_case("tsv") || ext.eq_ignore_ascii_case("tab")

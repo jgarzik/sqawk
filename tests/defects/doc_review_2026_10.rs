@@ -4,8 +4,9 @@
 //! against the binary. Most findings were wrong documentation; the two below
 //! were wrong behaviour, and every test in this module encodes the
 //! **correct** behaviour for one of them. Each was `#[ignore]`d when written
-//! and un-ignored as its defect was fixed. A few tests (marked in their doc
-//! comments) passed when written and pin behaviour the fixes had to keep.
+//! and un-ignored as its defect was fixed; all of them now pass. A few tests
+//! (marked in their doc comments) passed when written and pin behaviour the
+//! fixes had to keep.
 //! Run the red list with:
 //!     cargo test --test mod defects -- --ignored
 //!
@@ -100,7 +101,6 @@ fn repl(script: &str) -> Result<String, Box<dyn std::error::Error>> {
 
 /// A `.tsv` LOCATION is written tab-separated, so it loads back as written.
 #[test]
-#[ignore]
 fn location_tsv_is_written_tab_separated() -> TestResult {
     let (written, reread) = create_and_reload("x.tsv", "")?;
     assert_eq!(written, "a\tb\n1\tp\n2\tq\n");
@@ -110,7 +110,6 @@ fn location_tsv_is_written_tab_separated() -> TestResult {
 
 /// `.tab` follows the same rule as `.tsv`.
 #[test]
-#[ignore]
 fn location_tab_is_written_tab_separated() -> TestResult {
     let (written, reread) = create_and_reload("y.tab", "")?;
     assert_eq!(written, "a\tb\n1\tp\n2\tq\n");
@@ -155,7 +154,6 @@ fn location_explicit_delimiter_wins_over_extension() -> TestResult {
 
 /// `.schema` shows each declared type name as written.
 #[test]
-#[ignore]
 fn schema_shows_declared_type_names() -> TestResult {
     let out = repl(
         "CREATE TABLE q (a BIGINT, b DECIMAL(10,2), c VARCHAR(20), d INT, \
@@ -171,7 +169,6 @@ fn schema_shows_declared_type_names() -> TestResult {
 
 /// ALTER TABLE ... ADD COLUMN records its declared type as written too.
 #[test]
-#[ignore]
 fn alter_add_column_shows_declared_type_name() -> TestResult {
     let out = repl("CREATE TABLE q (a INTEGER);\nALTER TABLE q ADD COLUMN b BIGINT;\n.schema q\n")?;
     assert_eq!(out, "CREATE TABLE q (\n  a INTEGER,\n  b BIGINT\n);\n");
@@ -184,7 +181,6 @@ fn alter_add_column_shows_declared_type_name() -> TestResult {
 /// REAL/FLOA/DOUB -> REAL; anything else -> NUMERIC), and a loaded column
 /// or an expression keeps the type CTAS always gave it.
 #[test]
-#[ignore]
 fn ctas_column_types_follow_declared_affinity() -> TestResult {
     let out = repl(
         "CREATE TABLE q (a BIGINT, b DECIMAL(10,2), c VARCHAR(20), e BOOLEAN, \

@@ -534,6 +534,32 @@ pub enum DataType {
     Text,
     /// Boolean
     Boolean,
+    /// NUMERIC affinity (a declared type matching no other rule)
+    Numeric,
+    /// BLOB affinity (a declared type containing `BLOB`)
+    Blob,
+}
+
+impl DataType {
+    /// The affinity of a declared column type, by SQLite's rules (in order):
+    /// `INT` anywhere gives INTEGER; `CHAR`, `CLOB` or `TEXT` gives TEXT;
+    /// `BLOB` or no type gives BLOB; `REAL`, `FLOA` or `DOUB` gives REAL;
+    /// anything else gives NUMERIC. Case-insensitive.
+    pub fn from_declared(decl: &str) -> DataType {
+        let t = decl.to_ascii_uppercase();
+        let has = |s: &str| t.contains(s);
+        if has("INT") {
+            DataType::Integer
+        } else if has("CHAR") || has("CLOB") || has("TEXT") {
+            DataType::Text
+        } else if has("BLOB") || t.trim().is_empty() {
+            DataType::Blob
+        } else if has("REAL") || has("FLOA") || has("DOUB") {
+            DataType::Float
+        } else {
+            DataType::Numeric
+        }
+    }
 }
 
 impl fmt::Display for DataType {
@@ -543,6 +569,8 @@ impl fmt::Display for DataType {
             DataType::Float => write!(f, "REAL"),
             DataType::Text => write!(f, "TEXT"),
             DataType::Boolean => write!(f, "BOOLEAN"),
+            DataType::Numeric => write!(f, "NUMERIC"),
+            DataType::Blob => write!(f, "BLOB"),
         }
     }
 }
@@ -552,13 +580,27 @@ impl fmt::Display for DataType {
 pub struct Column {
     /// Name of the column
     pub name: String,
-    /// Data type of the column
+    /// Data type of the column (for a declared column, its affinity)
     pub data_type: DataType,
+    /// The type name as declared by CREATE TABLE / ALTER TABLE ADD COLUMN;
+    /// `None` for a loaded or result column
+    pub decl_type: Option<String>,
+}
+
+impl Column {
+    /// The type name `.schema` shows: the declared name when there is one,
+    /// else the data type's name.
+    pub fn type_name(&self) -> String {
+        match &self.decl_type {
+            Some(decl) => decl.clone(),
+            None => self.data_type.to_string(),
+        }
+    }
 }
 
 impl fmt::Display for Column {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({})", self.name, self.data_type)
+        write!(f, "{} ({})", self.name, self.type_name())
     }
 }
 
@@ -569,6 +611,8 @@ pub struct ColumnDefinition {
     pub name: String,
     /// Data type of the column
     pub data_type: DataType,
+    /// The declared type name, if the column was declared
+    pub decl_type: Option<String>,
 }
 
 impl Table {
@@ -582,6 +626,7 @@ impl Table {
             .map(|name| Column {
                 name: name.clone(),
                 data_type: DataType::Text,
+                decl_type: None,
             })
             .collect();
 
@@ -624,6 +669,7 @@ impl Table {
             .map(|col_def| Column {
                 name: col_def.name.clone(),
                 data_type: col_def.data_type,
+                decl_type: col_def.decl_type.clone(),
             })
             .collect();
 
@@ -1034,20 +1080,29 @@ impl Table {
             "BOOL" | "BOOLEAN" => DataType::Boolean,
             _ => DataType::Text,
         };
-        let column = Column { name, data_type };
+        let column = Column {
+            name,
+            data_type,
+            decl_type: None,
+        };
         self.cols.push(column);
         self.raw = None;
         self.modified = true;
     }
 
-    /// Add a new column with a default value for all existing rows
+    /// Add a new column, declared as `decl_type`, with a default value for
+    /// all existing rows
     pub fn add_column_with_default(
         &mut self,
         name: String,
-        data_type: DataType,
+        decl_type: String,
         default_value: Value,
     ) -> crate::error::SqawkResult<()> {
-        let column = Column { name, data_type };
+        let column = Column {
+            name,
+            data_type: DataType::from_declared(&decl_type),
+            decl_type: Some(decl_type),
+        };
         self.cols.push(column);
         // Every line of the file gains a field.
         self.raw = None;

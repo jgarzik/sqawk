@@ -7,11 +7,11 @@
 //! Every 2026-08 test here now passes, and so does every test of the
 //! `audit_2026_10` submodule (defects from the 2026-10 audit), of the
 //! `code_review_2026_10` submodule (defects from the 2026-10 code review of
-//! the `updates` branch) and of the `v1_review_2026_10` submodule (findings
-//! of the 2026-10 v1-readiness review). All serve as regression cover. The
-//! `doc_review_2026_10` submodule holds the code defects found by the
-//! 2026-10 documentation review. Add a new `#[ignore]`d test when a defect
-//! is found, and remove the attribute when it is fixed.
+//! the `updates` branch), of the `v1_review_2026_10` submodule (findings of
+//! the 2026-10 v1-readiness review) and of the `doc_review_2026_10`
+//! submodule (code defects found by the 2026-10 documentation review). All
+//! serve as regression cover. Add a new `#[ignore]`d test when a defect is
+//! found, and remove the attribute when it is fixed.
 //!
 //! Run the red list with:
 //!     cargo test --test mod defects -- --ignored

@@ -14,7 +14,6 @@ use crate::config::AppConfig;
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
 use crate::file_handler::FileHandler;
-use crate::table::DataType;
 
 /// SQL statement executor
 ///
@@ -180,13 +179,14 @@ impl<'a> SqlExecutor<'a> {
     /// * `table_name` - The name of the table
     ///
     /// # Returns
-    /// * `SqawkResult<Vec<(String, DataType)>>` - List of column names with their data types
-    pub fn get_table_column_types(&self, table_name: &str) -> SqawkResult<Vec<(String, DataType)>> {
+    /// * `SqawkResult<Vec<(String, String)>>` - each column's name and type
+    ///   name (the declared name for a declared column)
+    pub fn get_table_column_types(&self, table_name: &str) -> SqawkResult<Vec<(String, String)>> {
         let table = self.database.get_table(table_name)?;
         let column_types = table
             .column_metadata()
             .iter()
-            .map(|col| (col.name.clone(), col.data_type))
+            .map(|col| (col.name.clone(), col.type_name()))
             .collect();
         Ok(column_types)
     }

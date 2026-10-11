@@ -603,22 +603,27 @@ fn apply_modifications(
                 file_path,
                 delimiter,
             } => {
-                // Convert engine ColumnDef to table ColumnDefinition
+                // Each column keeps its declared type name; its affinity
+                // follows SQLite's rules.
                 let schema: Vec<crate::table::ColumnDefinition> = columns
                     .into_iter()
                     .map(|col| crate::table::ColumnDefinition {
                         name: col.name,
-                        data_type: match col.data_type.as_str() {
-                            "INTEGER" => crate::table::DataType::Integer,
-                            "REAL" => crate::table::DataType::Float,
-                            "BOOLEAN" => crate::table::DataType::Boolean,
-                            _ => crate::table::DataType::Text,
-                        },
+                        data_type: crate::table::DataType::from_declared(&col.data_type),
+                        decl_type: Some(col.data_type),
                     })
                     .collect();
 
-                // Create the table with schema
+                // Without WITH (DELIMITER=...), the file is written with the
+                // delimiter it will be loaded with: tab for `.tsv` / `.tab`,
+                // comma for everything else.
                 let file_path_buf = file_path.map(std::path::PathBuf::from);
+                let delimiter = delimiter.or_else(|| {
+                    file_path_buf
+                        .as_deref()
+                        .filter(|p| crate::file_handler::has_tab_extension(p))
+                        .map(|_| "\t".to_string())
+                });
                 let table = crate::table::Table::new_with_schema(
                     &table_name,
                     schema,
@@ -644,13 +649,11 @@ fn apply_modifications(
                 column_type,
             } => {
                 let table = database.get_table_mut(&table_name)?;
-                let data_type = match column_type.as_str() {
-                    "INTEGER" => crate::table::DataType::Integer,
-                    "REAL" => crate::table::DataType::Float,
-                    "BOOLEAN" => crate::table::DataType::Boolean,
-                    _ => crate::table::DataType::Text,
-                };
-                table.add_column_with_default(column_name, data_type, crate::table::Value::Null)?;
+                table.add_column_with_default(
+                    column_name,
+                    column_type,
+                    crate::table::Value::Null,
+                )?;
                 database.mark_modified(&table_name);
             }
             engine::TableModification::Truncate { table_name } => {

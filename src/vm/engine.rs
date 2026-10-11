@@ -584,6 +584,7 @@ impl Sorter {
 #[derive(Debug, Clone)]
 pub struct ColumnDef {
     pub name: String,
+    /// The declared type name, as written
     pub data_type: String,
 }
 
@@ -1088,7 +1089,7 @@ impl<'a> VmEngine<'a> {
                 while i + 1 < name_and_cols.len() {
                     columns.push(ColumnDef {
                         name: spec_unescape(name_and_cols[i]),
-                        data_type: name_and_cols[i + 1].to_string(),
+                        data_type: spec_unescape(name_and_cols[i + 1]),
                     });
                     i += 2;
                 }
@@ -1174,7 +1175,7 @@ impl<'a> VmEngine<'a> {
 
                 let table_name = spec_unescape(parts[0]);
                 let column_name = spec_unescape(parts[1]);
-                let column_type = parts[2].to_string();
+                let column_type = spec_unescape(parts[2]);
 
                 // Add to pending modifications
                 self.pending_modifications
@@ -2187,6 +2188,7 @@ impl<'a> VmEngine<'a> {
                     .map(|col| ColumnDefinition {
                         name: col.name.clone(),
                         data_type: col.data_type,
+                        decl_type: None,
                     })
                     .collect();
                 let table = Table::new_with_schema("result", col_defs, None, None);
@@ -2203,11 +2205,13 @@ impl<'a> VmEngine<'a> {
                     ColumnDefinition {
                         name: schema.columns[i].name.clone(),
                         data_type: schema.columns[i].data_type,
+                        decl_type: None,
                     }
                 } else {
                     ColumnDefinition {
                         name: format!("col{}", i),
                         data_type: crate::table::DataType::Text,
+                        decl_type: None,
                     }
                 }
             })
