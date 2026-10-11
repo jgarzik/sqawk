@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # Weekly, so breakage from a new stable toolchain shows up on main rather
+  # than on whatever PR comes next. GitHub Actions cron is UTC.
+  schedule:
+    - cron: "0 5 * * 0"
+
+permissions:
+  contents: read
+
+# PR runs share a group per branch and cancel superseded runs. Every other run
+# gets its own group: a shared group on main would cancel queued pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# CARGO_TERM_COLOR and CARGO_INCREMENTAL are set by dtolnay/rust-toolchain and
+# Swatinem/rust-cache.
+env:
+  RUST_BACKTRACE: 1
+  # Serialized everywhere. The REPL tests spawn the binary as a subprocess and
+  # several tests share fixtures under tests/data/, so running them in parallel
+  # made macOS and Windows flaky in a way Linux never showed.
+  RUST_TEST_THREADS: 1
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Without dev-dependencies, which cargo test and clippy --all-targets
+      # merge in: this is the feature set users actually build. --workspace
+      # adds tsq/, the unpublished test-data generator crate.
+      - name: Build
+        run: cargo build --locked --workspace
+      # On Windows too, not just Linux: tsq/src/main.rs has cfg(unix) branches
+      # whose non-unix side is otherwise never linted. macOS is unix like
+      # Linux, so it adds nothing.
+      - name: Clippy
+        if: runner.os != 'macOS'
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # Run even when Clippy failed, so a lint (often a new one from a stable
+      # toolchain release) does not hide the test results on every OS.
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: cargo test --locked --workspace
+
+  test-release:
+    name: Test (release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --locked --workspace --release
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Read from the rust-version declared in Cargo.toml. That field claimed
+      # 1.70 for a long time while the dependency tree had moved well past it,
+      # because nothing ever checked. Not pinned as @1.88: Dependabot would
+      # propose bumping that ref to toolchains that do not exist yet.
+      - name: Read rust-version
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      # Binaries only: rust-version is a promise to people building sqawk, and
+      # dev-dependencies are not part of it. --workspace includes tsq/, which
+      # declares the same rust-version.
+      - name: Check build at MSRV
+        run: cargo check --locked --workspace
