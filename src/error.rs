@@ -193,9 +193,31 @@ pub type SqawkResult<T> = std::result::Result<T, SqawkError>;
 mod tests {
     use super::*;
 
+    /// The platform's "permission denied" OS error. Raw error numbers differ
+    /// by platform: 13 is EACCES on Unix but ERROR_INVALID_DATA on Windows,
+    /// where access denied is 5.
+    #[cfg(unix)]
+    const DENIED: i32 = 13;
+    #[cfg(windows)]
+    const DENIED: i32 = 5;
+
+    /// The OS's own text for `DENIED` without the "(os error N)" suffix. The
+    /// wording comes from the OS (and differs between Windows and Wine), so
+    /// it is read rather than spelled out.
+    fn denied_text() -> String {
+        let shown = std::io::Error::from_raw_os_error(DENIED).to_string();
+        let suffix = format!(" (os error {})", DENIED);
+        let text = shown
+            .strip_suffix(&suffix)
+            .expect("io::Error display ends in (os error N)");
+        text.to_string()
+    }
+
     #[test]
     fn io_reason_strips_os_error_and_temp_path() {
-        let e = std::io::Error::from_raw_os_error(13);
+        let e = std::io::Error::from_raw_os_error(DENIED);
+        assert_eq!(io_reason(&e), denied_text());
+        #[cfg(unix)]
         assert_eq!(io_reason(&e), "Permission denied");
         let e = std::io::Error::other("Permission denied (os error 13) at path \"/d/.tmpAb12\"");
         assert_eq!(io_reason(&e), "Permission denied");
@@ -203,7 +225,10 @@ mod tests {
 
     #[test]
     fn file_error_names_file_once() {
-        let e = SqawkError::open("np.csv", std::io::Error::from_raw_os_error(13));
-        assert_eq!(e.to_string(), "cannot open 'np.csv': Permission denied");
+        let e = SqawkError::open("np.csv", std::io::Error::from_raw_os_error(DENIED));
+        assert_eq!(
+            e.to_string(),
+            format!("cannot open 'np.csv': {}", denied_text())
+        );
     }
 }

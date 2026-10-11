@@ -13,7 +13,7 @@ pub fn run_repl_script(
     verbose: bool,
 ) -> String {
     // Build command args
-    let mut args = vec!["run", "--bin", "sqawk"];
+    let mut args: Vec<&str> = Vec::new();
 
     // Add input files
     args.extend(input_files);
@@ -33,7 +33,7 @@ pub fn run_repl_script(
     args.push("--interactive");
 
     // Start the sqawk process
-    let mut process = Command::new("cargo")
+    let mut process = Command::new(env!("CARGO_BIN_EXE_sqawk"))
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

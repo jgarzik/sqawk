@@ -10,14 +10,8 @@ fn test_repl_basic_dot_commands() {
     let test_commands = ".help\n.version\n.tables\n.cd .\n.changes on\n.changes off\n.exit\n";
 
     // Start the sqawk process with sample data loaded
-    let mut process = Command::new("cargo")
-        .args([
-            "run",
-            "--bin",
-            "sqawk",
-            "tests/data/sample.csv",
-            "--interactive",
-        ])
+    let mut process = Command::new(env!("CARGO_BIN_EXE_sqawk"))
+        .args(["tests/data/sample.csv", "--interactive"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -49,14 +43,8 @@ fn test_repl_show_command() {
     let test_commands = ".show\n.show tables\n.exit\n";
 
     // Start the sqawk process with sample data loaded
-    let mut process = Command::new("cargo")
-        .args([
-            "run",
-            "--bin",
-            "sqawk",
-            "tests/data/sample.csv",
-            "--interactive",
-        ])
+    let mut process = Command::new(env!("CARGO_BIN_EXE_sqawk"))
+        .args(["tests/data/sample.csv", "--interactive"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -89,14 +77,8 @@ fn test_repl_stats_command() {
         ".stats on\nSELECT * FROM sample;\n.stats off\nSELECT * FROM sample;\n.exit\n";
 
     // Start the sqawk process with sample data loaded
-    let mut process = Command::new("cargo")
-        .args([
-            "run",
-            "--bin",
-            "sqawk",
-            "tests/data/sample.csv",
-            "--interactive",
-        ])
+    let mut process = Command::new(env!("CARGO_BIN_EXE_sqawk"))
+        .args(["tests/data/sample.csv", "--interactive"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

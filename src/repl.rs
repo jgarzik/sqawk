@@ -1270,19 +1270,25 @@ mod tests {
 
     #[test]
     fn history_location() {
+        // Absolute paths for this platform: "/state" has no drive letter and
+        // is relative on Windows.
+        #[cfg(windows)]
+        let (state, home) = (r"C:\state", r"C:\home\u");
+        #[cfg(not(windows))]
+        let (state, home) = ("/state", "/home/u");
         let os = |s: &str| Some(OsString::from(s));
         assert_eq!(
-            history_path(os("/state"), os("/home/u")),
-            Some(PathBuf::from("/state/sqawk/history"))
+            history_path(os(state), os(home)),
+            Some(PathBuf::from(state).join("sqawk").join("history"))
         );
         assert_eq!(
-            history_path(None, os("/home/u")),
-            Some(PathBuf::from("/home/u/.sqawk_history"))
+            history_path(None, os(home)),
+            Some(PathBuf::from(home).join(".sqawk_history"))
         );
         // A relative XDG_STATE_HOME is invalid and ignored.
         assert_eq!(
-            history_path(os("rel"), os("/home/u")),
-            Some(PathBuf::from("/home/u/.sqawk_history"))
+            history_path(os("rel"), os(home)),
+            Some(PathBuf::from(home).join(".sqawk_history"))
         );
         assert_eq!(history_path(os(""), os("")), None);
         assert_eq!(history_path(None, None), None);

@@ -26,7 +26,12 @@ fn run(dir: &Path, args: &[&str], stdin: &str) -> std::io::Result<Output> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    child.stdin.take().unwrap().write_all(stdin.as_bytes())?;
+    // A process that rejects its arguments can exit before reading stdin;
+    // the write then fails with BrokenPipe, which is not a test failure.
+    match child.stdin.take().unwrap().write_all(stdin.as_bytes()) {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(e),
+        _ => {}
+    }
     child.wait_with_output()
 }
 
