@@ -10,7 +10,8 @@
 //! back without changes is byte-identical: cells are inferred with a rule
 //! that round-trips (see `Value::from(&str)`), NULL is the empty field, and
 //! the header/line-ending/comment layout of the source is recorded on the
-//! table and reproduced.
+//! table and reproduced, including the `#` comment lines themselves (see
+//! `CommentLines`).
 
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -19,7 +20,7 @@ use tempfile::NamedTempFile;
 
 use crate::capacity::{generate_alpha_columns, is_likely_data_row};
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::{FileLayout, Table, Value};
+use crate::table::{CommentLines, FileLayout, Table, Value};
 
 /// How the first record of a file is treated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,10 +104,17 @@ pub fn read_table(
 
     let mut record = csv::ByteRecord::new();
     let mut line = 0usize;
+    let mut comment_lines = CommentLines::default();
 
     // First record: the header, or the first data row.
     let mut pending_first: Option<Vec<Value>> = None;
-    let has_first = read_record(&mut reader, &mut record, source, &mut line)?;
+    let first = read_record(&mut reader, &mut record, source, &mut line);
+    let mut has_first = first?;
+    if opts.comments {
+        let (lines, to_eof) = skipped_comments(data, &record);
+        comment_lines.head = lines;
+        has_first &= !(to_eof && is_phantom(&record));
+    }
     let header_mode = if opts.columns.is_some() {
         HeaderMode::Absent
     } else {
@@ -152,7 +160,24 @@ pub fn read_table(
     }
 
     loop {
-        match read_record(&mut reader, &mut record, source, &mut line) {
+        let mut next = read_record(&mut reader, &mut record, source, &mut line);
+        if opts.comments {
+            // The comment lines skipped before this record, or before the
+            // end of the file, go in front of the next row to be pushed (or
+            // into the tail, past the last row).
+            let (lines, to_eof) = skipped_comments(data, &record);
+            if !lines.is_empty() {
+                comment_lines
+                    .before
+                    .entry(sink.rows.len())
+                    .or_default()
+                    .extend_from_slice(&lines);
+            }
+            if to_eof && matches!(next, Ok(true)) && is_phantom(&record) {
+                next = Ok(false);
+            }
+        }
+        match next {
             Ok(true) => {
                 let row: Vec<Value> = record
                     .iter()
@@ -181,6 +206,7 @@ pub fn read_table(
 
     // Loading is not a modification.
     table.replace_rows(sink.rows);
+    table.set_comment_lines(comment_lines);
     table.mark_unmodified();
     Ok(table)
 }
@@ -223,6 +249,43 @@ impl RowSink<'_> {
         self.rows.push(row);
         Ok(())
     }
+}
+
+/// The `#` comment lines the reader skipped before `record` (which may be the
+/// empty record of end of input), verbatim with their line endings.
+///
+/// A record's position is where the reader stood when it started on it:
+/// just past the previous record. What lies between there and the record
+/// itself is blank lines (or the rest of the previous record's line ending)
+/// and comment lines; the scan stops at the first line that is neither.
+///
+/// Also returns whether the comment lines run to the end of the input.
+fn skipped_comments(data: &[u8], record: &csv::ByteRecord) -> (Vec<u8>, bool) {
+    let Some(pos) = record.position() else {
+        return (Vec::new(), false);
+    };
+    let mut i = (pos.byte() as usize).min(data.len());
+    let mut out = Vec::new();
+    while i < data.len() {
+        let end = data[i..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(data.len(), |n| i + n + 1);
+        let line = &data[i..end];
+        if line[0] == b'#' {
+            out.extend_from_slice(line);
+        } else if !line.iter().all(|&b| b == b'\r' || b == b'\n') {
+            break;
+        }
+        i = end;
+    }
+    (out, i >= data.len())
+}
+
+/// The csv crate reports a comment line that ends the input WITHOUT a line
+/// ending as an empty record. It is not a row: the comment is all there is.
+fn is_phantom(record: &csv::ByteRecord) -> bool {
+    record.len() == 1 && record[0].is_empty()
 }
 
 /// Read the next record; false at end of input. `line` tracks the 1-based
@@ -268,8 +331,7 @@ pub fn save_table(table: &Table, file_path: &Path) -> SqawkResult<()> {
 
     {
         let mut out = BufWriter::new(temp_file.as_file());
-        let layout = table.file_layout();
-        table.write_delimited(&mut out, layout.has_header, layout.crlf, layout.comments)?;
+        table.write_source_layout(&mut out)?;
         out.flush()?;
     }
 

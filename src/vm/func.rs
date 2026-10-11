@@ -469,7 +469,7 @@ fn printf(a: &[Register]) -> SqawkResult<Register> {
         }
         // Width and precision saturate while parsed; either one past the
         // length limit could only build a string that is too big.
-        let mut number = |chars: &mut std::iter::Peekable<std::str::Chars>| {
+        let number = |chars: &mut std::iter::Peekable<std::str::Chars>| {
             let mut n = 0usize;
             while let Some(d) = chars.peek().and_then(|c| c.to_digit(10)) {
                 n = n.saturating_mul(10).saturating_add(d as usize);

@@ -507,7 +507,8 @@ distinct groups.
 Modifications (INSERT, UPDATE, DELETE) remain in-memory unless `--write` flag is specified.
 Cells a statement did not change are written back byte for byte; NULL is
 written as an empty field; the source file's delimiter, header line (or its
-absence), line endings and permissions are kept.
+absence), line endings, `#` comment lines (in a non-`.csv` file) and
+permissions are kept.
 
 ## Unsupported syntax
 

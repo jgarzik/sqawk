@@ -640,24 +640,8 @@ fn apply_modifications(
         let delete_count = indices_to_delete.len();
         let table = database.get_table_mut(&table_name)?;
 
-        // Keep the rows not being deleted
-        let new_rows: Vec<crate::table::Row> = table
-            .rows()
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| !indices_to_delete.contains(idx))
-            .map(|(_, row)| {
-                row.iter()
-                    .map(|value| match value {
-                        crate::table::Value::String(cow) => {
-                            crate::table::Value::String(std::borrow::Cow::Owned(cow.to_string()))
-                        }
-                        v => v.clone(),
-                    })
-                    .collect()
-            })
-            .collect();
-        table.replace_rows(new_rows);
+        // Keep the rows not being deleted (and their comment lines in place)
+        table.retain_rows(|idx| !indices_to_delete.contains(&idx));
         modified_tables.insert(table_name.clone());
 
         // If we have equal deletes and inserts for this table, it's an UPDATE

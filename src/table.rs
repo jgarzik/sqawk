@@ -10,7 +10,7 @@
 //! - Column resolution with qualified names (table.column)
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -750,6 +750,9 @@ pub struct Table {
     /// How the source file was laid out, so writeback reproduces it.
     format: FileLayout,
 
+    /// The source file's `#` comment lines, so writeback reproduces them.
+    comments: CommentLines,
+
     /// A `--tabledef` schema with no data yet, waiting for its file
     placeholder: bool,
 }
@@ -767,6 +770,39 @@ pub struct FileLayout {
     /// row whose first field starts with `#` must be quoted on writeback, or
     /// it would be skipped as a comment when read again.
     pub comments: bool,
+}
+
+/// The `#` comment lines of a source file read with comment skipping, each
+/// kept verbatim (with its own line ending) and anchored to the data around
+/// it, so that writeback puts it back where it was.
+///
+/// A comment line is anchored to the row that follows it. Rows keep their
+/// identity through UPDATE, so their comments stay with them; a deleted row
+/// leaves its comments in place, in front of the next surviving row (or of
+/// the trailing comments); rows appended by INSERT go after the last row and
+/// before the trailing comments. Blank lines are not kept.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommentLines {
+    /// Lines before the first record (the header, or the first row).
+    pub head: Vec<u8>,
+    /// Lines before row `i`, by row index.
+    pub before: BTreeMap<usize, Vec<u8>>,
+    /// Lines after the last record.
+    pub tail: Vec<u8>,
+}
+
+impl CommentLines {
+    /// Move the comments of rows `from..` to the front of the tail, in order:
+    /// those rows are gone.
+    fn flush_from(&mut self, from: usize) {
+        let gone = self.before.split_off(&from);
+        if gone.is_empty() {
+            return;
+        }
+        let mut lines: Vec<u8> = gone.into_values().flatten().collect();
+        lines.append(&mut self.tail);
+        self.tail = lines;
+    }
 }
 
 impl Default for FileLayout {
@@ -857,6 +893,7 @@ impl Table {
             modified: false,
             delimiter: ",".to_string(), // Default to comma delimiter
             format: FileLayout::default(),
+            comments: CommentLines::default(),
             placeholder: false,
         }
     }
@@ -908,6 +945,7 @@ impl Table {
             modified: true, // Tables created with schema are considered modified
             delimiter: delimiter.unwrap_or_else(|| ",".to_string()),
             format: FileLayout::default(),
+            comments: CommentLines::default(),
             placeholder: false,
         }
     }
@@ -1059,6 +1097,13 @@ impl Table {
         self.format = format;
     }
 
+    /// Record the source file's comment lines, for writeback. Comments
+    /// anchored past the last row are moved to the tail.
+    pub fn set_comment_lines(&mut self, comments: CommentLines) {
+        self.comments = comments;
+        self.comments.flush_from(self.rows.len());
+    }
+
     /// Get the index of a column by name
     ///
     /// Looks up a column by name and returns its index in the table.
@@ -1084,7 +1129,7 @@ impl Table {
     pub fn print_to_stdout(&self) -> std::io::Result<()> {
         let stdout = std::io::stdout();
         let mut out = std::io::BufWriter::new(stdout.lock());
-        self.write_delimited(&mut out, true, false, false)?;
+        self.write_delimited(&mut out, true, false, false, None)?;
         std::io::Write::flush(&mut out)
     }
 
@@ -1094,12 +1139,14 @@ impl Table {
     /// * `crlf` - end records with CRLF instead of LF
     /// * `comments` - the file will be read with `#` comment skipping, so a
     ///   leading `#` in a record's first field must be quoted
+    /// * `lines` - comment lines to put back around the records
     pub fn write_delimited<W: std::io::Write>(
         &self,
         out: &mut W,
         header: bool,
         crlf: bool,
         comments: bool,
+        lines: Option<&CommentLines>,
     ) -> std::io::Result<()> {
         let delim = delimiter_byte(&self.delimiter);
         let w = RecordWriter {
@@ -1107,17 +1154,41 @@ impl Table {
             terminator: if crlf { b"\r\n" } else { b"\n" },
             comments,
         };
+        let empty = CommentLines::default();
+        let lines = lines.unwrap_or(&empty);
+        out.write_all(&lines.head)?;
         if header {
             let names = self.columns();
             w.write(out, names.iter().map(String::as_str))?;
         }
         let mut fields: Vec<std::borrow::Cow<'_, str>> = Vec::with_capacity(self.cols.len());
-        for row in &self.rows {
+        for (i, row) in self.rows.iter().enumerate() {
+            if let Some(before) = lines.before.get(&i) {
+                out.write_all(before)?;
+            }
             fields.clear();
             fields.extend(row.iter().map(Value::field_str));
             w.write(out, fields.iter().map(|f| f.as_ref()))?;
         }
-        Ok(())
+        // A comment line anchored past the last row (none should be) is
+        // still written rather than lost.
+        for (_, before) in lines.before.range(self.rows.len()..) {
+            out.write_all(before)?;
+        }
+        out.write_all(&lines.tail)
+    }
+
+    /// Write the table back to its file format: `write_delimited` with the
+    /// recorded layout and comment lines.
+    pub fn write_source_layout<W: std::io::Write>(&self, out: &mut W) -> std::io::Result<()> {
+        let layout = self.file_layout();
+        self.write_delimited(
+            out,
+            layout.has_header,
+            layout.crlf,
+            layout.comments,
+            Some(&self.comments),
+        )
     }
 
     /// Replace all rows with a new set
@@ -1129,6 +1200,36 @@ impl Table {
     /// * `new_rows` - The new set of rows to replace the existing ones
     pub fn replace_rows(&mut self, new_rows: Vec<Row>) {
         self.rows = new_rows;
+        self.comments.flush_from(self.rows.len());
+        self.modified = true;
+    }
+
+    /// Keep only the rows whose index satisfies `keep` (DELETE).
+    ///
+    /// Comment lines anchored to a removed row stay where they were: they
+    /// move to the next surviving row, or to the tail.
+    pub fn retain_rows(&mut self, keep: impl Fn(usize) -> bool) {
+        let old = std::mem::take(&mut self.rows);
+        let mut before = std::mem::take(&mut self.comments.before);
+        let mut pending: Vec<u8> = Vec::new();
+        for (i, row) in old.into_iter().enumerate() {
+            if let Some(mut lines) = before.remove(&i) {
+                pending.append(&mut lines);
+            }
+            if keep(i) {
+                if !pending.is_empty() {
+                    self.comments
+                        .before
+                        .insert(self.rows.len(), std::mem::take(&mut pending));
+                }
+                self.rows.push(row);
+            }
+        }
+        for (_, mut lines) in before {
+            pending.append(&mut lines);
+        }
+        pending.append(&mut self.comments.tail);
+        self.comments.tail = pending;
         self.modified = true;
     }
 
@@ -1195,6 +1296,7 @@ impl Table {
     /// Clear all rows from the table (TRUNCATE TABLE)
     pub fn clear_rows(&mut self) -> crate::error::SqawkResult<()> {
         self.rows.clear();
+        self.comments.flush_from(0);
         self.modified = true;
         Ok(())
     }

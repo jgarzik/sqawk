@@ -258,6 +258,22 @@ whether records ended in CRLF, and whether `#` lines were comments -- and
 writeback reproduces it. Writeback also keeps the file's permissions and, for
 a symlink, rewrites the link's target and leaves the link in place.
 
+In a file read with comment skipping (any delimited file that is not `.csv`),
+each `#` comment line is kept verbatim, with its own line ending, and
+anchored to the data that follows it: comments before the header (or, in a
+headerless file, before the first row) stay at the top, comments before a
+row stay with that row, and comments after the last row stay at the end. So
+a no-op UPDATE writes such a file back byte for byte. When rows change:
+
+- UPDATE replaces rows in place, so every comment stays where it was.
+- DELETE leaves a deleted row's comments where they were: in front of the
+  next surviving row, or of the trailing comments. Deleting every row (or
+  TRUNCATE) keeps all comments, in order.
+- INSERT appends rows after the last row and before the trailing comments.
+
+Blank lines are not kept (the reader skips them), and `#` lines in a `.csv`
+file are data, not comments.
+
 ### Row Identity Across Updates
 
 UPDATE replaces a row in place rather than deleting and re-appending it, so a

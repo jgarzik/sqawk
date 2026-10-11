@@ -5,11 +5,11 @@
 //! it wrong, and un-ignored as it was fixed.
 //!
 //! Every 2026-08 test here now passes, and so does every test of the
-//! `audit_2026_10` submodule (defects from the 2026-10 audit); both serve as
-//! regression cover. The `code_review_2026_10` submodule holds the defects
-//! found by the 2026-10 code review of the `updates` branch; its `#[ignore]`d
-//! tests are the current red list. Add a new `#[ignore]`d test when a defect
-//! is found, and remove the attribute when it is fixed.
+//! `audit_2026_10` submodule (defects from the 2026-10 audit) and of the
+//! `code_review_2026_10` submodule (defects from the 2026-10 code review of
+//! the `updates` branch): the red list is EMPTY. All serve as regression
+//! cover rather than as a to-do list. Add a new `#[ignore]`d test when a
+//! defect is found, and remove the attribute when it is fixed.
 //!
 //! Run the red list with:
 //!     cargo test --test mod defects -- --ignored

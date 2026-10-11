@@ -1,8 +1,11 @@
-//! Red list: defects found by the 2026-10 code review of the `updates` branch.
+//! Regression cover for the defects found by the 2026-10 code review of the
+//! `updates` branch.
 //!
 //! Every test in this module encodes **correct** behaviour for a defect found
-//! in that review. Each is `#[ignore]`d while sqawk gets it wrong; remove the
-//! attribute when the defect is fixed. Run the red list with:
+//! in that review. Each was `#[ignore]`d when written and un-ignored as its
+//! defect was fixed; all of them now pass, so the red list is empty again.
+//! A few tests (marked in their doc comments) were added with a fix rather
+//! than before it. Run the red list with:
 //!     cargo test --test mod defects -- --ignored
 //!
 //! Expected outputs were computed with SQLite 3.45 (python3 `sqlite3`) unless
@@ -179,14 +182,12 @@ const TSV: &str = "# leading comment\n\
 
 /// A no-op UPDATE must leave the file byte-identical, comments included.
 #[test]
-#[ignore]
 fn tsv_comments_survive_noop_update() -> TestResult {
     assert_write_back("t.tsv", TSV, &[], "UPDATE t SET id = id WHERE id = 1", TSV)
 }
 
 /// Comments keep their own line endings in a CRLF file.
 #[test]
-#[ignore]
 fn crlf_tsv_comments_survive_noop_update() -> TestResult {
     let crlf = "#c1\r\nid\tv\r\n#c2\r\n1\ta\r\n2\tb\r\n#end\r\n";
     assert_write_back(
@@ -200,7 +201,6 @@ fn crlf_tsv_comments_survive_noop_update() -> TestResult {
 
 /// A headerless colon-separated file (the /etc/passwd shape) with comments.
 #[test]
-#[ignore]
 fn headerless_colon_file_comments_survive_noop_update() -> TestResult {
     let passwd = "# /etc/passwd excerpt\n\
                   root:x:0:0:root:/root:/bin/bash\n\
@@ -219,7 +219,6 @@ fn headerless_colon_file_comments_survive_noop_update() -> TestResult {
 
 /// UPDATE replaces rows in place, so the comments stay where they were.
 #[test]
-#[ignore]
 fn comments_stay_put_on_update() -> TestResult {
     assert_write_back(
         "t.tsv",
@@ -233,7 +232,6 @@ fn comments_stay_put_on_update() -> TestResult {
 /// DELETE keeps a deleted row's comments at their position: before the next
 /// surviving row, or at the end.
 #[test]
-#[ignore]
 fn comments_stay_put_on_delete() -> TestResult {
     assert_write_back(
         "t.tsv",
@@ -253,7 +251,6 @@ fn comments_stay_put_on_delete() -> TestResult {
 
 /// INSERT appends rows after the last row and before the trailing comments.
 #[test]
-#[ignore]
 fn insert_goes_before_trailing_comments() -> TestResult {
     assert_write_back(
         "t.tsv",
@@ -272,6 +269,37 @@ fn insert_goes_before_trailing_comments() -> TestResult {
          # trailing 1\n\
          # trailing 2\n",
     )
+}
+
+/// Edge cases, written with the fix: a `#` line inside a quoted multi-line
+/// field is data, not a comment; blank lines are dropped (they always were);
+/// a last comment line without a newline is reproduced as it is (the csv
+/// crate reports it as an empty record, which used to load as a phantom
+/// all-NULL row and be written back as a `\t` line).
+#[test]
+fn comment_edge_cases_survive_noop_update() -> TestResult {
+    let input = "id\tnote\n1\t\"line one\n#not a comment\"\n\n# real comment\n2\tb\n#eof";
+    assert_write_back(
+        "t.tsv",
+        input,
+        &[],
+        "UPDATE t SET id = id WHERE id = 1",
+        &input.replace("\n\n", "\n"),
+    )
+}
+
+/// TRUNCATE (and deleting every row) keeps all comment lines, in order.
+#[test]
+fn comments_survive_deleting_every_row() -> TestResult {
+    let comments_only = "# leading comment\n\
+                         id\tname\tnote\n\
+                         # before the first row\n\
+                         # between 2 and 3\n\
+                         #another\n\
+                         # trailing 1\n\
+                         # trailing 2\n";
+    assert_write_back("t.tsv", TSV, &[], "DELETE FROM t", comments_only)?;
+    assert_write_back("t.tsv", TSV, &[], "TRUNCATE TABLE t", comments_only)
 }
 
 // ---------------------------------------------------------------------------
