@@ -28,9 +28,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --workspace --verbose
       - name: Run tests
-        run: RUST_TEST_THREADS=1 cargo test --verbose
+        run: RUST_TEST_THREADS=1 cargo test --workspace --verbose
 
   build-release:
     name: Build Release
@@ -49,9 +49,9 @@ jobs:
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-
       - name: Build release
-        run: cargo build --release --verbose
+        run: cargo build --workspace --release --verbose
       - name: Run release tests
-        run: RUST_TEST_THREADS=1 cargo test --release --verbose
+        run: RUST_TEST_THREADS=1 cargo test --workspace --release --verbose
 
   cross-platform:
     name: Cross-Platform Tests
@@ -73,13 +73,13 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --workspace --verbose
       # Serialized like the Linux jobs. The REPL tests spawn the binary as a
       # subprocess and several tests share fixtures under tests/data/, so
       # running them in parallel here made macOS and Windows flaky in a way
       # Linux never showed.
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --workspace --verbose
         env:
           RUST_TEST_THREADS: 1
 
@@ -104,7 +104,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   msrv:
     name: Minimum Supported Rust Version

@@ -28,8 +28,7 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 cargo install sqawk
 ```
 
-This installs two binaries: `sqawk` and [`tsq`](#tsq---test-data-generator).
-Requires Rust 1.88 or newer.
+This installs the `sqawk` binary. Requires Rust 1.88 or newer.
 
 ## Quick Examples
 
@@ -50,13 +49,15 @@ sqawk -s "UPDATE data SET status = 'archived' WHERE year < 2020" data.csv --writ
 cat employees.csv | sqawk -s "SELECT name FROM stdin WHERE salary > 70000" -
 ```
 
-## `tsq` - test data generator
+## `tsq` - test data generator (development only)
 
-`cargo install sqawk` also installs `tsq`, which generates deterministic
-multi-table CSV data plus a corpus of SQL queries for exercising sqawk.
+The source tree also contains `tsq`, which generates deterministic multi-table
+CSV data plus a corpus of SQL queries for exercising sqawk. It is a separate
+workspace crate (`tsq/`) that is not published, so `cargo install sqawk` does
+not install it. Run it from a checkout:
 
 ```sh
-tsq --seed 42 --rows 1000 --output-dir /tmp/sqawk-test
+cargo run -p tsq -- --seed 42 --rows 1000 --output-dir /tmp/sqawk-test
 sqawk -s "SELECT * FROM customers LIMIT 10" /tmp/sqawk-test/data/customers.csv
 ```
 

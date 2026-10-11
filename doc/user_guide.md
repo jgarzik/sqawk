@@ -93,10 +93,11 @@ To build from source:
 - Sqawk is designed to work on Linux, macOS, and Windows systems where Rust is supported
 - Building requires Rust 1.88 or newer
 - The binaries are self-contained with no runtime dependencies
-- Installing the crate provides **two** commands: `sqawk`, and `tsq`, a
-  generator of deterministic multi-table CSV data and SQL queries for
-  exercising sqawk. Run `tsq --help`, or see the
-  [project README](../README.md#tsq---test-data-generator)
+- Installing the crate provides the `sqawk` command. The source tree also
+  contains `tsq`, a development-only generator of deterministic multi-table
+  CSV data and SQL queries for exercising sqawk; it is not installed. Run
+  `cargo run -p tsq -- --help` from a checkout, or see the
+  [project README](../README.md#tsq---test-data-generator-development-only)
 
 ## Getting Started
 

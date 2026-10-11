@@ -8,9 +8,6 @@ license = "MIT"
 repository = "https://github.com/jgarzik/sqawk"
 homepage = "https://github.com/jgarzik/sqawk"
 readme = "README.md"
-# `cargo run` and `cargo install --path .` would otherwise be ambiguous across
-# the two [[bin]] targets below.
-default-run = "sqawk"
 keywords = ["csv", "tsv", "sql", "delimited", "awk"]
 categories = ["command-line-utilities", "text-processing", "parser-implementations"]
 # Minimum supported Rust version.
@@ -36,7 +33,6 @@ sqlparser = "0.62"
 csv = "1"
 anyhow = "1"
 regex = "1"
-libc = "0.2"
 tempfile = "3"
 
 rustyline = "15"
@@ -56,6 +52,11 @@ debug = true
 name = "sqawk"
 path = "src/main.rs"
 
-[[bin]]
-name = "tsq"
-path = "src/tsq.rs"
+# `tsq`, the test-data generator, is a separate workspace member with
+# `publish = false`: it builds and runs locally (`cargo run -p tsq`) but is
+# not part of the published sqawk crate. `cargo package` skips nested crates.
+# Only sqawk is a default member, so plain `cargo build` / `cargo publish`
+# act on sqawk alone; use `--workspace` (as CI does) to include tsq.
+[workspace]
+members = ["tsq"]
+default-members = ["."]

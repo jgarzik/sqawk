@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cargo build
 
 # Run all tests
-cargo test
+cargo test --workspace   # sqawk + the tsq dev crate
 
 # Run a specific test module
 cargo test --test mod basic       # Basic end-to-end tests
@@ -28,6 +28,9 @@ cargo run -- -s "SELECT * FROM data" data.csv
 
 # Run in interactive REPL mode
 cargo run -- --interactive data.csv
+
+# Generate test data with tsq (unpublished workspace crate in tsq/)
+cargo run -p tsq -- --seed 42 --rows 1000 --output-dir /tmp/sqawk-test
 ```
 
 ## Architecture Overview

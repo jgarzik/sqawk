@@ -1,0 +1,19 @@
+[package]
+name = "tsq"
+version = "0.1.0"
+edition = "2021"
+authors = ["Jeff Garzik <jgarzik@pobox.com>"]
+description = "Deterministic test data and SQL query generator for exercising sqawk"
+license = "MIT"
+rust-version = "1.88"
+# Local development tool only; never published to crates.io.
+publish = false
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"
