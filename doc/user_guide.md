@@ -20,17 +20,17 @@
    - [Field Separator Option (-F)](#field-separator-option--f)
    - [Output Options](#output-options)
    - [Table Definition Option (--tabledef)](#table-definition-option---tabledef)
+   - [Header Rows](#header-rows)
    - [Verbose Mode (-v)](#verbose-mode--v)
    - [Errors and Exit Status](#errors-and-exit-status)
    - [Help (--help)](#help---help)
 5. [Working with Files](#working-with-files)
    - [File Format Support](#file-format-support)
-   - [Reading Standard Input](#reading-standard-input)
+   - [Defining Schemas with CREATE TABLE](#defining-schemas-with-create-table)
    - [Table Naming](#table-naming)
    - [Handling Multiple Files](#handling-multiple-files)
    - [File Writeback Behavior](#file-writeback-behavior)
    - [Transactions](#transactions)
-   - [Defining Schemas with CREATE TABLE](#defining-schemas-with-create-table)
 6. [Examples](#examples)
    - [Basic Queries](#basic-queries)
    - [Aggregation and Grouping](#aggregation-and-grouping)
@@ -38,8 +38,10 @@
    - [Joins](#joins)
    - [Data Modification](#data-modification)
    - [String Functions](#string-functions)
+   - [SQL Semantics](#sql-semantics)
    - [System Files](#system-files---tabledef)
    - [Output Redirection](#output-redirection)
+   - [Reading Standard Input](#reading-standard-input)
    - [Interactive REPL Session](#interactive-repl-session)
 7. [Working with Large Files](#working-with-large-files)
 8. [Troubleshooting](#troubleshooting)
@@ -72,10 +74,11 @@ Sqawk is designed for data analysts, developers, system administrators, and anyo
 The simplest way to install Sqawk is through Cargo, Rust's package manager:
 
 ```sh
-cargo install sqawk
+cargo install --locked sqawk
 ```
 
-This will download, compile, and install the latest version of Sqawk from crates.io.
+This downloads, compiles and installs the latest version of Sqawk from
+crates.io; `--locked` builds with the dependency versions it was tested with.
 
 ### Building from Source
 
@@ -89,8 +92,7 @@ To build from source:
 
 2. Build and install using Cargo:
    ```sh
-   cargo build --release
-   cargo install --path .
+   cargo install --locked --path .
    ```
 
 ### Installation Notes
@@ -156,8 +158,8 @@ When you run a Sqawk command:
 
 1. Sqawk loads each specified file into memory as a table
 2. Table names are derived from file names (without extensions) or can be explicitly assigned
-3. The first row is treated as column headers (always for `.csv` files and
-   standard input; other files are checked for a missing header -- see
+3. The first line of every file is its header row of column names, unless
+   `--no-header` or `--tabledef` says the file has none (see
    [Header Rows](#header-rows))
 4. Data types are inferred per cell: an empty field is NULL, a number written
    in its canonical form (`42`, `1.5`) is a number, and everything else is
@@ -602,11 +604,11 @@ no header row"* rather than loading an unusable table.
 
 ### Defining Schemas with CREATE TABLE
 
-While Sqawk automatically infers types from input files, you can explicitly define table schemas using the CREATE TABLE statement. This is useful for:
+Besides the tables loaded from input files, you can create tables with the
+CREATE TABLE statement. This is useful for:
 
 - Creating empty tables without loading from a file
-- Ensuring specific column types for data validation
-- Defining output file formats for new tables
+- Defining the file, and its delimiter, that a new table is written to
 
 #### Basic CREATE TABLE Syntax
 
@@ -636,12 +638,10 @@ CREATE TABLE employees (
 
 #### Supported Data Types
 
-Sqawk supports these data types in CREATE TABLE statements:
-
-- `INT` or `INTEGER`: For whole numbers
-- `FLOAT` or `REAL`: For decimal numbers
-- `TEXT` or `STRING`: For text values
-- `BOOLEAN`: For true/false values
+The usual type names are `INT` / `INTEGER`, `FLOAT` / `REAL` / `DOUBLE`,
+`TEXT` / `STRING` and `BOOLEAN`; any other name is accepted too. Column types
+are not enforced: as in a loaded table, each value keeps its own type, so
+`INSERT INTO t VALUES ('abc')` stores the text `abc` in an `INT` column.
 
 #### Setting File Location and Format
 
@@ -842,7 +842,7 @@ sqawk -s "SELECT DISTINCT category FROM data" data.csv
 sqawk -s "SELECT COUNT(DISTINCT category) FROM data" data.csv
 
 # Unique combinations
-sqawk -s "SELECT DISTINCT department, role FROM employees" employees.csv
+sqawk -s "SELECT DISTINCT status, category FROM data" data.csv
 ```
 
 ### Joins
@@ -873,9 +873,12 @@ sqawk -s "UPDATE data SET status = 'archived' WHERE date < '2023-01-01'" data.cs
 # Delete rows
 sqawk -s "DELETE FROM data WHERE status = 'expired'" data.csv --write
 
-# Insert new rows
-sqawk -s "INSERT INTO data VALUES (100, 'New Item', 'active')" data.csv --write
+# Insert a row; columns not listed are NULL (an empty field in the file)
+sqawk -s "INSERT INTO data (id, name, status) VALUES (100, 'New Item', 'active')" data.csv --write
 ```
+
+`INSERT INTO data VALUES (...)` without a column list needs exactly one value
+per column of `data`; any other count is an error.
 
 ### String Functions
 
@@ -1018,31 +1021,44 @@ downstream.
 
 ## Working with Large Files
 
-Sqawk holds a whole table in memory at once, so the dataset must fit, which is
-worth planning for with large files:
+Sqawk reads every input file whole and holds all of its tables in memory for
+the whole run, so the data must fit in RAM.
+
+**How much memory.** A loaded table takes roughly six to seven times its
+file's size: the parsed values, plus the file's own bytes, which are kept so
+that `--write` can reproduce untouched rows exactly. Each statement's result
+set is also built in memory before it is printed, so a query that returns
+most of a table needs about as much again. Measured on an 83 MB CSV of one
+million 10-column rows:
+
+| Query | Peak memory |
+|-------|-------------|
+| `SELECT COUNT(*) FROM big` | 530 MB |
+| `SELECT * FROM big WHERE score > 95` (5% of rows) | 580 MB |
+| `SELECT city, COUNT(*) FROM big GROUP BY city` | 660 MB |
+| `SELECT * FROM big` | 1.4 GB |
+| `SELECT * FROM big ORDER BY amount` | 1.9 GB |
 
 **Tips for handling large files:**
 
-1. **Filter early**: When possible, use WHERE clauses to reduce the working dataset
+1. **Return less**: the table is loaded in full whatever the query, but a
+   WHERE clause, an aggregate or a LIMIT keeps the result set small
    ```sh
    sqawk -s "SELECT * FROM large_data WHERE date > '2023-01-01'" large_data.csv
    ```
 
-2. **Select only needed columns**: Minimize memory usage by selecting only required columns
+2. **Process in batches**: split a file that does not fit and process the
+   pieces (each piece needs the header line)
    ```sh
-   sqawk -s "SELECT id, name FROM large_data" large_data.csv
-   ```
-
-3. **Process in batches**: Split large files and process them in segments
-   ```sh
-   # Process first using head command (Unix/Linux)
-   head -n 1000000 large_data.csv > batch1.csv
+   # First million data rows (Unix/Linux)
+   head -n 1000001 large_data.csv > batch1.csv
    sqawk -s "SELECT * FROM batch1 WHERE value > 100" batch1.csv
    ```
 
-4. **Monitor memory usage**: Particularly when joining large tables, be aware of memory constraints
+3. **Joins**: an equality join builds a hash index on its inner table, so it
+   needs memory for that index on top of both tables, and its result set grows
+   with the number of matches
    ```sh
-   # Using a more targeted join condition reduces memory requirements
    sqawk -s "SELECT a.id, b.name FROM large_a a INNER JOIN large_b b ON a.id = b.id WHERE a.region = 'West'" large_a.csv large_b.csv
    ```
 
@@ -1094,9 +1110,10 @@ worth planning for with large files:
      regular data
 
 7. **Memory limitations**:
-   - If processing very large files, filter data early in your queries
-   - Consider processing in batches or using more targeted queries
-   - Select only the columns you need rather than using SELECT *
+   - Every input table is loaded whole: expect six to seven times the file
+     size, plus the result set (see [Working with Large Files](#working-with-large-files))
+   - Keep result sets small with WHERE, aggregates or LIMIT
+   - Split a file that does not fit and process the pieces
 
 8. **Changes not saved**:
    - Remember to use the `--write` flag to save changes

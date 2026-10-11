@@ -142,7 +142,8 @@ Tests are in `tests/` organized by functionality:
 - `basic/`, `comparison/`, `join/`, `join_on/`, `order_by/`, `update/`
 - `unsupported/`: parsed-but-unimplemented syntax must error and modify nothing
 - `aggregate/`, `alias/`, `distinct/`, `group_by/`, `limit_offset/`
-- `delimiter/`, `csv_handler/`, `string_functions/`, `repl/`
+- `delimiter/`, `file_io/`, `headerless/`, `stdin/`, `string_functions/`, `repl/`, `transaction/`
+- loader and writer unit tests live in `src/csv_handler.rs` (`#[cfg(test)]`)
 - `helpers/`: Test utilities
 - `common.rs`: Shared test helpers including REPL script runner
 

@@ -10,6 +10,9 @@
 | `BOOLEAN` | `BOOL` |
 | `NULL` | |
 
+A column type declared in CREATE TABLE is recorded but not enforced: any type
+name is accepted, and every value keeps its own type (see Type coercion).
+
 Type inference on load, per cell: an empty field is NULL; a canonical integer
 (`42`, `-7` -- printing the number gives back the same text) is INTEGER; a
 canonical float (`1.5`, `-0.25`, `2.0`, `1.0e+20` -- printing the real, see
@@ -80,14 +83,20 @@ level and group left to right (`2 = 1 < 2` is `2 = (1 < 2)`, `2 * 3 || 4` is
 | `NOT` |
 | `=` `==` `!=` `<>` `IS [NOT]` `IS [NOT] DISTINCT FROM` `IN` `LIKE` `BETWEEN` |
 | `<` `<=` `>` `>=` |
+| `&` `\|` `<<` `>>` |
 | `+` `-` |
 | `*` `/` `%` |
 | `\|\|` |
-| unary `-` `+` |
+| unary `-` `+` `~` |
 
 An expression may nest at most 1000 levels deep (SQLite's limit; a chain
 `a + b + ...` of n terms is n levels, parentheses add none). A deeper one is
 the error `expression tree is too large (maximum depth 1000)`.
+
+The SQL parser has its own, lower limit on *nesting*: parentheses and
+function calls may nest 47 deep (`((((1))))`, `abs(abs(1))`), and scalar
+subqueries inside one another about half as deep. Deeper nesting is the
+error `recursion limit exceeded`.
 
 `LIKE` follows SQLite: `%` matches any run of characters and `_` exactly one
 character (not byte), both including newlines; letters compare
@@ -134,8 +143,9 @@ gives NULL, and a number argument is used in its text form.
 |----------|-------------|
 | `UPPER(s)`, `LOWER(s)` | Case conversion (all of Unicode) |
 | `LENGTH(s)` | Number of characters |
-| `TRIM(s [, chars])`, `LTRIM`, `RTRIM` | Strip whitespace, or any of `chars`, from both / the start / the end |
-| `TRIM([BOTH\|LEADING\|TRAILING] chars FROM s)` | Standard-SQL spelling of the same |
+| `TRIM(s)` | Strip whitespace from both ends |
+| `LTRIM(s [, chars])`, `RTRIM(s [, chars])` | Strip whitespace, or any of `chars`, from the start / the end |
+| `TRIM([BOTH\|LEADING\|TRAILING] chars FROM s)` | Strip any of `chars` from both ends / the start / the end |
 | `SUBSTR(s, start [, len])`, `SUBSTRING` | Substring (see below) |
 | `SUBSTRING(s FROM start [FOR len])` | Substring (alternate syntax) |
 | `REPLACE(s, from, to)` | Replace every occurrence; an empty `from` leaves `s` alone |
@@ -713,7 +723,7 @@ sqawk aims to give SQLite's answers. Where it deliberately does not:
 | Derived table (`FROM (SELECT ...)`) reading an outer-query column | Correlated | Rejected (`no such column`): a derived table is computed once, before the statement |
 | `ILIKE`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `TRIM(... FROM ...)` | Not available | Available |
 | `PRINTF` width or precision past the length limit | NULL, or the number wrapped to 31 bits | Error "string or blob too big" |
-| Parser | SQLite grammar | sqlparser's Hive dialect with SQLite's operator precedence: `GLOB`, `REGEXP`, `LIMIT n, m`, `TRIM(s, chars)`, `REPLACE INTO` do not parse |
+| Parser | SQLite grammar | sqlparser's Hive dialect with SQLite's operator precedence: `GLOB`, `LIMIT n, m`, `TRIM(s, chars)`, `REPLACE INTO` do not parse, `REGEXP` is rejected, and parentheses nest at most 47 deep |
 
 Not implemented: common table expressions, views, indexes, triggers,
 `RETURNING`, row values, `GLOB`, and blob values.

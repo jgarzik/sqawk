@@ -9,8 +9,10 @@ Sqawk implements a lightweight in-memory database engine that supports SQL opera
 1. [Data Model](#data-model)
 2. [Architecture](#architecture)
 3. [File I/O Patterns](#file-io-patterns)
-4. [Storage Backend Architecture](#storage-backend-architecture)
+4. [Storage](#storage)
 5. [Performance Considerations](#performance-considerations)
+6. [Join Implementation](#join-implementation)
+7. [Current System Limitations](#current-system-limitations)
 
 ## Data Model
 
@@ -23,7 +25,8 @@ Tables in Sqawk are in-memory representations of delimiter-separated files. Each
 - Zero or more rows of data
 - Optional metadata including the source file path and delimiter information
 
-Tables maintain an internal mapping of column names to their indices for efficient access.
+Column names are looked up case-insensitively (`Table::column_index`), the
+one lookup used by SELECT, INSERT column lists and UPDATE SET.
 
 ### Rows and Columns
 
@@ -92,7 +95,7 @@ The `Table` struct represents an in-memory table with:
 - Column metadata
 - Row data
 - Methods for accessing and manipulating rows
-- Projection capabilities (selecting subsets of columns)
+- The source file's bytes and layout, for verbatim writeback (see Storage)
 
 ### SQL Execution: a bytecode VM
 
@@ -198,9 +201,9 @@ consequences follow:
   `CREATE TABLE t; INSERT INTO t ...; SELECT * FROM t` requires.
 
 A subquery in `FROM` (a derived table) is materialized before its enclosing
-statement compiles: the subquery runs, its result is registered under the
-alias, and the statement is rewritten to reference that name. The registration
-lasts only for that statement.
+statement compiles: the subquery runs, its result is registered under an
+internal name, and the FROM item is rewritten to reference that name (keeping
+the alias). The registration lasts only for that statement.
 
 ### File Handlers
 
@@ -255,11 +258,12 @@ This ensures that TSV files remain TSV, colon-separated files remain colon-separ
 Sqawk supports two primary output modes:
 
 1. **Stdout Output**: Query results (SELECT) are written to standard output using
-   the `-F` delimiter, or comma when `-F` was not given. This is independent of
-   the delimiter a source table was parsed with
+   the `--output-delimiter` delimiter, else the `-F` delimiter, else comma.
+   This is independent of the delimiter a source table was parsed with
 2. **File Writeback**: Modified tables (via INSERT, UPDATE, DELETE, ALTER TABLE, TRUNCATE) are written back to their source files when `--write` is specified, preserving that file's delimiter
 
-For stdout output, the data is streamed directly without buffering concerns. For file writeback, the atomic write pattern described above is used.
+A statement's result set is built in memory as a table and then printed. For
+file writeback, the atomic write pattern described above is used.
 
 ## Storage
 
@@ -332,12 +336,15 @@ Sqawk's in-memory database is optimized for:
 - **Fast Loading**: Delimiter-separated files are parsed directly into memory
 - **Format Flexibility**: Support for CSV, TSV, and custom-delimited files
 - **Efficient Filtering**: WHERE clauses are applied in a single pass
-- **Low Memory Overhead**: Simple data structures minimize memory usage
 - **Zero Configuration**: No setup required, works directly with files in various formats
 
-For larger datasets, consider:
-- The entire dataset must fit in memory
-- Complex queries may require multiple passes over the data
+Memory: every table is resident for the whole run. A loaded table takes
+roughly six to seven times its file's size -- each cell is a `Value` (with a
+heap string for text), and the file's bytes are kept as well for verbatim
+writeback. An 83 MB, one-million-row, 10-column CSV peaks at about 530 MB for
+`SELECT COUNT(*)`. A statement's result set is materialized on top of that
+before it prints (1.4 GB peak for `SELECT *` of the same file, 1.9 GB with
+`ORDER BY`, which also holds the sorter's copy).
 
 ## Join Implementation
 

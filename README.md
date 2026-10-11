@@ -8,7 +8,7 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 ## Features
 
 - **SQL Query Engine** - SELECT, INSERT, UPDATE, DELETE with WHERE, ORDER BY, GROUP BY, HAVING, LIMIT/OFFSET
-- **Joins** - INNER, LEFT, RIGHT, FULL OUTER, and CROSS joins with ON conditions
+- **Joins** - INNER, LEFT, RIGHT, FULL OUTER, and CROSS joins with ON, USING or NATURAL; equality joins run as hash joins
 - **Aggregates** - COUNT, SUM, TOTAL, AVG, MIN, MAX, GROUP_CONCAT/STRING_AGG with GROUP BY, DISTINCT and `FILTER (WHERE ...)`
 - **Functions** - String (UPPER, LOWER, LENGTH, SUBSTR, INSTR, REPLACE, TRIM, LPAD/RPAD, PRINTF, QUOTE, ...), math (ABS, ROUND, CEIL, FLOOR, SIGN, multi-argument MIN/MAX, bitwise operators), conditional (COALESCE, IFNULL, NULLIF, IIF, TYPEOF), date/time (DATE, TIME, DATETIME, STRFTIME, JULIANDAY, UNIXEPOCH, TIMEDIFF with SQLite's modifiers)
 - **SQLite semantics** - 64-bit integer arithmetic, SQLite CAST rules, ASCII case-insensitive LIKE with ESCAPE, character-based strings; unimplemented syntax is an error, never silently ignored
@@ -16,11 +16,16 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 - **Set Operations** - UNION, UNION ALL, INTERSECT, EXCEPT
 - **Window Functions** - ROW_NUMBER, RANK, DENSE_RANK, PERCENT_RANK, CUME_DIST, NTILE, LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE, and aggregates with `OVER (PARTITION BY ... ORDER BY ...)`, ROWS frames and named windows
 - **DDL** - CREATE TABLE, CREATE TABLE AS SELECT, DROP, ALTER TABLE ADD COLUMN, TRUNCATE
+- **Transactions** - BEGIN, COMMIT, ROLLBACK over the in-memory tables; nothing uncommitted is written
 - **Expressions** - CASE, CAST, BETWEEN, IN, LIKE/ILIKE ... ESCAPE, IS [NOT] DISTINCT FROM, `||`, arithmetic; ORDER BY ... NULLS FIRST/LAST
 - **File Formats** - CSV, TSV (`.tsv`/`.tab`), and custom delimiters (`-F`); headerless files via `--no-header` or `--tabledef`; `#` comment lines via `--comments`; untouched rows survive `--write` byte for byte
 - **Pipelines** - Reads standard input with a `-` file operand
 - **Safe by Default** - Files unchanged unless `--write` flag is specified
 - **Interactive REPL** - Explore data interactively with `-i` flag
+
+Every input file is loaded whole into memory: plan on six to seven times the
+file's size, plus the result set (see
+[Working with Large Files](doc/user_guide.md#working-with-large-files)).
 
 ## Installation
 
@@ -86,6 +91,7 @@ counts. The same seed always produces the same data.
 - [User Guide](doc/user_guide.md) - Installation, CLI options, and examples
 - [SQL Reference](doc/sql_reference.md) - Complete SQL syntax and functions
 - [Database Architecture](doc/database.md) - Technical internals (for contributors)
+- [Changelog](CHANGELOG.md) - What changed in each release, including breaking changes
 
 ## License
 
