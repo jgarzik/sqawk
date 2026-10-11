@@ -1,20 +1,66 @@
 #!/usr/bin/env python3
-"""Differential tester: sqawk vs sqlite3.
+"""Differential tester: sqawk vs SQLite (python3's stdlib sqlite3 module).
 
-Usage: python3 -I tests/sqlite_diff/harness.py [queries_file ...]
-Set SQAWK to override the binary (default: target/release/sqawk; run
-`cargo build --release` first).  Not part of `cargo test`.
-Each query file: one test per line (blank / '--' lines skipped).
-Prefix 'O:' => compare ordered; otherwise multiset compare.
-Multiple statements separated by ';' are allowed (DML); only the
-final SELECT's result is compared (sqlite runs all, collects last).
+Usage (from anywhere; paths resolve from this file's location):
+
+    cargo build --release
+    python3 -I tests/sqlite_diff/harness.py tests/sqlite_diff/queries.sql tests/sqlite_diff/queries2.sql
+
+SQAWK overrides the binary (default: <repo>/target/release/sqawk).  Not
+part of `cargo test`.  The fixed tables below are written as CSV files into
+a temporary directory, removed at exit.
+
+Query files: one test per line; blank lines and lines starting with `--`
+are skipped.  A line prefixed `O:` is compared in order; any other line is
+compared as a multiset of rows.  A line may hold several `;`-separated
+statements (DML before a SELECT): both engines run all of them, every
+result set is compared, and SQLite rolls its database back afterwards.
+
+Like-for-like setup
+-------------------
+* Values.  sqawk types each loaded cell by itself (src/table.rs
+  `infer_value`): an empty field is NULL; canonical integer text (what i64
+  formatting prints back, so not `007`, `-0`, `+3`) is INTEGER; text that
+  equals SQLite's CAST(x AS TEXT) rendering of its double (`1.5`, `2.0`,
+  `1.0e+20`, but not `1.50`, `1e3`, `.5`) is REAL; everything else is TEXT,
+  verbatim.  `cell_value` below mirrors that rule and each cell is inserted
+  into SQLite as the resulting Python value (None / int / float / str).
+* Columns are declared with no type, which gives them no affinity (BLOB
+  affinity in SQLite's terms): SQLite stores exactly the value inserted, so
+  one column can hold integers, reals and text per cell, as in sqawk.
+  Declaring INTEGER/REAL/TEXT would make SQLite convert values (`'007'`
+  stored as 7 in an INTEGER column) and the two engines would hold
+  different data.
+* Output.  SQLite results are rendered as sqawk prints them: NULL as an
+  empty field, integers in decimal, reals via SQLite's own CAST(x AS TEXT)
+  (`1.0`, `0.3`, `1.0e+20`, `Inf`), text verbatim; then records are built
+  with sqawk's RFC 4180 rules (src/table.rs `RecordWriter`): a field is
+  quoted when it holds a comma, quote, CR or LF or has leading/trailing
+  space or tab, quotes are doubled, and a record of one empty field prints
+  as `""`.  The raw record text is compared, so quoting is checked too.
+  sqawk's header line before each result set is skipped (column names are
+  not compared).
+
+Limitation: NULL and the empty string both print as an empty field in
+sqawk, so the comparison cannot tell them apart.
+
+Output: one block per non-passing test (DIFF shows the first rows of each
+side, sorted for unordered tests), then
+    SUMMARY {'pass': N, 'DIFF': N, 'sqawk_err': N, ...}
+pass = identical output; DIFF = both engines ran but printed different
+rows; sqawk_err = sqawk exited non-zero (unsupported syntax or a rejected
+query) where SQLite ran it; both_err = both engines rejected the query
+(counted, not printed; an agreeing error is a pass in substance);
+sqlite_err = SQLite rejected a query sqawk ran (sqawk extensions such as
+`TRIM(... FROM ...)`); panic / hang = sqawk crashed or exceeded 10 s.  A clean run has
+only pass, plus DIFF / sqawk_err entries that are documented differences
+from SQLite (doc/sql_reference.md).
 """
-import csv, io, os, re, sqlite3, subprocess, sys, tempfile, time, collections
+import collections, csv, os, re, sqlite3, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 SQAWK = os.environ.get("SQAWK", os.path.join(REPO, "target", "release", "sqawk"))
-DATA = tempfile.mkdtemp(prefix="sqawk-diff-")
 
 TABLES = {
     "emp": (["id", "name", "dept", "salary", "mgr", "bonus"], [
@@ -50,79 +96,111 @@ TABLES = {
     ]),
 }
 
+# ---------------------------------------------------------------- values
+_RDB = sqlite3.connect(":memory:")
 
-def infer(v):
-    if v is None or v == "":
+
+def real_text(f):
+    """SQLite's CAST(x AS TEXT) of a real -- exactly what sqawk prints."""
+    return _RDB.execute("SELECT CAST(? AS TEXT)", (f,)).fetchone()[0] or ""
+
+
+def field_text(v):
+    """A Python value as sqawk prints it (NULL -> empty field)."""
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return str(int(v))
+    if isinstance(v, float):
+        return real_text(v)
+    if isinstance(v, bytes):
+        return "<blob %s>" % v.hex()
+    return str(v)
+
+
+_INT = re.compile(r"-?(0|[1-9][0-9]*)")
+
+
+def cell_value(text):
+    """The value sqawk loads from field `text` (src/table.rs infer_value)."""
+    if text == "":
         return None
-    if isinstance(v, (int, float)):
-        return v
-    return v
+    if _INT.fullmatch(text) and text != "-0":
+        v = int(text)
+        if -2**63 <= v < 2**63:
+            return v
+        return text
+    if "." in text and re.fullmatch(r"[-+.e0-9]+", text):
+        try:
+            f = float(text)
+        except ValueError:
+            return text
+        if f == f and f not in (float("inf"), float("-inf")) and real_text(f) == text:
+            return f
+    return text
 
 
-def write_data():
-    os.makedirs(DATA, exist_ok=True)
+# ---------------------------------------------------------------- records
+def needs_quotes(s):
+    return s != "" and (any(c in s for c in ',"\r\n') or s[0] in " \t" or s[-1] in " \t")
+
+
+def record(fields):
+    """One output record, as sqawk's RecordWriter writes it (no terminator)."""
+    out = ['"%s"' % f.replace('"', '""') if needs_quotes(f) else f for f in fields]
+    if len(out) == 1 and out[0] == "":
+        return '""'
+    return ",".join(out)
+
+
+def raw_records(text):
+    """Split CSV text into raw record strings (LF/CRLF outside quotes)."""
+    recs, cur, q = [], [], False
+    for ch in text:
+        if ch == '"':
+            q = not q
+        if ch == "\n" and not q:
+            r = "".join(cur)
+            recs.append(r[:-1] if r.endswith("\r") else r)
+            cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        recs.append("".join(cur))
+    return recs
+
+
+# ---------------------------------------------------------------- engines
+def write_data(data_dir):
     for t, (cols, rows) in TABLES.items():
-        with open(os.path.join(DATA, t + ".csv"), "w", newline="") as f:
+        with open(os.path.join(data_dir, t + ".csv"), "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f, lineterminator="\n")
             w.writerow(cols)
             for r in rows:
-                w.writerow(["" if x is None else x for x in r])
+                w.writerow([field_text(x) for x in r])
 
 
 def sqlite_db():
     db = sqlite3.connect(":memory:")
+    db.isolation_level = None
+    # printf('%.1s', '日本') cuts inside a UTF-8 sequence in both engines;
+    # decode as sqawk's output is decoded instead of raising.
+    db.text_factory = lambda b: b.decode("utf-8", "replace")
     for t, (cols, rows) in TABLES.items():
-        db.execute("CREATE TABLE %s (%s)" % (t, ",".join(cols)))
+        db.execute("CREATE TABLE %s (%s)" % (t, ",".join('"%s"' % c for c in cols)))
         db.executemany("INSERT INTO %s VALUES (%s)" % (t, ",".join("?" * len(cols))),
-                       [[infer(x) for x in r] for r in rows])
+                       [[cell_value(field_text(x)) for x in r] for r in rows])
     return db
 
 
-def norm(x):
-    if x is None:
-        return "NULL"
-    if isinstance(x, bool):
-        return str(int(x))
-    if isinstance(x, int):
-        return str(x)
-    if isinstance(x, float):
-        if x != x:
-            return "NaN"
-        if x == int(x) and abs(x) < 1e15:
-            return str(int(x))
-        return "%.9g" % x
-    s = str(x)
-    if s == "NULL":
-        return "NULL"
-    if re.fullmatch(r"-?\d+(\.\d+)?([eE][-+]?\d+)?", s):
-        try:
-            return norm(float(s)) if not re.fullmatch(r"-?\d+", s) else str(int(s))
-        except ValueError:
-            pass
-    return s
-
-
-def run_sqlite(db, sql):
-    db.execute("SAVEPOINT sp")
-    try:
-        last = None
-        for stmt in split_stmts(sql):
-            cur = db.execute(stmt)
-            if cur.description:
-                last = [tuple(norm(v) for v in row) for row in cur.fetchall()]
-        return ("ok", last)
-    except Exception as ex:
-        return ("err", str(ex))
-    finally:
-        db.execute("ROLLBACK TO sp")
-        db.execute("RELEASE sp")
-
-
 def split_stmts(sql):
-    out, cur, q = [], "", False
+    out, cur, q = [], "", None
     for ch in sql:
-        if ch == "'":
-            q = not q
+        if q:
+            if ch == q:
+                q = None
+        elif ch in "'\"":
+            q = ch
         if ch == ";" and not q:
             if cur.strip():
                 out.append(cur)
@@ -134,70 +212,108 @@ def split_stmts(sql):
     return out
 
 
+def run_sqlite(db, sql):
+    """('ok', [result set, ...]) with each result set a list of records."""
+    db.execute("SAVEPOINT sp")
+    try:
+        sets = []
+        for stmt in split_stmts(sql):
+            cur = db.execute(stmt)
+            if cur.description:
+                sets.append([record([field_text(v) for v in row]) for row in cur.fetchall()])
+        return ("ok", sets)
+    except Exception as ex:
+        return ("err", str(ex))
+    finally:
+        db.execute("ROLLBACK TO sp")
+        db.execute("RELEASE sp")
+
+
 def tables_in(sql):
     return [t for t in TABLES if re.search(r"\b%s\b" % t, sql, re.IGNORECASE)]
 
 
-def run_sqawk(sql, extra_args=()):
-    files = [os.path.join(DATA, t + ".csv") for t in tables_in(sql)] or [os.path.join(DATA, "t1.csv")]
+def run_sqawk(data_dir, sql):
+    """('ok', [raw record, ...]) of stdout, headers included."""
+    files = [os.path.join(data_dir, t + ".csv") for t in tables_in(sql)] or [os.path.join(data_dir, "t1.csv")]
     t0 = time.time()
     try:
-        p = subprocess.run([SQAWK, *extra_args, "-s", sql, *files], capture_output=True,
-                           text=True, timeout=10)
+        p = subprocess.run([SQAWK, "-s", sql, *files], capture_output=True, timeout=10)
     except subprocess.TimeoutExpired:
-        return ("hang", None, 10)
+        return ("hang", "timeout", 10)
     dt = time.time() - t0
-    if p.returncode != 0:
-        kind = "panic" if ("panicked" in p.stderr or p.returncode >= 100 or p.returncode < 0) else "err"
-        return (kind, p.stderr.strip().splitlines()[-1] if p.stderr.strip() else "rc=%d" % p.returncode, dt)
-    lines = list(csv.reader(io.StringIO(p.stdout)))
-    # result sets each begin with a header; keep the last one.  A header is
-    # hard to detect generically, so for multi-statement SQL we rely on the
-    # final SELECT being the only SELECT.
-    # sqawk renders NULL as an empty field
-    rows = [tuple("NULL" if v == "" else norm(v) for v in r) for r in lines[1:]]
-    return ("ok", rows, dt)
+    err = p.stderr.decode("utf-8", "replace").strip()
+    if p.returncode != 0 or "panicked" in err:
+        kind = "panic" if ("panicked" in err or p.returncode >= 100 or p.returncode < 0) else "err"
+        return (kind, err.splitlines()[-1] if err else "rc=%d" % p.returncode, dt)
+    return ("ok", raw_records(p.stdout.decode("utf-8", "replace")), dt)
 
 
-def compare(ordered, a, b):
+def split_sets(recs, sets):
+    """Cut sqawk's records into result sets shaped like SQLite's, dropping
+    each header line.  None when the record count does not match."""
+    if len(recs) != sum(1 + len(s) for s in sets):
+        return None
+    out, i = [], 0
+    for s in sets:
+        out.append(recs[i + 1:i + 1 + len(s)])
+        i += 1 + len(s)
+    return out
+
+
+def same(ordered, a, b):
     if ordered:
         return a == b
     return collections.Counter(a) == collections.Counter(b)
 
 
+def show(ordered, rows):
+    return rows[:12] if ordered else sorted(rows)[:12]
+
+
 def main():
-    write_data()
-    db = sqlite_db()
     files = sys.argv[1:] or [os.path.join(HERE, "queries.sql")]
     stats = collections.Counter()
-    for qf in files:
-        for line in open(qf, encoding="utf-8"):
-            q = line.strip()
-            if not q or q.startswith("--"):
-                continue
-            ordered = q.startswith("O:")
-            if ordered:
-                q = q[2:].strip()
-            sk = run_sqawk(q)
-            sl = run_sqlite(db, q)
-            if sk[0] in ("hang", "panic"):
-                stats[sk[0]] += 1
-                print("%s: %s\n   %s" % (sk[0].upper(), q, sk[1]))
-            elif sk[0] == "err":
-                stats["sqawk_err"] += 1
-                print("UNSUPPORTED/ERR: %s\n   sqawk: %s\n   sqlite: %s" % (
-                    q, sk[1], "ok" if sl[0] == "ok" else sl[1]))
-            elif sl[0] == "err":
-                stats["sqlite_err"] += 1
-                print("SQLITE-ERR(sqawk ok): %s\n   sqlite: %s\n   sqawk: %s" % (q, sl[1], sk[1][:8]))
-            elif compare(ordered, sk[1], sl[1] or []):
-                stats["pass"] += 1
-            else:
-                stats["DIFF"] += 1
-                print("DIFF%s: %s\n   sqawk : %s\n   sqlite: %s" % (
-                    "(ordered)" if ordered else "", q, sk[1][:12], (sl[1] or [])[:12]))
-            if sk[0] == "ok" and sk[2] > 2:
-                print("SLOW %.1fs: %s" % (sk[2], q))
+    with tempfile.TemporaryDirectory(prefix="sqawk-diff-") as data_dir:
+        write_data(data_dir)
+        db = sqlite_db()
+        for qf in files:
+            for line in open(qf, encoding="utf-8"):
+                q = line.strip()
+                if not q or q.startswith("--"):
+                    continue
+                ordered = q.startswith("O:")
+                if ordered:
+                    q = q[2:].strip()
+                sk = run_sqawk(data_dir, q)
+                sl = run_sqlite(db, q)
+                if sk[0] in ("hang", "panic"):
+                    stats[sk[0]] += 1
+                    print("%s: %s\n   %s" % (sk[0].upper(), q, sk[1]))
+                elif sk[0] == "err" and sl[0] == "err":
+                    stats["both_err"] += 1
+                elif sk[0] == "err":
+                    stats["sqawk_err"] += 1
+                    print("SQAWK-ERR: %s\n   sqawk : %s\n   sqlite: ok %s" % (
+                        q, sk[1], [show(ordered, s) for s in sl[1]]))
+                elif sl[0] == "err":
+                    stats["sqlite_err"] += 1
+                    print("SQLITE-ERR: %s\n   sqlite: %s\n   sqawk : %s" % (q, sl[1], sk[1][:8]))
+                else:
+                    got = split_sets(sk[1], sl[1])
+                    if got is not None and all(same(ordered, a, b) for a, b in zip(got, sl[1])):
+                        stats["pass"] += 1
+                    else:
+                        stats["DIFF"] += 1
+                        exp = [r for s in sl[1] for r in s]
+                        if got is not None:
+                            mine = [r for s in got for r in s]
+                        else:  # counts differ: show sqawk's records minus its first header
+                            mine = sk[1][1:]
+                        print("DIFF%s: %s\n   sqawk : %s\n   sqlite: %s" % (
+                            "(ordered)" if ordered else "", q, show(ordered, mine), show(ordered, exp)))
+                if sk[0] == "ok" and sk[2] > 2:
+                    print("SLOW %.1fs: %s" % (sk[2], q))
     print("\nSUMMARY", dict(stats))
 
 

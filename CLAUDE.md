@@ -158,10 +158,35 @@ Two suites carry the correctness contract:
   defects. Run with `cargo test --test mod defects -- --ignored`. Remove the
   `#[ignore]` when a defect is fixed; the list only shrinks.
 
-`tests/sqlite_diff/harness.py` is a differential tester against SQLite (via
-python3's `sqlite3` module), not part of `cargo test`. Run
-`cargo build --release && python3 -I tests/sqlite_diff/harness.py
-tests/sqlite_diff/queries.sql tests/sqlite_diff/queries2.sql`; the SUMMARY
-line counts pass / DIFF (wrong answer) / sqawk_err.
+`tests/sqlite_diff/` holds differential and robustness testers, not part of
+`cargo test`. Run `cargo build --release` first; `SQAWK=path` overrides the
+binary. All write their data to temp dirs.
+
+- `python3 -I tests/sqlite_diff/harness.py tests/sqlite_diff/queries.sql
+  tests/sqlite_diff/queries2.sql`: fixed tables vs SQLite (python3
+  `sqlite3`), loaded as the same typed values sqawk infers (columns have no
+  affinity) and rendered as sqawk prints them (reals via `CAST(x AS TEXT)`,
+  NULL empty, RFC 4180 quoting compared byte for byte). SUMMARY counts pass /
+  DIFF (wrong answer) / sqawk_err (sqawk rejected what SQLite ran) /
+  sqlite_err / both_err / panic / hang.
+- `python3 -I tests/sqlite_diff/diffh.py --only-hand
+  tests/sqlite_diff/hand1.sql tests/sqlite_diff/hand2.sql
+  tests/sqlite_diff/hand3.sql` and `... diffh.py --only-random --seed N`:
+  adversarial tables plus a hand corpus or a seeded random query generator;
+  SUMMARY counts pass / diff / loose (differs only in number formatting) /
+  sqawk_err / sqlite_err / both_err / panic / hang.
+- `python3 -I tests/sqlite_diff/wb.py [SEED [N]]`: `--write` round-trip
+  fuzzer; WRITEBACK SUMMARY must show bad 0 and sqawk_err 0 (untouched
+  records byte-identical; BOM, comments and CRLF kept).
+- `python3 -I tests/sqlite_diff/csvfuzz.py`: malformed and huge inputs;
+  CSVFUZZ SUMMARY must show crash 0 and writeback_bad 0 (clean `sqawk:`
+  errors are expected).
+- `python3 -I tests/sqlite_diff/fuzz.py`: garbage SQL, limit values, deep
+  nesting; FUZZ SUMMARY must show findings 0.
+
+Every remaining DIFF / sqawk_err must be a difference or an unsupported
+feature listed in `doc/sql_reference.md` ("Differences from SQLite",
+"Unsupported syntax"); panic and hang must be 0. NULL and `''` both print
+empty, so the testers cannot tell them apart.
 
 Tests use `assert_cmd` for CLI testing and `tempfile` for temporary test data.

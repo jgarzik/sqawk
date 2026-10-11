@@ -696,6 +696,10 @@ nothing is modified. That includes:
   list, `FILTER` or `DISTINCT` on a scalar function, `FILTER` on a window
   function
 - `CAST ... FORMAT`, `LIKE ANY`, blob literals (`X'00'`) and parameters
+- `COLLATE` (any collation, in expressions and `ORDER BY`)
+- a RIGHT JOIN whose left side already contains an outer join, a FULL JOIN
+  followed by further joins, parenthesized joins, and `INTERSECT ALL` /
+  `EXCEPT ALL`
 - table and column constraints, `CREATE TABLE IF NOT EXISTS`,
   `PARTITIONED BY`, `ROW FORMAT`, `STORED AS` any format but `TEXTFILE`,
   `WITH` options other than `DELIMITER`, table comments, and `LOCATION` /
@@ -716,14 +720,16 @@ sqawk aims to give SQLite's answers. Where it deliberately does not:
 | NULL vs `''` | Distinct in output | Both print as an empty field |
 | `UPPER` / `LOWER` | ASCII letters only | All of Unicode |
 | `TRIM(s)` | Strips spaces only | Strips all whitespace |
-| `SUM` over text | Non-numeric text counts as 0 (result real) | Non-numeric text is skipped |
+| `SUM` / `AVG` over text | Non-numeric text counts as 0: `SUM` becomes real, `AVG` divides by every non-NULL value, and over only non-numeric text both give `0.0` | Non-numeric text is skipped: `SUM` stays an integer over integers and integer text, `AVG` divides by the count of numeric values, and over only non-numeric text both give NULL |
+| Bare column in an aggregate query (`SELECT k, MAX(y), s FROM t GROUP BY k`, `SELECT COUNT(*), x FROM t`) | Allowed: the value comes from one row of the group | Rejected: `'s' must appear in GROUP BY or be used in an aggregate` |
+| Integer `ORDER BY` / `GROUP BY` term | Only a 32-bit integer is a column position (a larger one is a constant); 0 or a negative one is an "out of range" error | Any integer literal is a column position (out of range is an error); a negative one such as `-1` is a constant expression |
 | `INSERT OR REPLACE`, `ON CONFLICT` | Plain INSERT when the table has no unique constraint | Rejected: sqawk tables have no keys, so the statement cannot do what it asks |
 | Subqueries in UPDATE / DELETE | A correlated subquery sees rows already changed | Sees the table as it was before the statement |
 | Aggregate of outer-query columns in a subquery (`(SELECT MIN(t.x) FROM u)`) | Evaluated in the outer query, which becomes an aggregate query | Rejected; an aggregate that also reads a column of the subquery's own tables aggregates in the subquery, as in SQLite |
 | Derived table (`FROM (SELECT ...)`) reading an outer-query column | Correlated | Rejected (`no such column`): a derived table is computed once, before the statement |
 | `ILIKE`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `TRIM(... FROM ...)` | Not available | Available |
 | `PRINTF` width or precision past the length limit | NULL, or the number wrapped to 31 bits | Error "string or blob too big" |
-| Parser | SQLite grammar | sqlparser's Hive dialect with SQLite's operator precedence: `GLOB`, `LIMIT n, m`, `TRIM(s, chars)`, `REPLACE INTO` do not parse, `REGEXP` is rejected, and parentheses nest at most 47 deep |
+| Parser | SQLite grammar | sqlparser's Hive dialect with SQLite's operator precedence: `GLOB`, `LIMIT n, m`, `TRIM(s, chars)`, `REPLACE INTO`, `x IN ()` do not parse, `REGEXP` is rejected, and parentheses nest at most 47 deep |
 
 Not implemented: common table expressions, views, indexes, triggers,
 `RETURNING`, row values, `GLOB`, and blob values.
