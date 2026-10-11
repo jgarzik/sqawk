@@ -677,10 +677,10 @@ impl<'a> SqlCompiler<'a> {
         if needs_scope {
             for (alias, i) in &st.aliases {
                 if ctx.resolve_unqualified(alias).is_err() {
-                    scope.agg_bindings.push((
-                        NameCtx::agg_key(&Expr::Identifier(Ident::new(alias.clone()))),
+                    scope.bind_agg(
+                        &Expr::Identifier(Ident::new(alias.clone())),
                         base + *i as i64,
-                    ));
+                    );
                 }
             }
         }

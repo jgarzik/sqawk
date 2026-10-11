@@ -2611,3 +2611,27 @@ fn empty_input_ungrouped_aggregate_has_one_row() -> Result<(), Box<dyn std::erro
         "c,s\n0,",
     )
 }
+
+/// `IS` as in SQLite: `x IS y` is NULL-safe equality, and its right side is
+/// parsed at the `=` level (`NULL IS NULL / 2` is `NULL IS (NULL / 2)`).
+/// Prefix `-` binds tighter than `||`. Expected values from SQLite 3.45.
+#[test]
+fn is_operator_and_unary_minus_follow_sqlite() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query_on(
+        &[crate::helpers::ONE],
+        "SELECT 1 IS 1 AS a, NULL IS NULL AS b, 1 IS NOT 2 AS c, NULL IS NULL / 2 AS d, \
+         'x' IS 'x' AND 0 AS e, -1 || 2 AS f, typeof(-1 || 2) AS g FROM one",
+        "a,b,c,d,e,f,g\n1,1,1,1,0,-12,text",
+    )
+}
+
+/// Parentheses add no depth (SQLite): `-(1+...+1)` with 999 terms is 1000
+/// levels, within the limit.
+#[test]
+fn parenthesized_999_term_chain_is_within_depth_limit() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query_on(
+        &[crate::helpers::ONE],
+        &format!("SELECT -({}) AS v FROM one", vec!["1"; 999].join("+")),
+        "v\n-999",
+    )
+}

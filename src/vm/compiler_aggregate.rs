@@ -477,13 +477,12 @@ impl<'a> SqlCompiler<'a> {
         // registers; any other column reference is an error.
         let mut ctx = g.plan.ctx();
         for (j, agg) in g.aggs.iter().enumerate() {
-            ctx.agg_bindings
-                .push((NameCtx::agg_key(&agg.call), fin + j as i64));
+            ctx.bind_agg(&agg.call, fin + j as i64);
         }
         let mut cols = Vec::new();
         for (i, k) in g.keys.iter().enumerate() {
             let reg = key_reg + i as i64;
-            ctx.agg_bindings.push((NameCtx::agg_key(k), reg));
+            ctx.bind_agg(k, reg);
             let col = match k {
                 Expr::Identifier(ident) => ctx.resolve_unqualified(&ident.value).ok(),
                 Expr::CompoundIdentifier(parts) if parts.len() >= 2 => ctx

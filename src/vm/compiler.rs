@@ -13,8 +13,6 @@ use sqlparser::ast::{
     SelectItemQualifiedWildcardKind, Statement, TrimWhereField, UnaryOperator, Value,
     ValueWithSpan,
 };
-use sqlparser::dialect::HiveDialect;
-use sqlparser::parser::Parser;
 use std::collections::HashMap;
 
 use super::bytecode::{Instruction, OpCode, Program, AGG_COUNT, AGG_DISTINCT};
@@ -132,6 +130,11 @@ pub(crate) struct NameCtx<'t> {
     /// instead of needing a separate post-aggregation compiler.
     pub agg_bindings: Vec<(String, i64)>,
 
+    /// The root variant of each bound expression in `agg_bindings`, so a
+    /// lookup renders a candidate to its key only when it could match.
+    /// Rendering every node of an N-node tree would cost O(N^2).
+    agg_kinds: Vec<std::mem::Discriminant<Expr>>,
+
     /// Columns merged by USING / NATURAL JOIN.
     pub using: Vec<UsingCol>,
 
@@ -163,6 +166,7 @@ impl<'t> NameCtx<'t> {
             outer: None,
             using_base: 0,
             agg_bindings: Vec::new(),
+            agg_kinds: Vec::new(),
             using: Vec::new(),
             col_bindings: None,
         }
@@ -178,9 +182,17 @@ impl<'t> NameCtx<'t> {
         expr.to_string().to_ascii_lowercase()
     }
 
+    /// Bind `expr` (an aggregate or window call, a GROUP BY key, an output
+    /// alias) to the register holding its computed value.
+    pub(crate) fn bind_agg(&mut self, expr: &Expr, reg: i64) {
+        self.agg_bindings.push((Self::agg_key(expr), reg));
+        self.agg_kinds.push(std::mem::discriminant(expr));
+    }
+
     /// Register holding an already-computed value for `expr`, if bound.
     pub(crate) fn lookup_agg(&self, expr: &Expr) -> Option<i64> {
-        if self.agg_bindings.is_empty() {
+        let kind = std::mem::discriminant(expr);
+        if !self.agg_kinds.contains(&kind) {
             return None;
         }
         let key = Self::agg_key(expr);
@@ -709,8 +721,7 @@ impl<'a> SqlCompiler<'a> {
         self.pending_jumps_three.clear();
 
         // Parse the SQL statement
-        let dialect = HiveDialect {};
-        let statements = Parser::parse_sql(&dialect, sql).map_err(SqawkError::SqlParseError)?;
+        let statements = super::parse::parse_sql(sql)?;
 
         if statements.is_empty() {
             return Err(SqawkError::InvalidSqlQuery(
@@ -1251,6 +1262,18 @@ impl<'a> SqlCompiler<'a> {
         ctx: &NameCtx<'a>,
         dest: i64,
     ) -> SqawkResult<()> {
+        let refs: Vec<&Expr> = args.iter().collect();
+        self.emit_call_refs(name, &refs, ctx, dest)
+    }
+
+    /// [`Self::emit_call`] over borrowed arguments.
+    pub(crate) fn emit_call_refs(
+        &mut self,
+        name: &str,
+        args: &[&Expr],
+        ctx: &NameCtx<'a>,
+        dest: i64,
+    ) -> SqawkResult<()> {
         let def = func::lookup(name).ok_or_else(|| {
             SqawkError::UnsupportedSqlFeature(format!("Unsupported function: {}", name))
         })?;
@@ -1531,7 +1554,7 @@ impl<'a> SqlCompiler<'a> {
                 op: BinaryOperator::StringConcat,
                 right,
             } => {
-                self.emit_call("||", &[(**left).clone(), (**right).clone()], ctx, dest)?;
+                self.emit_call_refs("||", &[left, right], ctx, dest)?;
             }
 
             // Logical AND / OR with SQL three-valued logic: both operands are

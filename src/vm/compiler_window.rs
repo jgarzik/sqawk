@@ -639,8 +639,7 @@ impl<'a> SqlCompiler<'a> {
         let vals = self.allocate_registers(nc.max(1));
         let mut ctx = template;
         for (j, call) in ws.calls.iter().enumerate() {
-            ctx.agg_bindings
-                .push((NameCtx::agg_key(call), vals + j as i64));
+            ctx.bind_agg(call, vals + j as i64);
         }
         let top = self.label();
         let done = self.label();

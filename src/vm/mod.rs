@@ -27,9 +27,11 @@ mod compiler_select;
 mod compiler_subquery;
 mod compiler_window;
 mod datetime;
+pub mod dialect;
 pub mod engine;
 mod func;
 mod like;
+pub mod parse;
 mod window;
 
 #[cfg(test)]
@@ -113,9 +115,7 @@ pub fn execute_vm(
     // Executing per statement gives each its own result set and makes each
     // statement observe the database as the previous one left it, which is
     // also what `CREATE TABLE t; INSERT INTO t ...` requires.
-    let dialect = sqlparser::dialect::HiveDialect {};
-    let statements =
-        sqlparser::parser::Parser::parse_sql(&dialect, sql).map_err(SqawkError::SqlParseError)?;
+    let statements = parse::parse_sql(sql)?;
 
     if statements.is_empty() {
         return Err(SqawkError::InvalidSqlQuery(
@@ -123,12 +123,21 @@ pub fn execute_vm(
         ));
     }
 
+    execute_statements(statements, database, verbose)
+}
+
+/// Compile and execute parsed statements one at a time (see `execute_vm`).
+fn execute_statements(
+    statements: Vec<sqlparser::ast::Statement>,
+    database: &mut Database,
+    verbose: bool,
+) -> SqawkResult<VmExecutionResult> {
     let mut tables: Vec<Table> = Vec::new();
     let mut modified_tables = HashSet::with_capacity(DEFAULT_TABLE_CAPACITY);
     let mut affected_rows: usize = 0;
     let mut dml_executed = false;
 
-    for statement in &statements {
+    for mut statement in statements {
         // PHASE 0: MATERIALIZE DERIVED TABLES.
         //
         // `FROM (SELECT ...) t` has no representation in the compiler, which
@@ -136,7 +145,6 @@ pub fn execute_vm(
         // every FROM site about subqueries, each derived table is executed
         // first and registered under its alias, and the statement is rewritten
         // to reference that name. The compiler then sees an ordinary table.
-        let mut statement = statement.clone();
         let derived = materialize_derived_tables(&mut statement, database, verbose)?;
 
         // Phases 1-3 run inside a closure so a failure anywhere still drops
@@ -434,16 +442,17 @@ fn materialize_in_factor(
     materialize_in_query(&mut inner, database, verbose, registered)?;
 
     // Registered under an internal name, so that an alias may repeat
-    // across subqueries and may shadow a real table, as in SQL. (The name
-    // must survive being rendered back to SQL for an enclosing derived
-    // table, so it is a plain identifier.)
+    // across subqueries and may shadow a real table, as in SQL.
     let name = (1..)
         .map(|i| format!("sqawk_derived_{}", i))
         .find(|n| !database.has_table(n))
         .expect("an unused name");
 
-    let inner_sql = inner.to_string();
-    let result = execute_vm(&inner_sql, database, verbose)?;
+    let result = execute_statements(
+        vec![sqlparser::ast::Statement::Query(Box::new(inner))],
+        database,
+        verbose,
+    )?;
     let mut table = result.tables.into_iter().next_back().ok_or_else(|| {
         SqawkError::InvalidSqlQuery("Subquery in FROM produced no result".to_string())
     })?;

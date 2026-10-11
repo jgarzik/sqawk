@@ -401,7 +401,6 @@ fn main_schema_qualifier_works() -> TestResult {
 /// `IS NOT DISTINCT FROM` parses its RHS as `0 AND 0`; SQLite binds it at the
 /// `=` level: `(0 IS NOT DISTINCT FROM 0) AND 0` = 0.
 #[test]
-#[ignore]
 fn is_not_distinct_from_binds_tighter_than_and() -> TestResult {
     one(
         "SELECT 0 IS NOT DISTINCT FROM 0 AND 0 AS v FROM one",
@@ -412,7 +411,6 @@ fn is_not_distinct_from_binds_tighter_than_and() -> TestResult {
 /// Same defect in a WHERE: parsed as `k IS NOT DISTINCT FROM (2 AND n > 0)`,
 /// which selects k = 1 instead of k = 2.
 #[test]
-#[ignore]
 fn is_not_distinct_from_in_where() -> TestResult {
     assert_query_on(
         &[D],
@@ -424,21 +422,18 @@ fn is_not_distinct_from_in_where() -> TestResult {
 /// LIKE and `=` share one precedence level in SQLite (left-to-right):
 /// `('abc' LIKE 'A%') = 1` = 1.
 #[test]
-#[ignore]
 fn like_and_equals_same_level() -> TestResult {
     one("SELECT 'abc' LIKE 'A%' = 1 AS v FROM one", "v\n1")
 }
 
 /// `<` binds tighter than `=` in SQLite: `2 = (1 < 2)` = 0.
 #[test]
-#[ignore]
 fn less_than_binds_tighter_than_equals() -> TestResult {
     one("SELECT 2 = 1 < 2 AS v FROM one", "v\n0")
 }
 
 /// `||` binds tighter than `*` in SQLite: `2 * (3 || 4)` = 68.
 #[test]
-#[ignore]
 fn concat_binds_tighter_than_multiply() -> TestResult {
     one("SELECT 2 * 3 || 4 AS v FROM one", "v\n68")
 }
@@ -446,7 +441,6 @@ fn concat_binds_tighter_than_multiply() -> TestResult {
 /// Compound operators have equal precedence, left to right, in SQLite:
 /// `(1 UNION ALL 2) INTERSECT 2` = {2}. sqawk binds INTERSECT tighter.
 #[test]
-#[ignore]
 fn compound_operators_left_to_right() -> TestResult {
     one(
         "SELECT 1 AS v UNION ALL SELECT 2 INTERSECT SELECT 2",
@@ -573,7 +567,6 @@ fn outer_only_aggregate_in_subquery_is_error() -> TestResult {
 
 /// 10,000-term `1+1+...`: SIGABRT stack overflow. Must be a clean error.
 #[test]
-#[ignore]
 fn deep_plus_chain_is_clean_error() -> TestResult {
     assert_fails_cleanly(&run_one(&chain(10_000, "+", "1"))?);
     Ok(())
@@ -581,7 +574,6 @@ fn deep_plus_chain_is_clean_error() -> TestResult {
 
 /// 7,000-term OR chain: stack overflow.
 #[test]
-#[ignore]
 fn deep_or_chain_is_clean_error() -> TestResult {
     assert_fails_cleanly(&run_one(&chain(7_000, " OR ", "id = 2"))?);
     Ok(())
@@ -589,7 +581,6 @@ fn deep_or_chain_is_clean_error() -> TestResult {
 
 /// 10,000-term AND chain: stack overflow.
 #[test]
-#[ignore]
 fn deep_and_chain_is_clean_error() -> TestResult {
     assert_fails_cleanly(&run_one(&chain(10_000, " AND ", "id = 1"))?);
     Ok(())
@@ -597,7 +588,6 @@ fn deep_and_chain_is_clean_error() -> TestResult {
 
 /// 5,000-term `||` chain: stack overflow.
 #[test]
-#[ignore]
 fn deep_concat_chain_is_clean_error() -> TestResult {
     assert_fails_cleanly(&run_one(&chain(5_000, " || ", "'a'"))?);
     Ok(())
@@ -605,7 +595,6 @@ fn deep_concat_chain_is_clean_error() -> TestResult {
 
 /// 3,000 UNION ALL arms: stack overflow.
 #[test]
-#[ignore]
 fn many_union_arms_is_clean_error() -> TestResult {
     let sql = (0..3000)
         .map(|i| format!("SELECT {i} AS v"))
@@ -618,7 +607,6 @@ fn many_union_arms_is_clean_error() -> TestResult {
 /// A 900-term `1+...` chain is below SQLite's depth limit and must work; the
 /// debug build overflows its stack today.
 #[test]
-#[ignore]
 fn plus_chain_of_900_works() -> TestResult {
     one(&chain(900, "+", "1"), "v\n900")
 }

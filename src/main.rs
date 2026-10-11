@@ -47,6 +47,23 @@ use file_handler::FileHandler;
 use repl::Repl;
 use sql_executor::SqlExecutor;
 
+/// Stack size sqawk runs on.
+///
+/// Parsing, compiling and evaluating an expression recurse once per level of
+/// nesting, and SQLite's depth limit (1000, enforced right after parsing)
+/// needs more than the 8 MiB main-thread stack in a debug build. The memory
+/// is reserved, not committed: pages are touched only as deep as recursion
+/// actually goes.
+const MAIN_STACK_BYTES: usize = 256 * 1024 * 1024;
+
+/// Run [`run`] on a freshly mapped [`MAIN_STACK_BYTES`] stack, on this
+/// thread. (A second thread with a large stack would work too, but once a
+/// process has two threads glibc's malloc takes a lock on every call, which
+/// slows a large load or GROUP BY by several percent.)
+fn main() -> Result<()> {
+    stacker::grow(MAIN_STACK_BYTES, run)
+}
+
 /// Main entry point for the sqawk utility
 ///
 /// This function orchestrates the entire application flow:
@@ -63,7 +80,7 @@ use sql_executor::SqlExecutor;
 /// # Returns
 /// * `Ok(())` if all operations completed successfully
 /// * `Err` with context if any step fails
-fn main() -> Result<()> {
+fn run() -> Result<()> {
     // Step 1: Parse command-line arguments
     // This handles -s/--sql, file specs, -F (field separator), --write, and -v flags
     let args = cli::parse_args()?;

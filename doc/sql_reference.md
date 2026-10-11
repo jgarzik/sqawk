@@ -49,10 +49,30 @@ SELECT col alias                -- alias without AS
 | `AND`, `OR`, `NOT` | `a > 1 AND b < 5` |
 | `IS NULL`, `IS NOT NULL` | `col IS NULL` |
 | `LIKE`, `ILIKE` | `name LIKE 'A%'`, `code LIKE 'x\_%' ESCAPE '\'` |
-| `IS [NOT] DISTINCT FROM` | `a IS NOT DISTINCT FROM b` (NULL-safe `=`) |
+| `IS [NOT]`, `IS [NOT] DISTINCT FROM` | `a IS b`, `a IS NOT DISTINCT FROM b` (NULL-safe `=`) |
 | `BETWEEN` | `col BETWEEN 1 AND 10` |
 | `IN` | `col IN (1, 2, 3)` |
 | `IN (SELECT ...)` | `id IN (SELECT id FROM t)` |
+
+Operators bind as in SQLite, loosest first; operators on one line share a
+level and group left to right (`2 = 1 < 2` is `2 = (1 < 2)`, `2 * 3 || 4` is
+`2 * (3 || 4)`, `'abc' LIKE 'A%' = 1` is `('abc' LIKE 'A%') = 1`):
+
+| Operators |
+|-----------|
+| `OR` |
+| `AND` |
+| `NOT` |
+| `=` `==` `!=` `<>` `IS [NOT]` `IS [NOT] DISTINCT FROM` `IN` `LIKE` `BETWEEN` |
+| `<` `<=` `>` `>=` |
+| `+` `-` |
+| `*` `/` `%` |
+| `\|\|` |
+| unary `-` `+` |
+
+An expression may nest at most 1000 levels deep (SQLite's limit; a chain
+`a + b + ...` of n terms is n levels, parentheses add none). A deeper one is
+the error `expression tree is too large (maximum depth 1000)`.
 
 `LIKE` follows SQLite: `%` matches any run of characters and `_` exactly one
 character (not byte), both including newlines; letters compare
@@ -390,6 +410,11 @@ SELECT ... INTERSECT SELECT ...       -- rows in both
 SELECT ... EXCEPT SELECT ...          -- rows in first but not second
 ```
 
+As in SQLite, the four operators have equal precedence and apply left to
+right: `A UNION ALL B INTERSECT C` is `(A UNION ALL B) INTERSECT C`.
+Parenthesize an operand to group differently. A compound may have at most
+500 terms (`too many terms in compound SELECT`).
+
 ## INSERT
 
 ```sql
@@ -552,7 +577,7 @@ sqawk aims to give SQLite's answers. Where it deliberately does not:
 | Subqueries in UPDATE / DELETE | A correlated subquery sees rows already changed | Sees the table as it was before the statement |
 | `ILIKE`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `TRIM(... FROM ...)` | Not available | Available |
 | `localtime` date modifier | Local time zone | Error (UTC only) |
-| Parser | SQLite grammar | sqlparser's Hive dialect: `GLOB`, `REGEXP`, `x IS 10`, `LIMIT n, m`, `TRIM(s, chars)`, `REPLACE INTO` do not parse |
+| Parser | SQLite grammar | sqlparser's Hive dialect with SQLite's operator precedence: `GLOB`, `REGEXP`, `LIMIT n, m`, `TRIM(s, chars)`, `REPLACE INTO` do not parse |
 
 Not implemented: common table expressions, views, indexes, triggers,
 `RETURNING`, row values, `GLOB`, and blob values.
