@@ -20,8 +20,9 @@
 //! - ROLLBACK removes the table and never touches the file.
 //!
 //! Each test was `#[ignore]`d when written and un-ignored when the defect
-//! was fixed. A few tests (marked in their doc comments) passed when written
-//! and pin behaviour the fix had to keep. Run the red list with:
+//! was fixed; all of them now pass. A few tests (marked in their doc
+//! comments) passed when written and pin behaviour the fix had to keep, and
+//! the last two were added with the fix. Run the red list with:
 //!     cargo test --test mod defects -- --ignored
 
 use std::fs;
@@ -72,7 +73,6 @@ fn fails(cwd: &Path, args: &[&str]) -> Result<String, Box<dyn std::error::Error>
 
 /// The existing file's rows are the table's rows, under the declared names.
 #[test]
-#[ignore]
 fn existing_file_rows_are_visible() -> TestResult {
     let dir = create_temp_dir()?;
     fs::write(dir.path().join("e.csv"), "num,label\n1,alice\n2,bob\n")?;
@@ -87,7 +87,6 @@ fn existing_file_rows_are_visible() -> TestResult {
 
 /// The declared types are the columns' types: `id INT` compares numerically.
 #[test]
-#[ignore]
 fn existing_file_uses_declared_types() -> TestResult {
     let dir = create_temp_dir()?;
     fs::write(dir.path().join("e.csv"), "num,label\n10,a\n9,b\n")?;
@@ -104,7 +103,6 @@ fn existing_file_uses_declared_types() -> TestResult {
 /// With no DML, `--write` leaves the file byte-identical (BOM, CRLF, quoting
 /// and the header's own text included).
 #[test]
-#[ignore]
 fn no_dml_write_leaves_file_identical() -> TestResult {
     let dir = create_temp_dir()?;
     let data = b"\xef\xbb\xbfnum,\"label\"\r\n1,\"a b\"\r\n2,  bob\r\n";
@@ -120,7 +118,6 @@ fn no_dml_write_leaves_file_identical() -> TestResult {
 
 /// INSERT appends; the original header and rows stay byte-identical.
 #[test]
-#[ignore]
 fn insert_write_appends_and_keeps_rows() -> TestResult {
     let dir = create_temp_dir()?;
     fs::write(
@@ -142,7 +139,6 @@ fn insert_write_appends_and_keeps_rows() -> TestResult {
 
 /// UPDATE of one row rewrites that row only.
 #[test]
-#[ignore]
 fn update_one_row_keeps_others() -> TestResult {
     let dir = create_temp_dir()?;
     fs::write(
@@ -165,7 +161,6 @@ fn update_one_row_keeps_others() -> TestResult {
 /// A header whose field count differs from the declared column count is an
 /// error naming the file and both counts; the file is left alone.
 #[test]
-#[ignore]
 fn header_field_count_mismatch_is_an_error() -> TestResult {
     let dir = create_temp_dir()?;
     let data = "a,b,c\n1,2,3\n";
@@ -193,7 +188,6 @@ fn header_field_count_mismatch_is_an_error() -> TestResult {
 /// `WITH (HEADER=false)`: the first line is data, the columns are the
 /// declared ones, and writeback emits no header.
 #[test]
-#[ignore]
 fn header_false_first_line_is_data() -> TestResult {
     let dir = create_temp_dir()?;
     fs::write(dir.path().join("d.txt"), "1,alice\n2,bob\n")?;
@@ -219,7 +213,6 @@ fn header_false_first_line_is_data() -> TestResult {
 
 /// `WITH (HEADER=true)` is the default spelled out.
 #[test]
-#[ignore]
 fn header_true_is_the_default() -> TestResult {
     let dir = create_temp_dir()?;
     fs::write(dir.path().join("e.csv"), "num,label\n1,alice\n")?;
@@ -235,7 +228,6 @@ fn header_true_is_the_default() -> TestResult {
 
 /// A `.tsv` LOCATION is read tab-separated.
 #[test]
-#[ignore]
 fn tsv_extension_reads_tab_separated() -> TestResult {
     let dir = create_temp_dir()?;
     fs::write(dir.path().join("x.tsv"), "num\tlabel\n1\talice, a\n")?;
@@ -255,7 +247,6 @@ fn tsv_extension_reads_tab_separated() -> TestResult {
 
 /// `WITH (DELIMITER=...)` overrides the extension rule.
 #[test]
-#[ignore]
 fn with_delimiter_overrides_extension() -> TestResult {
     let dir = create_temp_dir()?;
     fs::write(dir.path().join("x.csv"), "num;label\n1;alice\n")?;
@@ -271,7 +262,6 @@ fn with_delimiter_overrides_extension() -> TestResult {
 
 /// `WITH (COMMENTS=true)`: `#` lines are skipped and written back in place.
 #[test]
-#[ignore]
 fn with_comments_skips_and_keeps_hash_lines() -> TestResult {
     let dir = create_temp_dir()?;
     fs::write(
@@ -295,7 +285,6 @@ fn with_comments_skips_and_keeps_hash_lines() -> TestResult {
 /// A record with more fields than declared columns is the usual load error,
 /// with file and line.
 #[test]
-#[ignore]
 fn too_many_fields_is_a_load_error() -> TestResult {
     let dir = create_temp_dir()?;
     fs::write(dir.path().join("e.csv"), "num,label\n1,a\n2,b,c\n")?;
@@ -332,7 +321,6 @@ fn missing_file_is_created() -> TestResult {
 
 /// A new file under `WITH (HEADER=false)` is written without a header.
 #[test]
-#[ignore]
 fn missing_file_header_false_has_no_header() -> TestResult {
     let dir = create_temp_dir()?;
     ok(
@@ -348,7 +336,6 @@ fn missing_file_header_false_has_no_header() -> TestResult {
 /// The LOCATION file is already loaded as an operand: an error, and the
 /// file is left alone.
 #[test]
-#[ignore]
 fn location_already_loaded_as_operand() -> TestResult {
     let dir = create_temp_dir()?;
     let data = "id,name\n1,alice\n";
@@ -370,7 +357,6 @@ fn location_already_loaded_as_operand() -> TestResult {
 
 /// Two LOCATION tables over one file: the second is an error.
 #[test]
-#[ignore]
 fn location_already_loaded_as_another_table() -> TestResult {
     let dir = create_temp_dir()?;
     fs::write(dir.path().join("e.csv"), "id,name\n1,alice\n")?;
@@ -407,7 +393,6 @@ fn rollback_leaves_file_untouched() -> TestResult {
 
 /// A LOCATION that is a directory is a clean error.
 #[test]
-#[ignore]
 fn location_directory_is_an_error() -> TestResult {
     let dir = create_temp_dir()?;
     fs::create_dir(dir.path().join("sub"))?;
@@ -421,5 +406,36 @@ fn location_directory_is_an_error() -> TestResult {
         ],
     )?;
     assert!(err.starts_with("sqawk: ") && err.contains("sub"), "{err}");
+    Ok(())
+}
+
+/// `HEADER` and `COMMENTS` take true or false (any case, quoted or not);
+/// anything else is an error that names the option.
+#[test]
+fn boolean_option_value_is_checked() -> TestResult {
+    let dir = create_temp_dir()?;
+    fs::write(dir.path().join("one.csv"), "k\n1\n")?;
+    for with in ["HEADER=maybe", "COMMENTS='yes'", "header=1"] {
+        let sql = format!("CREATE TABLE t (id INT) LOCATION './n.csv' WITH ({with})");
+        let err = fails(dir.path(), &["-s", &sql, "one.csv"])?;
+        assert!(err.contains("must be true or false"), "{with}: {err}");
+    }
+    Ok(())
+}
+
+/// TRUNCATE leaves the file's own header line, not the declared names.
+#[test]
+fn truncate_keeps_the_header_line() -> TestResult {
+    let dir = create_temp_dir()?;
+    fs::write(dir.path().join("e.csv"), "NUM,\"Label\"\n1,a\n")?;
+    ok(
+        dir.path(),
+        "CREATE TABLE t (id INT, name TEXT) LOCATION './e.csv'; TRUNCATE TABLE t",
+        true,
+    )?;
+    assert_eq!(
+        fs::read_to_string(dir.path().join("e.csv"))?,
+        "NUM,\"Label\"\n"
+    );
     Ok(())
 }

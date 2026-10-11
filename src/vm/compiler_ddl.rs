@@ -7,6 +7,7 @@ use sqlparser::ast::{AlterTableOperation, ObjectName, ObjectType};
 use super::ast_compat::sql_option_key_value;
 use super::bytecode::{spec_escape, OpCode, ResultSchema};
 use super::compiler::{InsertTarget, SqlCompiler};
+use super::compiler_check::option_flag;
 use super::compiler_select::Sink;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::unique_column_names;
@@ -244,19 +245,25 @@ impl<'a> SqlCompiler<'a> {
             .and_then(|hf| hf.location.clone())
             .or_else(|| location.clone());
 
-        // Extract delimiter from WITH options
-        let delimiter = with_options.iter().find_map(|opt| {
-            let (key, value) = sql_option_key_value(opt)?;
-            if key.to_lowercase() == "delimiter" {
-                // sql_option_key_value unwraps the literal, so no quote
-                // stripping is needed -- and stripping only single quotes left
-                // double-quoted values carrying their quotes.
-                return Some(value);
-            }
-            None
-        });
+        // The WITH options (validated by check_create_table). sql_option_key_value
+        // unwraps the literal, so no quote stripping is needed.
+        let option = |name: &str| {
+            with_options.iter().find_map(|opt| {
+                let (key, value) = sql_option_key_value(opt)?;
+                key.eq_ignore_ascii_case(name).then_some(value)
+            })
+        };
+        let delimiter = option("delimiter");
+        let flag = |name: &str, default: bool| {
+            option(name)
+                .and_then(|v| option_flag(&v))
+                .unwrap_or(default)
+        };
+        let header = flag("header", true);
+        let comments = flag("comments", false);
 
-        // Add file path and delimiter to spec: "...|filepath|delimiter"
+        // Add file path, delimiter and flags to spec:
+        // "...|filepath|delimiter|header|comments"
         spec.push('|');
         if let Some(ref fp) = file_path {
             spec.push_str(&spec_escape(fp));
@@ -265,6 +272,8 @@ impl<'a> SqlCompiler<'a> {
         if let Some(ref d) = delimiter {
             spec.push_str(&spec_escape(d));
         }
+        spec.push_str(if header { "|1" } else { "|0" });
+        spec.push_str(if comments { "|1" } else { "|0" });
 
         // Generate Init
         let init_addr = self.program.len();

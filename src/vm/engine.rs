@@ -614,6 +614,10 @@ pub enum TableModification {
         columns: Vec<ColumnDef>,
         file_path: Option<String>,
         delimiter: Option<String>,
+        /// The LOCATION file's first line is a header
+        header: bool,
+        /// `#` lines in the LOCATION file are comments
+        comments: bool,
     },
     DropTable {
         table_name: String,
@@ -1058,13 +1062,12 @@ impl<'a> VmEngine<'a> {
 
             OpCode::CreateTable => {
                 // Create a new table from P4 specification
-                // P4 format: "table_name:col1:type1,col2:type2,...|filepath|delimiter"
+                // P4 format:
+                // "table_name:col1:type1:col2:type2...|filepath|delimiter|header|comments"
+                // Every field is spec_escape'd, so a '|' in a delimiter or
+                // path cannot split it.
                 let spec = inst.p4.clone().unwrap_or_default();
-                // splitn, not split: the delimiter is the LAST field and may
-                // itself be '|'. Splitting on every '|' turned
-                // `WITH (delimiter = '|')` into an extra empty field and left
-                // the table with the default comma instead.
-                let parts: Vec<&str> = spec.splitn(3, '|').collect();
+                let parts: Vec<&str> = spec.split('|').collect();
 
                 if parts.is_empty() {
                     return Err(SqawkError::VmError(
@@ -1103,6 +1106,8 @@ impl<'a> VmEngine<'a> {
                     .get(2)
                     .filter(|s| !s.is_empty())
                     .map(|s| spec_unescape(s));
+                let header = parts.get(3) != Some(&"0");
+                let comments = parts.get(4) == Some(&"1");
 
                 // Add to pending modifications
                 self.pending_modifications
@@ -1111,6 +1116,8 @@ impl<'a> VmEngine<'a> {
                         columns,
                         file_path,
                         delimiter,
+                        header,
+                        comments,
                     });
 
                 if self.verbose {

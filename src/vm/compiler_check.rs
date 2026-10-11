@@ -395,7 +395,8 @@ pub(crate) fn check_order_by_expr(ob: &OrderByExpr) -> SqawkResult<()> {
 }
 
 /// CREATE TABLE: column names and types, `LOCATION`, `STORED AS TEXTFILE`
-/// and `WITH (DELIMITER='...')`; or `AS query` with none of those.
+/// and `WITH (DELIMITER='...', HEADER=true|false, COMMENTS=true|false)`; or
+/// `AS query` with none of those.
 /// `TEMPORARY` is accepted for a table without `LOCATION` (every such table
 /// lives only for the session). Constraints are not enforced by sqawk, so
 /// declaring one is an error rather than a silent no-op; so is every other
@@ -563,17 +564,37 @@ pub(crate) fn check_create_table(create: &CreateTable) -> SqawkResult<()> {
         CreateTableOptions::Options(_)
         | CreateTableOptions::Plain(_)
         | CreateTableOptions::TableProperties(_) => {
-            return unsupported("Table options other than WITH (DELIMITER='...')")
+            return unsupported("Table options other than WITH (DELIMITER / HEADER / COMMENTS)")
         }
     };
     for option in options {
         match sql_option_key_value(option) {
             Some((key, _)) if key.eq_ignore_ascii_case("delimiter") => {}
+            Some((key, value))
+                if key.eq_ignore_ascii_case("header") || key.eq_ignore_ascii_case("comments") =>
+            {
+                if option_flag(&value).is_none() {
+                    return Err(SqawkError::InvalidSqlQuery(format!(
+                        "CREATE TABLE option {} must be true or false, not '{}'",
+                        key.to_uppercase(),
+                        value
+                    )));
+                }
+            }
             Some((key, _)) => unsupported(&format!("The CREATE TABLE option '{}'", key))?,
             None => unsupported(&format!("The CREATE TABLE option {}", option))?,
         }
     }
     reject(*temporary && has_location, "TEMPORARY table with LOCATION")?;
+    reject(
+        !has_location
+            && options.iter().any(|o| {
+                sql_option_key_value(o).is_some_and(|(key, _)| {
+                    key.eq_ignore_ascii_case("header") || key.eq_ignore_ascii_case("comments")
+                })
+            }),
+        "WITH (HEADER / COMMENTS) without LOCATION",
+    )?;
     if query.is_some() {
         reject(!columns.is_empty(), "A column list on CREATE TABLE ... AS")?;
         reject(
@@ -585,6 +606,18 @@ pub(crate) fn check_create_table(create: &CreateTable) -> SqawkResult<()> {
         }
     }
     Ok(())
+}
+
+/// The value of a boolean CREATE TABLE option (`HEADER`, `COMMENTS`):
+/// `true` or `false`, any case, quoted or not.
+pub(crate) fn option_flag(value: &str) -> Option<bool> {
+    if value.eq_ignore_ascii_case("true") {
+        Some(true)
+    } else if value.eq_ignore_ascii_case("false") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// `STORED AS <format>`: only TEXTFILE, the delimited text sqawk reads and

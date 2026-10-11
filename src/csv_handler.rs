@@ -29,10 +29,13 @@ pub struct ReadOptions {
     pub delimiter: u8,
     /// The first record is the header. When false, every record is data and
     /// the columns are named a, b, c, ... unless `columns` names them.
+    /// When true and `columns` is given, the header is skipped as data (and
+    /// kept for writeback) but `columns` names the columns; the header must
+    /// have exactly one field per column.
     pub header: bool,
     /// Skip lines that start with `#` (`--comments`)
     pub comments: bool,
-    /// Column names to use; implies the file has no header row
+    /// Column names to use instead of the header's (see `header`)
     pub columns: Option<Vec<String>>,
 }
 
@@ -96,7 +99,7 @@ pub fn read_table(
         .comment(if opts.comments { Some(b'#') } else { None })
         .from_reader(body);
 
-    let header = opts.header && opts.columns.is_none();
+    let header = opts.header;
     let mut record = csv::ByteRecord::new();
     let mut lines = LineCounter::new(body);
     // The bytes between records: blank lines, and `#` lines under
@@ -144,7 +147,21 @@ pub fn read_table(
             gaps.head = gap.to_vec();
             let cols = if header {
                 header_span = span;
-                record.iter().map(|f| field_text(f).into_owned()).collect()
+                match &opts.columns {
+                    None => record.iter().map(|f| field_text(f).into_owned()).collect(),
+                    Some(cols) if cols.len() == record.len() => cols.clone(),
+                    Some(cols) => {
+                        return Err(SqawkError::CsvParseError {
+                            file: source.to_string(),
+                            line,
+                            error: format!(
+                                "header has {} fields, but the table declares {} columns",
+                                record.len(),
+                                cols.len()
+                            ),
+                        })
+                    }
+                }
             } else {
                 opts.columns
                     .clone()
@@ -197,7 +214,8 @@ pub fn read_table(
     drop(reader);
     let mut table = Table::new_with_delimiter(table_name, columns, file_path, delimiter);
     table.set_file_layout(FileLayout {
-        has_header: header && header_span != RawSpan::NONE,
+        // A file with no header line yet gets one of the given column names.
+        has_header: header && (header_span != RawSpan::NONE || opts.columns.is_some()),
         bom,
         crlf,
         comments: opts.comments,
@@ -537,6 +555,7 @@ mod tests {
     #[test]
     fn custom_columns_make_the_first_line_data() {
         let opts = ReadOptions {
+            header: false,
             columns: Some(vec!["x".into(), "y".into()]),
             ..ReadOptions::default()
         };
@@ -544,6 +563,35 @@ mod tests {
         assert_eq!(table.columns(), vec!["x", "y"]);
         assert_eq!(table.rows().len(), 2);
         assert_eq!(table.rows()[0][1].to_string(), "name");
+        assert_eq!(written(&table), b"id,name\n1,a\n");
+    }
+
+    /// Columns given over a header: the header is skipped, must match the
+    /// column count, and is written back as read.
+    #[test]
+    fn custom_columns_over_a_header() {
+        let opts = ReadOptions {
+            columns: Some(vec!["x".into(), "y".into()]),
+            ..ReadOptions::default()
+        };
+        let table = load(b"\"id\",name\r\n1,a\r\n", &opts).unwrap();
+        assert_eq!(table.columns(), vec!["x", "y"]);
+        assert_eq!(table.rows().len(), 1);
+        assert_eq!(written(&table), b"\"id\",name\r\n1,a\r\n");
+        match load(b"\n\na,b,c\n1,2,3\n", &opts) {
+            Err(SqawkError::CsvParseError { line, error, .. }) => {
+                assert_eq!(line, 3);
+                assert_eq!(
+                    error,
+                    "header has 3 fields, but the table declares 2 columns"
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // No header line yet: writeback gives the file one.
+        let table = load(b"", &opts).unwrap();
+        assert_eq!(table.columns(), vec!["x", "y"]);
+        assert_eq!(written(&table), b"x,y\n");
     }
 
     #[test]

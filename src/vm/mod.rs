@@ -602,6 +602,8 @@ fn apply_modifications(
                 columns,
                 file_path,
                 delimiter,
+                header,
+                comments,
             } => {
                 // Each column keeps its declared type name; its affinity
                 // follows SQLite's rules.
@@ -614,26 +616,36 @@ fn apply_modifications(
                     })
                     .collect();
 
-                // Without WITH (DELIMITER=...), the file is written with the
-                // delimiter it will be loaded with: tab for `.tsv` / `.tab`,
-                // comma for everything else.
-                let file_path_buf = file_path.map(std::path::PathBuf::from);
-                let delimiter = delimiter.or_else(|| {
-                    file_path_buf
-                        .as_deref()
-                        .filter(|p| crate::file_handler::has_tab_extension(p))
-                        .map(|_| "\t".to_string())
-                });
-                let table = crate::table::Table::new_with_schema(
-                    &table_name,
-                    schema,
-                    file_path_buf,
+                let Some(path) = file_path else {
+                    // No LOCATION: a scratch table, never written.
+                    let table =
+                        crate::table::Table::new_with_schema(&table_name, schema, None, delimiter);
+                    database.add_table(table_name.clone(), table)?;
+                    database.mark_modified(&table_name);
+                    continue;
+                };
+                // The declared columns are the schema of the LOCATION file:
+                // an existing file is loaded under them (and is not modified
+                // by loading); a new one is created on --write.
+                if database.has_table(&table_name) {
+                    return Err(crate::error::SqawkError::TableAlreadyExists(table_name));
+                }
+                let options = crate::file_handler::LocationOptions {
                     delimiter,
-                );
-
-                // Add to database
+                    header,
+                    comments,
+                };
+                let (table, existed) = crate::file_handler::load_location(
+                    database,
+                    &table_name,
+                    &path,
+                    schema,
+                    &options,
+                )?;
                 database.add_table(table_name.clone(), table)?;
-                database.mark_modified(&table_name);
+                if !existed {
+                    database.mark_modified(&table_name);
+                }
             }
             engine::TableModification::DropTable { table_name } => {
                 // Remove table from database

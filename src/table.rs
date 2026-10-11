@@ -687,6 +687,20 @@ impl Table {
         }
     }
 
+    /// Give the columns declared names and types (CREATE TABLE ... LOCATION
+    /// over an existing file). `schema` has one entry per column.
+    pub fn set_declared_columns(&mut self, schema: Vec<ColumnDefinition>) {
+        debug_assert_eq!(schema.len(), self.cols.len());
+        self.cols = schema
+            .into_iter()
+            .map(|c| Column {
+                name: c.name,
+                data_type: c.data_type,
+                decl_type: c.decl_type,
+            })
+            .collect();
+    }
+
     /// Get the columns of the table
     ///
     /// Returns a vector containing all column names in the table.
@@ -1119,7 +1133,10 @@ impl Table {
     /// Clear all rows from the table (TRUNCATE TABLE)
     pub fn clear_rows(&mut self) -> crate::error::SqawkResult<()> {
         self.rows.clear();
-        self.raw = None;
+        // The header line is still written back as it was read.
+        if let Some(raw) = &mut self.raw {
+            raw.rows.clear();
+        }
         self.comments.flush_from(0);
         self.modified = true;
         Ok(())

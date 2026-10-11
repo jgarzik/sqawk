@@ -143,7 +143,8 @@ fn create_table_clauses() -> R {
 }
 
 /// CREATE TABLE options sqawk would otherwise ignore: a storage format other
-/// than TEXTFILE, a WITH option other than DELIMITER, other option forms, a
+/// than TEXTFILE, a WITH option other than DELIMITER / HEADER / COMMENTS,
+/// HEADER or COMMENTS without a LOCATION file, other option forms, a
 /// comment, and file options or a column list on CREATE TABLE ... AS (which
 /// never has a file).
 #[test]
@@ -152,7 +153,10 @@ fn create_table_options() -> R {
         "CREATE TABLE z (id INTEGER) LOCATION 'z.pq' STORED AS PARQUET",
         "CREATE TABLE z (id INTEGER) STORED AS ORC",
         "CREATE TABLE z (id INTEGER) STORED AS INPUTFORMAT 'a' OUTPUTFORMAT 'b'",
+        "CREATE TABLE z (id INTEGER) LOCATION 'z.csv' WITH (quote = '\"')",
         "CREATE TABLE z (id INTEGER) WITH (header = 'false')",
+        "CREATE TABLE z (id INTEGER) WITH (comments = true)",
+        "CREATE TABLE z (id INTEGER) LOCATION 'emp.csv' WITH (header = false, x = 1)",
         "CREATE TABLE z (id INTEGER) TBLPROPERTIES ('delimiter' = '|')",
         "CREATE TABLE z (id INTEGER) COMMENT 'c'",
         "CREATE TEMPORARY TABLE z (id INTEGER) LOCATION 'z.csv'",
