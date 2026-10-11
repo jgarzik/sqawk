@@ -253,6 +253,7 @@ fn file_name_without_stem_is_error() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn same_file_through_symlink_is_error() -> TestResult {
     let dir = create_temp_dir()?;

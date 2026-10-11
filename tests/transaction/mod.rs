@@ -308,6 +308,7 @@ fn write_of_stdin_table_is_error() -> R {
     Ok(())
 }
 
+#[cfg(unix)]
 fn perms_enforced(dir: &Path) -> bool {
     let p = dir.join(".perm_probe");
     fs::write(&p, "x").unwrap();
@@ -317,6 +318,7 @@ fn perms_enforced(dir: &Path) -> bool {
     enforced
 }
 
+#[cfg(unix)]
 fn chmod(p: &Path, mode: u32) {
     let mut perm = fs::metadata(p).unwrap().permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut perm, mode);
@@ -325,6 +327,7 @@ fn chmod(p: &Path, mode: u32) {
 
 /// A file in a directory that cannot be written is refused before any
 /// file -- including a writable one sorted first -- is written.
+#[cfg(unix)]
 #[test]
 fn write_into_read_only_directory_is_refused_up_front() -> R {
     let dir = create_temp_dir()?;
@@ -357,6 +360,7 @@ fn write_into_read_only_directory_is_refused_up_front() -> R {
 }
 
 /// A read-only file that was not modified does not block writeback.
+#[cfg(unix)]
 #[test]
 fn unmodified_read_only_file_is_fine() -> R {
     let dir = create_temp_dir()?;
@@ -396,6 +400,7 @@ fn write_splits_hard_link() -> R {
 }
 
 /// REPL `.save` of a read-only file is refused too.
+#[cfg(unix)]
 #[test]
 fn repl_save_of_read_only_file_is_refused() -> R {
     let dir = create_temp_dir()?;

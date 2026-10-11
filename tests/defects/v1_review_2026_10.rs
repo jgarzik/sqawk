@@ -243,6 +243,7 @@ fn assert_fails_cleanly(out: &Output) {
 }
 
 /// True when file permissions are enforced for this user (false for root).
+#[cfg(unix)]
 fn perms_enforced(dir: &Path) -> bool {
     let p = dir.join(".perm_probe");
     fs::write(&p, "x").unwrap();
@@ -254,6 +255,7 @@ fn perms_enforced(dir: &Path) -> bool {
     enforced
 }
 
+#[cfg(unix)]
 fn chmod(p: &Path, mode: u32) {
     let mut perm = fs::metadata(p).unwrap().permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut perm, mode);
@@ -1035,6 +1037,7 @@ fn tabledef_empty_column_is_error() -> TestResult {
 
 /// A read-only (0444) file is replaced by the atomic rename. --write must
 /// refuse up front and write nothing, including other modified files.
+#[cfg(unix)]
 #[test]
 fn write_to_read_only_file_is_refused() -> TestResult {
     let dir = create_temp_dir()?;
@@ -1321,6 +1324,7 @@ fn error_unknown_function() -> TestResult {
 
 /// An unreadable input file reports "Permission denied" twice and does not
 /// name the file in the cause.
+#[cfg(unix)]
 #[test]
 fn error_permission_denied_names_file() -> TestResult {
     let dir = create_temp_dir()?;
@@ -1337,6 +1341,7 @@ fn error_permission_denied_names_file() -> TestResult {
 
 /// A write failure (read-only directory) names the internal temp file
 /// (`.tmpXXXX`).
+#[cfg(unix)]
 #[test]
 fn error_write_failure_hides_temp_file() -> TestResult {
     let dir = create_temp_dir()?;
