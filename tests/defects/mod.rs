@@ -8,9 +8,10 @@
 //! `audit_2026_10` submodule (defects from the 2026-10 audit), of the
 //! `code_review_2026_10` submodule (defects from the 2026-10 code review of
 //! the `updates` branch) and of the `v1_review_2026_10` submodule (findings
-//! of the 2026-10 v1-readiness review). All serve as regression cover. Add a
-//! new `#[ignore]`d test when a defect is found, and remove the attribute
-//! when it is fixed.
+//! of the 2026-10 v1-readiness review). All serve as regression cover. The
+//! `doc_review_2026_10` submodule holds the code defects found by the
+//! 2026-10 documentation review. Add a new `#[ignore]`d test when a defect
+//! is found, and remove the attribute when it is fixed.
 //!
 //! Run the red list with:
 //!     cargo test --test mod defects -- --ignored
@@ -23,6 +24,7 @@
 
 mod audit_2026_10;
 mod code_review_2026_10;
+mod doc_review_2026_10;
 mod v1_review_2026_10;
 
 use crate::helpers::{
