@@ -46,20 +46,21 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       # Without dev-dependencies, which cargo test and clippy --all-targets
-      # merge in: this is the feature set users actually build.
+      # merge in: this is the feature set users actually build. --workspace
+      # adds tsq/, the unpublished test-data generator crate.
       - name: Build
-        run: cargo build --locked
-      # On Windows too, not just Linux: src/tsq.rs and src/storage/mmap.rs have
-      # cfg(unix) branches whose non-unix side is otherwise never linted. macOS
-      # is unix like Linux, so it adds nothing.
+        run: cargo build --locked --workspace
+      # On Windows too, not just Linux: tsq/src/main.rs has cfg(unix) branches
+      # whose non-unix side is otherwise never linted. macOS is unix like
+      # Linux, so it adds nothing.
       - name: Clippy
         if: runner.os != 'macOS'
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # Run even when Clippy failed, so a lint (often a new one from a stable
       # toolchain release) does not hide the test results on every OS.
       - name: Test
         if: ${{ !cancelled() }}
-        run: cargo test --locked
+        run: cargo test --locked --workspace
 
   test-release:
     name: Test (release)
@@ -72,7 +73,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Test
-        run: cargo test --locked --release
+        run: cargo test --locked --workspace --release
 
   fmt:
     name: Format
@@ -107,7 +108,8 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@v2
-      # Library and binaries only: rust-version is a promise to consumers, and
-      # dev-dependencies are not part of it.
+      # Binaries only: rust-version is a promise to people building sqawk, and
+      # dev-dependencies are not part of it. --workspace includes tsq/, which
+      # declares the same rust-version.
       - name: Check build at MSRV
-        run: cargo check --locked
+        run: cargo check --locked --workspace

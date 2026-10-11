@@ -173,3 +173,92 @@ fn test_like_special_chars() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// SQLite LIKE semantics. Expected values computed with SQLite 3.45.
+// ---------------------------------------------------------------------------
+
+mod sqlite_semantics {
+    use crate::helpers::{assert_query_on, assert_query_on_fails, ONE};
+
+    type R = Result<(), Box<dyn std::error::Error>>;
+
+    const LK: (&str, &str) = (
+        "lk.csv",
+        "k,s,p\n1,Alice,a%\n2,alice,_LICE\n3,Bob,%o%\n4,x%y,x\\%y\n5,,a%\n",
+    );
+    const U: (&str, &str) = ("u.csv", "id,w\n1,héllo\n2,日本語\n3,ABC\n4,a_b\n5,x%y\n");
+
+    /// LIKE folds ASCII case only.
+    #[test]
+    fn like_is_ascii_case_insensitive() -> R {
+        assert_query_on(&[LK], "SELECT k FROM lk WHERE s LIKE 'a%'", "k\n1\n2")?;
+        assert_query_on(&[U], "SELECT id FROM u WHERE w LIKE 'H%'", "id\n1")
+    }
+
+    /// The pattern may be a column; a NULL operand gives NULL.
+    #[test]
+    fn like_with_column_pattern() -> R {
+        assert_query_on(&[LK], "SELECT k FROM lk WHERE s LIKE p", "k\n1\n2\n3")?;
+        assert_query_on(
+            &[LK],
+            "SELECT k, s LIKE p AS m FROM lk",
+            "k,m\n1,1\n2,1\n3,1\n4,0\n5,",
+        )?;
+        assert_query_on(
+            &[LK],
+            "SELECT k FROM lk WHERE s LIKE p ESCAPE '\\'",
+            "k\n1\n2\n3\n4",
+        )
+    }
+
+    #[test]
+    fn not_like_excludes_null() -> R {
+        assert_query_on(
+            &[LK],
+            "SELECT k FROM lk WHERE s NOT LIKE '%o%'",
+            "k\n1\n2\n4",
+        )
+    }
+
+    /// `_` is one character (not one byte), and matches a newline too.
+    #[test]
+    fn underscore_is_one_character() -> R {
+        assert_query_on(&[U], "SELECT id FROM u WHERE w LIKE '__'", "id")?;
+        assert_query_on(
+            &[U],
+            "SELECT id FROM u WHERE w LIKE '___'",
+            "id\n2\n3\n4\n5",
+        )?;
+        assert_query_on(
+            &[U],
+            "SELECT id FROM u WHERE w LIKE '%\\_%' ESCAPE '\\'",
+            "id\n4",
+        )
+    }
+
+    #[test]
+    fn like_edge_cases() -> R {
+        assert_query_on(
+            &[ONE],
+            "SELECT 'a' || char(10) || 'b' LIKE 'a_b' AS a, 'é' LIKE 'É' AS b, \
+             123 LIKE '1%' AS c, 'abc' LIKE 'a%' ESCAPE NULL AS d FROM one",
+            "a,b,c,d\n1,0,1,",
+        )
+    }
+
+    /// ILIKE (not in SQLite) folds Unicode case.
+    #[test]
+    fn ilike_folds_unicode() -> R {
+        assert_query_on(&[ONE], "SELECT 'é' ILIKE 'É' AS a FROM one", "a\n1")
+    }
+
+    #[test]
+    fn escape_must_be_one_character() -> R {
+        assert_query_on_fails(
+            &[ONE],
+            "SELECT 'a' LIKE 'a' ESCAPE 'xy' FROM one",
+            "ESCAPE expression must be a single character",
+        )
+    }
+}

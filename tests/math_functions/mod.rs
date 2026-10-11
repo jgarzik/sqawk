@@ -144,7 +144,7 @@ fn test_math_func_rejects_extra_argument() -> Result<(), Box<dyn std::error::Err
     crate::helpers::assert_query_fails(
         &["tests/data/employees.csv"],
         "SELECT ABS(-5, 2) FROM employees",
-        "ABS takes exactly one argument",
+        "wrong number of arguments to function ABS()",
     )
 }
 
@@ -158,12 +158,12 @@ fn test_math_func_arity_enforced_without_from() -> Result<(), Box<dyn std::error
     crate::helpers::assert_query_fails(
         &["tests/data/employees.csv"],
         "SELECT ABS(-5, 2)",
-        "ABS takes exactly one argument",
+        "wrong number of arguments to function ABS()",
     )?;
     crate::helpers::assert_query_fails(
         &["tests/data/employees.csv"],
         "SELECT ROUND(3.14159, 2, 9)",
-        "ROUND takes at most two arguments",
+        "wrong number of arguments to function ROUND()",
     )
 }
 
@@ -177,7 +177,7 @@ fn test_round_precision_without_from() -> Result<(), Box<dyn std::error::Error>>
     crate::helpers::assert_query(
         &["tests/data/employees.csv"],
         "SELECT ROUND(3.14159, 2) AS a, ROUND(1234.5, -2) AS b",
-        concat!("col0,col1", "\n3.14,1200"),
+        concat!("a,b", "\n3.14,1200"),
     )
 }
 
@@ -218,6 +218,43 @@ fn test_round_precision_distinguishes_column_names() -> Result<(), Box<dyn std::
     crate::helpers::assert_query(
         &["tests/data/employees.csv"],
         "SELECT ROUND(3.14159, 1), ROUND(3.14159, 3) FROM employees LIMIT 1",
-        concat!("ROUND(expr, 1),ROUND(expr, 3)", "\n3.1,3.142"),
+        // The names contain the delimiter, so the CSV header quotes them.
+        concat!("\"ROUND(expr, 1)\",\"ROUND(expr, 3)\"", "\n3.1,3.142"),
     )
+}
+
+// ---------------------------------------------------------------------------
+// SQLite math semantics. Expected values computed with SQLite 3.45.
+// ---------------------------------------------------------------------------
+
+mod sqlite_semantics {
+    use crate::helpers::{assert_query_on, ONE};
+
+    type R = Result<(), Box<dyn std::error::Error>>;
+
+    /// ROUND rounds half away from zero on the decimal value actually
+    /// stored (2.675 is 2.67499..., so it rounds down) and returns a real.
+    #[test]
+    fn round_like_sqlite() -> R {
+        assert_query_on(
+            &[ONE],
+            "SELECT round(2.675, 2) AS a, round(0.125, 2) AS b, round(1.005, 2) AS c, \
+             round(2.5) AS d, round(-2.5) AS e, round(-2.25, 1) AS f, typeof(round(5)) AS g \
+             FROM one",
+            "a,b,c,d,e,f,g\n2.67,0.13,1,3,-3,-2.3,real",
+        )
+    }
+
+    /// ABS keeps an integer an integer; text gives a real. CEIL/FLOOR return
+    /// an integer argument unchanged.
+    #[test]
+    fn abs_ceil_floor_types() -> R {
+        assert_query_on(
+            &[ONE],
+            "SELECT abs(-5) AS a, typeof(abs(-5)) AS b, abs(-2.5) AS c, abs('-3') AS d, \
+             typeof(abs('-3')) AS e, ceil(1.2) AS f, typeof(ceil(1.2)) AS g, \
+             typeof(ceil(3)) AS h, floor(-1.5) AS i FROM one",
+            "a,b,c,d,e,f,g,h,i\n5,integer,2.5,3,real,2,real,integer,-2",
+        )
+    }
 }

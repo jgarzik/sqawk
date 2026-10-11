@@ -10,7 +10,12 @@
 | `BOOLEAN` | `BOOL` |
 | `NULL` | |
 
-Type inference on load: Integer → Float → Boolean → String. Empty values become NULL.
+Type inference on load, per cell: an empty field is NULL; a canonical integer
+(`42`, `-7` -- printing the number gives back the same text) is INTEGER; a
+canonical float (`1.5`, `-0.25`) is REAL; everything else is TEXT, verbatim and
+untrimmed -- including `007`, `1.50`, `1e3`, ` 42`, `true` and `NaN`. Booleans
+are never inferred. The rule guarantees that every loaded cell prints, and is
+written back, exactly as it was read.
 
 ## SELECT
 
@@ -21,7 +26,7 @@ FROM table [alias] [, table2 ...]
 [WHERE condition]
 [GROUP BY columns]
 [HAVING condition]
-[ORDER BY column [ASC|DESC], ...]
+[ORDER BY expr [ASC|DESC] [NULLS FIRST|NULLS LAST], ...]
 [LIMIT n [OFFSET m]]
 ```
 
@@ -43,10 +48,18 @@ SELECT col alias                -- alias without AS
 | `<`, `>`, `<=`, `>=` | `col > 10` |
 | `AND`, `OR`, `NOT` | `a > 1 AND b < 5` |
 | `IS NULL`, `IS NOT NULL` | `col IS NULL` |
-| `LIKE`, `ILIKE` | `name LIKE 'A%'` |
+| `LIKE`, `ILIKE` | `name LIKE 'A%'`, `code LIKE 'x\_%' ESCAPE '\'` |
+| `IS [NOT] DISTINCT FROM` | `a IS NOT DISTINCT FROM b` (NULL-safe `=`) |
 | `BETWEEN` | `col BETWEEN 1 AND 10` |
 | `IN` | `col IN (1, 2, 3)` |
 | `IN (SELECT ...)` | `id IN (SELECT id FROM t)` |
+
+`LIKE` follows SQLite: `%` matches any run of characters and `_` exactly one
+character (not byte), both including newlines; letters compare
+case-insensitively for ASCII only (`'a%'` matches `Alice`, but `'é'` does not
+match `'É'`). `ESCAPE 'c'` makes the character after `c` literal. The pattern
+may be any expression, such as another column. `ILIKE` (not in SQLite) folds
+Unicode case. A NULL value, pattern or escape gives NULL.
 
 ### CASE Expression
 
@@ -60,58 +73,126 @@ CASE expr WHEN val THEN result [WHEN ...] [ELSE default] END
 | Function | Description |
 |----------|-------------|
 | `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)` | Row/value count |
-| `SUM(col)` | Sum of values |
-| `AVG(col)` | Average |
-| `MIN(col)` | Minimum |
-| `MAX(col)` | Maximum |
+| `SUM(x)` | Sum; an integer while every value is an integer |
+| `TOTAL(x)` | Sum as a real; `0.0` (not NULL) over no rows |
+| `AVG(x)` | Average (a real) |
+| `MIN(x)`, `MAX(x)` | Least / greatest value |
+| `GROUP_CONCAT(x [, sep])` | Non-NULL values joined by `sep` (default `,`) |
+| `STRING_AGG(x, sep)` | Same as `GROUP_CONCAT(x, sep)` |
+
+Any aggregate takes `DISTINCT` (`SUM(DISTINCT x)`; `GROUP_CONCAT(DISTINCT x)`
+only with one argument) and a filter: `COUNT(*) FILTER (WHERE age > 30)`
+aggregates only the rows for which the condition is true. Aggregates skip
+NULLs; over no rows COUNT is 0, TOTAL 0.0 and the rest NULL. SUM of integers
+that overflows 64 bits is an `integer overflow` error, as in SQLite (TOTAL and
+AVG carry on in floating point). Text that spells a number is summed as that
+number; other text is skipped.
 
 ### String Functions
 
+String functions count characters, not bytes. Unless noted, a NULL argument
+gives NULL, and a number argument is used in its text form.
+
 | Function | Description |
 |----------|-------------|
-| `UPPER(s)` | Uppercase |
-| `LOWER(s)` | Lowercase |
-| `TRIM(s)` | Remove leading/trailing whitespace |
-| `SUBSTR(s, start [, len])` | Substring (1-indexed) |
+| `UPPER(s)`, `LOWER(s)` | Case conversion (all of Unicode) |
+| `LENGTH(s)` | Number of characters |
+| `TRIM(s [, chars])`, `LTRIM`, `RTRIM` | Strip whitespace, or any of `chars`, from both / the start / the end |
+| `TRIM([BOTH\|LEADING\|TRAILING] chars FROM s)` | Standard-SQL spelling of the same |
+| `SUBSTR(s, start [, len])`, `SUBSTRING` | Substring (see below) |
 | `SUBSTRING(s FROM start [FOR len])` | Substring (alternate syntax) |
-| `REPLACE(s, from, to)` | Replace occurrences |
-| `CONCAT(s1, s2, ...)` | Concatenate strings |
-| `LENGTH(s)` | String length |
-| `LEFT(s, n)` | First n characters |
-| `RIGHT(s, n)` | Last n characters |
-| `LPAD(s, len, pad)` | Left-pad to length |
-| `RPAD(s, len, pad)` | Right-pad to length |
+| `REPLACE(s, from, to)` | Replace every occurrence; an empty `from` leaves `s` alone |
+| `INSTR(s, t)` | 1-based position of the first `t` in `s`, 0 if absent |
+| `CONCAT(a, b, ...)` | Concatenation; NULL arguments count as `''` |
+| `CONCAT_WS(sep, a, ...)` | Concatenation with a separator; NULL arguments skipped |
+| `LEFT(s, n)`, `RIGHT(s, n)` | First / last `n` characters |
+| `LPAD(s, len [, fill])`, `RPAD` | Pad to `len` characters (see below) |
+| `HEX(x)` | Upper-case hex of the UTF-8 bytes; `''` for NULL |
+| `CHAR(n, ...)` | The characters with these code points |
+| `UNICODE(s)` | Code point of the first character |
+| `PRINTF(fmt, ...)`, `FORMAT` | C-style formatting: `%d %i %u %f %e %g %x %X %o %s %c %%`, flags `-+ 0`, width, precision |
+| `a \|\| b` | Concatenation; NULL if either side is NULL |
+
+`SUBSTR` follows SQLite: positions are 1-based; a negative `start` counts
+from the end (`SUBSTR('hello', -3)` is `llo`); `start` 0 is a position before
+the first character, so `SUBSTR('hello', 0, 2)` is `h`; a negative `len` takes
+the characters before `start` (`SUBSTR('hello', 3, -2)` is `he`).
+
+`LPAD`/`RPAD` are not in SQLite and follow PostgreSQL: the fill (default a
+space) is repeated as needed, `LPAD('ab', 5, 'xy')` is `xyxab`; a string
+longer than `len` is cut to its first `len` characters (`LPAD('hello', 2)` is
+`he`); an empty fill leaves a short string as it is; `len <= 0` gives `''`.
+
+No function builds a string longer than SQLite's default length limit,
+1,000,000,000 bytes: `LPAD('a', 10000000000)`, a `PRINTF` width or precision
+past the limit, or a `REPLACE`, `HEX` or concatenation whose result would
+exceed it is the error "string or blob too big". The length is checked before
+anything is allocated.
 
 ### Math Functions
 
 | Function | Description |
 |----------|-------------|
 | `ABS(n)` | Absolute value |
-| `ROUND(n [, d])` | Round to `d` decimal places, or to the nearest integer |
+| `ROUND(n [, d])` | Round to `d` decimal places (default 0); always a real |
 | `CEIL(n)`, `CEILING(n)` | Round up |
 | `FLOOR(n)` | Round down |
+| `SIGN(n)` | -1, 0 or 1; NULL for text that is not a number |
+| `MIN(a, b, ...)`, `MAX(a, b, ...)` | Least / greatest argument; NULL if any is NULL |
 
-`ROUND(3.14159, 2)` is `3.14`. A negative `d` rounds to the left of the decimal
-point, so `ROUND(1234.5, -2)` is `1200`. A `d` that is not a number is an error
-rather than a silent `0`. `ABS`, `CEIL`, `CEILING` and `FLOOR` take exactly one
-argument and reject a second.
+`ROUND(3.14159, 2)` is `3.14`. Halves round away from zero, judged on the
+value actually stored: `ROUND(2.675, 2)` is `2.67`, because 2.675 is stored as
+2.67499999.... A negative `d` rounds to the left of the decimal point, so
+`ROUND(1234.5, -2)` is `1200` (SQLite treats a negative `d` as 0). A `d` that
+is not a number is an error rather than a silent `0`.
 
-A result that lands on a whole number prints without a decimal part, as
-everywhere else in sqawk: `ROUND(2.0, 2)` is `2`, matching `AVG` and plain
-arithmetic rather than SQL's `2.0`.
+`ABS` of an integer is an integer, and `ABS(-9223372036854775808)` is an
+`integer overflow` error. `CEIL` and `FLOOR` return an integer argument
+unchanged. With one argument, `MIN` and `MAX` are the aggregates.
+
+A real that lands on a whole number prints without a decimal part, as
+everywhere else in sqawk: `ROUND(2.0, 2)` is `2`, where SQLite prints `2.0`.
 
 ### Arithmetic
 
-`+`, `-`, `*`, `/`, `%` (modulo)
+`+`, `-`, `*`, `/`, `%` follow SQLite:
+
+- Integers stay 64-bit integers: `5 / 2` is `2`, `-7 / 2` is `-3` (truncation
+  toward zero), `7 % 3` is `1`. Integers beyond 2^53 stay exact.
+- A result that does not fit in 64 bits is computed as a real instead:
+  `9223372036854775807 + 1` is `9223372036854775808.0`.
+- A real operand makes the result real (`7.0 / 2` is `3.5`). `%` with a real
+  operand takes the remainder of the operands truncated to integers, as a
+  real (`5.5 % 2` is `1.0`).
+- Division or remainder by zero is NULL. Any NULL operand gives NULL.
+- Text is read by its longest numeric prefix: `'12abc' + 0` is `12`,
+  `' 5 ' + 1` is `6`, `'1e3' + 0` is the real `1000`, `'abc' + 1` is `1`.
 
 ### Conditional and Conversion
 
 | Expression | Description |
 |------------|-------------|
-| `CAST(expr AS TYPE)` | Convert to `INTEGER`, `REAL`, `TEXT`, `BOOLEAN` |
+| `CAST(expr AS type)` | Convert (see below) |
 | `COALESCE(a, b, ...)` | First non-NULL argument |
+| `IFNULL(a, b)` | `COALESCE(a, b)` |
 | `NULLIF(a, b)` | NULL when `a = b`, otherwise `a` |
-| `a \|\| b` | String concatenation |
+| `IIF(cond, a, b)` | `CASE WHEN cond THEN a ELSE b END` |
+| `TYPEOF(x)` | `'integer'`, `'real'`, `'text'` or `'null'` |
+
+COALESCE, IFNULL and IIF evaluate only the argument they return.
+
+`CAST` maps any type name onto INTEGER, REAL, TEXT or NUMERIC by SQLite's
+affinity rules: a name containing `INT` is INTEGER (`BIGINT`, `SMALLINT`);
+`CHAR`, `CLOB` or `TEXT` is TEXT (`VARCHAR(10)`); `REAL`, `FLOA` or `DOUB` is
+REAL; anything else (`NUMERIC`, `DECIMAL`, `BOOLEAN`, `DATE`) is NUMERIC.
+
+- `CAST(text AS INTEGER)` reads an optional sign and the digits after it:
+  `'3.9'` is 3, `'12abc'` is 12, `' 5 '` is 5, `'1e3'` is 1, `'abc'` is 0.
+  Out-of-range values saturate at the 64-bit limits.
+- `CAST(real AS INTEGER)` truncates toward zero, saturating.
+- `CAST(text AS REAL)` reads the longest numeric prefix (`'1e3x'` is 1000).
+- `CAST(text AS NUMERIC)` gives an integer when the number is whole
+  (`'3.0'` is 3), else a real. `CAST(1 AS BOOLEAN)` is 1.
 
 ### Result Column Names
 
@@ -125,11 +206,33 @@ addressable. Use `AS` whenever the header is consumed downstream.
 
 | Function | Description |
 |----------|-------------|
-| `NOW()`, `CURRENT_TIMESTAMP` | Current timestamp |
-| `CURRENT_DATE` | Current date |
-| `CURRENT_TIME` | Current time |
-| `DATE(expr)` | Extract date |
-| `TIME(expr)` | Extract time |
+| `DATE(t, modifier...)` | `YYYY-MM-DD` |
+| `TIME(t, modifier...)` | `HH:MM:SS` |
+| `DATETIME(t, modifier...)` | `YYYY-MM-DD HH:MM:SS` |
+| `JULIANDAY(t, modifier...)` | Julian day number (a real) |
+| `UNIXEPOCH(t, modifier...)` | Seconds since 1970-01-01 (an integer) |
+| `STRFTIME(fmt, t, modifier...)` | Formatted: `%d %f %H %j %J %m %M %s %S %w %W %Y %%` |
+| `CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_TIMESTAMP`, `NOW()` | Now |
+
+These follow SQLite, in UTC. The time string `t` is `now`, `YYYY-MM-DD`,
+`YYYY-MM-DD HH:MM[:SS[.fff]]` (or with `T` for the space, and an optional
+`Z` / `+HH:MM` zone), `HH:MM[:SS]` (on 2000-01-01), or a number: a Julian day
+number, or seconds since 1970 when the first modifier is `unixepoch`. With no
+arguments the functions return the current moment.
+
+Modifiers: `+N days|hours|minutes|seconds|months|years` (or `-N`; fractions
+allowed), `start of day|month|year`,
+`weekday N` (0 = Sunday), `unixepoch`, `utc`. `localtime` is an error, since
+sqawk has no time zone.
+
+A malformed time string or an unknown modifier gives NULL. A day past the end
+of its month, up to 31, rolls into the next month: `DATE('2024-02-30')` is
+`2024-03-01`, and `DATE('2024-01-31', '+1 month')` is `2024-03-02`.
+As in SQLite, a fractional month or year count moves the calendar by its
+whole part and then adds the fraction as 30-day months or 365-day years
+(`DATETIME('2024-01-01', '+1.5 months')` is `2024-02-16 00:00:00`); a count
+beyond a unit's range (about 14713 years) gives NULL; and the result must lie
+in years 0000-9999, which is checked after the last modifier.
 
 ## JOIN
 
@@ -145,11 +248,26 @@ SELECT * FROM t1 LEFT JOIN t2 ON t1.id = t2.id
 SELECT * FROM t1 RIGHT JOIN t2 ON t1.id = t2.id
 SELECT * FROM t1 FULL JOIN t2 ON t1.id = t2.id
 
--- Multiple joins
+-- Multiple joins, any mix of INNER / LEFT / CROSS
 SELECT * FROM t1
   JOIN t2 ON t1.id = t2.t1_id
-  JOIN t3 ON t2.id = t3.t2_id
+  LEFT JOIN t3 ON t2.id = t3.t2_id
+
+-- USING and NATURAL: the shared columns appear once in SELECT *
+SELECT * FROM t1 JOIN t2 USING (id)
+SELECT * FROM t1 NATURAL LEFT JOIN t2
 ```
+
+WHERE filters the joined rows, including the NULL-extended rows of an outer
+join (`... LEFT JOIN t2 ON ... WHERE t2.id IS NULL` is an anti-join). An
+unqualified column name must be unambiguous across the joined tables.
+
+A RIGHT JOIN whose left side already contains an outer join, and a FULL JOIN
+followed by further joins, are rejected as unsupported.
+
+Joins on an equality (`ON a.k = b.k`, or the same condition in WHERE for a
+comma or inner join) run as hash joins: the inner table is indexed once
+instead of being rescanned for every outer row.
 
 ## Subqueries
 
@@ -170,33 +288,81 @@ SELECT name FROM employees e
 ```
 
 ```sql
--- Derived table: a subquery in FROM, which must be given an alias
+-- Derived table: a subquery in FROM
 SELECT name FROM (SELECT name, salary FROM employees WHERE salary > 70000) t
 SELECT COUNT(*) FROM (SELECT department FROM employees GROUP BY department) t
 ```
 
-A derived table is materialized before the outer query runs and exists only for
-the statement that declares it. Its alias may not shadow a real table.
+A derived table is materialized before the statement runs and exists only for
+the statement that declares it. It may appear in any FROM -- including inside
+a subquery, a compound arm or an INSERT ... SELECT -- and its alias is
+optional and may shadow a real table's name. A derived table that refers to a
+column of an enclosing query cannot be materialized up front and is an error.
+
+A subquery is a full query: it may use joins, GROUP BY, HAVING, DISTINCT,
+ORDER BY, LIMIT/OFFSET and UNION/INTERSECT/EXCEPT, and it may appear anywhere
+an expression can -- the SELECT list, WHERE, ON, HAVING, ORDER BY, LIMIT, CASE,
+function and aggregate arguments, UPDATE SET, DELETE WHERE and INSERT VALUES.
+
+- A name the subquery does not define is looked up in the enclosing queries,
+  innermost first, so a subquery may reference a column of any enclosing
+  query, at any depth. Such a subquery is *correlated* and runs again for each
+  outer row; an uncorrelated one runs once.
+- A scalar subquery yields its first row's value, or NULL when it returns no
+  rows. It must return exactly one column (*"sub-select returns 2 columns -
+  expected 1"*); so must the subquery of IN.
+- `x IN (SELECT ...)` follows SQL's three-valued logic: over an empty result
+  it is false (NOT IN true) even for a NULL `x`; otherwise a NULL `x`, or a
+  miss when the result contains a NULL, is NULL -- so `NOT IN` over a result
+  containing a NULL is never true.
+- In UPDATE and DELETE, a subquery sees the table as it was before the
+  statement started. (SQLite instead lets a correlated subquery see rows the
+  same UPDATE has already changed.)
+- Not supported: row values (`(a, b) IN (SELECT x, y ...)`), `ANY`/`ALL`.
 
 ## Window Functions
 
 ```sql
 SELECT name, ROW_NUMBER() OVER (ORDER BY salary DESC) FROM employees
-SELECT name, RANK()       OVER (ORDER BY department) FROM employees
-SELECT name, DENSE_RANK() OVER (ORDER BY department) FROM employees
-SELECT name, LAG(salary)  OVER (ORDER BY salary) FROM employees
-SELECT name, LEAD(salary) OVER (ORDER BY salary) FROM employees
-
--- Aggregates over a window
-SELECT name, SUM(salary) OVER (PARTITION BY department) FROM employees
+SELECT name, RANK()       OVER (PARTITION BY department ORDER BY salary) FROM employees
+SELECT name, LAG(salary, 1, 0) OVER (ORDER BY salary) FROM employees
+SELECT name, salary - AVG(salary) OVER (PARTITION BY department) FROM employees
+SELECT department, COUNT(*), RANK() OVER (ORDER BY COUNT(*) DESC)
+  FROM employees GROUP BY department
+SELECT name, SUM(salary) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+  FROM employees
+SELECT name, SUM(salary) OVER w, RANK() OVER (w ORDER BY salary)
+  FROM employees WINDOW w AS (PARTITION BY department)
 ```
 
-Supported functions: `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`, `LEAD`, and the
-aggregates `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`.
+Supported functions:
 
-The frame follows the standard: **without** `ORDER BY` in the `OVER` clause the
-frame is the whole partition, so every row sees the partition total; **with**
-`ORDER BY` the frame grows row by row, giving a running value.
+| Function | Value |
+|---|---|
+| `ROW_NUMBER()` | 1, 2, ... within the partition |
+| `RANK()` | 1 + number of rows before the current row's peers (gaps after ties) |
+| `DENSE_RANK()` | number of the current peer group (no gaps) |
+| `PERCENT_RANK()` | (rank - 1) / (partition rows - 1); 0 for a one-row partition |
+| `CUME_DIST()` | rows up to and including the last peer / partition rows |
+| `NTILE(n)` | bucket 1..n; the first `rows % n` buckets get one row more |
+| `LAG(x [, offset [, default]])` | `x` from `offset` (default 1) rows back, else `default` (NULL) |
+| `LEAD(x [, offset [, default]])` | likewise, forward |
+| `FIRST_VALUE(x)`, `LAST_VALUE(x)`, `NTH_VALUE(x, n)` | `x` at the first / last / n-th row of the frame |
+| `COUNT(*)`, `COUNT(x)`, `SUM`, `AVG`, `MIN`, `MAX` | the aggregate over the frame |
+
+Partition and order keys may be any expressions, any number of them; NULLs
+sort first. Rows with equal ORDER BY keys are *peers*. A query may use any
+number of window functions with different `OVER` clauses, and window calls
+may appear inside expressions (`ROUND(AVG(x) OVER (...), 1)`) and in ORDER BY.
+Windows work over joins, over grouped rows (they run after GROUP BY and
+HAVING), and in subqueries. A window function in WHERE, GROUP BY, HAVING or
+inside an aggregate is an error (*misuse of window function*).
+
+The frame (the rows an aggregate or FIRST_VALUE / LAST_VALUE / NTH_VALUE
+sees) defaults, as in SQLite, to `RANGE BETWEEN UNBOUNDED PRECEDING AND
+CURRENT ROW`: **without** `ORDER BY` that is the whole partition, so every row
+sees the partition total; **with** `ORDER BY` it is a running value in which
+peers share the same value.
 
 ```sql
 -- 210000 on every Engineering row
@@ -206,7 +372,14 @@ SELECT name, SUM(salary) OVER (PARTITION BY department) FROM employees
 SELECT name, SUM(salary) OVER (PARTITION BY department ORDER BY salary) FROM employees
 ```
 
-Explicit frame clauses (`ROWS BETWEEN ...`) are not supported.
+Explicit frames: `ROWS` with any of `UNBOUNDED PRECEDING`, `n PRECEDING`,
+`CURRENT ROW`, `n FOLLOWING`, `UNBOUNDED FOLLOWING` (`n` a non-negative
+integer literal), and `RANGE` with `UNBOUNDED` / `CURRENT ROW` bounds. Named
+windows (`WINDOW w AS (...)`, `OVER w`, `OVER (w ORDER BY ...)`) are
+supported. Not supported, and rejected with an error: `RANGE` frames with an
+offset, `GROUPS` frames, `EXCLUDE`, `FILTER` on a window function, and
+`DISTINCT` inside one. SUM of integers is an integer; AVG, PERCENT_RANK and
+CUME_DIST are floats.
 
 ## Set Operations
 
@@ -225,6 +398,9 @@ INSERT INTO table (col1, col2) VALUES (v1, v2)
 INSERT INTO table SELECT ... FROM other_table
 ```
 
+The SELECT may be any query (joins, GROUP BY, ORDER BY/LIMIT, UNION, ...).
+It must yield one column per target column.
+
 ## UPDATE
 
 ```sql
@@ -232,17 +408,17 @@ UPDATE table SET col1 = val1 [, col2 = val2, ...]
 [WHERE condition]
 ```
 
-`UPDATE ... FROM other_table` is not supported and is accepted without effect.
+`UPDATE ... FROM other_table` is not supported and is rejected with an error.
 To pull a value from another table, use a correlated subquery in the SET
-expression -- it must select an aggregate:
+expression:
 
 ```sql
 UPDATE data SET category =
-    (SELECT MAX(category) FROM lookup WHERE lookup.code = data.code)
+    (SELECT category FROM lookup WHERE lookup.code = data.code)
 ```
 
-A correlated scalar subquery selecting a bare column is rejected with
-*"Correlated scalar subquery must select an aggregate function"*.
+When several lookup rows match, the first is used; a row with no match gets
+NULL.
 
 ## DELETE
 
@@ -267,6 +443,10 @@ CREATE TABLE name (
 CREATE TABLE name AS SELECT ... FROM ...
 ```
 
+The new table's columns are the query's result columns. Column and table
+constraints (`PRIMARY KEY`, `NOT NULL`, `DEFAULT`, ...) are rejected: sqawk
+does not enforce them.
+
 ## DROP TABLE
 
 ```sql
@@ -288,7 +468,8 @@ TRUNCATE TABLE name
 
 ## NULL handling
 
-An empty field reads as NULL.
+An empty field reads as NULL, and NULL is printed (and written back) as an
+empty field.
 
 Comparison follows SQL three-valued logic: any comparison involving NULL is
 UNKNOWN, and a row whose `WHERE` evaluates to UNKNOWN is not returned. This
@@ -296,7 +477,11 @@ means a NULL row satisfies neither `x > 5` nor `x <= 5`, and `NULL = NULL` is
 UNKNOWN rather than true. Use `IS NULL` / `IS NOT NULL` to test for NULL.
 
 Aggregates skip NULLs: `COUNT(*)` counts rows while `COUNT(col)` counts
-non-NULL values. `ORDER BY` sorts NULLs first.
+non-NULL values. `ORDER BY` sorts NULLs first ascending and last descending,
+unless the term says `NULLS FIRST` or `NULLS LAST` (also in a window's ORDER
+BY).
+
+NULL and the empty string both print as an empty field.
 
 ## Type coercion
 
@@ -306,8 +491,68 @@ floats and text.
 When a comparison mixes a number and a string, the string is converted to a
 number if it parses as one, and the two are compared textually otherwise. This
 matches arithmetic, so `x + '1'` and `x > '1'` agree — awk-like rather than
-strict SQL, which suits untyped delimited input.
+strict SQL, which suits untyped delimited input. Two strings compare as text.
+
+Text that spells a number (`007`, `1.50`, `1e3`, which load as text to keep
+their spelling) is used as that number by arithmetic and by `SUM` and `AVG`.
+Arithmetic reads any text by its numeric prefix (see Arithmetic). In a
+condition (WHERE, `NOT`, `AND`, CASE), text is likewise read as a number, so
+`'x'` is false and `'1x'` true, as in SQLite.
+`ORDER BY`, `GROUP BY`, `MIN` and `MAX` order such text among the numbers by
+value; values equal as numbers but spelled differently (`7` and `007`) remain
+distinct groups.
 
 ## Writeback
 
 Modifications (INSERT, UPDATE, DELETE) remain in-memory unless `--write` flag is specified.
+Cells a statement did not change are written back byte for byte; NULL is
+written as an empty field; the source file's delimiter, header line (or its
+absence), line endings, `#` comment lines (in a non-`.csv` file) and
+permissions are kept.
+
+## Unsupported syntax
+
+The SQL parser accepts many dialects. Anything it accepts that sqawk does not
+implement is an error ("... is not supported"), never silently ignored, and
+nothing is modified. That includes:
+
+- `INSERT OR REPLACE` / `OR IGNORE` / ..., `ON CONFLICT`, `INSERT OVERWRITE`,
+  and `RETURNING` on INSERT, UPDATE and DELETE (`REPLACE INTO` does not parse)
+- `UPDATE ... FROM`, `DELETE ... USING`, `DELETE t FROM t JOIN ...`, and
+  UPDATE / DELETE with `ORDER BY` or `LIMIT`
+- `WITH` (common table expressions), `FETCH FIRST`, `FOR UPDATE`, `TOP`,
+  `QUALIFY`, `SORT BY` / `CLUSTER BY` / `DISTRIBUTE BY`, `LATERAL VIEW`,
+  `SELECT ... INTO`, `GROUP BY ... WITH ROLLUP`
+- `TABLESAMPLE`, table hints, `LATERAL` subqueries, column aliases on a FROM
+  item
+- `WITHIN GROUP`, `IGNORE NULLS`, `ORDER BY` inside an aggregate's argument
+  list, `FILTER` or `DISTINCT` on a scalar function, `FILTER` on a window
+  function
+- `CAST ... FORMAT`, `LIKE ANY`, blob literals (`X'00'`) and parameters
+- table and column constraints, `CREATE TABLE IF NOT EXISTS`,
+  `PARTITIONED BY`, `ROW FORMAT`
+- statements other than SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, DROP
+  TABLE, ALTER TABLE ADD COLUMN and TRUNCATE (no views, indexes, triggers or
+  transactions)
+
+## Differences from SQLite
+
+sqawk aims to give SQLite's answers. Where it deliberately does not:
+
+| Area | SQLite | sqawk |
+|------|--------|-------|
+| Column types | Declared affinity converts `'10'` stored in an INTEGER column to 10 | Each cell is typed when read; a text/number comparison converts the text if it is a number (`a = '10'` matches 10) -- awk-like, see Type coercion |
+| Real output | `%!.15g`: `1.0`, `9.22337203685478e+18` | Shortest round-trip digits, no exponent, no `.0`: `1`, `9223372036854775808` |
+| NULL vs `''` | Distinct in output | Both print as an empty field |
+| `UPPER` / `LOWER` | ASCII letters only | All of Unicode |
+| `TRIM(s)` | Strips spaces only | Strips all whitespace |
+| `ROUND(x, -d)` | Negative `d` treated as 0 | Rounds to the left of the point |
+| `SUM` over text | Non-numeric text counts as 0 (result real) | Non-numeric text is skipped |
+| `INSERT OR REPLACE`, `ON CONFLICT` | Plain INSERT when the table has no unique constraint | Rejected: sqawk tables have no keys, so the statement cannot do what it asks |
+| Subqueries in UPDATE / DELETE | A correlated subquery sees rows already changed | Sees the table as it was before the statement |
+| `ILIKE`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `TRIM(... FROM ...)` | Not available | Available |
+| `localtime` date modifier | Local time zone | Error (UTC only) |
+| Parser | SQLite grammar | sqlparser's Hive dialect: `GLOB`, `REGEXP`, `x IS 10`, `LIMIT n, m`, `TRIM(s, chars)`, `REPLACE INTO` do not parse |
+
+Not implemented: common table expressions, views, indexes, triggers,
+`RETURNING`, row values, `GLOB`, and blob values.

@@ -3,6 +3,8 @@
 //! This file contains tests for scalar subqueries with aggregate functions.
 //! Phase 4F: Subquery support
 
+mod exact;
+
 use crate::helpers::{create_custom_csv, create_temp_dir};
 
 /// Test scalar subquery with MAX aggregate
@@ -153,4 +155,54 @@ fn test_scalar_subquery_greater_than() -> Result<(), Box<dyn std::error::Error>>
         .stdout(predicates::str::contains("4,David,40"));
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Derived tables anywhere in a statement. Expected values from SQLite 3.45.
+// ---------------------------------------------------------------------------
+
+mod derived_tables {
+    use crate::helpers::{assert_query, employees_csv};
+
+    type R = Result<(), Box<dyn std::error::Error>>;
+
+    /// A derived table inside a scalar subquery (used to fail with "Only
+    /// table references are supported in FROM").
+    #[test]
+    fn derived_table_inside_subquery() -> R {
+        assert_query(
+            &[employees_csv()],
+            "SELECT department, COUNT(*) AS c FROM employees GROUP BY department \
+             HAVING COUNT(*) = (SELECT MAX(c) FROM (SELECT COUNT(*) AS c FROM employees \
+             GROUP BY department) z)",
+            "department,c\nEngineering,3",
+        )?;
+        assert_query(
+            &[employees_csv()],
+            "SELECT name FROM employees WHERE salary > (SELECT AVG(s) FROM \
+             (SELECT salary AS s FROM employees WHERE department = 'Sales') z) ORDER BY name",
+            "name\nGrace",
+        )
+    }
+
+    /// SQLite accepts a derived table without an alias.
+    #[test]
+    fn unaliased_derived_table() -> R {
+        assert_query(
+            &[employees_csv()],
+            "SELECT COUNT(*) AS n, SUM(x) AS s FROM (SELECT age AS x FROM employees WHERE id < 4)",
+            "n,s\n3,90",
+        )
+    }
+
+    /// The same alias in both arms of a compound.
+    #[test]
+    fn alias_repeated_across_arms() -> R {
+        assert_query(
+            &[employees_csv()],
+            "SELECT name FROM (SELECT name FROM employees WHERE id < 3) e UNION ALL \
+             SELECT name FROM (SELECT name FROM employees WHERE id = 8) e",
+            "name\nAlice\nBob\nHenry",
+        )
+    }
 }

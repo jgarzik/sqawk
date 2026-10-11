@@ -1,7 +1,6 @@
 # Sqawk
 
 [![Crates.io](https://img.shields.io/crates/v/sqawk.svg)](https://crates.io/crates/sqawk)
-[![Docs.rs](https://docs.rs/sqawk/badge.svg)](https://docs.rs/sqawk)
 [![MIT licensed](https://img.shields.io/crates/l/sqawk.svg)](./LICENSE)
 
 Sqawk is an SQL-based command-line tool for processing delimiter-separated files (CSV, TSV, etc.), inspired by the classic `awk` command. It loads data into in-memory tables, executes SQL queries, and optionally writes results back to files.
@@ -10,14 +9,15 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 
 - **SQL Query Engine** - SELECT, INSERT, UPDATE, DELETE with WHERE, ORDER BY, GROUP BY, HAVING, LIMIT/OFFSET
 - **Joins** - INNER, LEFT, RIGHT, FULL OUTER, and CROSS joins with ON conditions
-- **Aggregates** - COUNT, SUM, AVG, MIN, MAX with GROUP BY support
-- **Functions** - String (UPPER, LOWER, SUBSTR, REPLACE, etc.), math (ABS, ROUND, etc.), date/time
+- **Aggregates** - COUNT, SUM, TOTAL, AVG, MIN, MAX, GROUP_CONCAT/STRING_AGG with GROUP BY, DISTINCT and `FILTER (WHERE ...)`
+- **Functions** - String (UPPER, LOWER, LENGTH, SUBSTR, INSTR, REPLACE, TRIM, LPAD/RPAD, PRINTF, ...), math (ABS, ROUND, CEIL, FLOOR, SIGN, multi-argument MIN/MAX), conditional (COALESCE, IFNULL, NULLIF, IIF, TYPEOF), date/time (DATE, TIME, DATETIME, STRFTIME, JULIANDAY, UNIXEPOCH with modifiers)
+- **SQLite semantics** - 64-bit integer arithmetic, SQLite CAST rules, ASCII case-insensitive LIKE with ESCAPE, character-based strings; unimplemented syntax is an error, never silently ignored
 - **Subqueries** - Scalar, `IN (SELECT ...)`, and `EXISTS`, including correlated
 - **Set Operations** - UNION, UNION ALL, INTERSECT, EXCEPT
-- **Window Functions** - ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD, and aggregates with `OVER (PARTITION BY ... ORDER BY ...)`
+- **Window Functions** - ROW_NUMBER, RANK, DENSE_RANK, PERCENT_RANK, CUME_DIST, NTILE, LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE, and aggregates with `OVER (PARTITION BY ... ORDER BY ...)`, ROWS frames and named windows
 - **DDL** - CREATE TABLE, CREATE TABLE AS SELECT, DROP, ALTER TABLE ADD COLUMN, TRUNCATE
-- **Expressions** - CASE, CAST, COALESCE, NULLIF, BETWEEN, IN, LIKE/ILIKE, `||`, arithmetic
-- **File Formats** - CSV, TSV, and custom delimiters; headerless files via `--tabledef`
+- **Expressions** - CASE, CAST, BETWEEN, IN, LIKE/ILIKE ... ESCAPE, IS [NOT] DISTINCT FROM, `||`, arithmetic; ORDER BY ... NULLS FIRST/LAST
+- **File Formats** - CSV, TSV, and custom delimiters; headerless files via `--no-header` or `--tabledef`; unchanged cells survive `--write` byte for byte
 - **Pipelines** - Reads standard input with a `-` file operand
 - **Safe by Default** - Files unchanged unless `--write` flag is specified
 - **Interactive REPL** - Explore data interactively with `-i` flag
@@ -28,8 +28,7 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 cargo install sqawk
 ```
 
-This installs two binaries: `sqawk` and [`tsq`](#tsq---test-data-generator).
-Requires Rust 1.88 or newer.
+This installs the `sqawk` binary. Requires Rust 1.88 or newer.
 
 ## Quick Examples
 
@@ -50,13 +49,15 @@ sqawk -s "UPDATE data SET status = 'archived' WHERE year < 2020" data.csv --writ
 cat employees.csv | sqawk -s "SELECT name FROM stdin WHERE salary > 70000" -
 ```
 
-## `tsq` - test data generator
+## `tsq` - test data generator (development only)
 
-`cargo install sqawk` also installs `tsq`, which generates deterministic
-multi-table CSV data plus a corpus of SQL queries for exercising sqawk.
+The source tree also contains `tsq`, which generates deterministic multi-table
+CSV data plus a corpus of SQL queries for exercising sqawk. It is a separate
+workspace crate (`tsq/`) that is not published, so `cargo install sqawk` does
+not install it. Run it from a checkout:
 
 ```sh
-tsq --seed 42 --rows 1000 --output-dir /tmp/sqawk-test
+cargo run -p tsq -- --seed 42 --rows 1000 --output-dir /tmp/sqawk-test
 sqawk -s "SELECT * FROM customers LIMIT 10" /tmp/sqawk-test/data/customers.csv
 ```
 

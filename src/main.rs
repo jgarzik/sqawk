@@ -32,12 +32,10 @@ mod cli;
 mod config;
 mod csv_handler;
 mod database;
-mod delim_handler;
 mod error;
 mod file_handler;
 mod repl;
 mod sql_executor;
-mod storage;
 mod table;
 mod vm;
 
@@ -72,18 +70,24 @@ fn main() -> Result<()> {
 
     // Step 1b: Create a centralized application configuration
     // This will be passed to all components that need configuration settings
+    let field_separator = args
+        .field_separator
+        .as_deref()
+        .map(cli::validate_separator)
+        .transpose()?;
     let config = AppConfig::new(
-        args.verbose,                 // Verbose output flag
-        args.field_separator.clone(), // Field separator for tables
-        args.tabledef.clone(),        // Table column definitions
-        args.write,                   // Whether to write changes to files
-    );
+        args.verbose,          // Verbose output flag
+        field_separator,       // Field separator for tables
+        args.tabledef.clone(), // Table column definitions
+        args.write,            // Whether to write changes to files
+    )
+    .with_no_header(args.no_header);
 
     // Configure diagnostics output if verbose mode is enabled (-v flag)
     // This is important for debugging and understanding the execution flow
     if config.verbose() {
-        println!("Running in verbose mode");
-        println!("Arguments: {args:?}");
+        eprintln!("Running in verbose mode");
+        eprintln!("Arguments: {args:?}");
     }
 
     // Step 2a: Create a new Database instance to serve as the central store for tables
@@ -125,9 +129,9 @@ fn main() -> Result<()> {
     // Log table loading results in verbose mode
     if config.verbose() {
         let table_count = file_handler.table_count();
-        println!("Loaded {table_count} tables");
+        eprintln!("Loaded {table_count} tables");
         for table_name in file_handler.table_names() {
-            println!("Table '{table_name}' loaded");
+            eprintln!("Table '{table_name}' loaded");
         }
     }
 
@@ -151,6 +155,8 @@ fn main() -> Result<()> {
         }
     }
 
+    let mut stdout_open = true;
+
     // Process each SQL statement in the order specified on the command line
     // This allows operations like: UPDATE -> DELETE -> SELECT to see the effects
     for sql in &args.sql {
@@ -168,13 +174,22 @@ fn main() -> Result<()> {
         for table in &result {
             if config.verbose() {
                 let row_count = table.row_count();
-                println!("Query returned {row_count} rows");
+                eprintln!("Query returned {row_count} rows");
             }
-            // Print the result table in delimiter-separated format
-            table.print_to_stdout()?;
+            // Print the result table in delimiter-separated format. Once the
+            // reader of a pipe has gone away (`sqawk ... | head`), stop
+            // printing but keep going: later statements and --write still run.
+            if stdout_open {
+                if let Err(e) = table.print_to_stdout() {
+                    if e.kind() != std::io::ErrorKind::BrokenPipe {
+                        return Err(e).context("Failed to write results");
+                    }
+                    stdout_open = false;
+                }
+            }
         }
         if result.is_empty() && config.verbose() {
-            println!("Query executed successfully (no results to display)");
+            eprintln!("Query executed successfully (no results to display)");
         }
     }
 
@@ -188,8 +203,14 @@ fn main() -> Result<()> {
             .context("Failed to save modified tables")?;
     } else if config.verbose() {
         // In verbose mode, remind the user that changes weren't saved
-        println!("Changes not saved: use --write to save changes to files");
+        eprintln!("Changes not saved: use --write to save changes to files");
     }
+
+    // The process is about to exit, so freeing every loaded cell one by one
+    // is wasted work (measurable on large inputs); let the OS reclaim it.
+    drop(sql_executor);
+    drop(file_handler);
+    std::mem::forget(database);
 
     Ok(())
 }

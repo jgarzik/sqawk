@@ -2,11 +2,13 @@
 //!
 //! This module extends SqlCompiler with DML statement compilation methods.
 
-use sqlparser::ast::{Expr, Select, SelectItem, SetExpr, TableFactor};
+use sqlparser::ast::{Expr, SetExpr, TableFactor};
 
 use super::ast_compat::assignment_column;
-use super::bytecode::OpCode;
-use super::compiler::{NameCtx, SqlCompiler};
+use super::bytecode::{OpCode, ResultSchema};
+use super::compiler::{InsertTarget, NameCtx, SqlCompiler};
+use super::compiler_check::check_query;
+use super::compiler_select::Sink;
 use crate::error::{SqawkError, SqawkResult};
 
 impl<'a> SqlCompiler<'a> {
@@ -41,7 +43,14 @@ impl<'a> SqlCompiler<'a> {
         // Handle different source types: VALUES or SELECT
         match &*source.body {
             SetExpr::Values(values) => {
-                // INSERT ... VALUES
+                // INSERT ... VALUES. Query-level clauses on a VALUES list
+                // (`VALUES ... ORDER BY ... LIMIT ...`) are not honoured.
+                check_query(source)?;
+                if source.order_by.is_some() || source.limit_clause.is_some() {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "ORDER BY / LIMIT on INSERT ... VALUES is not supported".into(),
+                    ));
+                }
                 // Generate Init and jump
                 let init_addr = self.program.len();
                 self.emit(OpCode::Init, 0, 0, 0, None, "Start INSERT");
@@ -57,7 +66,9 @@ impl<'a> SqlCompiler<'a> {
                 );
 
                 // Process each row of values
-                let base_reg = self.register_counter as usize;
+                // Reserve the row block, so registers allocated while
+                // compiling a value expression cannot alias a column.
+                let base_reg = self.allocate_registers(column_count) as usize;
                 for value_row in &values.rows {
                     if value_row.len() != column_indices.len() {
                         return Err(SqawkError::InvalidSqlQuery(format!(
@@ -71,8 +82,8 @@ impl<'a> SqlCompiler<'a> {
                     for i in 0..column_count {
                         self.emit(
                             OpCode::Null,
-                            (base_reg + i) as i64,
                             0,
+                            (base_reg + i) as i64,
                             0,
                             None,
                             &format!("Init col {} to NULL", i),
@@ -83,7 +94,7 @@ impl<'a> SqlCompiler<'a> {
                     for (i, expr) in value_row.iter().enumerate() {
                         let col_idx = column_indices[i];
                         let value_reg = base_reg + col_idx;
-                        self.compile_expr_into_register(expr, value_reg)?;
+                        self.code_expr(expr, &NameCtx::empty(), Some(value_reg as i64))?;
                     }
 
                     // Insert the row
@@ -103,219 +114,37 @@ impl<'a> SqlCompiler<'a> {
 
                 // Patch init to jump past itself
                 self.patch_jump(init_addr, init_addr + 1);
-
-                // Update register counter
-                self.register_counter = (base_reg + column_count) as i64;
             }
 
-            SetExpr::Select(select) => {
-                // INSERT ... SELECT
-                self.compile_insert_select(&table_name_str, column_count, &column_indices, select)?;
-            }
-
+            // INSERT ... SELECT: any query, compiled by the SELECT pipeline,
+            // its rows sent to the table through `Sink::Table`.
             _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only INSERT ... VALUES and INSERT ... SELECT are supported".to_string(),
-                ));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Compile INSERT ... SELECT statement
-    pub(crate) fn compile_insert_select(
-        &mut self,
-        target_table_name: &str,
-        target_column_count: usize,
-        column_indices: &[usize],
-        select: &Select,
-    ) -> SqawkResult<()> {
-        // Get the source table from the SELECT
-        if select.from.is_empty() {
-            return Err(SqawkError::InvalidSqlQuery(
-                "INSERT ... SELECT requires a FROM clause".to_string(),
-            ));
-        }
-
-        let source_table_name = match &select.from[0].relation {
-            TableFactor::Table { name, .. } => self.get_table_name(name)?,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple table references are supported in INSERT...SELECT".to_string(),
-                ))
-            }
-        };
-
-        let source_table = self.database.get_table(&source_table_name)?;
-
-        // Generate Init
-        let init_addr = self.program.len();
-        self.emit(OpCode::Init, 0, 0, 0, None, "Start INSERT...SELECT");
-
-        // Open source table for reading (cursor 0)
-        self.emit(
-            OpCode::OpenRead,
-            0,
-            0,
-            0,
-            Some(source_table_name.clone()),
-            &format!("Open {} for reading", source_table_name),
-        );
-
-        // Open target table for writing (cursor 1)
-        self.emit(
-            OpCode::OpenWrite,
-            1,
-            0,
-            0,
-            Some(target_table_name.to_string()),
-            &format!("Open {} for writing", target_table_name),
-        );
-
-        // Rewind source cursor
-        let rewind_addr = self.program.len();
-        self.emit(OpCode::Rewind, 0, 0, 0, None, "Rewind source cursor");
-
-        // Loop body start
-        let loop_start = self.program.len();
-
-        // Allocate registers for the row data
-        let base_reg = self.register_counter as usize;
-        self.register_counter += target_column_count as i64;
-
-        // Initialize all columns to NULL
-        for i in 0..target_column_count {
-            self.emit(
-                OpCode::Null,
-                (base_reg + i) as i64,
-                0,
-                0,
-                None,
-                &format!("Init col {} to NULL", i),
-            );
-        }
-
-        // Load columns from SELECT projection
-        for (i, proj_item) in select.projection.iter().enumerate() {
-            if i >= column_indices.len() {
-                break;
-            }
-            let target_col_idx = column_indices[i];
-            let dest_reg = base_reg + target_col_idx;
-
-            match proj_item {
-                SelectItem::Wildcard(_) => {
-                    // SELECT * - load all columns from source
-                    for col_idx in 0..source_table.column_count() {
-                        if col_idx < target_column_count {
-                            self.emit(
-                                OpCode::Column,
-                                0,
-                                col_idx as i64,
-                                (base_reg + col_idx) as i64,
-                                None,
-                                &format!("Load source col {} to target col {}", col_idx, col_idx),
-                            );
-                        }
-                    }
-                    break; // Wildcard handles all columns
+                let cursor = self.alloc_cursor();
+                self.emit(
+                    OpCode::OpenWrite,
+                    cursor,
+                    0,
+                    0,
+                    Some(table_name_str.clone()),
+                    &format!("Open {} for writing", table_name_str),
+                );
+                self.insert_target = Some(InsertTarget {
+                    cursor,
+                    columns: Some((column_count, column_indices.clone())),
+                });
+                let schema = self.compile_query_to(source, Sink::Table);
+                self.insert_target = None;
+                let schema = schema?;
+                self.program.set_result_schema(ResultSchema::new());
+                if schema.columns.len() != column_indices.len() {
+                    return Err(SqawkError::InvalidSqlQuery(format!(
+                        "INSERT statement has {} values but {} columns were specified",
+                        schema.columns.len(),
+                        column_indices.len()
+                    )));
                 }
-                SelectItem::UnnamedExpr(expr) => {
-                    // Compile the expression
-                    match expr {
-                        Expr::Identifier(ident) => {
-                            let col_name = ident.value.to_lowercase();
-                            if let Some(col_idx) = source_table.column_index(&col_name) {
-                                self.emit(
-                                    OpCode::Column,
-                                    0,
-                                    col_idx as i64,
-                                    dest_reg as i64,
-                                    None,
-                                    &format!("Load {} to reg {}", col_name, dest_reg),
-                                );
-                            }
-                        }
-                        Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
-                            let col_name = parts[1].value.to_lowercase();
-                            if let Some(col_idx) = source_table.column_index(&col_name) {
-                                self.emit(
-                                    OpCode::Column,
-                                    0,
-                                    col_idx as i64,
-                                    dest_reg as i64,
-                                    None,
-                                    &format!("Load {} to reg {}", col_name, dest_reg),
-                                );
-                            }
-                        }
-                        _ => {
-                            // For other expressions, try to compile them
-                            self.compile_expr_into_register(expr, dest_reg)?;
-                        }
-                    }
-                }
-                SelectItem::ExprWithAlias { expr, .. } => {
-                    self.compile_expr_into_register(expr, dest_reg)?;
-                }
-                _ => {}
             }
         }
-
-        // Check WHERE clause if present
-        let skip_addr = if let Some(where_expr) = &select.selection {
-            let cond_reg = self.compile_where_condition(where_expr, source_table, 0)?;
-            let addr = self.program.len();
-            self.emit(
-                OpCode::IfZ,
-                cond_reg,
-                0, // will patch
-                0,
-                None,
-                "Skip if WHERE is false",
-            );
-            Some(addr)
-        } else {
-            None
-        };
-
-        // Insert the row into target table
-        self.emit(
-            OpCode::InsertRow,
-            1, // target cursor
-            base_reg as i64,
-            target_column_count as i64,
-            Some(target_table_name.to_string()),
-            "Insert row into target",
-        );
-
-        // Patch skip if present
-        if let Some(addr) = skip_addr {
-            self.patch_jump(addr, self.program.len());
-        }
-
-        // Next row
-        self.emit(
-            OpCode::Next,
-            0, // source cursor
-            loop_start as i64,
-            0,
-            None,
-            "Next source row",
-        );
-
-        // Patch rewind
-        let end_addr = self.program.len();
-        self.patch_jump(rewind_addr, end_addr);
-
-        // Close cursors and halt
-        self.emit(OpCode::Close, 0, 0, 0, None, "Close source cursor");
-        self.emit(OpCode::Close, 1, 0, 0, None, "Close target cursor");
-        self.emit(OpCode::Halt, 0, 0, 0, None, "End INSERT...SELECT");
-
-        // Patch init
-        self.patch_jump(init_addr, init_addr + 1);
 
         Ok(())
     }
@@ -378,7 +207,7 @@ impl<'a> SqlCompiler<'a> {
         // If there's a WHERE clause, check if row matches
         if let Some(where_expr) = selection {
             // Compile WHERE condition using table context
-            let cond_reg = self.compile_where_condition(where_expr, table, cursor_idx as usize)?;
+            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table, cursor_idx), None)?;
 
             // If condition is false (0), skip to next row
             let skip_addr = self.program.len();
@@ -514,7 +343,7 @@ impl<'a> SqlCompiler<'a> {
         // If there's a WHERE clause, check if row matches
         let skip_addr = if let Some(where_expr) = selection {
             // Compile WHERE condition using table context
-            let cond_reg = self.compile_where_condition(where_expr, table_ref, 0)?;
+            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table_ref, 0), None)?;
 
             // If condition is false (0), skip to next row
             let addr = self.program.len();

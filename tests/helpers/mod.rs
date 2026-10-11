@@ -274,6 +274,44 @@ pub fn assert_after_write(
     Ok(())
 }
 
+/// `assert_query` over ad-hoc tables: each `(file_name, content)` is
+/// written to a fresh temp dir and loaded under its file stem.
+pub fn assert_query_on(
+    files: &[(&str, &str)],
+    sql: &str,
+    expected: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = create_temp_dir()?;
+    let mut paths = Vec::new();
+    for (name, content) in files {
+        let p = dir.path().join(name);
+        fs::write(&p, content)?;
+        paths.push(p.to_str().unwrap().to_string());
+    }
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    assert_query(&refs, sql, expected)
+}
+
+/// `assert_query_fails` over ad-hoc tables (see [`assert_query_on`]).
+pub fn assert_query_on_fails(
+    files: &[(&str, &str)],
+    sql: &str,
+    expected_err: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = create_temp_dir()?;
+    let mut paths = Vec::new();
+    for (name, content) in files {
+        let p = dir.path().join(name);
+        fs::write(&p, content)?;
+        paths.push(p.to_str().unwrap().to_string());
+    }
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    assert_query_fails(&refs, sql, expected_err)
+}
+
+/// A one-row table `one(id)`, for queries over constant expressions.
+pub const ONE: (&str, &str) = ("one.csv", "id\n1\n");
+
 /// Path to the nullable.csv fixture (contains empty fields -> NULL values).
 ///
 /// No other fixture in tests/data/ has an empty field, so nothing in the suite

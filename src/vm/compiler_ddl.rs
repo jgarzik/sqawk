@@ -2,13 +2,12 @@
 //!
 //! This module extends SqlCompiler with DDL statement compilation methods.
 
-use sqlparser::ast::{
-    AlterTableOperation, ObjectName, ObjectType, SelectItem, SetExpr, TableFactor,
-};
+use sqlparser::ast::{AlterTableOperation, ObjectName, ObjectType};
 
 use super::ast_compat::sql_option_key_value;
-use super::bytecode::OpCode;
-use super::compiler::SqlCompiler;
+use super::bytecode::{OpCode, ResultSchema};
+use super::compiler::{InsertTarget, SqlCompiler};
+use super::compiler_select::Sink;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::DataType;
 
@@ -135,268 +134,58 @@ impl<'a> SqlCompiler<'a> {
         Ok(())
     }
 
-    /// Compile CREATE TABLE ... AS SELECT
+    /// Compile `CREATE TABLE name AS query`.
+    ///
+    /// The query is compiled by the ordinary SELECT pipeline, so any query
+    /// that can be run can be materialized; its rows go to the new table
+    /// through the `Sink::Table` destination. The new table's columns are
+    /// the query's result columns, known only once the query is compiled, so
+    /// the CreateTable instruction is emitted first and its spec patched in.
     pub(crate) fn compile_create_table_as_select(
         &mut self,
         name: &ObjectName,
         query: &sqlparser::ast::Query,
     ) -> SqawkResult<()> {
         let table_name = self.get_table_name(name)?;
-
-        // First, compile the SELECT query to get the result schema
-        // We need to figure out the column types from the SELECT
-        // For now, we'll use a simplified approach: compile the query,
-        // then create the table with columns inferred from the result schema
-
-        // Generate Init
-        let init_addr = self.program.len();
-        self.emit(OpCode::Init, 0, 0, 0, None, "Start CREATE TABLE AS SELECT");
-
-        // Get the SELECT to analyze
-        let select = match &*query.body {
-            SetExpr::Select(s) => s,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "CREATE TABLE AS only supports simple SELECT".to_string(),
-                ));
-            }
-        };
-
-        // Extract source table info to get column types
-        let source_table_name = if let Some(from) = select.from.first() {
-            match &from.relation {
-                TableFactor::Table { name, .. } => self.get_table_name(name)?,
-                _ => {
-                    return Err(SqawkError::UnsupportedSqlFeature(
-                        "CREATE TABLE AS requires a simple table source".to_string(),
-                    ));
-                }
-            }
-        } else {
-            return Err(SqawkError::InvalidSqlQuery(
-                "CREATE TABLE AS SELECT requires a FROM clause".to_string(),
-            ));
-        };
-
-        let source_table = self.database.get_table(&source_table_name)?;
-
-        // Build column definitions from the SELECT projection
-        let mut col_specs = Vec::new();
-        for item in &select.projection {
-            match item {
-                SelectItem::UnnamedExpr(expr) => {
-                    let (col_name, col_type) = self.infer_expr_schema(expr, source_table);
-                    let type_str = match col_type {
-                        DataType::Integer => "INTEGER",
-                        DataType::Float => "REAL",
-                        DataType::Boolean => "BOOLEAN",
-                        _ => "TEXT",
-                    };
-                    col_specs.push(format!("{}:{}", col_name, type_str));
-                }
-                SelectItem::ExprWithAlias { expr, alias } => {
-                    let (_, col_type) = self.infer_expr_schema(expr, source_table);
-                    let type_str = match col_type {
-                        DataType::Integer => "INTEGER",
-                        DataType::Float => "REAL",
-                        DataType::Boolean => "BOOLEAN",
-                        _ => "TEXT",
-                    };
-                    col_specs.push(format!("{}:{}", alias.value, type_str));
-                }
-                SelectItem::Wildcard(_) => {
-                    // Add all columns from source table
-                    for col in source_table.column_metadata() {
-                        let type_str = match col.data_type {
-                            DataType::Integer => "INTEGER",
-                            DataType::Float => "REAL",
-                            DataType::Boolean => "BOOLEAN",
-                            _ => "TEXT",
-                        };
-                        col_specs.push(format!("{}:{}", col.name, type_str));
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Build table spec: "table_name:col1:type1:col2:type2:..."
-        let mut spec = table_name.clone();
-        for col_spec in &col_specs {
-            spec.push(':');
-            spec.push_str(col_spec);
-        }
-        // Add empty file path and delimiter
-        spec.push_str("||");
-
-        // Emit CreateTable instruction
+        let create = self.program.len();
         self.emit(
             OpCode::CreateTable,
             0,
             0,
             0,
-            Some(spec),
+            None,
             &format!("Create table {}", table_name),
         );
-
-        // Now compile the SELECT and INSERT into the new table
-        // Open the new table for writing
-        let cursor_idx = 0i64;
+        let cursor = self.alloc_cursor();
         self.emit(
             OpCode::OpenWrite,
-            cursor_idx,
+            cursor,
             0,
             0,
             Some(table_name.clone()),
             "Open new table for writing",
         );
+        self.insert_target = Some(InsertTarget {
+            cursor,
+            columns: None,
+        });
+        let schema = self.compile_query_to(query, Sink::Table);
+        self.insert_target = None;
+        let schema = schema?;
+        self.program.set_result_schema(ResultSchema::new());
 
-        // Open source table for reading
-        let source_cursor = 1i64;
-        self.emit(
-            OpCode::OpenRead,
-            source_cursor,
-            1,
-            0,
-            Some(source_table_name.clone()),
-            "Open source table",
-        );
-
-        // Rewind source
-        let rewind_addr = self.program.len();
-        self.emit(
-            OpCode::Rewind,
-            source_cursor,
-            0,
-            0,
-            None,
-            "Start reading source",
-        );
-
-        let loop_start = self.program.len();
-
-        // Handle WHERE clause if present
-        let mut skip_insert_addr: Option<usize> = None;
-        if let Some(selection) = &select.selection {
-            // Compile the WHERE clause condition (returns the result register)
-            let cond_reg =
-                self.compile_where_condition(selection, source_table, source_cursor as usize)?;
-
-            // If condition is false (zero), skip the insert
-            skip_insert_addr = Some(self.program.len());
-            self.emit(
-                OpCode::IfZ,
-                cond_reg,
-                0, // Will be patched to point to Next
-                0,
-                None,
-                "Skip row if WHERE is false",
-            );
+        let mut spec = table_name.clone();
+        for col in &schema.columns {
+            let type_str = match col.data_type {
+                DataType::Integer => "INTEGER",
+                DataType::Float => "REAL",
+                DataType::Boolean => "BOOLEAN",
+                _ => "TEXT",
+            };
+            spec.push_str(&format!(":{}:{}", col.name, type_str));
         }
-
-        // Allocate registers for columns
-        let col_count = col_specs.len();
-        let start_reg = self.allocate_registers(col_count);
-
-        // Load columns from source based on projection
-        let mut reg_idx = 0;
-        for item in &select.projection {
-            match item {
-                SelectItem::UnnamedExpr(sqlparser::ast::Expr::Identifier(ident))
-                | SelectItem::ExprWithAlias {
-                    expr: sqlparser::ast::Expr::Identifier(ident),
-                    ..
-                } => {
-                    if let Some(col_idx) = source_table.column_index(&ident.value) {
-                        self.emit(
-                            OpCode::Column,
-                            source_cursor,
-                            col_idx as i64,
-                            start_reg + reg_idx as i64,
-                            None,
-                            &format!("Load column {}", ident.value),
-                        );
-                        reg_idx += 1;
-                    }
-                }
-                SelectItem::Wildcard(_) => {
-                    for col_idx in 0..source_table.column_count() {
-                        self.emit(
-                            OpCode::Column,
-                            source_cursor,
-                            col_idx as i64,
-                            start_reg + reg_idx as i64,
-                            None,
-                            "Load column",
-                        );
-                        reg_idx += 1;
-                    }
-                }
-                _ => {
-                    // For other expressions, try to compile them
-                    self.compile_where_operand(
-                        match item {
-                            SelectItem::UnnamedExpr(e) => e,
-                            SelectItem::ExprWithAlias { expr, .. } => expr,
-                            _ => continue,
-                        },
-                        source_table,
-                        source_cursor as usize,
-                        start_reg + reg_idx as i64,
-                    )?;
-                    reg_idx += 1;
-                }
-            }
-        }
-
-        // Insert row into new table
-        self.emit(
-            OpCode::InsertRow,
-            cursor_idx,
-            start_reg,
-            col_count as i64,
-            None,
-            "Insert row into new table",
-        );
-
-        // Next row in source
-        let next_addr = self.program.len();
-        self.emit(
-            OpCode::Next,
-            source_cursor,
-            loop_start as i64,
-            0,
-            None,
-            "Next source row",
-        );
-
-        // Patch the skip-insert jump to point to Next
-        if let Some(addr) = skip_insert_addr {
-            self.patch_jump(addr, next_addr);
-        }
-
-        let after_loop = self.program.len();
-
-        // Patch rewind
-        self.patch_jump(rewind_addr, after_loop);
-
-        // Close cursors
-        self.emit(OpCode::Close, cursor_idx, 0, 0, None, "Close new table");
-        self.emit(
-            OpCode::Close,
-            source_cursor,
-            0,
-            0,
-            None,
-            "Close source table",
-        );
-
-        // Halt
-        self.emit(OpCode::Halt, 0, 0, 0, None, "End CREATE TABLE AS SELECT");
-
-        // Patch init
-        self.patch_jump(init_addr, init_addr + 1);
-
+        spec.push_str("||");
+        self.program.instructions[create].p4 = Some(spec.into());
         Ok(())
     }
 

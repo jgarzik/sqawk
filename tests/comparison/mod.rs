@@ -208,3 +208,34 @@ fn test_comparison_boundary_values() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Expected values from SQLite 3.45.
+// ---------------------------------------------------------------------------
+
+mod sqlite_semantics {
+    use crate::helpers::{assert_query, assert_query_on, employees_csv};
+
+    type R = Result<(), Box<dyn std::error::Error>>;
+
+    /// NULL-safe equality.
+    #[test]
+    fn is_distinct_from() -> R {
+        assert_query_on(
+            &[("t.csv", "k,x\n1,2\n2,\n")],
+            "SELECT k, x IS NOT DISTINCT FROM NULL AS a, x IS DISTINCT FROM 2 AS b, \
+             NULL IS DISTINCT FROM NULL AS c, 2 IS NOT DISTINCT FROM 2.0 AS d FROM t",
+            "k,a,b,c,d\n1,0,0,0,1\n2,1,1,0,1",
+        )
+    }
+
+    /// Table names match case-insensitively, like every SQL identifier.
+    #[test]
+    fn table_names_are_case_insensitive() -> R {
+        assert_query(
+            &[employees_csv()],
+            "SELECT EMPLOYEES.NAME FROM EMPLOYEES WHERE ID = 2",
+            "NAME\nBob",
+        )
+    }
+}

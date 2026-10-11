@@ -77,7 +77,7 @@ impl<'a> SqlExecutor<'a> {
     ///   deliberately NOT merged, since each has its own column schema.
     pub fn execute(&mut self, sql: &str) -> SqawkResult<Vec<crate::table::Table>> {
         if self.config.verbose() {
-            println!("Executing SQL: {}", sql);
+            eprintln!("Executing SQL: {}", sql);
         }
 
         // Execute via VM engine

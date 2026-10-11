@@ -23,6 +23,10 @@ pub const AGG_AVG: i64 = 2;
 pub const AGG_MIN: i64 = 3;
 /// MAX aggregate function type
 pub const AGG_MAX: i64 = 4;
+/// TOTAL aggregate function type (SUM as a real, 0.0 over no rows)
+pub const AGG_TOTAL: i64 = 5;
+/// GROUP_CONCAT / STRING_AGG aggregate function type
+pub const AGG_GROUP_CONCAT: i64 = 6;
 
 /// Flag bit OR-ed into an AggStep/AggFinal function type to request DISTINCT.
 ///
@@ -31,6 +35,10 @@ pub const AGG_MAX: i64 = 4;
 /// the rest all use the same mechanism. Mask with `AGG_TYPE_MASK` to recover
 /// the base function.
 pub const AGG_DISTINCT: i64 = 0x100;
+
+/// Flag bit: the aggregate has a second argument (GROUP_CONCAT's
+/// separator), in the register after the value register.
+pub const AGG_SEP: i64 = 0x200;
 
 /// Mask selecting the base aggregate function out of a function-type word.
 pub const AGG_TYPE_MASK: i64 = 0xFF;
@@ -125,9 +133,8 @@ pub enum OpCode {
     Gt, // Greater than comparison (P1 > P2, result in P3)
     Ge, // Greater than or equal comparison (P1 >= P2, result in P3)
 
-    // Pattern matching operations
-    Like, // LIKE pattern match (P1 LIKE P4 pattern, result in P3). Case-sensitive.
-    Glob, // GLOB pattern match (P1 GLOB P4 pattern, result in P3). Unix-style wildcards.
+    // Pattern matching
+    Like, // r[P3] = r[P1] LIKE r[P1+1] [ESCAPE r[P1+2]]. P2: bit 0 NOT, bit 1 ILIKE, bit 2 ESCAPE.
 
     // Type conversion
     Cast, // Cast value in P1 to type in P4, result in P2. Types: "INTEGER", "TEXT", "REAL"
@@ -142,6 +149,12 @@ pub enum OpCode {
     // inversions used for NOT LIKE / NOT IN / IS NOT NULL and makes a bare
     // `NOT <expr>` expressible at all.
     Not, // P2 = NULL if P1 is NULL, else 1 if P1 is falsy, else 0
+
+    // Three-valued AND / OR, modelled on SQLite's OP_And / OP_Or. Both
+    // operands are evaluated; the result follows the SQL truth tables, so
+    // NULL AND 0 = 0, NULL AND 1 = NULL, NULL OR 1 = 1, NULL OR 0 = NULL.
+    And, // P3 = P1 AND P2
+    Or,  // P3 = P1 OR P2
 
     // Vector comparison, modelled on SQLite's OP_Compare / OP_Jump.
     //
@@ -166,46 +179,67 @@ pub enum OpCode {
     // Utility opcodes
     Noop, // No operation
 
-    // Set operations
-    SortResults, // Sort accumulated results. P4 = "col:asc,col:desc,..." over RESULT columns.
-    Distinct,    // Remove duplicate rows from results
-    Limit, // Limit results to P1 rows. P2 = offset (rows to skip, already applied). Post-processing opcode.
-    Intersect, // Keep only rows that exist in both left and right result sets
-    Except, // Keep only rows from left that don't exist in right result set
-
     // Join operations
-    NullRow,     // Load NULL values into registers P1 through P1+P2-1 (P2 = count)
-    RewindInner, // Rewind cursor P1, used for inner loop of nested join
-    MarkMatch,   // Set register P1 to 1 to indicate a match was found
-    CheckMatch,  // If register P1 is 0 (no match), jump to P2; reset register to 0
+    //
+    // NullRow follows SQLite's OP_NullRow: it puts cursor P1 on a virtual
+    // all-NULL row, so every Column read from it yields NULL, and leaves it
+    // exhausted, so a following Next/HashNext falls through. That is how an
+    // outer join's unmatched side is NULL-extended without copying columns
+    // into registers first.
+    NullRow, // Put cursor P1 on an all-NULL row (Column -> NULL; Next falls through)
 
-    // Subquery/Coroutine operations (inspired by SQLite)
-    InitCoroutine, // P1 = register to store return address, P2 = jump over coroutine, P3 = coroutine entry
-    Yield,         // Swap program counter with register P1 (coroutine yield)
-    EndCoroutine,  // Jump back to Yield that invoked this coroutine, set P1 for next Yield return
-    Once,          // First time: continue. Subsequently: jump to P2. Used for one-time init.
+    // Hash join, an ephemeral hash index over a cursor's rows.
+    //
+    // HashInsert is run once per row of the inner table to build the index;
+    // HashProbe then positions the cursor on the first row whose key equals
+    // the probe key and HashNext walks the remaining matches, so the loop
+    // body reads the inner row with ordinary Column instructions. Keys are
+    // normalized so that every pair of values the Eq opcode calls equal lands
+    // in the same bucket (1 and 1.0, 1 and '1'); the join condition is still
+    // re-checked on each candidate, so a bucket may over-approximate. A NULL
+    // key is never inserted and never matches.
+    HashInsert, // Add cursor P1's current row to its hash index under key r[P2..P2+P3]
+    HashProbe,  // Position cursor P1 on the first row matching key r[P3..P3+P4]; jump to P2 if none
+    HashNext,   // Advance cursor P1 to its next probe match and jump to P2; fall through when done
 
-    // Subquery result operations
-    AggStep,   // P1 = function type, P2 = value reg, P3 = accumulator reg. Step aggregate.
-    AggFinal,  // P1 = accumulator reg, P2 = result reg. Finalize aggregate.
-    AggReset,  // P1 = accumulator reg. Reset accumulator to initial state.
-    Exists,    // P1 = flag reg (set to 1 if cursor P2 has rows, else 0)
-    NotExists, // P1 = flag reg (set to 1 if cursor P2 has no rows, else 0)
+    // Per-row matched bits, for FULL JOIN's pass over unmatched right rows.
+    MarkRowMatched, // Record that cursor P1's current row matched (no-op on a NULL row)
+    IfRowMatched,   // Jump to P2 if cursor P1's current row was marked matched
+
+    // Subqueries: an uncorrelated subquery's fragment, and a subquery's
+    // cursor setup, run only the first time they are reached.
+    Once, // First time: continue. Subsequently: jump to P2.
+
+    // Aggregates
+    AggStep,  // P1 = function type, P2 = value reg, P3 = accumulator reg. Step aggregate.
+    AggFinal, // P1 = accumulator reg, P2 = result reg. Finalize aggregate.
+    AggReset, // P1 = accumulator reg. Reset accumulator to initial state.
 
     // Counter operations (LIMIT/OFFSET)
     DecrJumpZero, // Decrement register P1. If result is zero, jump to P2.
+    MustBeInt, // Make r[P1] an integer (integral REAL or integer text converts); else error. P4 = clause name.
 
     // Sorter operations (ORDER BY)
     SorterOpen, // Open a sorter. P1 = sorter ID, P2 = number of columns, P4 = sort key spec
     SorterInsert, // Insert row into sorter P1. P2 = start register, P3 = column count
-    SorterSort, // Sort the sorter P1. Must be called before SorterNext.
+    SorterSort, // Sort the sorter P1. Must be called before SorterNext. Jump to P2 (if > 0) when empty.
     SorterData, // Copy current sorter P1 row to registers starting at P2. P3 = column count.
     SorterNext, // Advance sorter P1. Jump to P2 if more rows, else continue.
 
     // Ephemeral table operations (for ORDER BY results, temp storage)
     // Ephemeral tables use cursor IDs and work with Column/Next/Rewind opcodes
-    OpenEphemeral, // Open ephemeral cursor P1 with P2 columns. P4 = sort key spec for ordering.
+    //
+    // With P3 = 1 an ephemeral table is KEYED, like SQLite's ephemeral index:
+    // it holds each distinct row once (IdxInsert of a row already present is a
+    // no-op), Found/NotFound test membership, IdxDelete removes a row, and
+    // Rewind walks the rows in sorted order. DISTINCT and the compound
+    // operators (UNION, INTERSECT, EXCEPT) are built from these. Rows are
+    // equal when every column is: NULL equals NULL and 1 equals 1.0.
+    OpenEphemeral, // Open ephemeral cursor P1 with P2 columns. P4 = sort key spec; P3 = 1: keyed.
     IdxInsert,     // Insert into ephemeral cursor P1. P2 = start register, P3 = column count.
+    IdxDelete,     // Remove row r[P2..P2+P3] from keyed ephemeral cursor P1, if present.
+    Found,         // Jump to P2 if row r[P3..P3+P4] is in keyed ephemeral cursor P1.
+    NotFound,      // Jump to P2 if row r[P3..P3+P4] is NOT in keyed ephemeral cursor P1.
     Sort,          // Sort ephemeral cursor P1. Jump to P2 when empty, else continue.
     Sequence,      // P1 = ephemeral cursor, P2 = dest register. Generate next sequence number.
 
@@ -215,14 +249,10 @@ pub enum OpCode {
     AlterTableAdd, // Add column to table. P4 = "table_name:col_name:col_type"
     Truncate,      // Remove all rows from table. P4 = table name
 
-    // String functions
-    StringFunc, // P1 = src reg, P2 = dest reg, P3 = arg2 reg (for SUBSTR/REPLACE), P4 = function name
-
-    // Math functions
-    MathFunc, // P1 = src reg, P2 = dest reg, P4 = function name (ABS, ROUND, CEIL, FLOOR)
-
-    // Date/Time functions
-    DateFunc, // P1 = src reg (optional), P2 = dest reg, P4 = function name (DATE, TIME, NOW)
+    // Scalar function call, modelled on SQLite's OP_Function: the body is
+    // looked up by name in the built-in table (`func.rs`) when the program
+    // is loaded.
+    Function, // r[P3] = P4(r[P1], ..., r[P1+P2-1])
 
     // Arithmetic operations
     Add,       // P1 = left reg, P2 = right reg, P3 = dest reg. dest = left + right
@@ -231,11 +261,143 @@ pub enum OpCode {
     Divide,    // P1 = left reg, P2 = right reg, P3 = dest reg. dest = left / right
     Remainder, // P1 = left reg, P2 = right reg, P3 = dest reg. dest = left % right
 
-    // Window function operations
-    WindowAggStep, // P1 = func type, P2 = value reg, P3 = accum reg, P4 = window spec. Step window aggregate.
-    WindowValue,   // P1 = accum reg, P2 = dest reg, P3 = func type. Get current window value.
-    WindowFinalize, // P1 = result column index. Give every row of a partition that partition's
-                   // final window value, which for an unordered frame is the partition total.
+    // Window functions, modelled on SQLite's window pass over a sorted
+    // ephemeral table: the rows of the query (every value the output needs,
+    // plus each window's partition keys, order keys and function arguments)
+    // are first collected into an ephemeral table; WindowCompute then sorts
+    // that table by one window definition's partition and order keys, walks
+    // each partition and writes every function of that definition into its
+    // result column of each row. The output stage reads the rows back.
+    WindowCompute, // Compute window definition Program::windows[P2] over ephemeral cursor P1.
+}
+
+/// One sort key: a column, its direction, and where NULLs go.
+///
+/// NULL sorts first ascending and last descending unless the ORDER BY term
+/// says `NULLS FIRST` / `NULLS LAST` (SQLite's default and syntax).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyOrder {
+    pub col: usize,
+    pub asc: bool,
+    pub nulls_first: bool,
+}
+
+impl KeyOrder {
+    /// A key with an optional explicit NULLS FIRST (`Some(true)`) / LAST.
+    pub fn new(col: usize, asc: bool, nulls_first: Option<bool>) -> Self {
+        KeyOrder {
+            col,
+            asc,
+            nulls_first: nulls_first.unwrap_or(asc),
+        }
+    }
+
+    /// This key in a SorterOpen / OpenEphemeral P4 spec: `col:asc|desc`,
+    /// plus `:nf` / `:nl` when NULL placement is not the default.
+    pub fn spec(&self) -> String {
+        let dir = if self.asc { "asc" } else { "desc" };
+        match (self.asc, self.nulls_first) {
+            (true, true) | (false, false) => format!("{}:{}", self.col, dir),
+            (_, true) => format!("{}:{}:nf", self.col, dir),
+            (_, false) => format!("{}:{}:nl", self.col, dir),
+        }
+    }
+
+    /// Parse a comma-separated spec (see [`KeyOrder::spec`]).
+    pub fn parse_spec(spec: &str) -> Vec<KeyOrder> {
+        spec.split(',')
+            .filter_map(|k| {
+                let mut parts = k.split(':');
+                let col = parts.next()?.parse::<usize>().ok()?;
+                let asc = parts.next()? != "desc";
+                let nulls = match parts.next() {
+                    Some("nf") => Some(true),
+                    Some("nl") => Some(false),
+                    _ => None,
+                };
+                Some(KeyOrder::new(col, asc, nulls))
+            })
+            .collect()
+    }
+}
+
+/// A window definition, as WindowCompute executes it: one sort order
+/// (PARTITION BY + ORDER BY) and every window function that shares it.
+///
+/// All positions are column indices of the ephemeral table the window stage
+/// collected its rows into.
+#[derive(Debug, Clone)]
+pub struct WindowDef {
+    /// PARTITION BY key columns.
+    pub partition: Vec<usize>,
+    /// ORDER BY keys. Rows equal on all of them are peers.
+    pub order: Vec<KeyOrder>,
+    pub funcs: Vec<WindowFunc>,
+}
+
+/// One window function call of a [`WindowDef`].
+#[derive(Debug, Clone)]
+pub struct WindowFunc {
+    pub kind: WindowFuncKind,
+    /// Argument columns, in call order.
+    pub args: Vec<usize>,
+    /// The frame; only aggregates and FIRST_VALUE / LAST_VALUE / NTH_VALUE
+    /// look at it.
+    pub frame: WindowFrame,
+    /// Column receiving the function's value for each row.
+    pub result: usize,
+}
+
+/// What a [`WindowFunc`] computes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowFuncKind {
+    RowNumber,
+    Rank,
+    DenseRank,
+    PercentRank,
+    CumeDist,
+    Ntile,
+    Lag,
+    Lead,
+    FirstValue,
+    LastValue,
+    NthValue,
+    /// An aggregate (`AGG_*` function type) over the frame. `COUNT(*)` is
+    /// `AGG_COUNT` with no argument.
+    Agg(i64),
+}
+
+/// A window frame: the rows, relative to the current row, that an aggregate
+/// or a value function sees. Bounds are already validated (start no later
+/// in the list UNBOUNDED PRECEDING < n PRECEDING < CURRENT ROW < n FOLLOWING
+/// < UNBOUNDED FOLLOWING than end).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowFrame {
+    /// ROWS (`true`) or RANGE. A RANGE frame's bounds are CURRENT ROW or
+    /// UNBOUNDED only, so it is defined by peer groups.
+    pub rows: bool,
+    pub start: FrameBound,
+    pub end: FrameBound,
+}
+
+impl WindowFrame {
+    /// The default frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW,
+    /// which without ORDER BY is the whole partition (every row a peer).
+    pub const DEFAULT: WindowFrame = WindowFrame {
+        rows: false,
+        start: FrameBound::UnboundedPreceding,
+        end: FrameBound::CurrentRow,
+    };
+}
+
+/// One end of a [`WindowFrame`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameBound {
+    UnboundedPreceding,
+    Preceding(u64),
+    CurrentRow,
+    Following(u64),
+    UnboundedFollowing,
 }
 
 /// A SQL VM instruction with opcode and parameters
@@ -321,6 +483,8 @@ pub struct Program {
     /// hold register numbers (`Integer 999999 -> r` being the obvious case),
     /// so scanning for the maximum both over- and under-estimates.
     pub register_count: i64,
+    /// Window definitions, indexed by WindowCompute's P2.
+    pub windows: Vec<WindowDef>,
 }
 
 impl Default for Program {
@@ -335,6 +499,7 @@ impl Program {
             instructions: Vec::with_capacity(DEFAULT_INSTRUCTION_CAPACITY),
             result_schema: ResultSchema::new(),
             register_count: 0,
+            windows: Vec::new(),
         }
     }
 

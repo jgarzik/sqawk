@@ -4,10 +4,12 @@
 //! found in that audit. Each was `#[ignore]`d when written, because sqawk got
 //! it wrong, and un-ignored as it was fixed.
 //!
-//! As of this commit the red list is EMPTY: every test here passes, and they
-//! now serve as regression cover for the defects rather than as a to-do list.
-//! Add a new `#[ignore]`d test here when a defect is found, and remove the
-//! attribute when it is fixed.
+//! Every 2026-08 test here now passes, and so does every test of the
+//! `audit_2026_10` submodule (defects from the 2026-10 audit) and of the
+//! `code_review_2026_10` submodule (defects from the 2026-10 code review of
+//! the `updates` branch): the red list is EMPTY. All serve as regression
+//! cover rather than as a to-do list. Add a new `#[ignore]`d test when a
+//! defect is found, and remove the attribute when it is fixed.
 //!
 //! Run the red list with:
 //!     cargo test --test mod defects -- --ignored
@@ -17,6 +19,9 @@
 //! precisely why every defect below survived a 302-test green suite: a test
 //! asserting `"Engineering,3"` passes even when three extra wrong rows are
 //! emitted, and passes regardless of row order.
+
+mod audit_2026_10;
+mod code_review_2026_10;
 
 use crate::helpers::{
     assert_after_write, assert_query, departments_csv, employees_csv, nullable_csv, orders_csv,

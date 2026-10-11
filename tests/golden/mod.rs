@@ -56,7 +56,28 @@ fn select_literal() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT 1",
-        concat!("col0", "\n1",),
+        concat!("expr", "\n1",),
+    )
+}
+
+/// A FROM-less SELECT goes through the same expression compiler as any
+/// other, so string functions, CAST, CASE and `||` all work without FROM.
+#[test]
+fn select_literal_expressions() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT UPPER('ab') || 'c', CAST('12' AS INTEGER) + 1, CASE WHEN 1 > 2 THEN 'x' ELSE 'y' END, SUBSTR('hello', 2, 3), -ABS(-4)",
+        concat!("expr,expr,expr,SUBSTR(expr),expr", "\nABc,13,y,ell,-4"),
+    )
+}
+
+/// Predicates are values under three-valued logic, in any position.
+#[test]
+fn select_three_valued_predicates() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT NULL AND 0, NULL OR 1, NULL OR 0, 2 IN (1, NULL), 1 IN (1, NULL), NULL BETWEEN 1 AND 2, NULL LIKE 'a%'",
+        concat!("expr,expr,expr,expr,expr,expr,expr", "\n0,1,,,1,,"),
     )
 }
 
@@ -554,8 +575,8 @@ fn union() -> Result<(), Box<dyn std::error::Error>> {
         "SELECT department FROM employees WHERE age < 26 UNION SELECT department FROM employees WHERE age > 44",
         concat!(
             "department",
-            "\nMarketing",
             "\nHR",
+            "\nMarketing",
             "\nSales",
         ),
     )
@@ -594,8 +615,8 @@ fn except() -> Result<(), Box<dyn std::error::Error>> {
         "SELECT department FROM employees WHERE age < 31 EXCEPT SELECT department FROM employees WHERE age > 31",
         concat!(
             "department",
-            "\nMarketing",
             "\nHR",
+            "\nMarketing",
         ),
     )
 }
@@ -784,18 +805,19 @@ fn str_left_right() -> Result<(), Box<dyn std::error::Error>> {
 fn math_abs() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/boundaries.csv"],
-        // NOTE: ABS(i64::MIN) has no representable result. sqawk saturates to
-        // i64::MAX rather than erroring or wrapping. Pinned so any change to
-        // that choice is deliberate, not so that it is endorsed.
+        "SELECT ABS(value) FROM boundaries WHERE id < 5",
+        concat!("ABS(value)", "\n0", "\n1", "\n1", "\n9223372036854775807",),
+    )
+}
+
+/// ABS(i64::MIN) has no representable result; as in SQLite it is an
+/// "integer overflow" error (it used to saturate to i64::MAX).
+#[test]
+fn math_abs_of_i64_min_is_overflow() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query_fails(
+        &["tests/data/boundaries.csv"],
         "SELECT ABS(value) FROM boundaries",
-        concat!(
-            "ABS(value)",
-            "\n0",
-            "\n1",
-            "\n1",
-            "\n9223372036854775807",
-            "\n9223372036854775807",
-        ),
+        "integer overflow",
     )
 }
 
@@ -943,7 +965,7 @@ fn nullif() -> Result<(), Box<dyn std::error::Error>> {
             "\nEve,Marketing",
             "\nFrank,Engineering",
             "\nGrace,Sales",
-            "\nHenry,NULL",
+            "\nHenry,",
         ),
     )
 }
@@ -1012,7 +1034,7 @@ fn win_lag() -> Result<(), Box<dyn std::error::Error>> {
         "SELECT name, LAG(salary) OVER (ORDER BY salary) FROM employees",
         concat!(
             "name,LAG",
-            "\nHenry,NULL",
+            "\nHenry,",
             "\nBob,45000",
             "\nEve,55000",
             "\nCharlie,60000",
@@ -1038,7 +1060,7 @@ fn win_lead() -> Result<(), Box<dyn std::error::Error>> {
             "\nAlice,75000",
             "\nFrank,80000",
             "\nDavid,90000",
-            "\nGrace,NULL",
+            "\nGrace,",
         ),
     )
 }
@@ -1114,7 +1136,7 @@ fn outer_join_left_nullfill() -> Result<(), Box<dyn std::error::Error>> {
             "\nAnn,Book",
             "\nAnn,Pen",
             "\nBen,Desk",
-            "\nCara,NULL",
+            "\nCara,",
         ),
     )
 }
@@ -1129,7 +1151,7 @@ fn outer_join_right_nullfill() -> Result<(), Box<dyn std::error::Error>> {
             "\nAnn,Book",
             "\nAnn,Pen",
             "\nBen,Desk",
-            "\nNULL,Orphan",
+            "\n,Orphan",
         ),
     )
 }
@@ -1144,8 +1166,8 @@ fn outer_join_full_nullfill() -> Result<(), Box<dyn std::error::Error>> {
             "\nAnn,Book",
             "\nAnn,Pen",
             "\nBen,Desk",
-            "\nCara,NULL",
-            "\nNULL,Orphan",
+            "\nCara,",
+            "\n,Orphan",
         ),
     )
 }
@@ -1505,12 +1527,13 @@ fn join_order_by_with_limit() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn order_by_key_absent_from_select_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
-    // After aggregation only the projected columns still exist, so ordering by
-    // something else must be an error, not a silently ignored clause.
+    // After aggregation a column that is neither a GROUP BY key nor inside
+    // an aggregate has no single value per row, so ordering by it must be an
+    // error, not a silently ignored clause.
     assert_query_fails(
         &["tests/data/employees.csv"],
         "SELECT department, COUNT(*) FROM employees GROUP BY department ORDER BY salary",
-        "must appear in the SELECT list",
+        "must appear in GROUP BY",
     )
 }
 
@@ -1548,7 +1571,7 @@ fn null_excluded_by_negated_comparison_too() -> Result<(), Box<dyn std::error::E
     assert_query(
         &["tests/data/nullable.csv"],
         "SELECT name FROM nullable WHERE score <= 60",
-        "name\nNULL",
+        "name\n\"\"",
     )
 }
 
@@ -1567,7 +1590,7 @@ fn nulls_sort_first() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/nullable.csv"],
         "SELECT id, score FROM nullable ORDER BY score",
-        "id,score\n2,NULL\n4,50\n3,70\n1,90\n5,90",
+        "id,score\n2,\n4,50\n3,70\n1,90\n5,90",
     )
 }
 
@@ -1640,7 +1663,7 @@ fn left_join_reversed_projection_nullfill() -> Result<(), Box<dyn std::error::Er
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT purchases.item, customers.name FROM customers LEFT JOIN purchases \
          ON customers.id = purchases.customer_id",
-        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\nNULL,Cara",
+        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\n,Cara",
     )
 }
 
@@ -1650,7 +1673,7 @@ fn right_join_reversed_projection_nullfill() -> Result<(), Box<dyn std::error::E
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT purchases.item, customers.name FROM customers RIGHT JOIN purchases \
          ON customers.id = purchases.customer_id",
-        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\nOrphan,NULL",
+        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\nOrphan,",
     )
 }
 
@@ -1660,7 +1683,7 @@ fn full_join_reversed_projection_nullfill() -> Result<(), Box<dyn std::error::Er
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT purchases.item, customers.name FROM customers FULL JOIN purchases \
          ON customers.id = purchases.customer_id",
-        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\nNULL,Cara\nOrphan,NULL",
+        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\n,Cara\nOrphan,",
     )
 }
 
@@ -1921,12 +1944,13 @@ fn inner_join_and_comma_join_agree() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn outer_join_aggregate_is_not_silently_rewritten() -> Result<(), Box<dyn std::error::Error>> {
     // Must not answer as though it were an inner join: Cara has no purchase,
-    // so a LEFT JOIN has 4 rows where the rewritten inner form has 3. Erroring
-    // is acceptable; a wrong number is not.
-    assert_query_fails(
+    // so a LEFT JOIN has 4 rows where the inner form has 3. (This used to be
+    // rejected outright; aggregates now consume the outer join's rows,
+    // NULL-extended ones included. Expected value from SQLite.)
+    assert_query(
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT COUNT(*) FROM customers LEFT JOIN purchases ON customers.id = purchases.customer_id",
-        "Unsupported",
+        "COUNT\n4",
     )
 }
 
@@ -1983,12 +2007,14 @@ fn nested_derived_tables() -> Result<(), Box<dyn std::error::Error>> {
     )
 }
 
+/// A derived table's alias may shadow a real table's name, as in SQL (it
+/// used to be rejected: derived tables were registered under their alias).
 #[test]
-fn derived_table_alias_may_not_shadow_a_real_table() -> Result<(), Box<dyn std::error::Error>> {
-    assert_query_fails(
+fn derived_table_alias_may_shadow_a_real_table() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
         &["tests/data/employees.csv"],
-        "SELECT name FROM (SELECT name FROM employees) employees",
-        "shadows an existing table",
+        "SELECT name FROM (SELECT name FROM employees LIMIT 2) employees",
+        "name\nAlice\nBob",
     )
 }
 
@@ -2040,7 +2066,7 @@ fn left_join_with_compound_on_keeps_nullfill() -> Result<(), Box<dyn std::error:
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT customers.name, purchases.item FROM customers LEFT JOIN purchases \
          ON customers.id = purchases.customer_id AND purchases.id > 10",
-        "customers.name,purchases.item\nAnn,Pen\nBen,Desk\nCara,NULL",
+        "customers.name,purchases.item\nAnn,Pen\nBen,Desk\nCara,",
     )
 }
 
@@ -2208,7 +2234,7 @@ fn alias_in_left_join() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT c.name, p.item FROM customers c LEFT JOIN purchases p ON c.id = p.customer_id",
-        "c.name,p.item\nAnn,Book\nAnn,Pen\nBen,Desk\nCara,NULL",
+        "c.name,p.item\nAnn,Book\nAnn,Pen\nBen,Desk\nCara,",
     )
 }
 
@@ -2237,16 +2263,16 @@ fn alias_in_implicit_join() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn explicit_window_frame_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
-    // The frame clause was parsed and then ignored, so this returned the
-    // default frame's answer -- a running total over the whole partition
-    // rather than a two-row sliding window. Rejecting it is correct until
-    // frames are implemented: a clear error beats a plausible wrong number.
-    assert_query_fails(
+fn explicit_rows_window_frame() -> Result<(), Box<dyn std::error::Error>> {
+    // The frame clause used to be parsed and then ignored (a running total
+    // over the whole partition), and then rejected. It is a two-row sliding
+    // window.
+    assert_query(
         &["tests/data/employees.csv"],
         "SELECT name, SUM(salary) OVER (ORDER BY salary ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) \
-         FROM employees",
-        "Explicit window frames",
+         AS s FROM employees",
+        "name,s\nHenry,45000\nBob,100000\nEve,115000\nCharlie,125000\nAlice,135000\n\
+         Frank,145000\nDavid,155000\nGrace,170000",
     )
 }
 
@@ -2378,13 +2404,13 @@ fn window_aggregate_over_explicit_columns() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
-fn window_with_wildcard_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
-    // The window path counts one output column per SELECT item, so a wildcard
-    // silently emitted a truncated row (2 columns for a 4-column table).
-    assert_query_fails(
+fn window_with_wildcard() -> Result<(), Box<dyn std::error::Error>> {
+    // The old window path counted one output column per SELECT item, so a
+    // wildcard emitted a truncated row; the window stage saves whole rows.
+    assert_query(
         &["tests/data/windowed.csv"],
-        "SELECT *, SUM(x) OVER (PARTITION BY d) FROM windowed",
-        "SELECT * cannot be combined with a window function",
+        "SELECT *, SUM(x) OVER (PARTITION BY d) AS s FROM windowed",
+        "a,b,d,x,s\n1,p,E,10,30\n2,q,E,20,30\n3,r,S,30,30",
     )
 }
 
@@ -2421,5 +2447,167 @@ fn unqualified_column_in_multi_table_is_case_insensitive() -> Result<(), Box<dyn
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT NAME, COUNT(*) FROM users, orders WHERE users.id = orders.user_id GROUP BY NAME",
         "NAME,COUNT\nJane,2\nJohn,3",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Output stage and compound SELECTs. Expected outputs computed with SQLite.
+// ---------------------------------------------------------------------------
+
+const EMP_DEPT: &[&str] = &["tests/data/employees.csv", "tests/data/departments.csv"];
+
+#[test]
+fn compound_order_by_desc_limit_offset() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        EMP_DEPT,
+        "SELECT name FROM employees WHERE id <= 4 UNION ALL SELECT name FROM departments ORDER BY 1 DESC LIMIT 3 OFFSET 2",
+        "name\nEve\nDavid\nDavid",
+    )
+}
+
+#[test]
+fn compound_three_arm_union_except_chain() -> Result<(), Box<dyn std::error::Error>> {
+    // Left-associative: (employees UNION departments) EXCEPT Sales. Without
+    // ORDER BY the set result comes out sorted, as in SQLite.
+    assert_query(
+        EMP_DEPT,
+        "SELECT department FROM employees UNION SELECT name FROM departments EXCEPT SELECT department FROM employees WHERE department = 'Sales'",
+        "department\nAlice\nBob\nCharlie\nDavid\nEngineering\nEve\nFrank\nGrace\nHR\nMarketing",
+    )
+}
+
+#[test]
+fn compound_three_arm_intersect_chain() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        EMP_DEPT,
+        "SELECT department FROM employees INTERSECT SELECT department FROM departments INTERSECT SELECT department FROM employees WHERE age > 30",
+        "department\nEngineering\nSales",
+    )
+}
+
+#[test]
+fn compound_order_by_alias_and_limit_expression() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        EMP_DEPT,
+        "SELECT 1 AS x UNION SELECT 3 UNION SELECT 2 ORDER BY x DESC LIMIT 1 + 1",
+        "x\n3\n2",
+    )
+}
+
+#[test]
+fn compound_column_count_mismatch_is_error() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query_fails(
+        EMP_DEPT,
+        "SELECT id, name FROM employees UNION SELECT id FROM departments",
+        "do not have the same number of result columns",
+    )
+}
+
+#[test]
+fn distinct_order_by_alias() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT DISTINCT department AS d FROM employees ORDER BY d DESC",
+        "d\nSales\nMarketing\nHR\nEngineering",
+    )
+}
+
+#[test]
+fn order_by_hidden_key_then_alias() -> Result<(), Box<dyn std::error::Error>> {
+    // `age` is not projected: a hidden sort key.
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name AS n FROM employees ORDER BY age DESC, n LIMIT 4",
+        "n\nGrace\nDavid\nCharlie\nFrank",
+    )
+}
+
+#[test]
+fn distinct_then_limit_offset() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT DISTINCT department FROM employees ORDER BY department LIMIT 2 OFFSET 1",
+        "department\nHR\nMarketing",
+    )
+}
+
+#[test]
+fn order_by_aggregate_not_in_select() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT department FROM employees GROUP BY department ORDER BY COUNT(*) DESC, department",
+        "department\nEngineering\nMarketing\nSales\nHR",
+    )
+}
+
+#[test]
+fn having_and_order_by_expression_over_alias() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT department, SUM(salary) AS s FROM employees GROUP BY department HAVING s > 100000 ORDER BY s / 2 DESC",
+        "department,s\nEngineering,210000\nSales,170000\nMarketing,115000",
+    )
+}
+
+#[test]
+fn fromless_where_false_is_no_rows() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT 1 AS x WHERE 1 = 0",
+        "x",
+    )
+}
+
+#[test]
+fn fromless_where_order_by_limit() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT 2 AS a, 'z' AS b WHERE 1 < 2 ORDER BY 1 LIMIT 5",
+        "a,b\n2,z",
+    )
+}
+
+#[test]
+fn offset_beyond_result_is_empty() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees ORDER BY id LIMIT 5 OFFSET 100",
+        "name",
+    )
+}
+
+#[test]
+fn negative_limit_means_no_limit() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees LIMIT -1 OFFSET 7",
+        "name\nHenry",
+    )
+}
+
+#[test]
+fn non_integer_limit_is_error() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees LIMIT 'x'",
+        "datatype mismatch",
+    )
+}
+
+#[test]
+fn empty_input_grouped_aggregate_has_no_rows() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT department, COUNT(*) AS c, SUM(salary) AS s FROM employees WHERE id > 100 GROUP BY department",
+        "department,c,s",
+    )
+}
+
+#[test]
+fn empty_input_ungrouped_aggregate_has_one_row() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT COUNT(*) AS c, SUM(salary) AS s FROM employees WHERE id > 100",
+        "c,s\n0,",
     )
 }

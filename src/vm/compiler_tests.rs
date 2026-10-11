@@ -248,10 +248,13 @@ fn test_like_pattern_compilation() {
 
     let instructions = &program.instructions;
 
-    // Verify we have Like instruction with the correct pattern
-    let like_found = instructions
-        .iter()
-        .any(|inst| inst.opcode == OpCode::Like && inst.p4.as_deref() == Some("A%"));
+    // The pattern is loaded into the register after the value.
+    let like_found = instructions.iter().any(|inst| {
+        inst.opcode == OpCode::Like
+            && instructions.iter().any(|s| {
+                s.opcode == OpCode::String && s.p2 == inst.p1 + 1 && s.p4.as_deref() == Some("A%")
+            })
+    });
 
     assert!(like_found, "Expected Like instruction with pattern 'A%'");
 }
@@ -366,4 +369,101 @@ fn test_nullif_compilation() {
 
     assert!(eq_found, "Expected Eq instruction for NULLIF comparison");
     assert!(null_found, "Expected Null instruction for NULLIF result");
+}
+
+/// Opcodes of the program compiled from `sql` against `users` plus a second
+/// table `orders(id, user_id)`.
+fn join_opcodes(sql: &str) -> Vec<OpCode> {
+    let mut database = create_test_database();
+    let mut orders = Table::new("orders", vec![], None);
+    orders.add_column("id".to_string(), "INTEGER".to_string());
+    orders.add_column("user_id".to_string(), "INTEGER".to_string());
+    database
+        .add_table("orders".to_string(), orders)
+        .expect("Failed to add table");
+    let mut compiler = SqlCompiler::new(&database, false);
+    let program = compiler.compile(sql).expect("Compilation failed");
+    program.instructions.iter().map(|i| i.opcode).collect()
+}
+
+#[test]
+fn test_equi_join_uses_hash_join() {
+    for sql in [
+        "SELECT users.name FROM users JOIN orders ON users.id = orders.user_id",
+        "SELECT users.name FROM users LEFT JOIN orders ON orders.user_id = users.id",
+        "SELECT users.name FROM users, orders WHERE users.id = orders.user_id",
+    ] {
+        let ops = join_opcodes(sql);
+        assert!(ops.contains(&OpCode::HashInsert), "no hash build: {sql}");
+        assert!(ops.contains(&OpCode::HashProbe), "no hash probe: {sql}");
+    }
+}
+
+#[test]
+fn test_non_equi_join_uses_nested_loop() {
+    let ops = join_opcodes("SELECT users.name FROM users JOIN orders ON users.id < orders.user_id");
+    assert!(!ops.contains(&OpCode::HashProbe));
+    assert_eq!(ops.iter().filter(|o| **o == OpCode::Rewind).count(), 2);
+}
+
+#[test]
+fn test_left_join_where_is_not_an_on_condition() {
+    // A WHERE term on the right table filters after NULL-extension; the join
+    // itself still hashes on the ON equality and NULL-extends unmatched rows.
+    let ops = join_opcodes(
+        "SELECT users.name FROM users LEFT JOIN orders ON users.id = orders.user_id WHERE orders.id IS NULL",
+    );
+    assert!(ops.contains(&OpCode::HashProbe));
+    assert!(ops.contains(&OpCode::NullRow));
+}
+
+fn count_op(ops: &[OpCode], op: OpCode) -> usize {
+    ops.iter().filter(|o| **o == op).count()
+}
+
+#[test]
+fn test_uncorrelated_subquery_runs_once() {
+    // Two Once guards: the subquery fragment (so it runs for the first outer
+    // row only) and its cursor setup.
+    let ops = join_opcodes("SELECT name FROM users WHERE age > (SELECT AVG(age) FROM users)");
+    assert_eq!(count_op(&ops, OpCode::Once), 2, "{ops:?}");
+    for sql in [
+        "SELECT name FROM users WHERE id IN (SELECT user_id FROM orders)",
+        "SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders)",
+    ] {
+        assert_eq!(count_op(&join_opcodes(sql), OpCode::Once), 2, "{sql}");
+    }
+}
+
+#[test]
+fn test_correlated_subquery_reruns_and_probes_hash() {
+    // Correlation is detected by name resolution, including through the
+    // outer table's own (unaliased) name that the inner table shares: the
+    // fragment guard is dropped, only the cursor setup stays Once, and the
+    // equality on the outer column becomes a hash probe.
+    for sql in [
+        "SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = users.id)",
+        "SELECT name FROM users WHERE age > (SELECT AVG(u2.age) FROM users u2 WHERE u2.id = users.id)",
+        "SELECT name FROM users WHERE id IN (SELECT user_id FROM orders WHERE orders.id = users.age)",
+    ] {
+        let ops = join_opcodes(sql);
+        assert_eq!(count_op(&ops, OpCode::Once), 1, "{sql}: {ops:?}");
+        assert!(ops.contains(&OpCode::HashProbe), "no hash probe: {sql}");
+    }
+}
+
+#[test]
+fn test_nested_subquery_correlation_depth() {
+    // The innermost subquery references the outermost query: both
+    // subqueries are correlated, so only the two cursor-setup guards remain.
+    let ops = join_opcodes(
+        "SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders o WHERE o.id > (SELECT MIN(u2.age) FROM users u2 WHERE u2.id = users.id))",
+    );
+    assert_eq!(count_op(&ops, OpCode::Once), 2, "{ops:?}");
+    // The innermost references only its parent: the middle subquery is
+    // uncorrelated and keeps its guard (3 = middle guard + two cursor setups).
+    let ops = join_opcodes(
+        "SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders o WHERE o.id > (SELECT MIN(u2.age) FROM users u2 WHERE u2.id = o.user_id))",
+    );
+    assert_eq!(count_op(&ops, OpCode::Once), 3, "{ops:?}");
 }

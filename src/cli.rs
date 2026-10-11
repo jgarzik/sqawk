@@ -94,6 +94,13 @@ pub struct SqawkArgs {
     #[clap(short = 'F', help = "Field separator character")]
     pub field_separator: Option<String>,
 
+    /// Input files have no header row
+    ///
+    /// The first line of every input file is data. Columns are named a, b,
+    /// c, ... unless --tabledef names them. Writeback emits no header line.
+    #[clap(long = "no-header", help = "Treat the first line of each file as data")]
+    pub no_header: bool,
+
     /// Enable verbose diagnostic output
     ///
     /// When enabled, shows detailed information about SQL execution,
@@ -122,4 +129,23 @@ pub struct SqawkArgs {
 /// * `Err` - Error during argument parsing (handled by clap, usually results in help text display)
 pub fn parse_args() -> Result<SqawkArgs> {
     Ok(SqawkArgs::parse())
+}
+
+/// Validate a `-F` field separator and return it in canonical form.
+///
+/// The separator must be exactly one ASCII byte, other than a quote or a
+/// line break; the two-character escape `\t` is accepted as a tab.
+pub fn validate_separator(sep: &str) -> Result<String> {
+    let sep = if sep == "\\t" { "\t" } else { sep };
+    match sep.as_bytes() {
+        [] => anyhow::bail!("field separator (-F) must not be empty"),
+        [b'"' | b'\n' | b'\r'] => {
+            anyhow::bail!("field separator (-F) cannot be a quote or a line break")
+        }
+        [b] if b.is_ascii() => Ok(sep.to_string()),
+        _ => anyhow::bail!(
+            "field separator (-F) must be a single ASCII character (or \\t for tab), got {:?}",
+            sep
+        ),
+    }
 }

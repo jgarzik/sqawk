@@ -1,17 +1,38 @@
 //! Tests for the `tsq` test-data generator.
 //!
-//! `tsq` is a second binary installed by `cargo install sqawk`, so it is part
-//! of the shipped surface. It had no tests at all; these cover the properties
+//! `tsq` is a local development tool (a `publish = false` workspace member),
+//! not part of the published sqawk crate. These tests cover the properties
 //! that make it useful -- determinism, referential integrity of the generated
 //! tables, and that sqawk can actually read what it writes.
 
-use crate::helpers::create_temp_dir;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// The sqawk binary from the shared workspace target directory.
+///
+/// sqawk is a different package, so `cargo_bin!` cannot name it. A test
+/// executable lives in `target/<profile>/deps/`, and the workspace's binaries
+/// in `target/<profile>/`. `cargo test --workspace` builds both packages
+/// before running any test.
+fn sqawk() -> Command {
+    let exe = std::env::current_exe().expect("current test executable");
+    let profile_dir = exe
+        .parent()
+        .and_then(Path::parent)
+        .expect("test executable is in target/<profile>/deps");
+    let bin: PathBuf = profile_dir.join(format!("sqawk{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        bin.exists(),
+        "{} not found: run `cargo test --workspace`, or build sqawk first",
+        bin.display()
+    );
+    Command::new(bin)
+}
 
 /// Run tsq into a fresh directory and return that directory.
 fn generate(seed: u64, rows: usize) -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
-    let dir = create_temp_dir()?;
+    let dir = tempfile::tempdir()?;
     let out = dir.path().join("out");
     let output = assert_cmd::cargo::cargo_bin_cmd!("tsq")
         .arg("--seed")
@@ -100,7 +121,7 @@ fn sqawk_can_query_the_generated_data() -> Result<(), Box<dyn std::error::Error>
     let dir = generate(7, 40)?;
     let customers = dir.path().join("out/data/customers.csv");
 
-    let output = assert_cmd::cargo::cargo_bin_cmd!("sqawk")
+    let output = sqawk()
         .arg("-s")
         .arg("SELECT COUNT(*) FROM customers")
         .arg(customers.to_str().unwrap())
@@ -127,10 +148,8 @@ fn generated_orders_reference_real_customers() -> Result<(), Box<dyn std::error:
     let dir = generate(11, 50)?;
     let base = dir.path().join("out/data");
 
-    let output = assert_cmd::cargo::cargo_bin_cmd!("sqawk")
+    let output = sqawk()
         .arg("-s")
-        // Rows are counted here rather than with COUNT(*), which is not yet
-        // supported over a join -- see defects::aggregate_over_join.
         .arg(
             "SELECT orders.order_id FROM orders JOIN customers \
              ON orders.customer_id = customers.customer_id",
