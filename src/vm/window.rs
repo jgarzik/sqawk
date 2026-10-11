@@ -243,7 +243,7 @@ fn evaluate(part: &[Vec<Value>], f: &WindowFunc, p: &Peers) -> SqawkResult<Vec<V
                     )?;
                 }
                 hi = e;
-                out.push(acc.finalize());
+                out.push(acc.finalize()?);
             }
         }
     }

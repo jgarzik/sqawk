@@ -1108,8 +1108,8 @@ fn percent_rank_function() -> TestResult {
     assert_query(
         &[employees_csv()],
         "SELECT id, PERCENT_RANK() OVER (ORDER BY department) AS f FROM employees",
-        "id,f\n1,0\n3,0\n6,0\n8,0.42857142857142855\n2,0.5714285714285714\n\
-         5,0.5714285714285714\n4,0.8571428571428571\n7,0.8571428571428571",
+        "id,f\n1,0.0\n3,0.0\n6,0.0\n8,0.428571428571429\n2,0.571428571428571\n\
+         5,0.571428571428571\n4,0.857142857142857\n7,0.857142857142857",
     )
 }
 
@@ -1331,14 +1331,14 @@ fn outer_join_aggregate_group_by() -> TestResult {
 }
 
 /// A scalar function over an aggregate (`ROUND(AVG(x), 1)`) is rejected with
-/// GROUP BY ("must appear in GROUP BY"). Values follow sqawk's float
-/// formatting (SQLite prints 70000.0).
+/// GROUP BY ("must appear in GROUP BY"). Integral reals print as SQLite
+/// prints them (70000.0).
 #[test]
 fn round_of_avg_with_group_by() -> TestResult {
     assert_query(
         &[employees_csv()],
         "SELECT department, ROUND(AVG(salary), 1) AS a FROM employees GROUP BY department",
-        "department,a\nEngineering,70000\nHR,45000\nMarketing,57500\nSales,85000",
+        "department,a\nEngineering,70000.0\nHR,45000.0\nMarketing,57500.0\nSales,85000.0",
     )
 }
 

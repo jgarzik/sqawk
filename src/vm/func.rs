@@ -10,7 +10,7 @@
 //! Semantics follow SQLite 3.45 unless a comment says otherwise. String
 //! functions count characters, not bytes.
 
-use super::arith::{self, text_of, text_to_num, to_num, Num};
+use super::arith::{self, c_general, text_of, text_to_num, to_num, Num};
 use super::bytecode::Register;
 use super::datetime;
 use super::engine::{compare_values, VmEngine};
@@ -614,35 +614,6 @@ fn c_exp(v: f64, p: usize, upper: bool) -> String {
     out
 }
 
-/// C's `%g` with precision `p` (significant digits), trailing zeros removed.
-/// As in C, the exponent that decides between fixed and exponent form is the
-/// one AFTER rounding to `p` digits: 999999.5 is `1e+06`, not `1000000`.
-fn c_general(v: f64, p: usize, upper: bool) -> String {
-    if v == 0.0 {
-        return "0".into();
-    }
-    // Digits past the exact expansion are zeros, which `%g` strips anyway.
-    let p = p.min(EXACT_DIGITS);
-    let strip = |s: &str| {
-        if s.contains('.') {
-            s.trim_end_matches('0').trim_end_matches('.').to_string()
-        } else {
-            s.to_string()
-        }
-    };
-    let e_form = c_exp(v, p - 1, upper);
-    let at = e_form.find(['e', 'E']).unwrap_or(e_form.len());
-    let x: i32 = e_form[at..]
-        .get(1..)
-        .and_then(|e| e.parse().ok())
-        .unwrap_or(0);
-    if x < -4 || x >= p as i32 {
-        format!("{}{}", strip(&e_form[..at]), &e_form[at..])
-    } else {
-        strip(&format!("{:.*}", (p as i32 - 1 - x) as usize, v))
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Numbers
 // ---------------------------------------------------------------------------
@@ -661,8 +632,7 @@ fn abs(a: &[Register]) -> SqawkResult<Register> {
 
 /// ROUND(x[, d]): always a real. Rounds half away from zero on the decimal
 /// digits of x (so 2.675, stored as 2.67499..., rounds to 2.67 as in
-/// SQLite). Unlike SQLite, a negative `d` rounds to the left of the decimal
-/// point: ROUND(1234.5, -2) is 1200.
+/// SQLite). A negative `d` is 0, as in SQLite: ROUND(1234.5, -2) is 1235.0.
 fn round(a: &[Register]) -> SqawkResult<Register> {
     if matches!(a[0], Register::Null) {
         return Ok(Register::Null);
@@ -687,25 +657,14 @@ fn round(a: &[Register]) -> SqawkResult<Register> {
 }
 
 /// Round `x` to `digits` decimal places, half away from zero, deciding the
-/// tie on x's shortest 17-significant-digit decimal expansion.
+/// tie on x's shortest 17-significant-digit decimal expansion. A negative
+/// `digits` is 0.
 pub(crate) fn round_decimal(x: f64, digits: i64) -> f64 {
     if !x.is_finite() {
         return x;
     }
     if digits <= 0 {
-        if digits == 0 {
-            return x.round();
-        }
-        if digits < -308 {
-            return x;
-        }
-        let factor = 10f64.powi((-digits) as i32);
-        let scaled = x / factor;
-        return if scaled.is_finite() {
-            scaled.round() * factor
-        } else {
-            x
-        };
+        return x.round();
     }
     if digits > 30 {
         return x;
@@ -885,7 +844,7 @@ mod tests {
         assert_eq!(round_decimal(9.995, 2), 9.99);
         assert_eq!(round_decimal(99.5, 0), 100.0);
         assert_eq!(round_decimal(0.0004, 2), 0.0);
-        assert_eq!(round_decimal(1234.5, -2), 1200.0);
+        assert_eq!(round_decimal(1234.5, -2), 1235.0);
     }
 
     #[test]

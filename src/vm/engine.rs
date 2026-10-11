@@ -31,12 +31,22 @@ enum CursorData<'a> {
         sorted: bool,
         sequence: i64,
         name: Option<String>, // Optional name for pending tables
-        /// A KEYED ephemeral table (OpenEphemeral P3 = 1): each distinct
-        /// row once, by its [`RowKey`]. `rows` is filled from it, sorted, on
-        /// Rewind.
-        set: Option<HashMap<Vec<RowKey>, Vec<Value>>>,
+        /// A KEYED ephemeral table (OpenEphemeral P3 = 1 or 2): each
+        /// distinct row once, by its [`RowKey`]. `rows` is filled from it,
+        /// sorted, on Rewind.
+        set: Option<KeyedRows>,
+        /// How a keyed table keys a column: [`row_key`] (P3 = 1; DISTINCT
+        /// and the compound operators) or [`value_cmp_key`] (P3 = 2; an IN
+        /// subquery's set, which must agree with `=`).
+        key_of: KeyFn,
     },
 }
+
+/// The rows of a keyed ephemeral table, by key.
+type KeyedRows = HashMap<Vec<RowKey>, Vec<Value>>;
+
+/// How a keyed ephemeral table keys one column.
+type KeyFn = fn(&Value) -> RowKey;
 
 /// One column of a keyed ephemeral row, normalized so that rows SQL calls
 /// equal for DISTINCT and the compound operators hash alike: NULL equals
@@ -56,20 +66,53 @@ pub(super) fn row_key(v: &Value) -> RowKey {
         Value::Null => RowKey::Null,
         Value::Integer(i) => RowKey::Int(*i),
         Value::Boolean(b) => RowKey::Int(*b as i64),
-        Value::Float(f) => {
-            // Every integral real in [-2^63, 2^63) is exactly an i64.
-            if f.fract() == 0.0
-                && *f >= -9_223_372_036_854_775_808.0
-                && *f < 9_223_372_036_854_775_808.0
-            {
-                RowKey::Int(*f as i64)
-            } else if f.is_nan() {
-                RowKey::Null
-            } else {
-                RowKey::Real(f.to_bits())
-            }
-        }
+        Value::Float(f) => real_key(*f),
         Value::String(s) => RowKey::Text(s.to_string()),
+    }
+}
+
+/// A real's key: an integral real in the i64 range is that integer, NaN is
+/// NULL, any other real its bit pattern (negative zero is integral, so it
+/// keys as 0).
+fn real_key(f: f64) -> RowKey {
+    // Every integral real in [-2^63, 2^63) is exactly an i64.
+    if f.fract() == 0.0 && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&f)
+    {
+        RowKey::Int(f as i64)
+    } else if f.is_nan() {
+        RowKey::Null
+    } else {
+        RowKey::Real(f.to_bits())
+    }
+}
+
+/// The key under which values that `=` calls equal hash alike (IN
+/// subqueries, hash joins): a number, and text with a numeric reading (see
+/// [`numeric_text`]), key as that number -- exactly, so two keys are equal
+/// precisely when [`VmEngine::sql_compare`] says Equal -- and other text by
+/// its bytes. Unlike [`row_key`], text `'1'` and integer 1 share a key.
+fn cmp_key(r: &Register) -> RowKey {
+    match r {
+        Register::Null => RowKey::Null,
+        Register::Integer(i) => RowKey::Int(*i),
+        Register::Boolean(b) => RowKey::Int(*b as i64),
+        Register::Float(f) => real_key(*f),
+        Register::String(s) => match numeric_text(s) {
+            Some(Value::Integer(i)) => RowKey::Int(i),
+            Some(Value::Float(f)) => real_key(f),
+            _ => RowKey::Text(s.clone()),
+        },
+    }
+}
+
+/// [`cmp_key`] of a stored value.
+fn value_cmp_key(v: &Value) -> RowKey {
+    match v {
+        Value::String(s) => match numeric_text(s) {
+            Some(n) => row_key(&n),
+            None => RowKey::Text(s.to_string()),
+        },
+        other => row_key(other),
     }
 }
 
@@ -93,48 +136,18 @@ struct Cursor<'a> {
     matched: Vec<bool>,
 }
 
-/// One component of a hash-join key.
-///
-/// Normalized so that values the `Eq` opcode treats as equal hash alike:
-/// every number, and every string that parses as one, becomes its f64 bit
-/// pattern. Two values in one bucket are not necessarily equal (`'1'` and
-/// `'1.0'` are distinct strings), which is fine because the join condition
-/// is re-evaluated on every candidate row.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum HashKeyPart {
-    Num(u64),
-    Str(String),
-}
-
 /// How one key register participates in a hash join.
 enum KeyClass {
     /// NULL (or NaN): equal to nothing, so the row is never inserted/matched.
     Never,
-    /// A value whose equality the bucketing cannot express (a boolean, which
-    /// `Eq` compares numerically against numbers but textually against
-    /// strings). Such rows are kept apart and checked against every probe.
-    Wild,
-    Key(HashKeyPart),
+    /// The register's [`cmp_key`]: rows match exactly when keys are equal.
+    Key(RowKey),
 }
 
 fn hash_key_class(reg: &Register) -> KeyClass {
-    fn num(f: f64) -> KeyClass {
-        if f.is_nan() {
-            KeyClass::Never
-        } else {
-            // 0.0 and -0.0 compare equal.
-            KeyClass::Key(HashKeyPart::Num(if f == 0.0 { 0 } else { f.to_bits() }))
-        }
-    }
-    match reg {
-        Register::Null => KeyClass::Never,
-        Register::Integer(i) => num(*i as f64),
-        Register::Float(f) => num(*f),
-        Register::Boolean(_) => KeyClass::Wild,
-        Register::String(s) => match s.trim().parse::<f64>() {
-            Ok(f) if !f.is_nan() => num(f),
-            _ => KeyClass::Key(HashKeyPart::Str(s.clone())),
-        },
+    match cmp_key(reg) {
+        RowKey::Null => KeyClass::Never,
+        key => KeyClass::Key(key),
     }
 }
 
@@ -142,11 +155,9 @@ fn hash_key_class(reg: &Register) -> KeyClass {
 #[derive(Default)]
 struct HashIndex {
     /// Key -> index into `buckets`.
-    map: HashMap<Vec<HashKeyPart>, usize>,
+    map: HashMap<Vec<RowKey>, usize>,
     /// Row positions per distinct key, in insertion (scan) order.
     buckets: Vec<Vec<usize>>,
-    /// Rows with a `Wild` key component, candidates for every probe.
-    wild: Vec<usize>,
 }
 
 /// Where HashProbe/HashNext are in the candidate list.
@@ -154,8 +165,6 @@ struct HashIndex {
 struct ProbeState {
     /// Bucket of the probe key, if any row had it.
     bucket: Option<usize>,
-    /// The probe key had a `Wild` component: every row is a candidate.
-    all: bool,
     /// Next candidate to return.
     pos: usize,
 }
@@ -174,8 +183,9 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Create ephemeral cursor; `keyed` makes it a set of distinct rows.
-    fn ephemeral(col_count: usize, sort_keys: Vec<KeyOrder>, keyed: bool) -> Self {
+    /// Create ephemeral cursor. `keyed` (OpenEphemeral P3) 1 makes it a set
+    /// of distinct rows keyed by [`row_key`], 2 by [`value_cmp_key`].
+    fn ephemeral(col_count: usize, sort_keys: Vec<KeyOrder>, keyed: i64) -> Self {
         Self {
             data: CursorData::Ephemeral {
                 rows: Vec::with_capacity(DEFAULT_SORTER_ROWS_CAPACITY),
@@ -184,7 +194,8 @@ impl<'a> Cursor<'a> {
                 sorted: false,
                 sequence: 0,
                 name: None,
-                set: keyed.then(HashMap::new),
+                set: (keyed != 0).then(HashMap::new),
+                key_of: if keyed == 2 { value_cmp_key } else { row_key },
             },
             position: 0,
             valid: false,
@@ -206,6 +217,7 @@ impl<'a> Cursor<'a> {
                 sequence: 0,
                 name: Some(table_name),
                 set: None,
+                key_of: row_key,
             },
             position: 0,
             valid: false,
@@ -264,17 +276,7 @@ impl<'a> Cursor<'a> {
     /// The `i`-th candidate row of the current hash probe.
     fn probe_candidate(&self, i: usize) -> Option<usize> {
         let index = self.hash.as_ref()?;
-        if self.probe.all {
-            return (i < self.rows().len()).then_some(i);
-        }
-        let bucket: &[usize] = match self.probe.bucket {
-            Some(b) => &index.buckets[b],
-            None => &[],
-        };
-        match bucket.get(i) {
-            Some(&row) => Some(row),
-            None => index.wild.get(i - bucket.len()).copied(),
-        }
+        index.buckets[self.probe.bucket?].get(i).copied()
     }
 
     /// Step to the next hash-probe candidate. False when there is none, in
@@ -354,10 +356,14 @@ impl<'a> Cursor<'a> {
     /// Insert row into ephemeral cursor (IdxInsert opcode)
     fn insert_row(&mut self, row: Vec<Value>) -> Result<(), SqawkError> {
         match &mut self.data {
-            CursorData::Ephemeral { set: Some(set), .. } => {
+            CursorData::Ephemeral {
+                set: Some(set),
+                key_of,
+                ..
+            } => {
                 // A row already present is replaced, as SQLite's IdxInsert
                 // does: `SELECT 1 UNION SELECT 1.0` yields 1.0.
-                set.insert(row.iter().map(row_key).collect(), row);
+                set.insert(row.iter().map(*key_of).collect(), row);
                 Ok(())
             }
             CursorData::Ephemeral { rows, sorted, .. } => {
@@ -371,10 +377,15 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// The keyed-set of a keyed ephemeral cursor (Found, NotFound, IdxDelete).
-    fn key_set(&mut self) -> Result<&mut HashMap<Vec<RowKey>, Vec<Value>>, SqawkError> {
+    /// The keyed-set of a keyed ephemeral cursor (Found, NotFound,
+    /// IdxDelete), and how it keys a value.
+    fn key_set(&mut self) -> Result<(&mut KeyedRows, KeyFn), SqawkError> {
         match &mut self.data {
-            CursorData::Ephemeral { set: Some(set), .. } => Ok(set),
+            CursorData::Ephemeral {
+                set: Some(set),
+                key_of,
+                ..
+            } => Ok((set, *key_of)),
             _ => Err(SqawkError::VmError(
                 "Cursor is not a keyed ephemeral table".into(),
             )),
@@ -499,22 +510,30 @@ pub(super) fn compare_key(k: &KeyOrder, a: &Value, b: &Value) -> std::cmp::Order
 
 /// Compare two Values for ordering (ORDER BY, GROUP BY, MIN/MAX).
 ///
-/// A total order: NULL first, then booleans, then numbers, then other text.
-/// Text that spells a number (`007`, `1.50`, `1e3` -- loaded as text so it
-/// keeps its spelling) sorts among the numbers by value, so a column mixing
-/// such text with inferred numbers still sorts numerically. Numbers equal in
-/// value but spelled differently (`7` and `007`) are ordered by their text,
-/// which keeps them in distinct groups.
+/// A total order consistent with [`VmEngine::sql_compare`]: NULL first,
+/// then numbers -- with text that has a numeric reading (`007`, `1.50`,
+/// `1e3`, loaded as text so it keeps its spelling) among them by value --
+/// then other text by bytes. Where `=` calls two values equal but they are
+/// not the same value (text `007` and integer 7, text `1` and `1.0`), the
+/// number comes first and texts are ordered by spelling, which keeps them
+/// in distinct groups, as DISTINCT keeps them apart.
 pub(super) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
     fn rank(v: &Value) -> u8 {
         match v {
             Value::Null => 0,
-            Value::Boolean(_) => 1,
-            Value::Integer(_) | Value::Float(_) => 2,
+            Value::Boolean(_) | Value::Integer(_) | Value::Float(_) => 2,
             Value::String(_) => 3,
         }
+    }
+
+    // A boolean is the integer 1 or 0, as `=` reads it.
+    if let Value::Boolean(x) = a {
+        return compare_values(&Value::Integer(*x as i64), b);
+    }
+    if let Value::Boolean(y) = b {
+        return compare_values(a, &Value::Integer(*y as i64));
     }
 
     match (a, b) {
@@ -527,7 +546,7 @@ pub(super) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
             // cannot start a number compares as text.
             fn may_be_number(s: &str) -> bool {
                 s.bytes().next().is_some_and(|c| {
-                    c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.' | b' ' | b'\t')
+                    c.is_ascii_digit() || c.is_ascii_whitespace() || matches!(c, b'-' | b'+' | b'.')
                 })
             }
             if !may_be_number(x) && !may_be_number(y) {
@@ -560,14 +579,11 @@ pub(super) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
             by_value.then_with(|| match (a, b) {
                 // Integer 1 and Float 1.0 are the same value. Text that
                 // spells a number sorts among the numbers by value, but is
-                // never the same value as one: by spelling, then (text `1`
-                // vs integer 1) the number first, as SQLite orders them --
-                // so GROUP BY agrees with DISTINCT.
-                (Value::String(_), _) | (_, Value::String(_)) => {
-                    a.field_str().cmp(&b.field_str()).then_with(|| {
-                        matches!(a, Value::String(_)).cmp(&matches!(b, Value::String(_)))
-                    })
-                }
+                // never the same value as one: the number first, as SQLite
+                // orders them -- so GROUP BY agrees with DISTINCT. (Texts of
+                // equal value are ordered by spelling on the path above.)
+                (Value::String(_), _) => Ordering::Greater,
+                (_, Value::String(_)) => Ordering::Less,
                 _ => Ordering::Equal,
             })
         }
@@ -576,13 +592,7 @@ pub(super) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
                 if na.is_some() { 2 } else { rank(a) },
                 if nb.is_some() { 2 } else { rank(b) },
             );
-            match ra.cmp(&rb) {
-                Ordering::Equal => match (a, b) {
-                    (Value::Boolean(x), Value::Boolean(y)) => x.cmp(y),
-                    _ => Ordering::Equal,
-                },
-                other => other,
-            }
+            ra.cmp(&rb)
         }
     }
 }
@@ -1912,28 +1922,22 @@ impl<'a> VmEngine<'a> {
                 let key_start = inst.p2 as usize;
                 let key_len = inst.p3 as usize;
                 let mut key = Vec::with_capacity(key_len);
-                let mut wild = false;
                 for i in 0..key_len {
-                    match hash_key_class(&self.get_register(key_start + i)?) {
+                    match hash_key_class(self.reg_ref(key_start + i)?) {
                         // A NULL key equals nothing: the row can never match.
                         KeyClass::Never => return Ok(ExecuteResult::Continue),
-                        KeyClass::Wild => wild = true,
                         KeyClass::Key(part) => key.push(part),
                     }
                 }
                 let cursor = self.cursor_mut(inst.p1)?;
                 let row = cursor.position;
                 let index = cursor.hash.get_or_insert_with(HashIndex::default);
-                if wild {
-                    index.wild.push(row);
-                } else {
-                    let next_id = index.buckets.len();
-                    let id = *index.map.entry(key).or_insert(next_id);
-                    if id == next_id {
-                        index.buckets.push(Vec::new());
-                    }
-                    index.buckets[id].push(row);
+                let next_id = index.buckets.len();
+                let id = *index.map.entry(key).or_insert(next_id);
+                if id == next_id {
+                    index.buckets.push(Vec::new());
                 }
+                index.buckets[id].push(row);
                 Ok(ExecuteResult::Continue)
             }
 
@@ -1947,26 +1951,20 @@ impl<'a> VmEngine<'a> {
                     .and_then(|n| n.parse().ok())
                     .ok_or_else(|| SqawkError::VmError("HashProbe needs a key width".into()))?;
                 let mut key = Vec::with_capacity(key_len);
-                let mut all = false;
                 let mut never = false;
                 for i in 0..key_len {
-                    match hash_key_class(&self.get_register(key_start + i)?) {
+                    match hash_key_class(self.reg_ref(key_start + i)?) {
                         KeyClass::Never => never = true,
-                        KeyClass::Wild => all = true,
                         KeyClass::Key(part) => key.push(part),
                     }
                 }
                 let cursor = self.cursor_mut(inst.p1)?;
                 cursor.null_row = false;
-                let bucket = match (&cursor.hash, never || all) {
+                let bucket = match (&cursor.hash, never) {
                     (Some(index), false) => index.map.get(&key).copied(),
                     _ => None,
                 };
-                cursor.probe = ProbeState {
-                    bucket,
-                    all: all && !never,
-                    pos: 0,
-                };
+                cursor.probe = ProbeState { bucket, pos: 0 };
                 if never {
                     cursor.valid = false;
                     return Ok(ExecuteResult::Jump(inst.p2 as usize));
@@ -2234,7 +2232,7 @@ impl<'a> VmEngine<'a> {
                 let sort_keys = KeyOrder::parse_spec(&sort_spec);
 
                 // Create ephemeral cursor in the unified cursors map
-                let cursor = Cursor::ephemeral(col_count, sort_keys, inst.p3 == 1);
+                let cursor = Cursor::ephemeral(col_count, sort_keys, inst.p3);
                 self.cursors.insert(cursor_id, cursor);
 
                 if self.verbose {
@@ -2286,16 +2284,17 @@ impl<'a> VmEngine<'a> {
                     let n = inst.p4.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
                     (inst.p3 as usize, n)
                 };
-                let mut key = Vec::with_capacity(count);
+                let mut values = Vec::with_capacity(count);
                 for i in 0..count {
-                    key.push(row_key(&Value::from(self.get_register(start + i)?)));
+                    values.push(Value::from(self.get_register(start + i)?));
                 }
                 let cursor_id = inst.p1 as usize;
-                let set = self
+                let (set, key_of) = self
                     .cursors
                     .get_mut(&cursor_id)
                     .ok_or_else(|| SqawkError::VmError(format!("Cursor {} not found", cursor_id)))?
                     .key_set()?;
+                let key: Vec<RowKey> = values.iter().map(key_of).collect();
                 let jump = match inst.opcode {
                     OpCode::IdxDelete => {
                         set.remove(&key);
@@ -2404,8 +2403,8 @@ impl<'a> VmEngine<'a> {
                 let acc_reg = inst.p1 as usize;
                 let stepped = !matches!(self.get_register(acc_reg)?, Register::Null);
                 let result = match self.accumulators.get(&acc_reg) {
-                    Some(acc) if stepped => acc.finalize(),
-                    _ => AggAccumulator::new(inst.p3).finalize(),
+                    Some(acc) if stepped => acc.finalize()?,
+                    _ => AggAccumulator::new(inst.p3).finalize()?,
                 };
                 self.set_register(inst.p2 as usize, Register::from(result))?;
                 Ok(ExecuteResult::Continue)
@@ -2531,14 +2530,14 @@ impl<'a> VmEngine<'a> {
     }
 
     fn get_register(&self, idx: usize) -> SqawkResult<Register> {
-        if idx < self.registers.len() {
-            Ok(self.registers[idx].clone())
-        } else {
-            Err(SqawkError::VmError(format!(
-                "Register index out of bounds: {}",
-                idx
-            )))
-        }
+        self.reg_ref(idx).cloned()
+    }
+
+    /// A register by reference, for readers that need no copy.
+    fn reg_ref(&self, idx: usize) -> SqawkResult<&Register> {
+        self.registers
+            .get(idx)
+            .ok_or_else(|| SqawkError::VmError(format!("Register index out of bounds: {}", idx)))
     }
 
     /// Set a register value by index
@@ -2605,25 +2604,25 @@ impl<'a> VmEngine<'a> {
         Ok(ExecuteResult::Continue)
     }
 
-    /// SQL comparison of two registers.
+    /// SQL comparison of two registers: the one comparison rule.
     ///
     /// `None` means UNKNOWN, which is the result whenever either operand is
     /// NULL -- including NULL against NULL. (Grouping and sorting need the
     /// opposite, NULL equal to NULL, which is why the Compare opcode has its
-    /// own internal ordering rather than sharing this.)
+    /// own internal ordering, [`compare_values`], which agrees with this one
+    /// on every non-NULL pair this calls unequal.)
     ///
-    /// Mixed string/number operands are coerced when the string parses as a
-    /// number, and compared as text otherwise. This is the awk-shaped choice
-    /// rather than the SQLite one, for two reasons: a CSV column is untyped
-    /// text that sqawk guesses a type for PER CELL, so a single column can
-    /// hold both; and arithmetic already coerces this way, so `x + '1'` and
-    /// `x > '1'` agree instead of disagreeing.
+    /// A value's numeric reading is the number itself, or for text the
+    /// number [`numeric_text`] reads from it (`'007'`, `' 1.5 '`, `'1e3'`).
+    /// Two values that both have one compare as numbers, whatever their
+    /// types -- text against text included, so `'9' < '10'`. A number is
+    /// less than text with no numeric reading. Two texts without one compare
+    /// by bytes (BINARY). This deliberately differs from SQLite, whose
+    /// column affinities sqawk does not have: a CSV column is untyped text
+    /// typed PER CELL, so `=`, `<`, IN, joins, ORDER BY and MIN/MAX all
+    /// compare numeric-looking text by value.
     pub(super) fn sql_compare(a: &Register, b: &Register) -> Option<std::cmp::Ordering> {
-        // Any NULL operand yields UNKNOWN.
-        if matches!(a, Register::Null) || matches!(b, Register::Null) {
-            return None;
-        }
-
+        use std::cmp::Ordering;
         fn as_number(reg: &Register) -> Option<Num> {
             match reg {
                 Register::Integer(i) => Some(Num::Int(*i)),
@@ -2639,21 +2638,19 @@ impl<'a> VmEngine<'a> {
         }
 
         match (a, b) {
+            (Register::Null, _) | (_, Register::Null) => None,
             // Integer against integer compares as i64, not through f64, so
             // values above 2^53 stay exact.
             (Register::Integer(x), Register::Integer(y)) => Some(x.cmp(y)),
-            (Register::String(x), Register::String(y)) => Some(x.cmp(y)),
-            (Register::Boolean(x), Register::Boolean(y)) => Some(x.cmp(y)),
-            _ => match (as_number(a), as_number(b)) {
-                (Some(x), Some(y)) => Some(arith::cmp_num(x, y)),
-                // A string that does not parse as a number falls back to a
-                // textual comparison against the other side's rendering.
-                _ => {
-                    let x: Value = a.clone().into();
-                    let y: Value = b.clone().into();
-                    Some(x.to_string().cmp(&y.to_string()))
-                }
-            },
+            _ => Some(match (as_number(a), as_number(b)) {
+                (Some(x), Some(y)) => arith::cmp_num(x, y),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => match (a, b) {
+                    (Register::String(x), Register::String(y)) => x.as_bytes().cmp(y.as_bytes()),
+                    _ => Ordering::Equal,
+                },
+            }),
         }
     }
 

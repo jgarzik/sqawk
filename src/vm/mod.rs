@@ -14,7 +14,7 @@
 pub const SQLPARSER_VERSION: &str = "0.62";
 
 mod agg;
-mod arith;
+pub(crate) mod arith;
 pub mod ast_compat;
 pub mod bytecode;
 pub mod compiler;

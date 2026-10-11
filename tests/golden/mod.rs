@@ -11,7 +11,7 @@
 //!
 //! Known-wrong behaviour is NOT pinned here -- it lives in `tests/defects/`.
 
-use crate::helpers::assert_query;
+use crate::helpers::{assert_query, assert_query_on, ONE};
 
 #[test]
 fn select_star() -> Result<(), Box<dyn std::error::Error>> {
@@ -360,7 +360,7 @@ fn agg_avg() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT AVG(salary) FROM employees",
-        concat!("AVG", "\n67500",),
+        concat!("AVG", "\n67500.0",),
     )
 }
 
@@ -828,14 +828,14 @@ fn math_round() -> Result<(), Box<dyn std::error::Error>> {
         "SELECT ROUND(salary) FROM employees",
         concat!(
             "ROUND(salary)",
-            "\n70000",
-            "\n55000",
-            "\n65000",
-            "\n80000",
-            "\n60000",
-            "\n75000",
-            "\n90000",
-            "\n45000",
+            "\n70000.0",
+            "\n55000.0",
+            "\n65000.0",
+            "\n80000.0",
+            "\n60000.0",
+            "\n75000.0",
+            "\n90000.0",
+            "\n45000.0",
         ),
     )
 }
@@ -1315,7 +1315,7 @@ fn aggregate_distinct_variants() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/repeats.csv"],
         "SELECT SUM(v), SUM(DISTINCT v), COUNT(v), COUNT(DISTINCT v), \
          MIN(DISTINCT v), MAX(DISTINCT v), AVG(DISTINCT v) FROM repeats",
-        "SUM,SUM,COUNT,COUNT,MIN,MAX,AVG\n100,60,5,3,10,30,20",
+        "SUM,SUM,COUNT,COUNT,MIN,MAX,AVG\n100,60,5,3,10,30,20.0",
     )
 }
 
@@ -1581,7 +1581,7 @@ fn aggregates_skip_nulls() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/nullable.csv"],
         "SELECT COUNT(*), COUNT(score), SUM(score), AVG(score) FROM nullable",
-        "COUNT,COUNT,SUM,AVG\n5,4,300,75",
+        "COUNT,COUNT,SUM,AVG\n5,4,300,75.0",
     )
 }
 
@@ -2633,5 +2633,68 @@ fn parenthesized_999_term_chain_is_within_depth_limit() -> Result<(), Box<dyn st
         &[crate::helpers::ONE],
         &format!("SELECT -({}) AS v FROM one", vec!["1"; 999].join("+")),
         "v\n-999",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Value semantics: real rendering, load inference, the one comparison rule.
+// ---------------------------------------------------------------------------
+
+/// A field loads as REAL exactly when it is the real's printed form
+/// (SQLite's `CAST(x AS TEXT)`), so every cell prints back verbatim.
+#[test]
+fn real_inference_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[(
+            "r.csv",
+            "v\n2.0\n0.30000000000000004\n1e5\n1.0e+20\n-0.0\n0.0001\n0.00001\n1.0e-05\n",
+        )],
+        "SELECT typeof(v) AS t, v FROM r",
+        "t,v\nreal,2.0\ntext,0.30000000000000004\ntext,1e5\nreal,1.0e+20\ntext,-0.0\n\
+         real,0.0001\ntext,0.00001\nreal,1.0e-05",
+    )
+}
+
+/// `||` and CAST see the same text as output.
+#[test]
+fn real_text_form() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "SELECT 'a' || 2.0 AS a, CAST(0.1 + 0.2 AS TEXT) AS b, -0.0 AS c, 1e15 AS d, \
+         123456789012345.0 AS e, 1234567890123445.0 AS f FROM one",
+        "a,b,c,d,e,f\na2.0,0.3,0.0,1.0e+15,123456789012345.0,1.23456789012345e+15",
+    )
+}
+
+/// `=`, IN list, IN subquery, `<` and a hash join all use one rule; numbers
+/// sort before other text.
+#[test]
+fn one_comparison_rule() -> Result<(), Box<dyn std::error::Error>> {
+    let files = [("n.csv", "v\n10\n9\n007\n1e1\nabc\n-x\n")];
+    assert_query_on(
+        &files,
+        "SELECT v, v = 10 AS eq, v IN (10, 7) AS inl, v IN (SELECT '10.0') AS ins, \
+         v < '9.5' AS lt FROM n ORDER BY v",
+        "v,eq,inl,ins,lt\n007,0,1,0,1\n9,0,0,0,1\n10,1,1,1,0\n1e1,1,1,1,0\n\
+         -x,0,0,0,0\nabc,0,0,0,0",
+    )?;
+    assert_query_on(
+        &files,
+        "SELECT a.v AS a, b.v AS b FROM n a JOIN n b ON a.v = b.v AND a.v || 'x' <> b.v || 'x' \
+         ORDER BY 1, 2",
+        "a,b\n10,1e1\n1e1,10",
+    )
+}
+
+/// INTERSECT keeps the left side's value, UNION the last one inserted, as
+/// SQLite does.
+#[test]
+fn compound_keeps_sqlite_value() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(&[ONE], "SELECT 1 AS v INTERSECT SELECT 1.0", "v\n1")?;
+    assert_query_on(&[ONE], "SELECT 1 AS v UNION SELECT 1.0", "v\n1.0")?;
+    assert_query_on(
+        &[ONE],
+        "SELECT 1 AS v INTERSECT SELECT 1.0 UNION ALL SELECT 2.0 INTERSECT SELECT 2",
+        "v\n2.0",
     )
 }

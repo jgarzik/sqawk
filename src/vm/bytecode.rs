@@ -234,8 +234,10 @@ pub enum OpCode {
     // no-op), Found/NotFound test membership, IdxDelete removes a row, and
     // Rewind walks the rows in sorted order. DISTINCT and the compound
     // operators (UNION, INTERSECT, EXCEPT) are built from these. Rows are
-    // equal when every column is: NULL equals NULL and 1 equals 1.0.
-    OpenEphemeral, // Open ephemeral cursor P1 with P2 columns. P4 = sort key spec; P3 = 1: keyed.
+    // equal when every column is: NULL equals NULL and 1 equals 1.0. With
+    // P3 = 2 columns are keyed as `=` compares instead (text '1' equals 1),
+    // for IN (SELECT ...).
+    OpenEphemeral, // Open ephemeral cursor P1 with P2 columns. P4 = sort key spec; P3 = 1/2: keyed.
     IdxInsert,     // Insert into ephemeral cursor P1. P2 = start register, P3 = column count.
     IdxDelete,     // Remove row r[P2..P2+P3] from keyed ephemeral cursor P1, if present.
     Found,         // Jump to P2 if row r[P3..P3+P4] is in keyed ephemeral cursor P1.

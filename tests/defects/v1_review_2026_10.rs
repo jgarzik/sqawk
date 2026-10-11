@@ -464,7 +464,6 @@ fn compound_intersect_then_union() -> TestResult {
 /// `'9' IN (9)` and `'9' = (SELECT 9)` are 1 but `'9' IN (SELECT 9)` is 0:
 /// the IN-subquery set compares by exact key.
 #[test]
-#[ignore]
 fn in_subquery_numeric_text_matches_number() -> TestResult {
     one(
         "SELECT '9' IN (SELECT 9) AS a, '9' IN (9) AS b, '9' = (SELECT 9) AS c FROM one",
@@ -476,7 +475,6 @@ fn in_subquery_numeric_text_matches_number() -> TestResult {
 /// holds numeric-looking text (`007`, `9.0`, `1e1`); the JOIN matches all
 /// four rows, the IN subquery only 8.
 #[test]
-#[ignore]
 fn in_subquery_agrees_with_join() -> TestResult {
     let files = [
         ("na.csv", "n\n7\n8\n9\n10\n"),
@@ -497,7 +495,6 @@ fn in_subquery_agrees_with_join() -> TestResult {
 /// Two numeric-looking texts compare numerically, as ORDER BY and MIN/MAX
 /// already order them (`'9'` before `'10'`). `<` compares them lexically.
 #[test]
-#[ignore]
 fn numeric_text_less_than_is_numeric() -> TestResult {
     one(
         "SELECT '10' < '9' AS a, '9' < '10' AS b, '010' < '9' AS c FROM one",
@@ -508,7 +505,6 @@ fn numeric_text_less_than_is_numeric() -> TestResult {
 /// Numbers sort before non-numeric text in ORDER BY; `<` must agree:
 /// `'-x' < 10` is 0 and `10 < 'abc'` is 1.
 #[test]
-#[ignore]
 fn non_numeric_text_vs_number_order() -> TestResult {
     one(
         "SELECT '-x' < 10 AS a, 10 < 'abc' AS b FROM one",
@@ -519,7 +515,6 @@ fn non_numeric_text_vs_number_order() -> TestResult {
 /// ORDER BY puts `9, 10` before `-x, abc`, but `s < '9'` selects `-x`.
 /// Under one total order no row is below 9.
 #[test]
-#[ignore]
 fn less_than_agrees_with_order_by() -> TestResult {
     let st = [("st.csv", "s\n10\n9\nabc\n-x\n")];
     assert_query_on(&st, "SELECT s FROM st ORDER BY s", "s\n9\n10\n-x\nabc")?;
@@ -680,21 +675,18 @@ fn count_star_header_is_sql_text() -> TestResult {
 
 /// Printed as 301 digits instead of `1.5e+300`.
 #[test]
-#[ignore]
 fn large_real_uses_exponent() -> TestResult {
     one("SELECT 1e300 * 1.5 AS v FROM one", "v\n1.5e+300")
 }
 
 /// Printed as `0.000...015` instead of `1.5e-300`.
 #[test]
-#[ignore]
 fn tiny_real_uses_exponent() -> TestResult {
     one("SELECT 1.5e-300 AS v FROM one", "v\n1.5e-300")
 }
 
 /// Printed as `0.30000000000000004` instead of `0.3`.
 #[test]
-#[ignore]
 fn real_prints_15_significant_digits() -> TestResult {
     one("SELECT 0.1 + 0.2 AS v FROM one", "v\n0.3")
 }
@@ -702,7 +694,6 @@ fn real_prints_15_significant_digits() -> TestResult {
 /// Integer overflow to real prints `9223372036854776000`; SQLite
 /// `9.22337203685478e+18`.
 #[test]
-#[ignore]
 fn overflowed_integer_prints_as_real() -> TestResult {
     one(
         "SELECT 9223372036854775807 + 1 AS v FROM one",
@@ -712,14 +703,12 @@ fn overflowed_integer_prints_as_real() -> TestResult {
 
 /// An integral real prints `2`; SQLite renders `2.0`.
 #[test]
-#[ignore]
 fn integral_real_prints_point_zero() -> TestResult {
     one("SELECT 2.0 * 1 AS v FROM one", "v\n2.0")
 }
 
 /// Infinity prints `inf` / `-inf`; SQLite `Inf` / `-Inf`.
 #[test]
-#[ignore]
 fn infinity_prints_like_sqlite() -> TestResult {
     one(
         "SELECT 1e308 * 10 AS v, -1e308 * 10 AS w FROM one",
@@ -730,7 +719,6 @@ fn infinity_prints_like_sqlite() -> TestResult {
 /// `ROUND(x, N)` with negative N rounds to tens/hundreds (1200); SQLite
 /// treats negative N as 0: `ROUND(1234.5, -2)` = 1235.0 (func.rs ~666).
 #[test]
-#[ignore]
 fn round_negative_digits_is_zero() -> TestResult {
     one("SELECT ROUND(1234.5, -2) AS v FROM one", "v\n1235.0")
 }
@@ -739,7 +727,6 @@ fn round_negative_digits_is_zero() -> TestResult {
 /// 103.79999999999998, so `SUM(x) = 103.8` is 0. SQLite (Neumaier) gives
 /// exactly 103.8.
 #[test]
-#[ignore]
 fn sum_is_compensated() -> TestResult {
     let m = [("m.csv", "x\n17.07\n10.51\n23.41\n29.99\n22.82\n")];
     assert_query_on(
@@ -752,7 +739,6 @@ fn sum_is_compensated() -> TestResult {
 /// SUM of 0.1, 0.2, 0.3 prints `0.6000000000000001`; SQLite `0.6`, and
 /// `SUM(x) = 0.6` is 1.
 #[test]
-#[ignore]
 fn sum_of_tenths() -> TestResult {
     let p = [("p.csv", "x\n0.1\n0.2\n0.3\n")];
     assert_query_on(

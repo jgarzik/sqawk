@@ -70,14 +70,11 @@ pub(crate) enum Dest {
     },
     /// A compound query's ORDER BY sorter; the payload is the row itself.
     Sorter(i64),
-    /// Insert into a keyed ephemeral table (UNION; the left side of
-    /// INTERSECT and EXCEPT).
+    /// Insert into a keyed ephemeral table (UNION; both sides of
+    /// INTERSECT; the left side of EXCEPT).
     Insert(i64),
     /// Remove from a keyed ephemeral table (the right side of EXCEPT).
     Delete(i64),
-    /// Insert into `into` if the row is in `probe` (the right side of
-    /// INTERSECT).
-    Intersect { probe: i64, into: i64 },
 }
 
 /// One ORDER BY key of a SELECT core.
@@ -413,7 +410,7 @@ impl<'a> SqlCompiler<'a> {
                 self.program.instructions[open].p2 = l.columns.len() as i64;
                 let r = self.compile_compound(right, Dest::Insert(u))?;
                 check(&l, &r)?;
-                self.emit_keyed_scan(u, l.columns.len(), dest);
+                self.emit_keyed_scan(u, l.columns.len(), dest, None);
                 Ok(l)
             }
             (SetOperator::Except | SetOperator::Minus, false) => {
@@ -422,19 +419,22 @@ impl<'a> SqlCompiler<'a> {
                 self.program.instructions[open].p2 = l.columns.len() as i64;
                 let r = self.compile_compound(right, Dest::Delete(u))?;
                 check(&l, &r)?;
-                self.emit_keyed_scan(u, l.columns.len(), dest);
+                self.emit_keyed_scan(u, l.columns.len(), dest, None);
                 Ok(l)
             }
             (SetOperator::Intersect, false) => {
-                let (probe, open_probe) = self.open_keyed("INTERSECT left");
-                let l = self.compile_compound(left, Dest::Insert(probe))?;
+                // As SQLite: both sides into keyed tables, then the left
+                // table's rows that the right one holds -- so the values
+                // come from the left (`SELECT 1 INTERSECT SELECT 1.0` is 1).
+                let (lt, open_l) = self.open_keyed("INTERSECT left");
+                let l = self.compile_compound(left, Dest::Insert(lt))?;
                 let n = l.columns.len() as i64;
-                self.program.instructions[open_probe].p2 = n;
-                let (into, open_into) = self.open_keyed("INTERSECT result");
-                self.program.instructions[open_into].p2 = n;
-                let r = self.compile_compound(right, Dest::Intersect { probe, into })?;
+                self.program.instructions[open_l].p2 = n;
+                let (rt, open_r) = self.open_keyed("INTERSECT right");
+                self.program.instructions[open_r].p2 = n;
+                let r = self.compile_compound(right, Dest::Insert(rt))?;
                 check(&l, &r)?;
-                self.emit_keyed_scan(into, l.columns.len(), dest);
+                self.emit_keyed_scan(lt, l.columns.len(), dest, Some(rt));
                 Ok(l)
             }
             (op, _) => Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -454,17 +454,30 @@ impl<'a> SqlCompiler<'a> {
         (cursor, addr)
     }
 
-    /// Walk a keyed ephemeral table (in sorted order), sending each row on.
-    fn emit_keyed_scan(&mut self, cursor: i64, n: usize, dest: Dest) {
+    /// Walk a keyed ephemeral table (in sorted order), sending each row on
+    /// -- only the rows also in keyed table `only_in`, if given.
+    fn emit_keyed_scan(&mut self, cursor: i64, n: usize, dest: Dest, only_in: Option<i64>) {
         let row = self.allocate_registers(n.max(1));
         let top = self.label();
         let done = self.label();
+        let next = self.label();
         self.emit_jump_to(OpCode::Rewind, cursor, done, 0, None, "compound result");
         self.resolve(top);
         for i in 0..n {
             self.emit(OpCode::Column, cursor, i as i64, row + i as i64, None, "");
         }
+        if let Some(other) = only_in {
+            self.emit_jump_to(
+                OpCode::NotFound,
+                other,
+                next,
+                row,
+                Some(n.to_string()),
+                "INTERSECT: not on the right",
+            );
+        }
         self.emit_to_dest(row, n, dest);
+        self.resolve(next);
         self.emit_jump_to(OpCode::Next, cursor, top, 0, None, "");
         self.resolve(done);
     }
@@ -834,19 +847,6 @@ impl<'a> SqlCompiler<'a> {
             Dest::Sorter(id) => self.emit(OpCode::SorterInsert, id, start, n64, None, ""),
             Dest::Insert(c) => self.emit(OpCode::IdxInsert, c, start, n64, None, ""),
             Dest::Delete(c) => self.emit(OpCode::IdxDelete, c, start, n64, None, ""),
-            Dest::Intersect { probe, into } => {
-                let skip = self.label();
-                self.emit_jump_to(
-                    OpCode::NotFound,
-                    probe,
-                    skip,
-                    start,
-                    Some(n.to_string()),
-                    "INTERSECT: not on the left",
-                );
-                self.emit(OpCode::IdxInsert, into, start, n64, None, "");
-                self.resolve(skip);
-            }
         }
     }
 }

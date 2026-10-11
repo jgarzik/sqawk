@@ -155,7 +155,7 @@ impl fmt::Display for Value {
         match self {
             Value::Null => write!(f, "NULL"),
             Value::Integer(i) => write!(f, "{}", i),
-            Value::Float(float) => write!(f, "{}", float),
+            Value::Float(float) => f.write_str(&crate::vm::arith::real_text(*float)),
             Value::String(s) => write!(f, "{}", s),
             Value::Boolean(b) => write!(f, "{}", b),
         }
@@ -182,18 +182,20 @@ fn canonical_integer(s: &str) -> Option<i64> {
     s.parse::<i64>().ok()
 }
 
-/// Parse `s` as a float only if formatting the float back (the same `{}`
-/// formatting `Value`'s Display uses) reproduces `s` exactly.
+/// Parse `s` as a float only if rendering the float back (the rendering
+/// `Value`'s Display uses, SQLite's `CAST(x AS TEXT)`) reproduces `s`
+/// exactly.
 ///
-/// So `1.5` is a float but `1.50`, `1e3`, `2.0`, `.5`, `NaN` and `inf` are
+/// So `1.5`, `2.0` and `1.0e+20` are floats but `1.50`, `2`, `1e3`, `.5`,
+/// `0.30000000000000004` (17 digits; rendered `0.3`), `NaN` and `Inf` are
 /// not: loading them as numbers would change their spelling on output and on
-/// writeback. Display never emits an exponent, so only `-`, digits and `.`
-/// can possibly round-trip; anything else is rejected before formatting.
+/// writeback. Every rendering contains a point and only digits, `-`, `+`,
+/// `.` and `e`; anything else is rejected before parsing.
 fn canonical_float(s: &str) -> Option<f64> {
-    if s.is_empty()
+    if !s.contains('.')
         || !s
             .bytes()
-            .all(|c| c.is_ascii_digit() || c == b'-' || c == b'.')
+            .all(|c| c.is_ascii_digit() || matches!(c, b'-' | b'.' | b'e' | b'+'))
     {
         return None;
     }
@@ -204,39 +206,56 @@ fn canonical_float(s: &str) -> Option<f64> {
     if let Some(canonical) = short_decimal_is_canonical(s) {
         return canonical.then_some(f);
     }
-    thread_local! {
-        static BUF: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
-    }
-    BUF.with(|buf| {
-        use std::fmt::Write;
-        let mut buf = buf.borrow_mut();
-        buf.clear();
-        let _ = write!(buf, "{}", f);
-        (*buf == s).then_some(f)
-    })
+    (crate::vm::arith::real_text(f) == s).then_some(f)
 }
 
-/// Decide canonicity of a plain decimal without formatting, when possible.
+/// Decide canonicity of a plain decimal without rendering, when possible.
 ///
-/// Display prints the shortest digit string that round-trips, in positional
-/// notation. A decimal of at most 15 significant digits round-trips through
-/// f64 exactly, and no other decimal that short maps to the same double, so
-/// such a string is canonical iff it is in Display's shape:
-/// `-?(0|[1-9][0-9]*)\.[0-9]*[1-9]`. Returns None when the fast rule does not
-/// apply (more digits, or no point), leaving the caller to format and compare.
+/// The rendering is `%.15g` with `.0` kept on integral values: positional
+/// when the leading digit's exponent is in [-4, 15), trailing zeros dropped
+/// except the one in `.0`. A decimal of at most 15 significant digits comes
+/// back unchanged from 15-digit rounding of its nearest double, so such a
+/// string is canonical iff it has the rendering's shape. Returns None when
+/// the fast rule does not apply (more digits, or exponent notation), leaving
+/// the caller to render and compare.
 fn short_decimal_is_canonical(s: &str) -> Option<bool> {
-    let body = s.strip_prefix('-').unwrap_or(s);
+    let (neg, body) = match s.strip_prefix('-') {
+        Some(b) => (true, b),
+        None => (false, s),
+    };
+    if body.contains('e') {
+        return None;
+    }
     let (int, frac) = body.split_once('.')?;
-    if int.is_empty() || frac.is_empty() || frac.contains(['.', '-']) || int.contains('-') {
+    let all_digits = |t: &str| !t.is_empty() && t.bytes().all(|c| c.is_ascii_digit());
+    if !all_digits(int) || !all_digits(frac) {
         return Some(false);
     }
-    let digits = || int.bytes().chain(frac.bytes());
-    let significant = digits().skip_while(|&c| c == b'0').count();
+    if int.len() > 1 && int.starts_with('0') {
+        return Some(false);
+    }
+    let lead_zeros = frac.bytes().take_while(|&c| c == b'0').count();
+    if int == "0" && lead_zeros == frac.len() {
+        // Zero renders `0.0`, negative zero included.
+        return Some(!neg && frac == "0");
+    }
+    let significant = if int == "0" {
+        frac.len() - lead_zeros
+    } else {
+        int.len() + frac.len()
+    };
     if significant > 15 {
         return None;
     }
-    let shape_ok = (int == "0" || !int.starts_with('0')) && !frac.ends_with('0');
-    Some(shape_ok)
+    let exponent = if int == "0" {
+        -(lead_zeros as i64) - 1
+    } else {
+        int.len() as i64 - 1
+    };
+    if !(-4..15).contains(&exponent) {
+        return Some(false);
+    }
+    Some(frac == "0" || !frac.ends_with('0'))
 }
 
 /// Infer the type of a field read from an input file.
@@ -246,9 +265,9 @@ fn short_decimal_is_canonical(s: &str) -> Option<bool> {
 ///
 /// - empty field: NULL (rendered back as an empty field)
 /// - canonical integer (`42`, `-7`): Integer
-/// - canonical float (`1.5`, `-0.25`): Float
+/// - canonical float (`1.5`, `-0.25`, `2.0`, `1.0e+20`): Float
 /// - anything else, verbatim and untrimmed: String. That includes `007`,
-///   `1.50`, `1e3`, ` 42`, `true`, `NaN`.
+///   `1.50`, `1e3`, `0.30000000000000004`, ` 42`, `true`, `NaN`.
 ///
 /// Numeric-looking strings still behave as numbers where a number is needed
 /// (arithmetic, SUM/AVG, comparison with a number, ordering); see the VM.
@@ -303,8 +322,12 @@ impl Value {
 }
 
 /// Interpret text as a number: an i64 if it parses as one, else a finite f64.
+///
+/// This is the single "numeric reading" of text, used by every comparison
+/// (see the VM's `sql_compare`), by SUM/AVG and by ordering. Surrounding
+/// ASCII whitespace is allowed.
 pub fn numeric_text(s: &str) -> Option<Value> {
-    let t = s.trim();
+    let t = s.trim_matches(|c: char| c.is_ascii_whitespace());
     // Cheap rejection first: this runs inside sort comparators. A finite
     // number starts with a digit, a sign or a point.
     if !t

@@ -36,9 +36,13 @@ Tables maintain an internal mapping of column names to their indices for efficie
   logic, so a comparison involving NULL is UNKNOWN and its row is filtered out
   rather than raising an error. Sorting and grouping treat NULL as equal to
   NULL, which SQL comparison must not — the two use separate paths deliberately
-- **Coercion**: A comparison mixing a number and a string converts the string
-  when it parses as a number, and compares textually otherwise. See
-  [SQL Reference](sql_reference.md) for the exact rules
+- **Comparison**: One rule everywhere (`=`, `<`, IN lists and subqueries,
+  joins, ORDER BY, MIN/MAX): two values that both read as numbers -- numbers,
+  or text spelling a number such as `'007'` or `'1e3'` -- compare as numbers,
+  text against text included (`'10' > '9'`); numbers sort before other text;
+  other text compares byte by byte. DISTINCT, GROUP BY and the compound
+  operators still keep text `'1'` and integer `1` apart. See
+  [SQL Reference](sql_reference.md#type-coercion) for the exact rules
 
 ### Table Lifecycle
 
@@ -244,12 +248,14 @@ rather than writing anywhere.
 - empty field: NULL
 - canonical integer (`42`, `-7`, where formatting the number back gives the
   same text): INTEGER
-- canonical float (`1.5`, `-0.25`): REAL
-- anything else, verbatim: TEXT -- including `007`, `1.50`, `1e3`, ` 42`,
-  `true`, `NaN`
+- canonical float (`1.5`, `-0.25`, `2.0`, `1.0e+20`, where printing the real
+  the way SQLite's `CAST(x AS TEXT)` does gives the same text): REAL
+- anything else, verbatim: TEXT -- including `007`, `1.50`, `1e3`, `-0.0`,
+  `0.30000000000000004`, ` 42`, `true`, `NaN`
 
 Text that spells a number still acts as one where a number is needed:
-arithmetic, `SUM`/`AVG`, comparison against a number, and sort order.
+arithmetic, `SUM`/`AVG`, every comparison (against a number or against other
+numeric text), and sort order.
 
 ### Source layout
 

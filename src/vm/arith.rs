@@ -282,12 +282,140 @@ pub(crate) fn cast(r: Register, target: &str) -> Register {
     }
 }
 
+/// The first `p` (>= 1) significant decimal digits of the finite, nonzero
+/// `v`'s magnitude, rounded half up on its exact decimal expansion as
+/// SQLite's `sqlite3FpDecode` rounds (so 0.25 to one digit is 3, where C's
+/// printf gives 2), and the decimal exponent of the first digit.
+fn decimal_digits(v: f64, p: usize) -> (Vec<u8>, i32) {
+    // Fast path: the shortest digits that read back as `v`, when there are
+    // at most `p` <= 15 of them, are also its rounding to `p` digits (`v`
+    // is within half an ulp of them, far less than half a unit in the 15th
+    // digit), and need no exact expansion. Not for subnormals, whose ulp
+    // is large relative to them (5e-324 is 4.94065645841247e-324).
+    if p <= 15 && v.abs() >= f64::MIN_POSITIVE {
+        let s = format!("{:e}", v.abs());
+        if let Some((mant, exp)) = s.split_once('e') {
+            let d: Vec<u8> = mant
+                .bytes()
+                .filter(u8::is_ascii_digit)
+                .map(|b| b - b'0')
+                .collect();
+            if d.len() <= p {
+                return (d, exp.parse().unwrap_or(0));
+            }
+        }
+    }
+    // Ten guard digits decide the rounding: only a run of ten 9s after the
+    // cut could carry into the digit that decides it.
+    let s = format!("{:.*e}", p + 10, v.abs());
+    let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
+    let mut exp: i32 = exp.parse().unwrap_or(0);
+    let all: Vec<u8> = mant
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .map(|b| b - b'0')
+        .collect();
+    let mut d = all[..p].to_vec();
+    if all[p] >= 5 {
+        let mut i = p;
+        loop {
+            if i == 0 {
+                // 99..9 rounded up: 100..0, one place higher.
+                d.insert(0, 1);
+                d.truncate(p);
+                exp += 1;
+                break;
+            }
+            i -= 1;
+            if d[i] == 9 {
+                d[i] = 0;
+            } else {
+                d[i] += 1;
+                break;
+            }
+        }
+    }
+    (d, exp)
+}
+
+/// Digits past which `%g` precision is not honoured (every digit past a
+/// double's exact expansion is a zero, which `%g` strips anyway).
+const MAX_GENERAL_DIGITS: usize = 1100;
+
+/// `%g` with precision `p` (significant digits, at least 1) of a finite
+/// `v`, as SQLite's printf renders it: trailing zeros removed, exponent
+/// form when the exponent after rounding is below -4 or at least `p` (so
+/// 999999.5 at six digits is `1e+06`), digits rounded half up.
+pub(crate) fn c_general(v: f64, p: usize, upper: bool) -> String {
+    if v == 0.0 {
+        return "0".into();
+    }
+    let p = p.clamp(1, MAX_GENERAL_DIGITS);
+    let (mut d, x) = decimal_digits(v, p);
+    while d.len() > 1 && d.last() == Some(&0) {
+        d.pop();
+    }
+    let digit = |b: u8| (b'0' + b) as char;
+    let mut out = String::with_capacity(d.len() + 8);
+    if v < 0.0 {
+        out.push('-');
+    }
+    if x < -4 || x >= p as i32 {
+        out.push(digit(d[0]));
+        if d.len() > 1 {
+            out.push('.');
+            out.extend(d[1..].iter().map(|&b| digit(b)));
+        }
+        out.push(if upper { 'E' } else { 'e' });
+        out.push(if x < 0 { '-' } else { '+' });
+        out.push_str(&format!("{:02}", x.unsigned_abs()));
+    } else if x < 0 {
+        out.push_str("0.");
+        out.extend(std::iter::repeat_n('0', (-x - 1) as usize));
+        out.extend(d.iter().map(|&b| digit(b)));
+    } else {
+        let int_len = x as usize + 1;
+        for i in 0..int_len {
+            out.push(digit(d.get(i).copied().unwrap_or(0)));
+        }
+        if d.len() > int_len {
+            out.push('.');
+            out.extend(d[int_len..].iter().map(|&b| digit(b)));
+        }
+    }
+    out
+}
+
+/// A REAL's text, exactly as SQLite's `CAST(x AS TEXT)` renders it
+/// (`%!.15g`): 15 significant digits, an integral value keeps a `.0`
+/// (`2.0`, `1.0e+20`), infinities are `Inf` / `-Inf`, and negative zero is
+/// `0.0`. NaN, which SQLite turns into NULL, renders as the empty string.
+pub(crate) fn real_text(f: f64) -> String {
+    if f.is_nan() {
+        return String::new();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 { "Inf" } else { "-Inf" }.into();
+    }
+    if f == 0.0 {
+        return "0.0".into();
+    }
+    let mut s = c_general(f, 15, false);
+    if !s.contains('.') {
+        match s.find('e') {
+            Some(at) => s.insert_str(at, ".0"),
+            None => s.push_str(".0"),
+        }
+    }
+    s
+}
+
 /// A non-NULL register's text form, as functions and `||` see it.
 pub(crate) fn text_of(r: &Register) -> String {
     match r {
         Register::String(s) => s.clone(),
         Register::Integer(i) => i.to_string(),
-        Register::Float(f) => f.to_string(),
+        Register::Float(f) => real_text(*f),
         Register::Boolean(b) => (*b as i64).to_string(),
         Register::Null => String::new(),
     }

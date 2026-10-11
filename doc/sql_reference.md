@@ -12,10 +12,24 @@
 
 Type inference on load, per cell: an empty field is NULL; a canonical integer
 (`42`, `-7` -- printing the number gives back the same text) is INTEGER; a
-canonical float (`1.5`, `-0.25`) is REAL; everything else is TEXT, verbatim and
-untrimmed -- including `007`, `1.50`, `1e3`, ` 42`, `true` and `NaN`. Booleans
-are never inferred. The rule guarantees that every loaded cell prints, and is
-written back, exactly as it was read.
+canonical float (`1.5`, `-0.25`, `2.0`, `1.0e+20` -- printing the real, see
+Real output, gives back the same text) is REAL; everything else is TEXT,
+verbatim and untrimmed -- including `007`, `1.50`, `1e3`, `-0.0`,
+`0.30000000000000004` (more digits than a real prints), ` 42`, `true` and
+`NaN`. Booleans are never inferred. The rule guarantees that every loaded cell
+prints, and is written back, exactly as it was read.
+
+### Real output
+
+A REAL prints exactly as SQLite's `CAST(x AS TEXT)` prints it (`%!.15g`): 15
+significant digits, rounded half up; positional notation when the exponent is
+from -4 to 14, else exponent notation with a signed, at least two-digit
+exponent; trailing zeros dropped, but a whole number keeps `.0`. So `0.1 + 0.2`
+is `0.3`, `2.0 * 1` is `2.0`, `1e20` is `1.0e+20`, `1.5e-300` is `1.5e-300`,
+`9223372036854775807 + 1` is `9.22337203685478e+18`, negative zero is `0.0`,
+and the infinities are `Inf` and `-Inf`. The same text is what `||`, string
+functions and `CAST(x AS TEXT)` see, and what `--write` writes for a changed
+cell.
 
 ## SELECT
 
@@ -105,8 +119,10 @@ only with one argument) and a filter: `COUNT(*) FILTER (WHERE age > 30)`
 aggregates only the rows for which the condition is true. Aggregates skip
 NULLs; over no rows COUNT is 0, TOTAL 0.0 and the rest NULL. SUM of integers
 that overflows 64 bits is an `integer overflow` error, as in SQLite (TOTAL and
-AVG carry on in floating point). Text that spells a number is summed as that
-number; other text is skipped.
+AVG carry on in floating point). Real sums use Kahan-Babuska-Neumaier
+compensated summation, as SQLite does, so `SUM` of `0.1`, `0.2`, `0.3` is
+exactly `0.6`. Text that spells a number is summed as that number; other text
+is skipped.
 
 ### String Functions
 
@@ -162,16 +178,16 @@ anything is allocated.
 
 `ROUND(3.14159, 2)` is `3.14`. Halves round away from zero, judged on the
 value actually stored: `ROUND(2.675, 2)` is `2.67`, because 2.675 is stored as
-2.67499999.... A negative `d` rounds to the left of the decimal point, so
-`ROUND(1234.5, -2)` is `1200` (SQLite treats a negative `d` as 0). A `d` that
-is not a number is an error rather than a silent `0`.
+2.67499999.... A negative `d` is treated as 0, as in SQLite:
+`ROUND(1234.5, -2)` is `1235.0`. A `d` that is not a number is an error rather
+than a silent `0`.
 
 `ABS` of an integer is an integer, and `ABS(-9223372036854775808)` is an
 `integer overflow` error. `CEIL` and `FLOOR` return an integer argument
 unchanged. With one argument, `MIN` and `MAX` are the aggregates.
 
-A real that lands on a whole number prints without a decimal part, as
-everywhere else in sqawk: `ROUND(2.0, 2)` is `2`, where SQLite prints `2.0`.
+`ROUND` returns a real, so a whole result prints with `.0` (see Real output):
+`ROUND(2.0, 2)` is `2.0`.
 
 ### Arithmetic
 
@@ -180,13 +196,13 @@ everywhere else in sqawk: `ROUND(2.0, 2)` is `2`, where SQLite prints `2.0`.
 - Integers stay 64-bit integers: `5 / 2` is `2`, `-7 / 2` is `-3` (truncation
   toward zero), `7 % 3` is `1`. Integers beyond 2^53 stay exact.
 - A result that does not fit in 64 bits is computed as a real instead:
-  `9223372036854775807 + 1` is `9223372036854775808.0`.
+  `9223372036854775807 + 1` is the real `9.22337203685478e+18`.
 - A real operand makes the result real (`7.0 / 2` is `3.5`). `%` with a real
   operand takes the remainder of the operands truncated to integers, as a
   real (`5.5 % 2` is `1.0`).
 - Division or remainder by zero is NULL. Any NULL operand gives NULL.
 - Text is read by its longest numeric prefix: `'12abc' + 0` is `12`,
-  `' 5 ' + 1` is `6`, `'1e3' + 0` is the real `1000`, `'abc' + 1` is `1`.
+  `' 5 ' + 1` is `6`, `'1e3' + 0` is the real `1000.0`, `'abc' + 1` is `1`.
 
 ### Conditional and Conversion
 
@@ -513,19 +529,40 @@ NULL and the empty string both print as an empty field.
 Values are typed per cell as they are read, so one column may hold integers,
 floats and text.
 
-When a comparison mixes a number and a string, the string is converted to a
-number if it parses as one, and the two are compared textually otherwise. This
-matches arithmetic, so `x + '1'` and `x > '1'` agree — awk-like rather than
-strict SQL, which suits untyped delimited input. Two strings compare as text.
+Every comparison -- `=`, `<>`, `<`, `<=`, `>`, `>=`, `IS`, `BETWEEN`, `IN`
+with a list, `IN (SELECT ...)`, `CASE x WHEN`, `NULLIF`, JOIN conditions
+(including hash joins), `ORDER BY`, `MIN` / `MAX` and window ordering -- uses
+one rule:
 
-Text that spells a number (`007`, `1.50`, `1e3`, which load as text to keep
-their spelling) is used as that number by arithmetic and by `SUM` and `AVG`.
-Arithmetic reads any text by its numeric prefix (see Arithmetic). In a
-condition (WHERE, `NOT`, `AND`, CASE), text is likewise read as a number, so
+- A value's *numeric reading* is the value itself for an integer or real, and
+  for text the number it spells in full: an optional sign, digits with an
+  optional point, an optional exponent, optionally surrounded by ASCII
+  whitespace (`'007'`, `' 1.5 '`, `'1e3'`, `'+3'`). `'12abc'`, `'0x10'`,
+  `'inf'`, `'NaN'` and `''` have none.
+- Two values that both have a numeric reading compare as numbers, whatever
+  their types -- text against text included: `'10' > '9'`, `'1' = '1.0'`,
+  `'007' = 7`, and integers compare exactly (no rounding through floating
+  point).
+- A number (or numeric-reading text) is less than text without one:
+  `10 < 'abc'`, `'-x' > 10`.
+- Two texts without a numeric reading compare byte by byte (BINARY):
+  `'B' < 'a'`.
+- Any NULL operand makes the comparison UNKNOWN (sorting puts NULLs first).
+
+`<` and `ORDER BY` therefore agree: a column sorts `9, 10, -x, abc`, and
+`WHERE s < '9'` selects nothing from it. `x IN (SELECT ...)` matches exactly the
+rows `x = ...` (and the equivalent JOIN) matches: `'9' IN (SELECT 9)` is 1.
+
+Values equal under this rule but not the same value -- text `'1'` and integer
+`1`, or text `'007'` and `'7'` -- stay apart in `DISTINCT`, `GROUP BY`,
+`UNION` / `INTERSECT` / `EXCEPT` and `COUNT(DISTINCT ...)`, as in SQLite; a
+number sorts before text of equal value, and equal texts by spelling. An
+integer and a real of equal value (`1` and `1.0`) are one value.
+
+Text that spells a number is used as that number by arithmetic and by `SUM`
+and `AVG`. Arithmetic reads any text by its numeric prefix (see Arithmetic). In
+a condition (WHERE, `NOT`, `AND`, CASE), text is likewise read as a number, so
 `'x'` is false and `'1x'` true, as in SQLite.
-`ORDER BY`, `GROUP BY`, `MIN` and `MAX` order such text among the numbers by
-value; values equal as numbers but spelled differently (`7` and `007`) remain
-distinct groups.
 
 ## Writeback
 
@@ -566,12 +603,10 @@ sqawk aims to give SQLite's answers. Where it deliberately does not:
 
 | Area | SQLite | sqawk |
 |------|--------|-------|
-| Column types | Declared affinity converts `'10'` stored in an INTEGER column to 10 | Each cell is typed when read; a text/number comparison converts the text if it is a number (`a = '10'` matches 10) -- awk-like, see Type coercion |
-| Real output | `%!.15g`: `1.0`, `9.22337203685478e+18` | Shortest round-trip digits, no exponent, no `.0`: `1`, `9223372036854775808` |
+| Column types | Declared affinity converts `'10'` stored in an INTEGER column to 10; text compares with text as text (`'10' < '9'`) | Each cell is typed when read; numeric-looking text compares numerically everywhere, text against text included (`a = '10'` matches 10, `'10' > '9'`), see Type coercion |
 | NULL vs `''` | Distinct in output | Both print as an empty field |
 | `UPPER` / `LOWER` | ASCII letters only | All of Unicode |
 | `TRIM(s)` | Strips spaces only | Strips all whitespace |
-| `ROUND(x, -d)` | Negative `d` treated as 0 | Rounds to the left of the point |
 | `SUM` over text | Non-numeric text counts as 0 (result real) | Non-numeric text is skipped |
 | `INSERT OR REPLACE`, `ON CONFLICT` | Plain INSERT when the table has no unique constraint | Rejected: sqawk tables have no keys, so the statement cannot do what it asks |
 | Subqueries in UPDATE / DELETE | A correlated subquery sees rows already changed | Sees the table as it was before the statement |

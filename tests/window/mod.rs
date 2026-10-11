@@ -472,9 +472,9 @@ fn nth_value_percent_rank_cume_dist() -> TestResult {
     check(
         "SELECT id, NTH_VALUE(id, 2) OVER (ORDER BY id) AS n, PERCENT_RANK() OVER (ORDER BY v) AS p, \
          CUME_DIST() OVER (ORDER BY v) AS c FROM w",
-        "id,n,p,c\n1,,0.2857142857142857,0.5\n2,2,0.7142857142857143,0.875\n\
-         3,2,0.7142857142857143,0.875\n4,2,0.14285714285714285,0.25\n5,2,0,0.125\n\
-         6,2,0.5714285714285714,0.625\n7,2,1,1\n8,2,0.2857142857142857,0.5",
+        "id,n,p,c\n1,,0.285714285714286,0.5\n2,2,0.714285714285714,0.875\n\
+         3,2,0.714285714285714,0.875\n4,2,0.142857142857143,0.25\n5,2,0.0,0.125\n\
+         6,2,0.571428571428571,0.625\n7,2,1.0,1.0\n8,2,0.285714285714286,0.5",
     )
 }
 
@@ -568,7 +568,7 @@ fn window_in_expression() -> TestResult {
     check(
         "SELECT id, v * 2 + SUM(v) OVER (PARTITION BY g) AS e, \
          ROUND(AVG(v) OVER (PARTITION BY g ORDER BY id), 1) AS r FROM w",
-        "id,e,r\n7,90,30\n1,80,10\n2,100,15\n3,100,16.7\n8,80,15\n4,30,5\n5,,5\n6,50,10",
+        "id,e,r\n7,90,30.0\n1,80,10.0\n2,100,15.0\n3,100,16.7\n8,80,15.0\n4,30,5.0\n5,,5.0\n6,50,10.0",
     )
 }
 
@@ -623,7 +623,7 @@ fn sum_over_integers_stays_integer() -> TestResult {
     )?;
     check(
         "SELECT AVG(v) OVER (PARTITION BY g) AS a FROM w WHERE g = 'b'",
-        "a\n10\n10\n10",
+        "a\n10.0\n10.0\n10.0",
     )
 }
 

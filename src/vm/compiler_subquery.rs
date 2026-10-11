@@ -128,8 +128,9 @@ impl<'a> SqlCompiler<'a> {
 
     /// Compile `lhs [NOT] IN (SELECT ...)` into `dest`.
     ///
-    /// The subquery's rows are materialized into a keyed ephemeral table and
-    /// `lhs` is probed with `Found`, with SQL's three-valued result: over an
+    /// The subquery's rows are materialized into an ephemeral table keyed as
+    /// `=` compares (numeric-looking text as its number) and `lhs` is probed
+    /// with `Found`, with SQL's three-valued result: over an
     /// empty set IN is 0 (NOT IN 1) even for a NULL `lhs`; otherwise a NULL
     /// `lhs` gives NULL, a hit 1, and a miss NULL if the set holds a NULL,
     /// else 0.
@@ -158,11 +159,13 @@ impl<'a> SqlCompiler<'a> {
                 nonempty,
             },
             &mut |c| {
+                // P3 = 2: keyed as `=` compares, so `'9' IN (SELECT 9)`
+                // agrees with `'9' = 9` and with a join on the same values.
                 c.emit(
                     OpCode::OpenEphemeral,
                     set,
                     1,
-                    1,
+                    2,
                     None,
                     "IN (SELECT ...) set",
                 );

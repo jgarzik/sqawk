@@ -144,7 +144,7 @@ mod sqlite_semantics {
             &[ONE],
             "SELECT 7/2 AS a, -7/2 AS b, 7%3 AS c, -7%3 AS d, 7%-3 AS e, 7.0/2 AS f, \
              5.5%2 AS h, -7.5%2 AS i FROM one",
-            "a,b,c,d,e,f,h,i\n3,-3,1,-1,1,3.5,1,-1",
+            "a,b,c,d,e,f,h,i\n3,-3,1,-1,1,3.5,1.0,-1.0",
         )
     }
 
@@ -190,7 +190,7 @@ mod sqlite_semantics {
             &[ONE],
             "SELECT '12abc' + 0 AS a, ' 5 ' + 1 AS b, 'abc' + 1 AS c, '1e3' + 0 AS d, \
              typeof('1e3' + 0) AS e, '007' + 0 AS f, '3.9x' * 2 AS g FROM one",
-            "a,b,c,d,e,f,g\n12,6,1,1000,real,7,7.8",
+            "a,b,c,d,e,f,g\n12,6,1,1000.0,real,7,7.8",
         )
     }
 
@@ -201,7 +201,7 @@ mod sqlite_semantics {
             "SELECT k, a/2 AS h, a%3 AS m, a/b AS q, a%b AS r, b*2 AS d, typeof(a/2) AS ta, \
              typeof(b*2) AS tb FROM t",
             "k,h,m,q,r,d,ta,tb\n\
-             1,3,1,2.8,1,5,integer,real\n\
+             1,3,1,2.8,1.0,5.0,integer,real\n\
              2,-3,-1,,,,integer,null\n\
              3,5,1,,,0,integer,integer",
         )
