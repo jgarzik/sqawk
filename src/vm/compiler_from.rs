@@ -378,6 +378,33 @@ fn collect_sources(expr: &Expr, ctx: &NameCtx<'_>, out: &mut Vec<usize>) -> Opti
     }
 }
 
+/// Whether `exprs` read at least one column and every column they read
+/// belongs to an enclosing query. An expression that cannot be analyzed (a
+/// subquery, an unresolvable name) does not count.
+pub(crate) fn reads_only_outer(exprs: &[Expr], ctx: &NameCtx<'_>) -> bool {
+    fn walk(expr: &Expr, ctx: &NameCtx<'_>, read_any: &mut bool) -> Option<()> {
+        let name = match expr {
+            Expr::Identifier(ident) => Some((None, &ident.value)),
+            Expr::CompoundIdentifier(parts) if parts.len() >= 2 => Some((
+                Some(parts[parts.len() - 2].value.as_str()),
+                &parts[parts.len() - 1].value,
+            )),
+            _ => None,
+        };
+        if let Some((qualifier, name)) = name {
+            let (_, depth) = ctx.lookup(qualifier, name).ok()?;
+            *read_any = true;
+            return (depth > 0).then_some(());
+        }
+        for child in expr_children(expr)? {
+            walk(child, ctx, read_any)?;
+        }
+        Some(())
+    }
+    let mut read_any = false;
+    exprs.iter().all(|e| walk(e, ctx, &mut read_any).is_some()) && read_any
+}
+
 /// Whether `expr` reads a column of an enclosing query. Unanalyzable
 /// expressions (subqueries and the like) count as doing so.
 fn mentions_outer(expr: &Expr, ctx: &NameCtx<'_>) -> bool {

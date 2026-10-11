@@ -163,8 +163,8 @@ impl<'a> SqlCompiler<'a> {
 
         // Get table name
         let table_with_joins = &from[0];
-        let table_name = match &table_with_joins.relation {
-            TableFactor::Table { name, .. } => self.get_table_name(name)?,
+        let (table_name, alias) = match &table_with_joins.relation {
+            TableFactor::Table { name, alias, .. } => (self.get_table_name(name)?, alias.as_ref()),
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(
                     "Only simple table references are supported in DELETE".to_string(),
@@ -207,7 +207,9 @@ impl<'a> SqlCompiler<'a> {
         // If there's a WHERE clause, check if row matches
         if let Some(where_expr) = selection {
             // Compile WHERE condition using table context
-            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table, cursor_idx), None)?;
+            let alias = alias.map(|a| a.name.value.as_str());
+            let ctx = NameCtx::aliased(table, cursor_idx, alias);
+            let cond_reg = self.code_expr(where_expr, &ctx, None)?;
 
             // If condition is false (0), skip to next row
             let skip_addr = self.program.len();
@@ -277,8 +279,11 @@ impl<'a> SqlCompiler<'a> {
         selection: Option<&Expr>,
     ) -> SqawkResult<()> {
         // Get table name
-        let table_name = match &table.relation {
-            TableFactor::Table { name, .. } => self.get_table_name(name)?,
+        let (table_name, alias) = match &table.relation {
+            TableFactor::Table { name, alias, .. } => (
+                self.get_table_name(name)?,
+                alias.as_ref().map(|a| a.name.value.as_str()),
+            ),
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(
                     "Only simple table references are supported in UPDATE".to_string(),
@@ -343,7 +348,8 @@ impl<'a> SqlCompiler<'a> {
         // If there's a WHERE clause, check if row matches
         let skip_addr = if let Some(where_expr) = selection {
             // Compile WHERE condition using table context
-            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table_ref, 0), None)?;
+            let cond_reg =
+                self.code_expr(where_expr, &NameCtx::aliased(table_ref, 0, alias), None)?;
 
             // If condition is false (0), skip to next row
             let addr = self.program.len();
@@ -369,7 +375,7 @@ impl<'a> SqlCompiler<'a> {
         // Reading through a Column op against the cursor yields the ORIGINAL
         // row value, which is the required semantics -- every RHS is evaluated
         // against the row as it was before any assignment in this statement.
-        let update_ctx = NameCtx::single(table_ref, 0);
+        let update_ctx = NameCtx::aliased(table_ref, 0, alias);
         for (col_idx, expr) in &assignment_map {
             self.code_expr(expr, &update_ctx, Some((base_reg + *col_idx) as i64))?;
         }

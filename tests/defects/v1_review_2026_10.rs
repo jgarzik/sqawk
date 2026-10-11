@@ -320,7 +320,6 @@ fn repl_tables(pattern: &str) -> Result<Vec<String>, Box<dyn std::error::Error>>
 
 /// `zz` names no table in FROM, yet `zz.k` resolves to `d.k`.
 #[test]
-#[ignore]
 fn unknown_qualifier_is_error() -> TestResult {
     assert_query_on_fails(&[D], "SELECT zz.k AS v FROM d", "no such column: zz.k")
 }
@@ -328,7 +327,6 @@ fn unknown_qualifier_is_error() -> TestResult {
 /// An UPDATE whose WHERE names an unknown qualifier updates rows and writes
 /// them back. It must fail and leave the file unchanged.
 #[test]
-#[ignore]
 fn unknown_qualifier_in_update_is_error() -> TestResult {
     assert_write_refused(
         "d.csv",
@@ -339,7 +337,6 @@ fn unknown_qualifier_in_update_is_error() -> TestResult {
 
 /// `zz.*` with no table `zz` expands to `d.*` (star expansion, compiler.rs ~897).
 #[test]
-#[ignore]
 fn unknown_qualifier_star_is_error() -> TestResult {
     assert_query_on_fails(&[D], "SELECT zz.* FROM d", "zz")
 }
@@ -348,7 +345,6 @@ fn unknown_qualifier_star_is_error() -> TestResult {
 /// without the correlation (`materialize_in_factor`, vm/mod.rs ~409), so every
 /// row gets max(v) over all of `b` (9, 9). It must be rejected.
 #[test]
-#[ignore]
 fn correlated_derived_table_is_error() -> TestResult {
     let out = run_sqls(
         &[A, B],
@@ -375,14 +371,12 @@ fn aliased_update_target_resolves() -> TestResult {
 
 /// A schema qualifier other than `main` is silently ignored: `foo.d` reads `d`.
 #[test]
-#[ignore]
 fn unknown_schema_is_error() -> TestResult {
     assert_query_on_fails(&[D], "SELECT * FROM foo.d", "foo")
 }
 
 /// `UPDATE foo.d` updates `d` and writes it back. It must fail, file unchanged.
 #[test]
-#[ignore]
 fn unknown_schema_in_update_is_error() -> TestResult {
     assert_write_refused("d.csv", D.1.as_bytes(), &["UPDATE foo.d SET n = 5"])
 }
@@ -544,7 +538,6 @@ fn distinct_and_group_by_keep_text_and_integer_apart() -> TestResult {
 /// `MIN(d.n)` inside a subquery over `b` aggregates only outer columns; sqawk
 /// returns NULL for every row. It must be a clean error.
 #[test]
-#[ignore]
 fn outer_only_aggregate_in_subquery_is_error() -> TestResult {
     let out = run_sqls(
         &[D, B],

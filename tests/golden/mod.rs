@@ -11,7 +11,7 @@
 //!
 //! Known-wrong behaviour is NOT pinned here -- it lives in `tests/defects/`.
 
-use crate::helpers::{assert_query, assert_query_on, ONE};
+use crate::helpers::{assert_query, assert_query_on, assert_query_on_fails, ONE};
 
 #[test]
 fn select_star() -> Result<(), Box<dyn std::error::Error>> {
@@ -1189,7 +1189,7 @@ fn err_unknown_column() -> Result<(), Box<dyn std::error::Error>> {
     assert_query_fails(
         &["tests/data/employees.csv"],
         "SELECT nosuchcolumn FROM employees",
-        "not found",
+        "no such column: nosuchcolumn",
     )
 }
 
@@ -1198,7 +1198,7 @@ fn err_unknown_table() -> Result<(), Box<dyn std::error::Error>> {
     assert_query_fails(
         &["tests/data/employees.csv"],
         "SELECT name FROM nosuchtable",
-        "not found",
+        "no such table: nosuchtable",
     )
 }
 
@@ -1233,7 +1233,7 @@ fn err_order_by_all_rejected() -> Result<(), Box<dyn std::error::Error>> {
     assert_query_fails(
         &["tests/data/employees.csv"],
         "SELECT name FROM employees ORDER BY ALL",
-        "not found",
+        "no such column: ALL",
     )
 }
 
@@ -2025,7 +2025,7 @@ fn derived_table_does_not_outlive_its_statement() -> Result<(), Box<dyn std::err
     assert_query_fails(
         &["tests/data/employees.csv"],
         "SELECT name FROM (SELECT name FROM employees) t; SELECT name FROM t",
-        "not found",
+        "no such table: t",
     )
 }
 
@@ -2696,5 +2696,90 @@ fn compound_keeps_sqlite_value() -> Result<(), Box<dyn std::error::Error>> {
         &[ONE],
         "SELECT 1 AS v INTERSECT SELECT 1.0 UNION ALL SELECT 2.0 INTERSECT SELECT 2",
         "v\n2.0",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Name resolution: a qualifier must name a FROM source as it is known there
+// (its alias when it has one); `main` is the only schema.
+// ---------------------------------------------------------------------------
+
+const NAMES_D: (&str, &str) = ("d.csv", "k,n\n1,10\n2,20\n");
+
+#[test]
+fn qualifier_must_name_a_source() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on_fails(&[NAMES_D], "SELECT zz.k FROM d", "no such column: zz.k")?;
+    // An aliased table is known only by its alias, as in SQLite.
+    assert_query_on_fails(
+        &[NAMES_D],
+        "SELECT k FROM d x WHERE d.k = 1",
+        "no such column: d.k",
+    )?;
+    assert_query_on_fails(&[NAMES_D], "SELECT d.* FROM d x", "no such table: d")?;
+    assert_query_on_fails(
+        &[NAMES_D],
+        "DELETE FROM d WHERE zz.k = 1",
+        "no such column: zz.k",
+    )?;
+    assert_query_on(&[NAMES_D], "SELECT x.k FROM d x WHERE x.n = 20", "k\n2")
+}
+
+#[test]
+fn delete_target_alias_resolves() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[NAMES_D],
+        "DELETE FROM d AS x WHERE x.k = 1; SELECT * FROM d",
+        "k,n\n2,20",
+    )?;
+    assert_query_on(
+        &[NAMES_D],
+        "UPDATE d AS x SET n = x.n + 1 WHERE x.k = 2; SELECT * FROM d",
+        "k,n\n1,10\n2,21",
+    )
+}
+
+#[test]
+fn main_schema_qualifier() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[NAMES_D],
+        "SELECT main.d.k, MAIN.d.n FROM main.d WHERE main.d.k = 2",
+        "k,n\n2,20",
+    )?;
+    assert_query_on(&[NAMES_D], "SELECT main.d.* FROM d", "k,n\n1,10\n2,20")?;
+    assert_query_on(
+        &[NAMES_D],
+        "UPDATE main.d SET n = 0 WHERE k = 1; SELECT n FROM d",
+        "n\n0\n20",
+    )?;
+    assert_query_on_fails(&[NAMES_D], "SELECT * FROM foo.d", "no such table: foo.d")?;
+    assert_query_on_fails(
+        &[NAMES_D],
+        "SELECT foo.d.k FROM d",
+        "no such column: foo.d.k",
+    )?;
+    assert_query_on_fails(&[NAMES_D], "SELECT foo.d.* FROM d", "no such table: foo.d")?;
+    assert_query_on_fails(&[NAMES_D], "DROP TABLE foo.d", "no such table: foo.d")?;
+    assert_query_on_fails(
+        &[NAMES_D],
+        "INSERT INTO foo.d VALUES (3, 30)",
+        "no such table: foo.d",
+    )
+}
+
+/// An aggregate whose arguments read only outer-query columns is rejected;
+/// one that also reads an inner column aggregates in the subquery.
+#[test]
+fn outer_only_aggregate_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    let e = ("e.csv", "v\n5\n15\n");
+    assert_query_on_fails(
+        &[NAMES_D, e],
+        "SELECT k, (SELECT MIN(d.n) FROM e) FROM d",
+        "aggregate of outer-query columns is not supported",
+    )?;
+    assert_query_on(
+        &[NAMES_D, e],
+        "SELECT k, (SELECT MIN(d.n + e.v) FROM e) AS m, \
+         (SELECT COUNT(*) FROM e WHERE e.v > d.n) AS c FROM d",
+        "k,m,c\n1,15,1\n2,25,0",
     )
 }

@@ -19,7 +19,7 @@ use sqlparser::ast::{
 use super::ast_compat::{func_args, group_by_exprs};
 use super::bytecode::{OpCode, AGG_DISTINCT, AGG_SEP, AGG_TYPE_MASK};
 use super::compiler::{NameCtx, OutCol, SqlCompiler};
-use super::compiler_from::{expr_children, FromPlan};
+use super::compiler_from::{expr_children, reads_only_outer, FromPlan};
 use super::compiler_select::{Dest, OutputStage};
 use super::compiler_window::{window_call_children, WindowStage};
 use crate::aggregate::AggregateFunction;
@@ -239,6 +239,18 @@ impl<'a> SqlCompiler<'a> {
             .into_iter()
             .map(Self::describe_aggregate)
             .collect::<SqawkResult<Vec<_>>>()?;
+        // SQLite evaluates an aggregate whose arguments read only columns of
+        // an enclosing query in that enclosing query, turning it into an
+        // aggregate query. sqawk aggregates where the call is written, which
+        // would silently give a different answer, so the call is rejected.
+        for agg in &aggs {
+            if reads_only_outer(&agg.args, &ctx) {
+                return Err(SqawkError::UnsupportedSqlFeature(format!(
+                    "aggregate of outer-query columns is not supported: {}",
+                    agg.call
+                )));
+            }
+        }
         let group = Group {
             plan,
             having: select.having.as_ref(),

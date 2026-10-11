@@ -74,13 +74,13 @@ impl fmt::Display for SqawkError {
                 write!(f, "CSV parse error in {} at line {}: {}", file, line, error)
             }
             SqawkError::SqlParseError(e) => write!(f, "SQL parsing error: {}", e),
-            SqawkError::TableNotFound(name) => write!(f, "Table '{}' not found", name),
+            SqawkError::TableNotFound(name) => write!(f, "no such table: {}", name),
             SqawkError::TableAlreadyExists(name) => write!(f, "Table '{}' already exists", name),
             SqawkError::FileNotFound(path) => write!(f, "File not found: {}", path),
             SqawkError::NoFilePath(name) => {
                 write!(f, "Table '{}' has no associated file path", name)
             }
-            SqawkError::ColumnNotFound(name) => write!(f, "Column '{}' not found", name),
+            SqawkError::ColumnNotFound(name) => write!(f, "no such column: {}", name),
             SqawkError::InvalidFileSpec(spec) => write!(f, "Invalid file specification: {}", spec),
             SqawkError::UnsupportedSqlFeature(feature) => {
                 write!(f, "Unsupported SQL feature: {}", feature)

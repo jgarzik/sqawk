@@ -49,7 +49,8 @@ FROM table [alias] [, table2 ...]
 ```sql
 SELECT *                        -- all columns
 SELECT col1, col2               -- specific columns
-SELECT table.col                -- qualified
+SELECT table.col                -- qualified (by the alias, if the table has one)
+SELECT main.table.col           -- `main` is the one schema; any other is an error
 SELECT col AS alias             -- aliased
 SELECT col alias                -- alias without AS
 ```
@@ -610,6 +611,8 @@ sqawk aims to give SQLite's answers. Where it deliberately does not:
 | `SUM` over text | Non-numeric text counts as 0 (result real) | Non-numeric text is skipped |
 | `INSERT OR REPLACE`, `ON CONFLICT` | Plain INSERT when the table has no unique constraint | Rejected: sqawk tables have no keys, so the statement cannot do what it asks |
 | Subqueries in UPDATE / DELETE | A correlated subquery sees rows already changed | Sees the table as it was before the statement |
+| Aggregate of outer-query columns in a subquery (`(SELECT MIN(t.x) FROM u)`) | Evaluated in the outer query, which becomes an aggregate query | Rejected; an aggregate that also reads a column of the subquery's own tables aggregates in the subquery, as in SQLite |
+| Derived table (`FROM (SELECT ...)`) reading an outer-query column | Correlated | Rejected (`no such column`): a derived table is computed once, before the statement |
 | `ILIKE`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `TRIM(... FROM ...)` | Not available | Available |
 | `localtime` date modifier | Local time zone | Error (UTC only) |
 | Parser | SQLite grammar | sqlparser's Hive dialect with SQLite's operator precedence: `GLOB`, `REGEXP`, `LIMIT n, m`, `TRIM(s, chars)`, `REPLACE INTO` do not parse |

@@ -106,6 +106,7 @@ fn normalize(statement: &mut Statement) -> SqawkResult<()> {
                 if d > MAX_EXPR_DEPTH {
                     return Err(too_deep());
                 }
+                strip_main_schema(e)?;
                 push_expr_children(e, d + 1, &mut stack);
             }
             Node::Query(q, d) => {
@@ -292,6 +293,23 @@ fn push_function_args<'a>(args: &'a mut FunctionArguments, d: usize, stack: &mut
 
 /// Push the children of `e`, each at depth `d`. A subquery's expressions
 /// continue from `d`, so nesting through subqueries counts too.
+/// `main.t.c` is `t.c`: every table lives in SQLite's `main` schema. Any
+/// other three-part name, or a longer one, names no column.
+fn strip_main_schema(e: &mut Expr) -> SqawkResult<()> {
+    let Expr::CompoundIdentifier(parts) = e else {
+        return Ok(());
+    };
+    if parts.len() <= 2 {
+        return Ok(());
+    }
+    if parts.len() == 3 && parts[0].value.eq_ignore_ascii_case("main") {
+        parts.remove(0);
+        return Ok(());
+    }
+    let name: Vec<&str> = parts.iter().map(|p| p.value.as_str()).collect();
+    Err(SqawkError::ColumnNotFound(name.join(".")))
+}
+
 fn push_expr_children<'a>(e: &'a mut Expr, d: usize, stack: &mut Vec<Node<'a>>) {
     let push = |stack: &mut Vec<Node<'a>>, e: &'a mut Expr| stack.push(Node::Expr(e, d));
     match e {

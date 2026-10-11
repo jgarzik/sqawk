@@ -858,7 +858,7 @@ worth planning for with large files:
 
 **Common Issues and Solutions:**
 
-1. **"Table not found" error**:
+1. **"no such table" error**:
    - Check that the filename matches the table name in your SQL
    - If using custom table names, verify the syntax: `tablename=filename.csv`
    - Ensure file paths are correct and files are accessible

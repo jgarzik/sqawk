@@ -194,6 +194,25 @@ pub(crate) fn sql_option_key_value(option: &SqlOption) -> Option<(String, String
     }
 }
 
+/// The table an `ObjectName` names in a table position: `t` or `main.t`.
+///
+/// Every table lives in SQLite's `main` schema (matched case-insensitively),
+/// so that is the one schema qualifier accepted; any other schema, or a
+/// catalog, names a table that does not exist.
+pub(crate) fn main_table_name(name: &ObjectName) -> SqawkResult<String> {
+    match name.0.as_slice() {
+        [_] => Ok(object_name_last(name)),
+        [schema, _]
+            if schema
+                .as_ident()
+                .is_some_and(|i| i.value.eq_ignore_ascii_case("main")) =>
+        {
+            Ok(object_name_last(name))
+        }
+        _ => Err(SqawkError::TableNotFound(name.to_string())),
+    }
+}
+
 /// The final segment of an `ObjectName` -- the bare table or function name.
 pub(crate) fn object_name_last(name: &ObjectName) -> String {
     match name.0.last() {
