@@ -77,8 +77,22 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
 - `compiler_subquery.rs`: scalar / EXISTS / IN subqueries, compiled by the
   same query compiler as fragments of the enclosing program (`Once` when
   uncorrelated; correlation found by `NameCtx` outward resolution)
+- `compiler_check.rs`: rejects every parsed clause sqawk does not implement
+  (RETURNING, ON CONFLICT, UPDATE FROM, WITH, QUALIFY, ...) before
+  compilation; INSERT/UPDATE/DELETE/Query/Select are destructured
+  exhaustively so a new sqlparser field fails to compile until handled
 - `ast_compat.rs`: thin accessors normalizing sqlparser AST shapes
 - `engine.rs`: Executes bytecode instructions
+- `arith.rs`: SQLite numeric semantics -- text-to-number coercion, i64
+  arithmetic with overflow to real, CAST, truth values
+- `func.rs`: the scalar function table (`FuncDef`: name, arity, body) run by
+  the `Function` opcode (SQLite's OP_Function); arity is checked at compile
+  time. Lazy functions (COALESCE, IFNULL, IIF, NULLIF) are compiled to jumps
+- `datetime.rs`: DATE/TIME/DATETIME/STRFTIME/... (SQLite time strings and
+  modifiers, UTC)
+- `like.rs`: the LIKE matcher (no regex; compiled pattern cached per
+  instruction)
+- `agg.rs`: aggregate accumulators shared by AggStep/AggFinal and windows
 
 Each statement is compiled and executed separately, so a statement observes the
 effects of the ones before it.
@@ -94,10 +108,14 @@ effects of the ones before it.
 
 ### SQL Features
 
-Expression compilation, including all scalar and string functions, lives in
-`src/vm/compiler.rs` behind `code_expr`. Aggregates are compiled in
-`src/vm/compiler_aggregate.rs` and executed by the `AggStep`/`AggFinal`
-opcodes; `src/aggregate.rs` retains only the function-name lookup.
+Expression compilation lives in `src/vm/compiler.rs` behind `code_expr`;
+scalar functions are looked up in `src/vm/func.rs` and called through the
+`Function` opcode. Aggregates (including FILTER and GROUP_CONCAT's separator)
+are compiled in `src/vm/compiler_aggregate.rs` and executed by the
+`AggStep`/`AggFinal` opcodes over `src/vm/agg.rs` accumulators;
+`src/aggregate.rs` retains only the function-name lookup and arity. Semantics
+follow SQLite 3.45; deliberate differences are listed in
+`doc/sql_reference.md` ("Differences from SQLite").
 
 ### Safe Writeback Model
 
@@ -107,6 +125,7 @@ By default, all modifications remain in memory only. The `--write` flag must be 
 
 Tests are in `tests/` organized by functionality:
 - `basic/`, `comparison/`, `join/`, `join_on/`, `order_by/`, `update/`
+- `unsupported/`: parsed-but-unimplemented syntax must error and modify nothing
 - `aggregate/`, `alias/`, `distinct/`, `group_by/`, `limit_offset/`
 - `delimiter/`, `csv_handler/`, `string_functions/`, `repl/`
 - `helpers/`: Test utilities

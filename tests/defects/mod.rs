@@ -4,11 +4,11 @@
 //! found in that audit. Each was `#[ignore]`d when written, because sqawk got
 //! it wrong, and un-ignored as it was fixed.
 //!
-//! Every 2026-08 test here now passes; they serve as regression cover for
-//! those defects rather than as a to-do list. The live red list is the
-//! `audit_2026_10` submodule (defects from the 2026-10 audit). Add a new
-//! `#[ignore]`d test when a defect is found, and remove the attribute when it
-//! is fixed.
+//! Every 2026-08 test here now passes, and so does every test of the
+//! `audit_2026_10` submodule (defects from the 2026-10 audit): the red list is
+//! EMPTY. Both serve as regression cover rather than as a to-do list. Add a
+//! new `#[ignore]`d test when a defect is found, and remove the attribute when
+//! it is fixed.
 //!
 //! Run the red list with:
 //!     cargo test --test mod defects -- --ignored

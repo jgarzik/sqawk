@@ -1,11 +1,14 @@
-//! Red list from the 2026-10 audit.
+//! Regression cover for the defects found in the 2026-10 audit.
 //!
 //! Every test in this module encodes **correct** behaviour for a defect found
-//! in the 2026-10 audit, and each is `#[ignore]`d until its defect is fixed.
-//! When a fix lands, remove the `#[ignore]` on the tests it turns green; the
-//! list only shrinks.
+//! in the 2026-10 audit. Each was `#[ignore]`d when written and un-ignored as
+//! its defect was fixed. All of them now pass: the red list is empty again,
+//! and these tests guard against regressions. Two tests were rewritten when
+//! the feature they rejected was implemented instead (`aggregate_filter_clause`
+//! and `order_by_nulls_first_last`, which used to assert an error).
 //!
-//! Run the red list with:
+//! A newly found defect gets a new `#[ignore]`d test here (or in a new audit
+//! module); remove the attribute when it is fixed. Run the red list with:
 //!     cargo test --test mod defects -- --ignored
 //!
 //! Expected outputs were computed by loading the same data into SQLite
@@ -942,8 +945,8 @@ fn correlated_scalar_unaliased_outer_table() -> TestResult {
     )
 }
 
-/// `DELETE t FROM t JOIN u ...` (multi-table DELETE) is accepted and deletes
-/// every row of `users`; must be rejected.
+/// `DELETE t FROM t JOIN u ...` (multi-table DELETE) was accepted and deleted
+/// every row of `users`; now rejected.
 #[test]
 fn delete_with_join_is_error() -> TestResult {
     assert_query_fails(
@@ -1011,7 +1014,8 @@ fn order_by_nulls_first_last() -> TestResult {
     )
 }
 
-/// `INSERT ... RETURNING` performs the insert and emits nothing.
+/// `INSERT ... RETURNING` performed the insert and emitted nothing; now
+/// rejected.
 #[test]
 fn insert_returning_is_error() -> TestResult {
     assert_query_fails(
@@ -1021,7 +1025,7 @@ fn insert_returning_is_error() -> TestResult {
     )
 }
 
-/// `INSERT ... ON CONFLICT DO NOTHING` is silently ignored.
+/// `INSERT ... ON CONFLICT DO NOTHING` was silently ignored; now rejected.
 #[test]
 fn insert_on_conflict_is_error() -> TestResult {
     assert_query_fails(
@@ -1031,7 +1035,8 @@ fn insert_on_conflict_is_error() -> TestResult {
     )
 }
 
-/// `INSERT OR REPLACE` is treated as a plain INSERT.
+/// `INSERT OR REPLACE` was treated as a plain INSERT; now rejected (sqawk
+/// tables have no keys to replace on).
 #[test]
 fn insert_or_replace_is_error() -> TestResult {
     assert_query_fails(
@@ -1041,7 +1046,7 @@ fn insert_or_replace_is_error() -> TestResult {
     )
 }
 
-/// `UPDATE ... FROM` silently ignores the FROM clause.
+/// `UPDATE ... FROM` silently ignored the FROM clause; now rejected.
 #[test]
 fn update_from_is_error() -> TestResult {
     assert_query_fails(
@@ -1051,7 +1056,7 @@ fn update_from_is_error() -> TestResult {
     )
 }
 
-/// `DELETE ... USING` silently ignores the USING clause.
+/// `DELETE ... USING` silently ignored the USING clause; now rejected.
 #[test]
 fn delete_using_is_error() -> TestResult {
     assert_query_fails(
@@ -1113,7 +1118,7 @@ fn percent_rank_function() -> TestResult {
 // ---------------------------------------------------------------------------
 
 /// Integer division and modulo: `5 / 2` is 2 and `-7 / 2` is -3 (truncating),
-/// not 2.5 / -3.5 (Divide always produces a float in engine.rs).
+/// not 2.5 / -3.5 (Divide always produced a float; fixed in vm/arith.rs).
 #[test]
 fn integer_division_truncates() -> TestResult {
     assert_query(
@@ -1133,7 +1138,7 @@ fn integer_division_in_where() -> TestResult {
     )
 }
 
-/// i64 overflow saturates at i64::MAX; SQLite promotes to REAL, so the sum
+/// i64 overflow saturated at i64::MAX; SQLite promotes to REAL, so the sum
 /// compares greater than i64::MAX.
 #[test]
 fn integer_overflow_promotes_to_float() -> TestResult {
@@ -1144,7 +1149,7 @@ fn integer_overflow_promotes_to_float() -> TestResult {
     )
 }
 
-/// Integer arithmetic goes through f64, losing precision above 2^53.
+/// Integer arithmetic went through f64, losing precision above 2^53.
 #[test]
 fn large_integer_arithmetic_is_exact() -> TestResult {
     assert_query(
@@ -1154,7 +1159,7 @@ fn large_integer_arithmetic_is_exact() -> TestResult {
     )
 }
 
-/// CAST(text AS INTEGER) yields 0 unless the whole string is an integer;
+/// CAST(text AS INTEGER) yielded 0 unless the whole string was an integer;
 /// SQLite takes the longest numeric prefix ('3.9' -> 3, '12abc' -> 12).
 #[test]
 fn cast_text_to_integer_uses_numeric_prefix() -> TestResult {
@@ -1176,7 +1181,7 @@ fn inserted_float_literal_is_numeric() -> TestResult {
     )
 }
 
-/// LIKE is case-sensitive; SQLite's LIKE is ASCII case-insensitive.
+/// LIKE was case-sensitive; SQLite's LIKE is ASCII case-insensitive.
 #[test]
 fn like_is_ascii_case_insensitive() -> TestResult {
     assert_query(
@@ -1186,7 +1191,7 @@ fn like_is_ascii_case_insensitive() -> TestResult {
     )
 }
 
-/// LIKE ... ESCAPE is ignored, so an escaped `%` never matches literally.
+/// LIKE ... ESCAPE was ignored, so an escaped `%` never matched literally.
 #[test]
 fn like_escape_percent() -> TestResult {
     assert_query_on(
@@ -1206,7 +1211,7 @@ fn like_escape_underscore() -> TestResult {
     )
 }
 
-/// `x || NULL` returns `x`; it must be NULL.
+/// `x || NULL` returned `x`; it must be NULL.
 #[test]
 fn concat_with_null_is_null() -> TestResult {
     assert_query(
@@ -1216,7 +1221,7 @@ fn concat_with_null_is_null() -> TestResult {
     )
 }
 
-/// LENGTH counts bytes, not characters.
+/// LENGTH counted bytes, not characters.
 #[test]
 fn length_counts_characters() -> TestResult {
     assert_query(
@@ -1226,8 +1231,8 @@ fn length_counts_characters() -> TestResult {
     )
 }
 
-/// SUBSTR with a negative start returns '' (must count from the end) and a
-/// zero start does not shrink the length as SQLite does.
+/// SUBSTR with a negative start returned '' (must count from the end) and a
+/// zero start did not shrink the length as SQLite does.
 #[test]
 fn substr_negative_and_zero_start() -> TestResult {
     assert_query(
@@ -1237,8 +1242,8 @@ fn substr_negative_and_zero_start() -> TestResult {
     )
 }
 
-/// CURRENT_DATE returns the wrong date (a hand-rolled epoch-to-civil
-/// conversion in the date functions); must equal today's UTC date.
+/// CURRENT_DATE returned the wrong date (a hand-rolled epoch-to-civil
+/// conversion with 365-day years); must equal today's UTC date.
 #[test]
 fn current_date_is_today() -> TestResult {
     assert_query(
@@ -1439,7 +1444,7 @@ fn having_aggregate_not_in_select() -> TestResult {
     )
 }
 
-/// GROUP_CONCAT is unsupported. Output is RFC 4180 quoted because the value
+/// GROUP_CONCAT was unsupported; now implemented. Output is RFC 4180 quoted because the value
 /// contains the delimiter.
 #[test]
 fn group_concat() -> TestResult {
@@ -1450,7 +1455,7 @@ fn group_concat() -> TestResult {
     )
 }
 
-/// IFNULL is unsupported.
+/// IFNULL was unsupported; now implemented.
 #[test]
 fn ifnull_function() -> TestResult {
     assert_query(
@@ -1460,7 +1465,7 @@ fn ifnull_function() -> TestResult {
     )
 }
 
-/// IIF is unsupported.
+/// IIF was unsupported; now implemented.
 #[test]
 fn iif_function() -> TestResult {
     assert_query(
@@ -1470,7 +1475,7 @@ fn iif_function() -> TestResult {
     )
 }
 
-/// INSTR is unsupported.
+/// INSTR was unsupported; now implemented.
 #[test]
 fn instr_function() -> TestResult {
     assert_query(
@@ -1480,7 +1485,7 @@ fn instr_function() -> TestResult {
     )
 }
 
-/// TYPEOF is unsupported.
+/// TYPEOF was unsupported; now implemented.
 #[test]
 fn typeof_function() -> TestResult {
     assert_query(
@@ -1491,8 +1496,8 @@ fn typeof_function() -> TestResult {
 }
 
 /// LPAD/RPAD are documented in doc/sql_reference.md ("Left-pad to length",
-/// "Right-pad to length") but unsupported. SQLite lacks them; expected values
-/// follow the documented semantics.
+/// "Right-pad to length") but were unsupported; now implemented. SQLite lacks
+/// them; expected values follow the documented (PostgreSQL) semantics.
 #[test]
 fn lpad_rpad_functions() -> TestResult {
     assert_query(

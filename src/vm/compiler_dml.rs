@@ -7,6 +7,7 @@ use sqlparser::ast::{Expr, SetExpr, TableFactor};
 use super::ast_compat::assignment_column;
 use super::bytecode::{OpCode, ResultSchema};
 use super::compiler::{InsertTarget, NameCtx, SqlCompiler};
+use super::compiler_check::check_query;
 use super::compiler_select::Sink;
 use crate::error::{SqawkError, SqawkResult};
 
@@ -42,7 +43,14 @@ impl<'a> SqlCompiler<'a> {
         // Handle different source types: VALUES or SELECT
         match &*source.body {
             SetExpr::Values(values) => {
-                // INSERT ... VALUES
+                // INSERT ... VALUES. Query-level clauses on a VALUES list
+                // (`VALUES ... ORDER BY ... LIMIT ...`) are not honoured.
+                check_query(source)?;
+                if source.order_by.is_some() || source.limit_clause.is_some() {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "ORDER BY / LIMIT on INSERT ... VALUES is not supported".into(),
+                    ));
+                }
                 // Generate Init and jump
                 let init_addr = self.program.len();
                 self.emit(OpCode::Init, 0, 0, 0, None, "Start INSERT");

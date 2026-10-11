@@ -47,6 +47,7 @@ fn insert_conflict_and_returning_clauses() -> R {
         "INSERT INTO emp VALUES (9, 'x', 'y', 1) RETURNING id",
         "INSERT INTO emp VALUES (1, 'x', 'y', 1) ON CONFLICT DO NOTHING",
         "INSERT OVERWRITE TABLE emp SELECT * FROM emp",
+        "INSERT INTO emp VALUES (9, 'x', 'y', 1) LIMIT 1",
     ])
 }
 

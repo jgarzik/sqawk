@@ -10,13 +10,14 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 
 - **SQL Query Engine** - SELECT, INSERT, UPDATE, DELETE with WHERE, ORDER BY, GROUP BY, HAVING, LIMIT/OFFSET
 - **Joins** - INNER, LEFT, RIGHT, FULL OUTER, and CROSS joins with ON conditions
-- **Aggregates** - COUNT, SUM, AVG, MIN, MAX with GROUP BY support
-- **Functions** - String (UPPER, LOWER, SUBSTR, REPLACE, etc.), math (ABS, ROUND, etc.), date/time
+- **Aggregates** - COUNT, SUM, TOTAL, AVG, MIN, MAX, GROUP_CONCAT/STRING_AGG with GROUP BY, DISTINCT and `FILTER (WHERE ...)`
+- **Functions** - String (UPPER, LOWER, LENGTH, SUBSTR, INSTR, REPLACE, TRIM, LPAD/RPAD, PRINTF, ...), math (ABS, ROUND, CEIL, FLOOR, SIGN, multi-argument MIN/MAX), conditional (COALESCE, IFNULL, NULLIF, IIF, TYPEOF), date/time (DATE, TIME, DATETIME, STRFTIME, JULIANDAY, UNIXEPOCH with modifiers)
+- **SQLite semantics** - 64-bit integer arithmetic, SQLite CAST rules, ASCII case-insensitive LIKE with ESCAPE, character-based strings; unimplemented syntax is an error, never silently ignored
 - **Subqueries** - Scalar, `IN (SELECT ...)`, and `EXISTS`, including correlated
 - **Set Operations** - UNION, UNION ALL, INTERSECT, EXCEPT
 - **Window Functions** - ROW_NUMBER, RANK, DENSE_RANK, PERCENT_RANK, CUME_DIST, NTILE, LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE, and aggregates with `OVER (PARTITION BY ... ORDER BY ...)`, ROWS frames and named windows
 - **DDL** - CREATE TABLE, CREATE TABLE AS SELECT, DROP, ALTER TABLE ADD COLUMN, TRUNCATE
-- **Expressions** - CASE, CAST, COALESCE, NULLIF, BETWEEN, IN, LIKE/ILIKE, `||`, arithmetic
+- **Expressions** - CASE, CAST, BETWEEN, IN, LIKE/ILIKE ... ESCAPE, IS [NOT] DISTINCT FROM, `||`, arithmetic; ORDER BY ... NULLS FIRST/LAST
 - **File Formats** - CSV, TSV, and custom delimiters; headerless files via `--no-header` or `--tabledef`; unchanged cells survive `--write` byte for byte
 - **Pipelines** - Reads standard input with a `-` file operand
 - **Safe by Default** - Files unchanged unless `--write` flag is specified
