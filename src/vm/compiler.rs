@@ -11,8 +11,9 @@ use super::ast_compat::{
 };
 use sqlparser::ast::{
     BinaryOperator, CaseWhen, DataType as SqlDataType, Expr, Function, FunctionArg,
-    FunctionArgExpr, Ident, JoinConstraint, ObjectName, Query, Select, SelectItem, SetExpr,
-    SetOperator, SetQuantifier, Statement, TableWithJoins, UnaryOperator, Value, ValueWithSpan,
+    FunctionArgExpr, Ident, ObjectName, OrderByExpr, Query, Select, SelectItem,
+    SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Statement, UnaryOperator,
+    Value, ValueWithSpan,
 };
 use sqlparser::dialect::HiveDialect;
 use sqlparser::parser::Parser;
@@ -22,15 +23,13 @@ use super::bytecode::{
     Instruction, OpCode, Program, ResultSchema, AGG_AVG, AGG_COUNT, AGG_DISTINCT, AGG_MAX, AGG_MIN,
     AGG_SUM,
 };
+use super::compiler_from::{expr_children, FromPlan};
 use crate::aggregate::AggregateFunction;
 use crate::capacity::DEFAULT_CURSOR_CAPACITY;
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{DataType, Table, Value as TableValue};
 
-/// Result type for multi-table projection resolution
-/// Contains: (columns_per_table, output_column_refs, schema, is_wildcard)
-pub(crate) type MultiTableProjection = (Vec<Vec<usize>>, Vec<(usize, usize)>, ResultSchema, bool);
 /// Outer column reference found in a correlated subquery (Phase 4B)
 #[derive(Debug, Clone)]
 struct OuterColumnRef {
@@ -63,14 +62,6 @@ pub(crate) struct Label(usize);
 pub(crate) struct Src<'t> {
     /// VM cursor id for this source.
     pub cursor: i64,
-    /// Base register holding this source's columns, when the loop has already
-    /// materialized them.
-    ///
-    /// Multi-table joins load every column into registers before evaluating
-    /// join conditions, so a column reference there is a register offset
-    /// rather than a `Column` read from a cursor. Modelling both here means
-    /// one expression compiler serves both loop shapes.
-    pub reg_base: Option<i64>,
     /// The table behind the cursor.
     pub table: &'t Table,
     /// How the query refers to it: the alias if there is one, else the table
@@ -79,25 +70,40 @@ pub(crate) struct Src<'t> {
     pub refname: String,
 }
 
+/// One output column of a SELECT list, after `*` expansion.
+pub(crate) struct OutCol {
+    /// The value, as an expression over the FROM sources.
+    pub expr: Expr,
+    /// Result header.
+    pub name: String,
+    /// The `AS` alias, which ORDER BY may name.
+    pub alias: Option<String>,
+}
+
+/// A column merged by `JOIN ... USING (col)` or NATURAL JOIN.
+///
+/// SQL gives such a join ONE output column per USING name, so an unqualified
+/// reference is not ambiguous even though both tables have the column. Its
+/// value is the first non-NULL of the joined columns, which for an inner or
+/// LEFT join is simply the left table's value and for RIGHT/FULL picks up the
+/// right side's value on NULL-extended rows.
+#[derive(Clone, Debug)]
+pub(crate) struct UsingCol {
+    /// Column name, ASCII-lowercased.
+    pub name: String,
+    /// The merged columns as (cursor, column index), leftmost first.
+    pub refs: Vec<(i64, usize)>,
+}
+
 /// A resolved column: where its value lives at run time.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ColumnRef {
     /// Read column `col` from cursor `cursor`.
     Cursor { cursor: i64, col: usize },
     /// The value is already in this register.
     Register(i64),
-}
-
-impl ColumnRef {
-    fn new(src: &Src<'_>, col: usize) -> Self {
-        match src.reg_base {
-            Some(base) => ColumnRef::Register(base + col as i64),
-            None => ColumnRef::Cursor {
-                cursor: src.cursor,
-                col,
-            },
-        }
-    }
+    /// A USING-merged column: index into [`NameCtx::using`].
+    Using(usize),
 }
 
 /// Name resolution scope for [`SqlCompiler::code_expr`].
@@ -120,30 +126,38 @@ pub(crate) struct NameCtx<'t> {
     /// FROM are ambiguous, but an inner name shadowing an outer one is not.
     pub outer: Vec<Src<'t>>,
 
-    /// Aggregate results available to this expression, keyed by the rendered
-    /// call text (`"sum(salary)"`).
+    /// Values already computed into registers, keyed by the rendered
+    /// expression text (`"sum(salary)"`, or a GROUP BY key such as
+    /// `"upper(department)"`).
     ///
     /// After aggregation an aggregate is a value like any other, so an
     /// expression may contain one -- `SUM(salary) + 1`. Binding them here lets
     /// the ordinary expression compiler handle the surrounding arithmetic
     /// instead of needing a separate post-aggregation compiler.
     pub agg_bindings: Vec<(String, i64)>,
+
+    /// Columns merged by USING / NATURAL JOIN.
+    pub using: Vec<UsingCol>,
+
+    /// Post-aggregation column scope.
+    ///
+    /// `None` for an ordinary row scope. `Some` once rows have been grouped:
+    /// only GROUP BY key columns still have a single value per output row, so
+    /// a column reference must be one of these (bound to the register holding
+    /// the key) or it is an error -- reading the cursor at that point would
+    /// return whatever row the scan happened to stop on.
+    pub col_bindings: Option<Vec<(ColumnRef, i64)>>,
 }
 
 impl<'t> NameCtx<'t> {
     /// The common single-table scope, equivalent to the old
     /// `(table, cursor_idx)` pair.
     pub(crate) fn single(table: &'t Table, cursor: i64) -> Self {
-        NameCtx {
-            srcs: vec![Src {
-                cursor,
-                reg_base: None,
-                table,
-                refname: table.name().to_ascii_lowercase(),
-            }],
-            outer: Vec::new(),
-            agg_bindings: Vec::new(),
-        }
+        Self::multi(vec![Src {
+            cursor,
+            table,
+            refname: table.name().to_ascii_lowercase(),
+        }])
     }
 
     /// A scope over several FROM sources, for joins.
@@ -152,16 +166,14 @@ impl<'t> NameCtx<'t> {
             srcs,
             outer: Vec::new(),
             agg_bindings: Vec::new(),
+            using: Vec::new(),
+            col_bindings: None,
         }
     }
 
     /// A scope with no FROM sources, for constant expressions.
     pub(crate) fn empty() -> Self {
-        NameCtx {
-            srcs: Vec::new(),
-            outer: Vec::new(),
-            agg_bindings: Vec::new(),
-        }
+        Self::multi(Vec::new())
     }
 
     /// Normalized key for an aggregate call, used to bind and to look up.
@@ -169,13 +181,33 @@ impl<'t> NameCtx<'t> {
         expr.to_string().to_ascii_lowercase()
     }
 
-    /// Register holding the result of an already-computed aggregate.
+    /// Register holding an already-computed value for `expr`, if bound.
     fn lookup_agg(&self, expr: &Expr) -> Option<i64> {
+        if self.agg_bindings.is_empty() {
+            return None;
+        }
         let key = Self::agg_key(expr);
         self.agg_bindings
             .iter()
             .find(|(k, _)| *k == key)
             .map(|(_, r)| *r)
+    }
+
+    /// Apply the post-aggregation scope to a resolved column.
+    fn bind(&self, col: ColumnRef, name: &str) -> SqawkResult<ColumnRef> {
+        match &self.col_bindings {
+            None => Ok(col),
+            Some(bound) => bound
+                .iter()
+                .find(|(c, _)| *c == col)
+                .map(|(_, reg)| ColumnRef::Register(*reg))
+                .ok_or_else(|| {
+                    SqawkError::InvalidSqlQuery(format!(
+                        "'{}' must appear in GROUP BY or be used in an aggregate",
+                        name
+                    ))
+                }),
+        }
     }
 
     /// Resolve an unqualified column name across every source.
@@ -186,8 +218,12 @@ impl<'t> NameCtx<'t> {
     ///
     /// Returns `Err` if no source has the column, or if more than one does --
     /// silently picking the first would make the result depend on FROM order.
-    fn resolve_unqualified(&self, name: &str) -> SqawkResult<ColumnRef> {
+    /// A USING-merged column is the exception: it is one column by definition.
+    pub(crate) fn resolve_unqualified(&self, name: &str) -> SqawkResult<ColumnRef> {
         let want = name.to_ascii_lowercase();
+        if let Some(i) = self.using.iter().position(|u| u.name == want) {
+            return Ok(ColumnRef::Using(i));
+        }
         let mut found: Option<ColumnRef> = None;
         for src in &self.srcs {
             for (i, col) in src.table.column_metadata().iter().enumerate() {
@@ -198,7 +234,10 @@ impl<'t> NameCtx<'t> {
                             name
                         )));
                     }
-                    found = Some(ColumnRef::new(src, i));
+                    found = Some(ColumnRef::Cursor {
+                        cursor: src.cursor,
+                        col: i,
+                    });
                     break;
                 }
             }
@@ -210,7 +249,10 @@ impl<'t> NameCtx<'t> {
         for src in &self.outer {
             for (i, col) in src.table.column_metadata().iter().enumerate() {
                 if col.name.to_ascii_lowercase() == want {
-                    return Ok(ColumnRef::new(src, i));
+                    return Ok(ColumnRef::Cursor {
+                        cursor: src.cursor,
+                        col: i,
+                    });
                 }
             }
         }
@@ -218,16 +260,19 @@ impl<'t> NameCtx<'t> {
     }
 
     /// Resolve a `table.column` (or `alias.column`) reference.
-    fn resolve_qualified(&self, qualifier: &str, name: &str) -> SqawkResult<ColumnRef> {
+    pub(crate) fn resolve_qualified(&self, qualifier: &str, name: &str) -> SqawkResult<ColumnRef> {
         let qual = qualifier.to_ascii_lowercase();
         let want = name.to_ascii_lowercase();
-        for src in &self.srcs {
+        for src in self.srcs.iter().chain(&self.outer) {
             if src.refname != qual {
                 continue;
             }
             for (i, col) in src.table.column_metadata().iter().enumerate() {
                 if col.name.to_ascii_lowercase() == want {
-                    return Ok(ColumnRef::new(src, i));
+                    return Ok(ColumnRef::Cursor {
+                        cursor: src.cursor,
+                        col: i,
+                    });
                 }
             }
             return Err(SqawkError::ColumnNotFound(format!(
@@ -235,35 +280,17 @@ impl<'t> NameCtx<'t> {
                 qualifier, name
             )));
         }
-        // Qualifier not in this scope: try the enclosing one, which is how a
-        // correlated subquery refers to its outer row.
-        for src in &self.outer {
-            if src.refname != qual {
-                continue;
-            }
-            for (i, col) in src.table.column_metadata().iter().enumerate() {
-                if col.name.to_ascii_lowercase() == want {
-                    return Ok(ColumnRef::new(src, i));
-                }
-            }
+        // Unknown qualifier entirely. With a single source, fall back to an
+        // unqualified match so `employees.age` still works when the table was
+        // given an alias. With several, a wrong qualifier is an error: the
+        // fallback could silently read the same-named column of another table.
+        if self.srcs.len() <= 1 {
+            return self.resolve_unqualified(name);
         }
-        // Unknown qualifier entirely: fall back to an unqualified match so a
-        // single-table query can still say `employees.age` when the cursor was
-        // opened under a different refname.
-        self.resolve_unqualified(name)
-    }
-}
-
-/// Classify a join operator for the inner-join rewrite.
-///
-/// `Some(Some(c))` = inner join with constraint `c`; `Some(None)` = cross join;
-/// `None` = not rewritable (outer joins and the exotic forms).
-fn classify_join_for_rewrite(op: &sqlparser::ast::JoinOperator) -> Option<Option<&JoinConstraint>> {
-    use sqlparser::ast::JoinOperator as J;
-    match op {
-        J::Join(c) | J::Inner(c) => Some(Some(c)),
-        J::CrossJoin(_) => Some(None),
-        _ => None,
+        Err(SqawkError::ColumnNotFound(format!(
+            "{}.{}",
+            qualifier, name
+        )))
     }
 }
 
@@ -496,26 +523,6 @@ impl<'a> SqlCompiler<'a> {
         ));
     }
 
-    /// Helper to emit Column opcodes for multiple columns
-    pub(crate) fn emit_column_loads(
-        &mut self,
-        cursor: i64,
-        cols: &[usize],
-        start_reg: i64,
-        label: &str,
-    ) {
-        for (i, col_idx) in cols.iter().enumerate() {
-            self.emit(
-                OpCode::Column,
-                cursor,
-                *col_idx as i64,
-                start_reg + i as i64,
-                None,
-                &format!("r[{}] = {}.col[{}]", start_reg + i as i64, label, col_idx),
-            );
-        }
-    }
-
     /// The AggStep/AggFinal function-type word for an aggregate CALL,
     /// including its DISTINCT flag.
     ///
@@ -553,47 +560,6 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// Emit a comparison operation and return the result register
-    pub(crate) fn emit_comparison(
-        &mut self,
-        op: &BinaryOperator,
-        left_reg: i64,
-        right_reg: i64,
-    ) -> SqawkResult<i64> {
-        let result_reg = self.allocate_register();
-        let opcode = Self::binary_op_to_comparison_opcode(op)?;
-
-        self.emit(
-            opcode,
-            left_reg,
-            right_reg,
-            result_reg,
-            None,
-            &format!(
-                "r[{}] = (r[{}] {:?} r[{}])",
-                result_reg, left_reg, op, right_reg
-            ),
-        );
-
-        Ok(result_reg)
-    }
-
-    /// Convert a comparison binary operator to the corresponding OpCode
-    pub(crate) fn binary_op_to_comparison_opcode(op: &BinaryOperator) -> SqawkResult<OpCode> {
-        match op {
-            BinaryOperator::Eq => Ok(OpCode::Eq),
-            BinaryOperator::NotEq => Ok(OpCode::Ne),
-            BinaryOperator::Lt => Ok(OpCode::Lt),
-            BinaryOperator::LtEq => Ok(OpCode::Le),
-            BinaryOperator::Gt => Ok(OpCode::Gt),
-            BinaryOperator::GtEq => Ok(OpCode::Ge),
-            _ => Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Unsupported comparison operator: {:?}",
-                op
-            ))),
-        }
-    }
-
     /// Convert SQL type to internal type string
     pub(crate) fn sql_type_to_internal(data_type: &str) -> &'static str {
         match data_type.to_uppercase().as_str() {
@@ -602,50 +568,6 @@ impl<'a> SqlCompiler<'a> {
             "BOOLEAN" | "BOOL" => "BOOLEAN",
             _ => "TEXT",
         }
-    }
-
-    /// Find a column by table name and column name in a list of tables.
-    /// Returns (table_idx, col_idx) if found.
-    pub(crate) fn find_column_in_tables(
-        table_name: &str,
-        col_name: &str,
-        tables: &[&Table],
-        table_names: &[&str],
-    ) -> SqawkResult<(usize, usize)> {
-        for (i, name) in table_names.iter().enumerate() {
-            if table_name.eq_ignore_ascii_case(name) {
-                let columns = tables[i].columns();
-                if let Some(col_idx) = columns
-                    .iter()
-                    .position(|c| c.eq_ignore_ascii_case(col_name))
-                {
-                    return Ok((i, col_idx));
-                } else {
-                    return Err(SqawkError::ColumnNotFound(col_name.to_string()));
-                }
-            }
-        }
-        Err(SqawkError::TableNotFound(table_name.to_string()))
-    }
-
-    /// Build a wildcard schema (SELECT *) from multiple tables.
-    /// Returns column indices per table and the result schema.
-    pub(crate) fn build_wildcard_schema(
-        tables: &[&Table],
-        table_names: &[&str],
-    ) -> (Vec<Vec<usize>>, ResultSchema) {
-        let mut table_cols = Vec::with_capacity(tables.len());
-        let mut schema = ResultSchema::new();
-
-        for (i, table) in tables.iter().enumerate() {
-            let cols: Vec<usize> = (0..table.column_count()).collect();
-            for meta in table.column_metadata() {
-                schema.add_column(format!("{}.{}", table_names[i], meta.name), meta.data_type);
-            }
-            table_cols.push(cols);
-        }
-
-        (table_cols, schema)
     }
 
     // Removed unused add_halt method
@@ -835,19 +757,8 @@ impl<'a> SqlCompiler<'a> {
             ));
         }
 
-        // Check if we have ORDER BY, LIMIT, or OFFSET
-        let has_order_by = !query_order_by(query).is_empty();
-        let has_limit = query_limit(query).is_some() || query_offset(query).is_some();
-
-        // Compile the body (SELECT or set operation)
         match &*query.body {
-            SetExpr::Select(select) => {
-                if has_order_by || has_limit {
-                    self.compile_select_with_post_processing(select, query)?;
-                } else {
-                    self.compile_select(select)?;
-                }
-            }
+            SetExpr::Select(select) => self.compile_select(select, Some(query))?,
             SetExpr::SetOperation {
                 op,
                 left,
@@ -958,7 +869,7 @@ impl<'a> SqlCompiler<'a> {
     /// Compile a set expression (can be a SELECT or nested set operation)
     fn compile_set_expr(&mut self, expr: &SetExpr) -> SqawkResult<()> {
         match expr {
-            SetExpr::Select(select) => self.compile_select(select),
+            SetExpr::Select(select) => self.compile_select(select, None),
             SetExpr::SetOperation {
                 op,
                 left,
@@ -975,71 +886,16 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// Rewrite `A INNER JOIN B ON cond` into `FROM A, B WHERE cond`.
+    /// Compile a SELECT.
     ///
-    /// The implicit (comma) join path already supports aggregates and GROUP BY;
-    /// the explicit-JOIN path does not, and rejects `COUNT(*)` in its
-    /// projection resolver. For an INNER join the two spellings mean the same
-    /// thing, so an aggregate query over an explicit join is answered by
-    /// handing it to the machinery that can already do it, rather than by
-    /// duplicating that machinery.
+    /// `query` carries ORDER BY / LIMIT / OFFSET when the SELECT is a query's
+    /// whole body; a set-operation operand passes `None`.
     ///
-    /// Returns `None` when the rewrite does not apply: outer joins are NOT
-    /// equivalent to a comma join plus WHERE, since the WHERE would discard
-    /// exactly the NULL-extended rows the outer join exists to produce.
-    fn rewrite_inner_join_as_implicit(select: &Select) -> Option<Select> {
-        if select.from.len() != 1 {
-            return None;
-        }
-        let twj = &select.from[0];
-        if twj.joins.is_empty() {
-            return None;
-        }
-
-        let mut froms = vec![TableWithJoins {
-            relation: twj.relation.clone(),
-            joins: Vec::new(),
-        }];
-        let mut condition = select.selection.clone();
-
-        for join in &twj.joins {
-            let constraint = match classify_join_for_rewrite(&join.join_operator)? {
-                Some(c) => c,
-                // CROSS JOIN contributes a source but no condition.
-                None => {
-                    froms.push(TableWithJoins {
-                        relation: join.relation.clone(),
-                        joins: Vec::new(),
-                    });
-                    continue;
-                }
-            };
-            let on_expr = match constraint {
-                JoinConstraint::On(expr) => expr.clone(),
-                _ => return None,
-            };
-            froms.push(TableWithJoins {
-                relation: join.relation.clone(),
-                joins: Vec::new(),
-            });
-            condition = Some(match condition {
-                Some(existing) => Expr::BinaryOp {
-                    left: Box::new(existing),
-                    op: BinaryOperator::And,
-                    right: Box::new(on_expr),
-                },
-                None => on_expr,
-            });
-        }
-
-        let mut rewritten = select.clone();
-        rewritten.from = froms;
-        rewritten.selection = condition;
-        Some(rewritten)
-    }
-
-    /// Compile a SELECT statement
-    fn compile_select(&mut self, select: &Select) -> SqawkResult<()> {
+    /// Every FROM shape -- one table, a comma list, any chain of joins -- goes
+    /// through the one FROM planner, and the stage after it (plain
+    /// projection, aggregation, windows) consumes rows from the planner's loop
+    /// nest without knowing how many tables produced them.
+    fn compile_select(&mut self, select: &Select, query: Option<&Query>) -> SqawkResult<()> {
         // `GROUP BY ALL` carries no key list, so it would otherwise look
         // identical to "no GROUP BY" and silently collapse the query. Reject it.
         if is_group_by_all(&select.group_by) {
@@ -1050,738 +906,379 @@ impl<'a> SqlCompiler<'a> {
 
         if select.from.is_empty() {
             self.compile_select_literal(select)?;
-        } else {
-            // Check for implicit join (comma-separated tables in FROM)
-            if select.from.len() > 1 {
-                // Multiple tables in FROM clause - treat as implicit cross join with WHERE filter
-                if self.verbose {
-                    eprintln!("Processing multiple tables in FROM clause as CROSS JOINs");
-                }
-
-                // Check for GROUP BY or aggregates - requires specialized handling
-                let has_group_by = !group_by_exprs(&select.group_by).is_empty();
-                let has_aggregates = self.has_aggregates(&select.projection);
-
-                if has_group_by || has_aggregates {
-                    // Create a temporary query to pass to compile_implicit_join_with_group_by
-                    let query = Query {
-                        with: None,
-                        body: Box::new(SetExpr::Select(Box::new(select.clone()))),
-                        order_by: None,
-                        limit_clause: None,
-                        fetch: None,
-                        locks: vec![],
-                        for_clause: None,
-                        settings: None,
-                        format_clause: None,
-                        pipe_operators: vec![],
-                    };
-                    return self.compile_implicit_join_with_group_by(select, &query);
-                }
-
-                return self.compile_implicit_join(select);
+            if select.distinct.is_some() {
+                self.emit(OpCode::Distinct, 0, 0, 0, None, "Remove duplicate rows");
             }
-
-            let table_with_joins = &select.from[0];
-            if !table_with_joins.joins.is_empty() {
-                // An aggregate or GROUP BY over an explicit INNER join is
-                // answered by rewriting it to the equivalent comma join, whose
-                // path already supports both.
-                let needs_aggregation = !group_by_exprs(&select.group_by).is_empty()
-                    || self.has_aggregates(&select.projection);
-                if needs_aggregation {
-                    if let Some(rewritten) = Self::rewrite_inner_join_as_implicit(select) {
-                        return self.compile_select(&rewritten);
-                    }
-                }
-                self.compile_join(table_with_joins, &select.projection, &select.selection)?;
-            } else {
-                // Check for GROUP BY, window functions, or aggregates
-                let has_group_by = !group_by_exprs(&select.group_by).is_empty();
-                let has_window_functions = self.has_window_functions(&select.projection);
-                let has_aggregates = self.has_aggregates(&select.projection);
-
-                if has_window_functions {
-                    // Window function query (ROW_NUMBER, RANK, etc. with OVER clause)
-                    let table_name = match &table_with_joins.relation {
-                        sqlparser::ast::TableFactor::Table { name, .. } => {
-                            self.get_table_name(name)?
-                        }
-                        _ => {
-                            return Err(SqawkError::UnsupportedSqlFeature(
-                                "Only simple table scans supported".into(),
-                            ))
-                        }
-                    };
-                    let table = self.database.get_table(&table_name)?;
-                    self.compile_select_with_window(select, table, &table_name)?;
-                } else if has_group_by {
-                    // GROUP BY query
-                    let table_name = match &table_with_joins.relation {
-                        sqlparser::ast::TableFactor::Table { name, .. } => {
-                            self.get_table_name(name)?
-                        }
-                        _ => {
-                            return Err(SqawkError::UnsupportedSqlFeature(
-                                "Only simple table scans supported".into(),
-                            ))
-                        }
-                    };
-                    let table = self.database.get_table(&table_name)?;
-                    self.compile_select_with_group_by(select, table, &table_name)?;
-                } else if has_aggregates {
-                    // Aggregate without GROUP BY - entire table is one group
-                    let table_name = match &table_with_joins.relation {
-                        sqlparser::ast::TableFactor::Table { name, .. } => {
-                            self.get_table_name(name)?
-                        }
-                        _ => {
-                            return Err(SqawkError::UnsupportedSqlFeature(
-                                "Only simple table scans supported".into(),
-                            ))
-                        }
-                    };
-                    let table = self.database.get_table(&table_name)?;
-                    self.compile_select_with_aggregate(select, table, &table_name)?;
-                } else {
-                    self.compile_table_scan(
-                        table_with_joins,
-                        &select.projection,
-                        &select.selection,
-                    )?;
-                }
-            }
+            return Ok(());
         }
 
-        // Handle DISTINCT - emit Distinct opcode to deduplicate results
+        let plan = self.plan_from(&select.from, select.selection.as_ref())?;
+
+        // Correlated-subquery detection matches qualifiers against the outer
+        // table's alias.
+        self.current_outer_alias = match (&select.from[0].relation, plan.srcs.len()) {
+            (sqlparser::ast::TableFactor::Table { alias: Some(a), .. }, 1) => {
+                Some(a.name.value.clone())
+            }
+            _ => None,
+        };
+
+        let has_group_by = !group_by_exprs(&select.group_by).is_empty();
+        let has_aggregates = self.has_aggregates(&select.projection) || select.having.is_some();
+
+        if self.has_window_functions(&select.projection) {
+            let (table, table_name) = plan.single_table().ok_or_else(|| {
+                SqawkError::UnsupportedSqlFeature(
+                    "Window functions over a join are not supported".into(),
+                )
+            })?;
+            let table_name = table_name.to_string();
+            self.compile_select_with_window(select, table, &table_name)?;
+        } else if has_group_by || has_aggregates {
+            self.compile_select_grouped(select, &plan)?;
+        } else {
+            return self.compile_select_plain(select, query, &plan);
+        }
+
+        // These stages emit finished rows, so DISTINCT, ORDER BY and LIMIT
+        // are applied to the result set.
         if select.distinct.is_some() {
             self.emit(OpCode::Distinct, 0, 0, 0, None, "Remove duplicate rows");
         }
-
+        if let Some(query) = query {
+            self.emit_result_post_processing(select, query)?;
+        }
         Ok(())
     }
 
-    /// Compile a SELECT with ORDER BY and/or LIMIT/OFFSET
-    fn compile_select_with_post_processing(
+    /// A SELECT without aggregation or window functions: the projection is
+    /// computed per row inside the loop nest, then sorted (ORDER BY) or
+    /// emitted directly, with OFFSET/LIMIT counted on output rows.
+    fn compile_select_plain(
         &mut self,
         select: &Select,
-        query: &Query,
+        query: Option<&Query>,
+        plan: &FromPlan<'a>,
     ) -> SqawkResult<()> {
-        let has_order_by = !query_order_by(query).is_empty();
-
-        if select.from.is_empty() {
-            self.compile_select_literal(select)?;
-            return Ok(());
+        let outs = self.expand_projection(&select.projection, plan)?;
+        let ctx = plan.ctx();
+        let mut schema = ResultSchema::new();
+        for out in &outs {
+            schema.add_column(out.name.clone(), self.infer_expr_type(&out.expr, &ctx));
         }
-
-        // Check for implicit join (comma-separated tables in FROM)
-        if select.from.len() > 1 {
-            // Multiple tables in FROM clause
-            if self.verbose {
-                eprintln!("Processing multiple tables in FROM clause as CROSS JOINs");
-            }
-
-            // Check for GROUP BY or aggregates - requires specialized handling
-            let has_group_by = !group_by_exprs(&select.group_by).is_empty();
-            let has_aggregates = self.has_aggregates(&select.projection);
-
-            if has_group_by || has_aggregates {
-                // Multi-table query with GROUP BY or aggregates. Like the
-                // single-table grouped path, this emits rows directly, so
-                // ORDER BY and LIMIT are applied to the finished result set --
-                // both were silently dropped here.
-                self.compile_implicit_join_with_group_by(select, query)?;
-                return self.emit_result_post_processing(select, query);
-            }
-
-            if !query_order_by(query).is_empty() {
-                // ORDER BY needs the whole result before it can sort, so the
-                // scan must NOT apply LIMIT as it goes -- doing so would keep
-                // the first N rows and then sort those, rather than the top N.
-                // Sorting and limiting both happen afterwards.
-                self.compile_implicit_join(select)?;
-                return self.emit_result_post_processing(select, query);
-            }
-
-            return self.compile_implicit_join_with_query(select, query);
-        }
-
-        let table_with_joins = &select.from[0];
-
-        // Check for explicit JOINs (FROM table1 JOIN table2 ON ...)
-        if !table_with_joins.joins.is_empty() {
-            // See compile_select: aggregates over an explicit INNER join are
-            // handled by rewriting to the comma-join form.
-            let needs_aggregation = !group_by_exprs(&select.group_by).is_empty()
-                || self.has_aggregates(&select.projection);
-            if needs_aggregation {
-                if let Some(rewritten) = Self::rewrite_inner_join_as_implicit(select) {
-                    return self.compile_select_with_post_processing(&rewritten, query);
-                }
-            }
-            // A join emits rows directly rather than through the cursor-based
-            // sorter, which is why ORDER BY used to be dropped here outright.
-            // Sorting the finished result set works regardless of how many
-            // cursors produced it.
-            self.compile_join(table_with_joins, &select.projection, &select.selection)?;
-            self.emit_result_post_processing(select, query)?;
-            return Ok(());
-        }
-
-        // Get table and columns for ORDER BY resolution
-        let table_name = match &table_with_joins.relation {
-            sqlparser::ast::TableFactor::Table { name, .. } => self.get_table_name(name)?,
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple table scans supported".into(),
-                ))
-            }
-        };
-
-        if !self.database.has_table(&table_name) {
-            return Err(SqawkError::TableNotFound(table_name));
-        }
-
-        let table = self.database.get_table(&table_name).unwrap();
-
-        // Check for GROUP BY - delegate to specialized handler
-        // GROUP BY with ORDER BY/LIMIT handles these internally
-        let has_group_by = !group_by_exprs(&select.group_by).is_empty();
-        let has_aggregates = self.has_aggregates(&select.projection);
-
-        if has_group_by || has_aggregates {
-            if has_group_by {
-                self.compile_select_with_group_by(select, table, &table_name)?;
-            } else {
-                self.compile_select_with_aggregate(select, table, &table_name)?;
-            }
-            // These paths emit rows directly rather than through the sorter,
-            // so ORDER BY and LIMIT are applied to the finished result set.
-            // `query` used to be in scope here and simply never passed on,
-            // which is why both were silently dropped on every grouped query.
-            self.emit_result_post_processing(select, query)?;
-            return Ok(());
-        }
-
-        // Check if projection contains function expressions or computed expressions
-        let has_computed_expr = Self::projection_needs_expr(&select.projection);
-
-        // If we have functions/computed expressions and only LIMIT (no ORDER BY), use compile_table_scan
-        // which handles function expressions properly
-        if has_computed_expr && !has_order_by {
-            return self.compile_table_scan_with_limit(select, query, &table_name);
-        }
-
-        let columns = self.resolve_projection(&select.projection, table)?;
-
-        // Build result schema with column names and types
-        let schema = self.build_result_schema(&select.projection, table);
         self.program.set_result_schema(schema);
 
-        if has_order_by {
-            self.compile_select_with_sorter(select, query, table, &columns, &table_name)?;
-        } else {
-            self.compile_select_with_limit(select, query, table, &columns, &table_name)?;
-        }
+        let n = outs.len();
+        let order_by: &[OrderByExpr] = query.map(query_order_by).unwrap_or(&[]);
+        let (limit, offset) = match query {
+            Some(q) => self.extract_limit_offset(q)?,
+            None => (None, 0),
+        };
+        // With DISTINCT the row count is known only after deduplication, so
+        // LIMIT/OFFSET are applied to the finished result instead of inline.
+        let distinct = select.distinct.is_some();
+        let exit = self.label();
 
-        Ok(())
-    }
-
-    /// Compile SELECT with ORDER BY using a sorter
-    fn compile_select_with_sorter(
-        &mut self,
-        select: &Select,
-        query: &Query,
-        table: &Table,
-        columns: &[usize],
-        table_name: &str,
-    ) -> SqawkResult<()> {
-        let cursor_idx = 0i64;
-        let sorter_id = 0i64;
-        let col_count = columns.len();
-
-        // Sorter payload is [sort keys.., output columns..].
-        //
-        // It used to hold only the output columns, and the sort spec mapped
-        // each ORDER BY key to a position among them -- so ordering by a
-        // column you did not select was rejected with "ORDER BY column must be
-        // in SELECT list", and ordering by an expression was rejected outright.
-        // Carrying the keys separately removes both restrictions: a key is
-        // just another value computed per row, whether or not it is projected.
-        let order_by = query_order_by(query);
-        let key_count = order_by.len();
-        let total_cols = key_count + col_count;
-
-        let sort_spec: String = order_by
-            .iter()
-            .enumerate()
-            .map(|(i, ob)| format!("{}:{}", i, if order_by_is_asc(ob) { "asc" } else { "desc" }))
-            .collect::<Vec<_>>()
-            .join(",");
-
-        // Open sorter
-        self.emit(
-            OpCode::SorterOpen,
-            sorter_id,
-            total_cols as i64,
-            0,
-            Some(sort_spec),
-            "",
-        );
-
-        // Open table
-        self.emit(
-            OpCode::OpenRead,
-            cursor_idx,
-            1,
-            0,
-            Some(table_name.to_string()),
-            "",
-        );
-
-        // Rewind - jump past loop if empty
-        let rewind_addr = self.program.len();
-        self.emit(
-            OpCode::Rewind,
-            cursor_idx,
-            0, // Will be patched
-            0,
-            None,
-            "",
-        );
-
-        let loop_start = self.program.len();
-
-        // WHERE first, so filtered rows never reach the sorter.
-        let next_label = self.label();
-        if let Some(where_expr) = &select.selection {
-            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table, cursor_idx), None)?;
-            self.emit_jump_to(
-                OpCode::IfZ,
-                cond_reg,
-                next_label,
-                0,
-                None,
-                "Skip row if WHERE is false",
-            );
-        }
-
-        // One contiguous block: sort keys first, then the output columns.
-        let start_reg = self.allocate_registers(total_cols);
-
-        let ctx = NameCtx::single(table, cursor_idx);
-        for (i, ob) in order_by.iter().enumerate() {
-            let dest = start_reg + i as i64;
-            // `ORDER BY 2` names the second output column, it is not the
-            // constant 2.
-            if let Some(out_idx) = Self::order_by_ordinal(&ob.expr, col_count)? {
-                let col_idx = columns[out_idx];
-                self.emit(
-                    OpCode::Column,
-                    cursor_idx,
-                    col_idx as i64,
-                    dest,
-                    None,
-                    &format!("r[{}] = ORDER BY position {}", dest, out_idx + 1),
-                );
+        if order_by.is_empty() {
+            let out_regs = self.allocate_registers(n.max(1));
+            let counters = if distinct {
+                (None, None)
             } else {
-                self.code_expr(&ob.expr, &ctx, Some(dest))?;
+                self.emit_limit_counters(limit, offset, exit)
+            };
+            self.emit_scan(plan, &mut |c, ctx| {
+                for (i, out) in outs.iter().enumerate() {
+                    c.code_expr(&out.expr, ctx, Some(out_regs + i as i64))?;
+                }
+                c.emit_limited_result_row(out_regs, n, counters, exit);
+                Ok(())
+            })?;
+        } else {
+            // Sorter payload is [sort keys.., output columns..]: a key is just
+            // another value computed per row, projected or not.
+            enum Key<'e> {
+                /// An output column: `ORDER BY 2` or `ORDER BY alias`.
+                Out(usize),
+                Expr(&'e Expr),
             }
-        }
-
-        for (i, col_idx) in columns.iter().enumerate() {
+            let mut keys = Vec::with_capacity(order_by.len());
+            for ob in order_by {
+                let key = if let Some(i) = Self::order_by_ordinal(&ob.expr, n)? {
+                    Key::Out(i)
+                } else if let Some(i) = Self::alias_position(&outs, &ob.expr) {
+                    Key::Out(i)
+                } else if let Some(i) = Self::bare_output_position(&outs, &ob.expr, &ctx) {
+                    Key::Out(i)
+                } else {
+                    Key::Expr(&ob.expr)
+                };
+                keys.push(key);
+            }
+            let nk = keys.len();
+            let total = nk + n;
+            let spec: String = order_by
+                .iter()
+                .enumerate()
+                .map(|(i, ob)| {
+                    format!("{}:{}", i, if order_by_is_asc(ob) { "asc" } else { "desc" })
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let sorter_id = 0i64;
             self.emit(
-                OpCode::Column,
-                cursor_idx,
-                *col_idx as i64,
-                start_reg + (key_count + i) as i64,
-                None,
-                "",
-            );
-        }
-
-        // Insert into sorter
-        self.emit(
-            OpCode::SorterInsert,
-            sorter_id,
-            start_reg,
-            total_cols as i64,
-            None,
-            "",
-        );
-
-        // Next row
-        self.resolve(next_label);
-        self.emit(OpCode::Next, cursor_idx, loop_start as i64, 0, None, "");
-
-        let after_scan = self.program.len();
-
-        // Patch rewind jump
-        if let Some(inst) = self.program.instructions.get_mut(rewind_addr) {
-            inst.p2 = after_scan as i64;
-        }
-
-        // Sort the sorter
-        self.emit(OpCode::SorterSort, sorter_id, 0, 0, None, "");
-
-        // Handle LIMIT/OFFSET
-        // When DISTINCT is present, we apply LIMIT after DISTINCT (as a separate opcode)
-        // because DISTINCT may reduce the row count
-        let has_distinct = select.distinct.is_some();
-        let (limit_val, offset_val) = self.extract_limit_offset(query)?;
-
-        // Only apply LIMIT during sorter output if DISTINCT is not present
-        let limit_reg = if !has_distinct && (limit_val.is_some() || offset_val > 0) {
-            let reg = self.allocate_register();
-            // Initialize limit counter (add offset to limit since we'll skip offset rows)
-            let total = limit_val.unwrap_or(i64::MAX);
-            self.emit(OpCode::Integer, total, reg, 0, None, "");
-            Some(reg)
-        } else {
-            None
-        };
-
-        // Only apply offset during sorter output if DISTINCT is NOT present
-        // When DISTINCT is present, offset is applied after DISTINCT via the Limit opcode
-        let offset_reg = if offset_val > 0 && !has_distinct {
-            let reg = self.allocate_register();
-            self.emit(OpCode::Integer, offset_val, reg, 0, None, "");
-            Some(reg)
-        } else {
-            None
-        };
-
-        // Emit sorted results
-        let sorter_loop_start = self.program.len();
-
-        // Get row from sorter
-        self.emit(
-            OpCode::SorterData,
-            sorter_id,
-            start_reg,
-            total_cols as i64,
-            None,
-            "",
-        );
-
-        // Symbolic targets for the drain loop. Using labels here matters
-        // because whether a LIMIT instruction exists changes the distance
-        // between the OFFSET logic and SorterNext -- the exact coupling that
-        // the old `skip_offset = if limit_reg.is_some() { 3 } else { 2 }`
-        // encoded by hand.
-        let result_row_label = self.label();
-        let sorter_next_label = self.label();
-        let after_loop_label = self.label();
-
-        // Handle OFFSET - skip first N rows
-        if let Some(off_reg) = offset_reg {
-            let decrement_label = self.label();
-
-            // If offset counter > 0, decrement and skip this row
-            self.emit_jump_to(
-                OpCode::IfPos,
-                off_reg,
-                decrement_label,
+                OpCode::SorterOpen,
+                sorter_id,
+                total as i64,
                 0,
-                None,
-                "offset remaining -> skip this row",
+                Some(spec),
+                "ORDER BY",
             );
-            // Offset exhausted, continue to output
-            self.emit_jump_to(
-                OpCode::Goto,
-                0,
-                result_row_label,
-                0,
-                None,
-                "offset exhausted -> output row",
-            );
-
-            self.resolve(decrement_label);
-            // Decrement offset, then fall through to the skip.
-            let continue_label = self.label();
-            self.emit_jump_to(OpCode::DecrJumpZero, off_reg, continue_label, 0, None, "");
-            self.resolve(continue_label);
-            self.emit_jump_to(OpCode::Goto, 0, sorter_next_label, 0, None, "skip row");
+            let row = self.allocate_registers(total);
+            self.emit_scan(plan, &mut |c, ctx| {
+                for (i, out) in outs.iter().enumerate() {
+                    c.code_expr(&out.expr, ctx, Some(row + (nk + i) as i64))?;
+                }
+                for (i, key) in keys.iter().enumerate() {
+                    match key {
+                        Key::Out(j) => c.emit(
+                            OpCode::Copy,
+                            row + (nk + j) as i64,
+                            row + i as i64,
+                            0,
+                            None,
+                            "sort key = output column",
+                        ),
+                        Key::Expr(e) => {
+                            c.code_expr(e, ctx, Some(row + i as i64))?;
+                        }
+                    }
+                }
+                c.emit(OpCode::SorterInsert, sorter_id, row, total as i64, None, "");
+                Ok(())
+            })?;
+            self.emit_jump_to(OpCode::SorterSort, sorter_id, exit, 0, None, "empty: done");
+            let counters = if distinct {
+                (None, None)
+            } else {
+                self.emit_limit_counters(limit, offset, exit)
+            };
+            let top = self.label();
+            self.resolve(top);
+            self.emit(OpCode::SorterData, sorter_id, row, total as i64, None, "");
+            self.emit_limited_result_row(row + nk as i64, n, counters, exit);
+            self.emit_jump_to(OpCode::SorterNext, sorter_id, top, 0, None, "");
         }
+        self.resolve(exit);
 
-        // Output result row
-        self.resolve(result_row_label);
-        // Emit only the output half: the sort keys are internal.
-        self.emit(
-            OpCode::ResultRow,
-            start_reg + key_count as i64,
-            col_count as i64,
-            0,
-            None,
-            "",
-        );
-
-        // Handle LIMIT
-        if let Some(lim_reg) = limit_reg {
-            // DecrJumpZero exits when limit reached
-            self.emit_jump_to(
-                OpCode::DecrJumpZero,
-                lim_reg,
-                after_loop_label,
-                0,
-                None,
-                "limit reached -> exit loop",
-            );
-        }
-
-        // Next sorted row
-        self.resolve(sorter_next_label);
-        self.emit(
-            OpCode::SorterNext,
-            sorter_id,
-            sorter_loop_start as i64,
-            0,
-            None,
-            "",
-        );
-
-        // Close cursor
-        self.resolve(after_loop_label);
-        self.emit(OpCode::Close, cursor_idx, 0, 0, None, "");
-
-        // Handle DISTINCT - emit Distinct opcode to deduplicate results
-        if select.distinct.is_some() {
+        if distinct {
             self.emit(OpCode::Distinct, 0, 0, 0, None, "Remove duplicate rows");
-
-            // For DISTINCT queries, apply LIMIT/OFFSET after DISTINCT
-            // OFFSET was NOT applied during sorter output when DISTINCT is present
-            if limit_val.is_some() || offset_val > 0 {
+            if limit.is_some() || offset > 0 {
                 self.emit(
                     OpCode::Limit,
-                    limit_val.unwrap_or(i64::MAX),
-                    offset_val,
+                    limit.unwrap_or(i64::MAX),
+                    offset,
                     0,
                     None,
-                    &format!(
-                        "Limit {} offset {}",
-                        limit_val.unwrap_or(i64::MAX),
-                        offset_val
-                    ),
+                    "LIMIT after DISTINCT",
                 );
             }
         }
-
         Ok(())
     }
 
-    /// Compile SELECT with LIMIT/OFFSET (no ORDER BY)
-    fn compile_select_with_limit(
+    /// Initialize LIMIT / OFFSET counters: (limit register, offset register).
+    ///
+    /// `LIMIT 0` jumps straight to `exit`.
+    fn emit_limit_counters(
         &mut self,
-        select: &Select,
-        query: &Query,
-        table: &Table,
-        columns: &[usize],
-        table_name: &str,
-    ) -> SqawkResult<()> {
-        let cursor_idx = 0i64;
-        let col_count = columns.len();
-
-        let (limit_val, offset_val) = self.extract_limit_offset(query)?;
-
-        // Open table
-        self.emit(
-            OpCode::OpenRead,
-            cursor_idx,
-            1,
-            0,
-            Some(table_name.to_string()),
-            "",
-        );
-
-        // Initialize limit counter
-        let limit_reg = if let Some(limit) = limit_val {
-            let reg = self.allocate_register();
-            self.emit(OpCode::Integer, limit, reg, 0, None, "");
-            Some(reg)
-        } else {
-            None
-        };
-
-        // LIMIT 0 optimization: skip the entire loop if limit is 0 at compile time
-        let limit_zero_jump = if limit_val == Some(0) {
-            let addr = self.program.len();
-            self.emit(
-                OpCode::Goto,
-                0,
-                0, // Will be patched to after loop
-                0,
-                None,
-                "LIMIT 0: skip loop",
-            );
-            Some(addr)
-        } else {
-            None
-        };
-
-        // Initialize offset counter
-        let offset_reg = if offset_val > 0 {
-            let reg = self.allocate_register();
-            self.emit(OpCode::Integer, offset_val, reg, 0, None, "");
-            Some(reg)
-        } else {
-            None
-        };
-
-        // Rewind
-        let rewind_addr = self.program.len();
-        self.emit(
-            OpCode::Rewind,
-            cursor_idx,
-            0, // Will be patched
-            0,
-            None,
-            "",
-        );
-
-        let loop_start = self.program.len();
-
-        // Load columns
-        let start_reg = self.allocate_registers(col_count);
-
-        for (i, col_idx) in columns.iter().enumerate() {
-            self.emit(
-                OpCode::Column,
-                cursor_idx,
-                *col_idx as i64,
-                start_reg + i as i64,
-                None,
-                "",
-            );
+        limit: Option<i64>,
+        offset: i64,
+        exit: Label,
+    ) -> (Option<i64>, Option<i64>) {
+        if limit == Some(0) {
+            self.emit_jump_to(OpCode::Goto, 0, exit, 0, None, "LIMIT 0");
         }
+        let lim = limit.map(|l| {
+            let r = self.allocate_register();
+            self.emit(OpCode::Integer, l, r, 0, None, "LIMIT counter");
+            r
+        });
+        let off = (offset > 0).then(|| {
+            let r = self.allocate_register();
+            self.emit(OpCode::Integer, offset, r, 0, None, "OFFSET counter");
+            r
+        });
+        (lim, off)
+    }
 
-        // A row that fails WHERE must resume at Next -- NOT at a fixed offset.
-        // The distance from here to Next depends on whether OFFSET and LIMIT
-        // emit instructions, so the old `program.len() + 2` landed on the
-        // LIMIT counter's DecrJumpZero (making LIMIT count rows *scanned*
-        // rather than rows *returned*) or, with OFFSET, on ResultRow itself.
-        let next_label = self.label();
-
-        // WHERE clause
-        if let Some(where_expr) = &select.selection {
-            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table, cursor_idx), None)?;
-            self.emit_jump_to(
-                OpCode::IfZ,
-                cond_reg,
-                next_label,
-                0,
-                None,
-                "Skip row if WHERE is false",
-            );
+    /// Emit `ResultRow` for `n` registers at `start`, honouring the counters
+    /// from [`Self::emit_limit_counters`]: the first OFFSET rows are skipped,
+    /// and the LIMIT-th emitted row jumps to `exit`.
+    fn emit_limited_result_row(
+        &mut self,
+        start: i64,
+        n: usize,
+        (lim, off): (Option<i64>, Option<i64>),
+        exit: Label,
+    ) {
+        let skip = self.label();
+        if let Some(off) = off {
+            let dec = self.label();
+            let emit = self.label();
+            self.emit_jump_to(OpCode::IfPos, off, dec, 0, None, "OFFSET remaining?");
+            self.emit_jump_to(OpCode::Goto, 0, emit, 0, None, "");
+            self.resolve(dec);
+            self.emit_jump_to(OpCode::DecrJumpZero, off, skip, 0, None, "skip row");
+            self.emit_jump_to(OpCode::Goto, 0, skip, 0, None, "");
+            self.resolve(emit);
         }
-
-        // Handle OFFSET - skip first N matching rows
-        // Pattern: IfPos offset, skip -> output -> skip: DecrJumpZero -> Next
-        let offset_ifpos_addr = if let Some(off_reg) = offset_reg {
-            let addr = self.program.len();
-            self.emit(
-                OpCode::IfPos,
-                off_reg,
-                0, // Will patch to DecrJumpZero (skip block)
-                0,
-                None,
-                "",
-            );
-            Some(addr)
-        } else {
-            None
-        };
-
-        // Output row
-        self.emit(OpCode::ResultRow, start_reg, col_count as i64, 0, None, "");
-
-        // Handle LIMIT
-        let after_limit = if let Some(lim_reg) = limit_reg {
-            self.emit(
-                OpCode::DecrJumpZero,
-                lim_reg,
-                0, // Will be patched to after loop
-                0,
-                None,
-                "",
-            );
-            Some(self.program.len() - 1)
-        } else {
-            None
-        };
-
-        // Goto past offset decrement (skip block) to Next
-        let goto_next_addr = if offset_reg.is_some() {
-            let addr = self.program.len();
-            self.emit(
-                OpCode::Goto,
-                0,
-                0, // Will patch to Next
-                0,
-                None,
-                "",
-            );
-            Some(addr)
-        } else {
-            None
-        };
-
-        // Offset skip block: decrement offset counter then fall through to Next
-        let offset_decr_addr = if let Some(off_reg) = offset_reg {
-            let addr = self.program.len();
-            self.emit(
-                OpCode::DecrJumpZero,
-                off_reg,
-                (self.program.len() + 1) as i64, // Always fall through to Next
-                0,
-                None,
-                "",
-            );
-            Some(addr)
-        } else {
-            None
-        };
-
-        // Next row
-        let next_addr = self.program.len();
-        self.resolve(next_label);
-        self.emit(OpCode::Next, cursor_idx, loop_start as i64, 0, None, "");
-
-        let after_loop = self.program.len();
-
-        // Patch jumps
-        if let Some(inst) = self.program.instructions.get_mut(rewind_addr) {
-            inst.p2 = after_loop as i64;
+        self.emit(OpCode::ResultRow, start, n as i64, 0, None, "Output row");
+        if let Some(lim) = lim {
+            self.emit_jump_to(OpCode::DecrJumpZero, lim, exit, 0, None, "LIMIT reached");
         }
-        if let Some(addr) = after_limit {
-            if let Some(inst) = self.program.instructions.get_mut(addr) {
-                inst.p2 = after_loop as i64;
+        self.resolve(skip);
+    }
+
+    /// The output column an `ORDER BY alias` names, if `expr` is one.
+    fn alias_position(outs: &[OutCol], expr: &Expr) -> Option<usize> {
+        let Expr::Identifier(ident) = expr else {
+            return None;
+        };
+        outs.iter().position(|o| {
+            o.alias
+                .as_deref()
+                .is_some_and(|a| a.eq_ignore_ascii_case(&ident.value))
+        })
+    }
+
+    /// The output column a bare `ORDER BY name` means when `name` does not
+    /// resolve on its own (typically: ambiguous across joined tables) but
+    /// exactly one projected column reference has that name.
+    fn bare_output_position(outs: &[OutCol], expr: &Expr, ctx: &NameCtx<'_>) -> Option<usize> {
+        let Expr::Identifier(ident) = expr else {
+            return None;
+        };
+        if ctx.resolve_unqualified(&ident.value).is_ok() {
+            return None;
+        }
+        let mut hits = outs.iter().enumerate().filter(|(_, o)| match &o.expr {
+            Expr::Identifier(i) => i.value.eq_ignore_ascii_case(&ident.value),
+            Expr::CompoundIdentifier(parts) => parts
+                .last()
+                .is_some_and(|p| p.value.eq_ignore_ascii_case(&ident.value)),
+            _ => false,
+        });
+        match (hits.next(), hits.next()) {
+            (Some((i, _)), None) => Some(i),
+            _ => None,
+        }
+    }
+
+    /// Expand a SELECT list into one expression per output column.
+    ///
+    /// `*` and `t.*` become column references, so every output column --
+    /// expanded or written -- is compiled by `code_expr` alike.
+    pub(crate) fn expand_projection(
+        &self,
+        projection: &[SelectItem],
+        plan: &FromPlan<'a>,
+    ) -> SqawkResult<Vec<OutCol>> {
+        let multi = plan.srcs.len() > 1;
+        let star_name = |refname: &str, col: &str| {
+            if multi && !plan.bare_star {
+                format!("{}.{}", refname, col)
+            } else {
+                col.to_string()
             }
-        }
-        // Patch offset IfPos to jump to decrement block
-        if let Some(ifpos_addr) = offset_ifpos_addr {
-            if let Some(decr_addr) = offset_decr_addr {
-                if let Some(inst) = self.program.instructions.get_mut(ifpos_addr) {
-                    inst.p2 = decr_addr as i64;
+        };
+        let column = |refname: &str, col: &str| {
+            Expr::CompoundIdentifier(vec![Ident::new(refname), Ident::new(col)])
+        };
+        let mut outs = Vec::new();
+        for item in projection {
+            match item {
+                SelectItem::Wildcard(_) => {
+                    for (si, src) in plan.srcs.iter().enumerate() {
+                        for (ci, meta) in src.table.column_metadata().iter().enumerate() {
+                            if plan.is_hidden(si, ci) {
+                                continue;
+                            }
+                            let expr = match plan.using_at(si, ci) {
+                                Some(u) => Expr::Identifier(Ident::new(u.name.clone())),
+                                None => column(&src.refname, &meta.name),
+                            };
+                            outs.push(OutCol {
+                                expr,
+                                name: star_name(&src.refname, &meta.name),
+                                alias: None,
+                            });
+                        }
+                    }
+                }
+                SelectItem::QualifiedWildcard(kind, _) => {
+                    let qualifier = match kind {
+                        SelectItemQualifiedWildcardKind::ObjectName(name) => {
+                            object_name_last(name).to_ascii_lowercase()
+                        }
+                        SelectItemQualifiedWildcardKind::Expr(_) => {
+                            return Err(SqawkError::UnsupportedSqlFeature(
+                                "expr.* is not supported".into(),
+                            ))
+                        }
+                    };
+                    let found = plan.srcs.iter().position(|s| {
+                        s.refname == qualifier || s.table.name().eq_ignore_ascii_case(&qualifier)
+                    });
+                    let src = match found {
+                        Some(i) => &plan.srcs[i],
+                        // A single table answers to its own name whatever
+                        // alias it was given.
+                        None if !multi => &plan.srcs[0],
+                        None => return Err(SqawkError::TableNotFound(qualifier)),
+                    };
+                    for meta in src.table.column_metadata() {
+                        outs.push(OutCol {
+                            expr: column(&src.refname, &meta.name),
+                            name: star_name(&src.refname, &meta.name),
+                            alias: None,
+                        });
+                    }
+                }
+                SelectItem::UnnamedExpr(expr) => outs.push(OutCol {
+                    expr: expr.clone(),
+                    name: self.output_name(expr, multi),
+                    alias: None,
+                }),
+                SelectItem::ExprWithAlias { expr, alias } => outs.push(OutCol {
+                    expr: expr.clone(),
+                    name: alias.value.clone(),
+                    alias: Some(alias.value.clone()),
+                }),
+                // Multiple aliases for one item (`expr AS (a, b)`) is a
+                // non-standard extension sqawk does not implement.
+                SelectItem::ExprWithAliases { .. } => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "Multiple column aliases are not supported".into(),
+                    ))
                 }
             }
         }
-        // Patch Goto to jump to Next
-        if let Some(goto_addr) = goto_next_addr {
-            if let Some(inst) = self.program.instructions.get_mut(goto_addr) {
-                inst.p2 = next_addr as i64;
-            }
-        }
-        // Patch LIMIT 0 optimization Goto to jump past loop
-        if let Some(goto_addr) = limit_zero_jump {
-            if let Some(inst) = self.program.instructions.get_mut(goto_addr) {
-                inst.p2 = after_loop as i64;
-            }
-        }
+        Ok(outs)
+    }
 
-        // Close cursor
-        self.emit(OpCode::Close, cursor_idx, 0, 0, None, "");
-
-        Ok(())
+    /// Header for an unaliased SELECT-list expression.
+    ///
+    /// In a join a qualified column keeps its qualifier (`users.name`), as
+    /// join output always has; a single-table query shows the bare name.
+    pub(crate) fn output_name(&self, expr: &Expr, multi: bool) -> String {
+        match expr {
+            Expr::CompoundIdentifier(parts) if multi => parts
+                .iter()
+                .map(|p| p.value.as_str())
+                .collect::<Vec<_>>()
+                .join("."),
+            _ => self.get_column_name_from_expr(expr),
+        }
     }
 
     /// Extract LIMIT and OFFSET values from query
@@ -1865,438 +1362,6 @@ impl<'a> SqlCompiler<'a> {
             );
         }
         self.resolve(skip);
-
-        Ok(())
-    }
-
-    /// Compile a table scan with optional WHERE clause
-    fn compile_table_scan(
-        &mut self,
-        table_with_joins: &TableWithJoins,
-        projection: &[SelectItem],
-        where_clause: &Option<Expr>,
-    ) -> SqawkResult<()> {
-        // Get the table name and alias
-        let (table_name, table_alias) = match &table_with_joins.relation {
-            sqlparser::ast::TableFactor::Table { name, alias, .. } => {
-                let tname = self.get_table_name(name)?;
-                let talias = alias.as_ref().map(|a| a.name.value.clone());
-                (tname, talias)
-            }
-            _ => {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Only simple table scans are supported".into(),
-                ))
-            }
-        };
-
-        // Set the current outer alias for correlated subquery detection
-        self.current_outer_alias = table_alias;
-
-        // Check if the table exists by trying to get it
-        if !self.database.has_table(&table_name) {
-            return Err(SqawkError::TableNotFound(table_name));
-        }
-
-        let table = self.database.get_table(&table_name).unwrap();
-
-        // Check if projection contains function expressions or computed expressions
-        let has_function_expr = Self::projection_needs_expr(projection);
-
-        // Build result schema with column names and types
-        let schema = self.build_result_schema(projection, table);
-        self.program.set_result_schema(schema);
-
-        self.add_comment(&format!("Scanning table: {}", table_name));
-
-        // Open the table for reading (cursor 0)
-        let cursor_idx = 0;
-        // Use a simple counter for now, since we don't have get_table_id
-        let table_id = 1i64; // Just assign a default ID
-
-        self.emit(
-            OpCode::OpenRead,
-            cursor_idx as i64,
-            table_id,
-            0,
-            Some(table_name.clone()),
-            &format!("Open table {} for reading", table_name),
-        );
-
-        // Set up the loop to scan the table
-        // Store the rewind address to patch later with correct exit point
-        let rewind_addr = self.program.len();
-        self.emit(
-            OpCode::Rewind,
-            cursor_idx as i64,
-            0, // Placeholder - will be patched with actual exit address
-            0,
-            None,
-            "Position cursor at first row",
-        );
-
-        // Loop body start address
-        let loop_addr = self.program.len();
-
-        // Load projection values into registers
-        let mut result_regs = Vec::new();
-        if has_function_expr {
-            // Pre-allocate all result registers to ensure they are contiguous
-            let num_items = projection.len();
-            for _ in 0..num_items {
-                let value_reg = self.allocate_register();
-                result_regs.push(value_reg);
-            }
-
-            // Handle projection with function expressions
-            for (idx, item) in projection.iter().enumerate() {
-                let value_reg = result_regs[idx];
-
-                match item {
-                    // Multiple aliases for one item (`expr AS (a, b)`) is a
-                    // non-standard extension sqawk does not implement.
-                    SelectItem::ExprWithAliases { .. } => {
-                        return Err(SqawkError::UnsupportedSqlFeature(
-                            "Multiple column aliases are not supported".into(),
-                        ))
-                    }
-                    SelectItem::Wildcard(_) => {
-                        // For wildcard, load all columns
-                        for col_idx in 0..table.column_count() {
-                            if col_idx > 0 {
-                                let extra_reg = self.allocate_register();
-                                result_regs.push(extra_reg);
-                                self.emit(
-                                    OpCode::Column,
-                                    cursor_idx as i64,
-                                    col_idx as i64,
-                                    extra_reg,
-                                    None,
-                                    &format!("r[{}] = column {}", extra_reg, col_idx),
-                                );
-                            } else {
-                                self.emit(
-                                    OpCode::Column,
-                                    cursor_idx as i64,
-                                    0,
-                                    value_reg,
-                                    None,
-                                    &format!("r[{}] = column 0", value_reg),
-                                );
-                            }
-                        }
-                    }
-                    SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-                        // One expression compiler, as everywhere else. This was
-                        // a parallel implementation understanding Function,
-                        // Trim, Substring, Position, Overlay, BinaryOp, UnaryOp,
-                        // Ceil and Floor, and rejecting everything else -- so
-                        // IS NULL, LIKE, BETWEEN, IN and subqueries were
-                        // unusable in a projection despite being supported in
-                        // WHERE.
-                        let ctx = NameCtx::single(table, cursor_idx as i64);
-                        self.code_expr(expr, &ctx, Some(value_reg))?;
-                    }
-                    SelectItem::QualifiedWildcard(_, _) => {
-                        for col_idx in 0..table.column_count() {
-                            if col_idx > 0 {
-                                let extra_reg = self.allocate_register();
-                                result_regs.push(extra_reg);
-                                self.emit(
-                                    OpCode::Column,
-                                    cursor_idx as i64,
-                                    col_idx as i64,
-                                    extra_reg,
-                                    None,
-                                    &format!("r[{}] = column {}", extra_reg, col_idx),
-                                );
-                            } else {
-                                self.emit(
-                                    OpCode::Column,
-                                    cursor_idx as i64,
-                                    0,
-                                    value_reg,
-                                    None,
-                                    &format!("r[{}] = column 0", value_reg),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // Original path for simple column references
-            let columns = self.resolve_projection(projection, table)?;
-            for col_idx in columns.iter() {
-                let value_reg = self.allocate_register();
-                result_regs.push(value_reg);
-
-                self.emit(
-                    OpCode::Column,
-                    cursor_idx as i64,
-                    *col_idx as i64,
-                    value_reg,
-                    None,
-                    &format!("r[{}] = column {} value", value_reg, col_idx),
-                );
-            }
-        }
-
-        // Compile WHERE clause filtering if present
-        if let Some(where_expr) = where_clause {
-            self.add_comment("WHERE clause filtering");
-            if self.verbose {
-                eprintln!("WHERE comparison: {:?}", where_expr);
-            }
-            let skip_addr =
-                self.code_expr(where_expr, &NameCtx::single(table, cursor_idx as i64), None)?;
-
-            // If WHERE condition failed, jump to Next instruction to skip this row
-            self.emit(
-                OpCode::IfZ,
-                skip_addr,                       // Register containing condition result
-                (self.program.len() + 2) as i64, // Jump to Next instruction
-                0,
-                None,
-                "Skip row if WHERE condition is false",
-            );
-        }
-
-        // Output the result row (only reached if WHERE condition passes)
-        self.emit(
-            OpCode::ResultRow,
-            result_regs[0],           // First register in result
-            result_regs.len() as i64, // Number of columns
-            0,
-            None,
-            "Output result row",
-        );
-
-        // Move to next row and continue loop
-        self.emit(
-            OpCode::Next,
-            cursor_idx as i64,
-            loop_addr as i64, // Jump back to start of loop for next row
-            0,
-            None,
-            "Move to next row or exit loop",
-        );
-
-        // Close the table cursor
-        // First, get the close instruction address (this is where Rewind should jump on empty table)
-        let close_addr = self.program.len();
-        self.emit(OpCode::Close, cursor_idx as i64, 0, 0, None, "Close cursor");
-
-        // Patch the Rewind instruction to jump to Close on empty table
-        if let Some(rewind_inst) = self.program.instructions.get_mut(rewind_addr) {
-            rewind_inst.p2 = close_addr as i64;
-        }
-
-        Ok(())
-    }
-
-    /// Compile a table scan with LIMIT/OFFSET and function expressions
-    fn compile_table_scan_with_limit(
-        &mut self,
-        select: &Select,
-        query: &Query,
-        table_name: &str,
-    ) -> SqawkResult<()> {
-        let table = self.database.get_table(table_name).unwrap();
-        let projection = &select.projection;
-
-        // Build result schema with column names and types
-        let schema = self.build_result_schema(projection, table);
-        self.program.set_result_schema(schema);
-
-        let (limit_val, offset_val) = self.extract_limit_offset(query)?;
-
-        let cursor_idx = 0i64;
-
-        // Open table
-        self.emit(
-            OpCode::OpenRead,
-            cursor_idx,
-            1,
-            0,
-            Some(table_name.to_string()),
-            &format!("Open table {} for reading", table_name),
-        );
-
-        // Initialize limit counter
-        let limit_reg = if let Some(limit) = limit_val {
-            let reg = self.allocate_register();
-            self.emit(
-                OpCode::Integer,
-                limit,
-                reg,
-                0,
-                None,
-                "Initialize limit counter",
-            );
-            Some(reg)
-        } else {
-            None
-        };
-
-        // Initialize offset counter
-        let offset_reg = if offset_val > 0 {
-            let reg = self.allocate_register();
-            self.emit(
-                OpCode::Integer,
-                offset_val,
-                reg,
-                0,
-                None,
-                "Initialize offset counter",
-            );
-            Some(reg)
-        } else {
-            None
-        };
-
-        // Rewind
-        let rewind_addr = self.program.len();
-        self.emit(OpCode::Rewind, cursor_idx, 0, 0, None, "Rewind cursor");
-
-        let loop_start = self.program.len();
-
-        // Pre-allocate result registers to ensure they are contiguous
-        let mut result_regs = Vec::new();
-        for _ in projection {
-            let value_reg = self.allocate_register();
-            result_regs.push(value_reg);
-        }
-
-        // Load projection values into registers with function support
-        for (idx, item) in projection.iter().enumerate() {
-            let value_reg = result_regs[idx];
-
-            match item {
-                // Multiple aliases for one item (`expr AS (a, b)`) is a
-                // non-standard extension sqawk does not implement.
-                SelectItem::ExprWithAliases { .. } => {
-                    return Err(SqawkError::UnsupportedSqlFeature(
-                        "Multiple column aliases are not supported".into(),
-                    ))
-                }
-                SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => {
-                    for col_idx in 0..table.column_count() {
-                        if col_idx > 0 {
-                            let extra_reg = self.allocate_register();
-                            result_regs.push(extra_reg);
-                            self.emit(
-                                OpCode::Column,
-                                cursor_idx,
-                                col_idx as i64,
-                                extra_reg,
-                                None,
-                                &format!("r[{}] = column {}", extra_reg, col_idx),
-                            );
-                        } else {
-                            self.emit(
-                                OpCode::Column,
-                                cursor_idx,
-                                0,
-                                value_reg,
-                                None,
-                                &format!("r[{}] = column 0", value_reg),
-                            );
-                        }
-                    }
-                }
-                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-                    self.code_expr(expr, &NameCtx::single(table, cursor_idx), Some(value_reg))?;
-                }
-            }
-        }
-
-        // WHERE clause
-        if let Some(where_expr) = &select.selection {
-            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table, cursor_idx), None)?;
-            // Jump to Next if condition fails
-            let next_addr = self.program.len()
-                + 1
-                + if offset_reg.is_some() { 2 } else { 0 }
-                + if limit_reg.is_some() { 2 } else { 0 }
-                + 1; // ResultRow
-            self.emit(
-                OpCode::IfZ,
-                cond_reg,
-                next_addr as i64,
-                0,
-                None,
-                "Skip if WHERE false",
-            );
-        }
-
-        // Handle offset
-        if let Some(offset_r) = offset_reg {
-            // If offset counter > 0, decrement and skip this row
-            let after_skip = self.program.len() + 2;
-            self.emit(
-                OpCode::DecrJumpZero,
-                offset_r,
-                after_skip as i64,
-                0,
-                None,
-                "Decrement offset, skip if done",
-            );
-            // Jump to next row (skip output)
-            let next_addr = self.program.len() + if limit_reg.is_some() { 3 } else { 1 } + 1;
-            self.emit(
-                OpCode::Goto,
-                0,
-                next_addr as i64,
-                0,
-                None,
-                "Skip row for offset",
-            );
-        }
-
-        // Output result row
-        self.emit(
-            OpCode::ResultRow,
-            result_regs[0],
-            result_regs.len() as i64,
-            0,
-            None,
-            "Output result row",
-        );
-
-        // Handle limit
-        if let Some(limit_r) = limit_reg {
-            // Decrement limit counter, stop if zero
-            let loop_end = self.program.len() + 2;
-            self.emit(
-                OpCode::DecrJumpZero,
-                limit_r,
-                loop_end as i64,
-                0,
-                None,
-                "Decrement limit, stop if zero",
-            );
-        }
-
-        // Next row
-        self.emit(
-            OpCode::Next,
-            cursor_idx,
-            loop_start as i64,
-            0,
-            None,
-            "Next row",
-        );
-
-        let loop_end = self.program.len();
-
-        // Close cursor
-        self.emit(OpCode::Close, cursor_idx, 0, 0, None, "Close cursor");
-
-        // Patch rewind jump
-        if let Some(inst) = self.program.instructions.get_mut(rewind_addr) {
-            inst.p2 = loop_end as i64;
-        }
 
         Ok(())
     }
@@ -4068,12 +3133,31 @@ impl<'a> SqlCompiler<'a> {
     ) -> SqawkResult<i64> {
         let dest = into.unwrap_or_else(|| self.allocate_register());
 
+        // A value already computed into a register -- an aggregate, or a
+        // GROUP BY key after grouping: read the bound register rather than
+        // recompiling it (an aggregate is not a scalar function, and a key's
+        // columns no longer have a current row).
+        if let Some(src) = ctx.lookup_agg(expr) {
+            if src != dest {
+                self.emit(
+                    OpCode::Copy,
+                    src,
+                    dest,
+                    0,
+                    None,
+                    &format!("r[{}] = {} (r[{}])", dest, expr, src),
+                );
+            }
+            return Ok(dest);
+        }
+
         match expr {
             // Column references resolve through the context, so they work
             // across joins and aliases and are matched case-insensitively.
             Expr::Identifier(ident) => {
                 let col = ctx.resolve_unqualified(&ident.value)?;
-                self.emit_column_ref(col, dest, &ident.value);
+                let col = ctx.bind(col, &ident.value)?;
+                self.emit_column_ref(col, ctx, dest, &ident.value);
             }
 
             // `table.column` / `alias.column`. The old WHERE compiler had no
@@ -4082,8 +3166,10 @@ impl<'a> SqlCompiler<'a> {
             Expr::CompoundIdentifier(parts) if parts.len() >= 2 => {
                 let qualifier = &parts[parts.len() - 2].value;
                 let name = &parts[parts.len() - 1].value;
+                let label = format!("{}.{}", qualifier, name);
                 let col = ctx.resolve_qualified(qualifier, name)?;
-                self.emit_column_ref(col, dest, &format!("{}.{}", qualifier, name));
+                let col = ctx.bind(col, &label)?;
+                self.emit_column_ref(col, ctx, dest, &label);
             }
 
             Expr::Nested(inner) => {
@@ -4111,23 +3197,6 @@ impl<'a> SqlCompiler<'a> {
                     other => TableValue::String(other.to_string().into()),
                 };
                 self.emit_value_literal(dest, &literal)?;
-            }
-
-            // An aggregate call in a position where aggregates have already
-            // been computed: read the bound register rather than trying to
-            // compile SUM as a scalar function.
-            Expr::Function(_) if ctx.lookup_agg(expr).is_some() => {
-                let src = ctx.lookup_agg(expr).unwrap();
-                if src != dest {
-                    self.emit(
-                        OpCode::Copy,
-                        src,
-                        dest,
-                        0,
-                        None,
-                        &format!("r[{}] = aggregate r[{}]", dest, src),
-                    );
-                }
             }
 
             // String concatenation. sqlparser has always produced this node;
@@ -4508,7 +3577,7 @@ impl<'a> SqlCompiler<'a> {
     }
 
     /// Emit whatever loads a resolved column into `dest`.
-    fn emit_column_ref(&mut self, col: ColumnRef, dest: i64, label: &str) {
+    fn emit_column_ref(&mut self, col: ColumnRef, ctx: &NameCtx<'_>, dest: i64, label: &str) {
         match col {
             ColumnRef::Cursor { cursor, col } => self.emit(
                 OpCode::Column,
@@ -4529,6 +3598,27 @@ impl<'a> SqlCompiler<'a> {
                         &format!("r[{}] = {} (r[{}])", dest, label, src),
                     );
                 }
+            }
+            // COALESCE over the merged columns, leftmost first.
+            ColumnRef::Using(i) => {
+                let refs = ctx.using[i].refs.clone();
+                let done = self.label();
+                let is_null = self.allocate_register();
+                for (n, (cursor, col)) in refs.iter().enumerate() {
+                    self.emit(
+                        OpCode::Column,
+                        *cursor,
+                        *col as i64,
+                        dest,
+                        None,
+                        &format!("r[{}] = {} (USING column, source {})", dest, label, n),
+                    );
+                    if n + 1 < refs.len() {
+                        self.emit(OpCode::IsNull, dest, is_null, 0, None, "");
+                        self.emit_jump_to(OpCode::IfZ, is_null, done, 0, None, "not NULL: done");
+                    }
+                }
+                self.resolve(done);
             }
         }
     }
@@ -4571,26 +3661,6 @@ impl<'a> SqlCompiler<'a> {
         // Use the last part of the object name as the table name
         // (schemas and catalogs are ignored for now)
         Ok(object_name_last(name))
-    }
-
-    /// Whether a projection item needs expression compilation rather than a
-    /// bare column load.
-    ///
-    /// Phrased as "not a plain column reference" rather than as an allowlist
-    /// of computed forms. The allowlists this replaces named nine expression
-    /// kinds and omitted CASE, CAST, IS NULL, LIKE, BETWEEN, IN and
-    /// subqueries, so those fell through to the column-index path and were
-    /// rejected with "Only column references supported in SELECT" -- even
-    /// though the expression compiler handles them. An allowlist has to be
-    /// updated every time an expression kind is added; this cannot drift.
-    fn projection_needs_expr(projection: &[SelectItem]) -> bool {
-        projection.iter().any(|item| {
-            let expr = match item {
-                SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => e,
-                _ => return false,
-            };
-            !matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_))
-        })
     }
 
     /// Emit post-processing ORDER BY / LIMIT / OFFSET over the result set.
@@ -4763,78 +3833,6 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// Resolve projection items to column indices
-    fn resolve_projection(
-        &self,
-        projection: &[SelectItem],
-        table: &Table,
-    ) -> SqawkResult<Vec<usize>> {
-        let mut columns = Vec::new();
-
-        for item in projection {
-            match item {
-                // Multiple aliases for one item (`expr AS (a, b)`) is a
-                // non-standard extension sqawk does not implement.
-                SelectItem::ExprWithAliases { .. } => {
-                    return Err(SqawkError::UnsupportedSqlFeature(
-                        "Multiple column aliases are not supported".into(),
-                    ))
-                }
-                SelectItem::Wildcard(_) => {
-                    // SELECT * - include all columns
-                    for i in 0..table.column_count() {
-                        columns.push(i);
-                    }
-                }
-                SelectItem::UnnamedExpr(expr) => {
-                    let col_idx = self.resolve_column_expr(expr, table)?;
-                    columns.push(col_idx);
-                }
-                SelectItem::ExprWithAlias { expr, .. } => {
-                    let col_idx = self.resolve_column_expr(expr, table)?;
-                    columns.push(col_idx);
-                }
-                SelectItem::QualifiedWildcard(name, _) => {
-                    // table.* - for now just include all columns
-                    let _ = name; // Ignore table qualifier for single-table queries
-                    for i in 0..table.column_count() {
-                        columns.push(i);
-                    }
-                }
-            }
-        }
-
-        if columns.is_empty() {
-            // Default to all columns
-            Ok((0..table.column_count()).collect())
-        } else {
-            Ok(columns)
-        }
-    }
-
-    pub(crate) fn resolve_column_expr(&self, expr: &Expr, table: &Table) -> SqawkResult<usize> {
-        match expr {
-            Expr::Identifier(ident) => {
-                let col_name = ident.value.to_lowercase();
-                table
-                    .column_index(&col_name)
-                    .ok_or(SqawkError::ColumnNotFound(col_name))
-            }
-            Expr::CompoundIdentifier(parts) => {
-                let col_name = parts
-                    .last()
-                    .map(|p| p.value.to_lowercase())
-                    .unwrap_or_default();
-                table
-                    .column_index(&col_name)
-                    .ok_or(SqawkError::ColumnNotFound(col_name))
-            }
-            _ => Err(SqawkError::UnsupportedSqlFeature(
-                "Only column references supported in SELECT".into(),
-            )),
-        }
-    }
-
     pub(crate) fn get_column_name_from_expr(&self, expr: &Expr) -> String {
         match expr {
             Expr::Identifier(ident) => ident.value.clone(),
@@ -4890,68 +3888,27 @@ impl<'a> SqlCompiler<'a> {
         }
     }
 
-    /// Build a ResultSchema from a projection and table
-    ///
-    /// This creates a proper schema with column names and types for the result set.
-    pub(crate) fn build_result_schema(
-        &self,
-        projection: &[SelectItem],
-        table: &Table,
-    ) -> ResultSchema {
-        let mut schema = ResultSchema::new();
-        let col_metadata = table.column_metadata();
-
-        for item in projection {
-            match item {
-                // Multiple aliases for one item (`expr AS (a, b)`) is a
-                // non-standard extension sqawk does not implement. This
-                // function cannot fail; the compile path rejects the item.
-                SelectItem::ExprWithAliases { .. } => {}
-                SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => {
-                    // Add all columns from the table with their types
-                    for meta in col_metadata {
-                        schema.add_column(meta.name.clone(), meta.data_type);
-                    }
-                }
-                SelectItem::UnnamedExpr(expr) => {
-                    let name = self.get_column_name_from_expr(expr);
-                    let data_type = self.infer_expr_type(expr, table);
-                    schema.add_column(name, data_type);
-                }
-                SelectItem::ExprWithAlias { expr, alias } => {
-                    let data_type = self.infer_expr_type(expr, table);
-                    schema.add_column(alias.value.clone(), data_type);
-                }
-            }
-        }
-        schema
-    }
-
     /// Infer the data type of an expression
-    pub(crate) fn infer_expr_type(&self, expr: &Expr, table: &Table) -> DataType {
+    pub(crate) fn infer_expr_type(&self, expr: &Expr, ctx: &NameCtx<'_>) -> DataType {
+        let column_type = |col: SqawkResult<ColumnRef>| -> DataType {
+            let (cursor, idx) = match col {
+                Ok(ColumnRef::Cursor { cursor, col }) => (cursor, col),
+                Ok(ColumnRef::Using(i)) => ctx.using[i].refs[0],
+                _ => return DataType::Text,
+            };
+            ctx.srcs
+                .iter()
+                .chain(&ctx.outer)
+                .find(|s| s.cursor == cursor)
+                .and_then(|s| s.table.column_metadata().get(idx))
+                .map(|m| m.data_type)
+                .unwrap_or(DataType::Text)
+        };
         match expr {
-            Expr::Identifier(ident) => {
-                // Look up the column type in the table
-                let col_meta = table.column_metadata();
-                for meta in col_meta {
-                    if meta.name.eq_ignore_ascii_case(&ident.value) {
-                        return meta.data_type;
-                    }
-                }
-                DataType::Text // Default to text if not found
-            }
-            Expr::CompoundIdentifier(parts) => {
-                // For table.column references, use the column name
-                if let Some(col_name) = parts.last() {
-                    let col_meta = table.column_metadata();
-                    for meta in col_meta {
-                        if meta.name.eq_ignore_ascii_case(&col_name.value) {
-                            return meta.data_type;
-                        }
-                    }
-                }
-                DataType::Text
-            }
+            Expr::Identifier(ident) => column_type(ctx.resolve_unqualified(&ident.value)),
+            Expr::CompoundIdentifier(parts) if parts.len() >= 2 => column_type(
+                ctx.resolve_qualified(&parts[parts.len() - 2].value, &parts[parts.len() - 1].value),
+            ),
             Expr::Function(func) => {
                 let func_name = func.name.to_string().to_uppercase();
                 match func_name.as_str() {
@@ -4965,7 +3922,7 @@ impl<'a> SqlCompiler<'a> {
                             if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))) =
                                 func_args(func).first()
                             {
-                                let arg_type = self.infer_expr_type(arg, table);
+                                let arg_type = self.infer_expr_type(arg, ctx);
                                 if matches!(arg_type, DataType::Integer) {
                                     return DataType::Integer;
                                 }
@@ -4978,7 +3935,7 @@ impl<'a> SqlCompiler<'a> {
                         if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))) =
                             func_args(func).first()
                         {
-                            return self.infer_expr_type(arg, table);
+                            return self.infer_expr_type(arg, ctx);
                         }
                         DataType::Text
                     }
@@ -4990,7 +3947,7 @@ impl<'a> SqlCompiler<'a> {
                         if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))) =
                             func_args(func).first()
                         {
-                            return self.infer_expr_type(arg, table);
+                            return self.infer_expr_type(arg, ctx);
                         }
                         DataType::Text
                     }
@@ -5013,7 +3970,7 @@ impl<'a> SqlCompiler<'a> {
                     | BinaryOperator::Minus
                     | BinaryOperator::Multiply
                     | BinaryOperator::Divide
-                    | BinaryOperator::Modulo => self.infer_expr_type(left, table),
+                    | BinaryOperator::Modulo => self.infer_expr_type(left, ctx),
                     BinaryOperator::Eq
                     | BinaryOperator::NotEq
                     | BinaryOperator::Lt
@@ -5033,10 +3990,10 @@ impl<'a> SqlCompiler<'a> {
             } => {
                 // CASE returns the type of its first result
                 if let Some(first) = conditions.first() {
-                    return self.infer_expr_type(&first.result, table);
+                    return self.infer_expr_type(&first.result, ctx);
                 }
                 if let Some(else_expr) = else_result {
-                    return self.infer_expr_type(else_expr, table);
+                    return self.infer_expr_type(else_expr, ctx);
                 }
                 DataType::Text
             }
@@ -5097,15 +4054,8 @@ impl<'a> SqlCompiler<'a> {
         if Self::is_aggregate_call(expr) {
             return true;
         }
-        match expr {
-            Expr::BinaryOp { left, right, .. } => {
-                self.is_aggregate_expr(left) || self.is_aggregate_expr(right)
-            }
-            Expr::UnaryOp { expr: inner, .. }
-            | Expr::Nested(inner)
-            | Expr::Cast { expr: inner, .. } => self.is_aggregate_expr(inner),
-            _ => false,
-        }
+        expr_children(expr)
+            .is_some_and(|children| children.into_iter().any(|c| self.is_aggregate_expr(c)))
     }
 
     /// Check if the projection contains any window functions

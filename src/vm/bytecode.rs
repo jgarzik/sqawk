@@ -180,10 +180,31 @@ pub enum OpCode {
     Except, // Keep only rows from left that don't exist in right result set
 
     // Join operations
-    NullRow,     // Load NULL values into registers P1 through P1+P2-1 (P2 = count)
-    RewindInner, // Rewind cursor P1, used for inner loop of nested join
-    MarkMatch,   // Set register P1 to 1 to indicate a match was found
-    CheckMatch,  // If register P1 is 0 (no match), jump to P2; reset register to 0
+    //
+    // NullRow follows SQLite's OP_NullRow: it puts cursor P1 on a virtual
+    // all-NULL row, so every Column read from it yields NULL, and leaves it
+    // exhausted, so a following Next/HashNext falls through. That is how an
+    // outer join's unmatched side is NULL-extended without copying columns
+    // into registers first.
+    NullRow, // Put cursor P1 on an all-NULL row (Column -> NULL; Next falls through)
+
+    // Hash join, an ephemeral hash index over a cursor's rows.
+    //
+    // HashInsert is run once per row of the inner table to build the index;
+    // HashProbe then positions the cursor on the first row whose key equals
+    // the probe key and HashNext walks the remaining matches, so the loop
+    // body reads the inner row with ordinary Column instructions. Keys are
+    // normalized so that every pair of values the Eq opcode calls equal lands
+    // in the same bucket (1 and 1.0, 1 and '1'); the join condition is still
+    // re-checked on each candidate, so a bucket may over-approximate. A NULL
+    // key is never inserted and never matches.
+    HashInsert, // Add cursor P1's current row to its hash index under key r[P2..P2+P3]
+    HashProbe,  // Position cursor P1 on the first row matching key r[P3..P3+P4]; jump to P2 if none
+    HashNext,   // Advance cursor P1 to its next probe match and jump to P2; fall through when done
+
+    // Per-row matched bits, for FULL JOIN's pass over unmatched right rows.
+    MarkRowMatched, // Record that cursor P1's current row matched (no-op on a NULL row)
+    IfRowMatched,   // Jump to P2 if cursor P1's current row was marked matched
 
     // Subquery/Coroutine operations (inspired by SQLite)
     InitCoroutine, // P1 = register to store return address, P2 = jump over coroutine, P3 = coroutine entry
@@ -204,7 +225,7 @@ pub enum OpCode {
     // Sorter operations (ORDER BY)
     SorterOpen, // Open a sorter. P1 = sorter ID, P2 = number of columns, P4 = sort key spec
     SorterInsert, // Insert row into sorter P1. P2 = start register, P3 = column count
-    SorterSort, // Sort the sorter P1. Must be called before SorterNext.
+    SorterSort, // Sort the sorter P1. Must be called before SorterNext. Jump to P2 (if > 0) when empty.
     SorterData, // Copy current sorter P1 row to registers starting at P2. P3 = column count.
     SorterNext, // Advance sorter P1. Jump to P2 if more rows, else continue.
 

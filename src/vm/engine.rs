@@ -44,6 +44,81 @@ struct Cursor<'a> {
     position: usize,
     /// Whether the cursor is at a valid row
     valid: bool,
+    /// Set by NullRow: the cursor stands on a virtual all-NULL row.
+    null_row: bool,
+    /// Hash index built by HashInsert, if this cursor is a hash-join inner.
+    hash: Option<HashIndex>,
+    /// Iteration state of the current HashProbe.
+    probe: ProbeState,
+    /// Rows marked by MarkRowMatched (FULL JOIN), indexed by row position.
+    matched: Vec<bool>,
+}
+
+/// One component of a hash-join key.
+///
+/// Normalized so that values the `Eq` opcode treats as equal hash alike:
+/// every number, and every string that parses as one, becomes its f64 bit
+/// pattern. Two values in one bucket are not necessarily equal (`'1'` and
+/// `'1.0'` are distinct strings), which is fine because the join condition
+/// is re-evaluated on every candidate row.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum HashKeyPart {
+    Num(u64),
+    Str(String),
+}
+
+/// How one key register participates in a hash join.
+enum KeyClass {
+    /// NULL (or NaN): equal to nothing, so the row is never inserted/matched.
+    Never,
+    /// A value whose equality the bucketing cannot express (a boolean, which
+    /// `Eq` compares numerically against numbers but textually against
+    /// strings). Such rows are kept apart and checked against every probe.
+    Wild,
+    Key(HashKeyPart),
+}
+
+fn hash_key_class(reg: &Register) -> KeyClass {
+    fn num(f: f64) -> KeyClass {
+        if f.is_nan() {
+            KeyClass::Never
+        } else {
+            // 0.0 and -0.0 compare equal.
+            KeyClass::Key(HashKeyPart::Num(if f == 0.0 { 0 } else { f.to_bits() }))
+        }
+    }
+    match reg {
+        Register::Null => KeyClass::Never,
+        Register::Integer(i) => num(*i as f64),
+        Register::Float(f) => num(*f),
+        Register::Boolean(_) => KeyClass::Wild,
+        Register::String(s) => match s.trim().parse::<f64>() {
+            Ok(f) if !f.is_nan() => num(f),
+            _ => KeyClass::Key(HashKeyPart::Str(s.clone())),
+        },
+    }
+}
+
+/// Ephemeral hash index over a cursor's rows, keyed on the join key.
+#[derive(Default)]
+struct HashIndex {
+    /// Key -> index into `buckets`.
+    map: HashMap<Vec<HashKeyPart>, usize>,
+    /// Row positions per distinct key, in insertion (scan) order.
+    buckets: Vec<Vec<usize>>,
+    /// Rows with a `Wild` key component, candidates for every probe.
+    wild: Vec<usize>,
+}
+
+/// Where HashProbe/HashNext are in the candidate list.
+#[derive(Default)]
+struct ProbeState {
+    /// Bucket of the probe key, if any row had it.
+    bucket: Option<usize>,
+    /// The probe key had a `Wild` component: every row is a candidate.
+    all: bool,
+    /// Next candidate to return.
+    pos: usize,
 }
 
 impl<'a> Cursor<'a> {
@@ -53,6 +128,10 @@ impl<'a> Cursor<'a> {
             data: CursorData::Table { table },
             position: 0,
             valid: false,
+            null_row: false,
+            hash: None,
+            probe: ProbeState::default(),
+            matched: Vec::new(),
         }
     }
 
@@ -69,6 +148,10 @@ impl<'a> Cursor<'a> {
             },
             position: 0,
             valid: false,
+            null_row: false,
+            hash: None,
+            probe: ProbeState::default(),
+            matched: Vec::new(),
         }
     }
 
@@ -85,12 +168,17 @@ impl<'a> Cursor<'a> {
             },
             position: 0,
             valid: false,
+            null_row: false,
+            hash: None,
+            probe: ProbeState::default(),
+            matched: Vec::new(),
         }
     }
 
     /// Move to the first row (Rewind opcode)
     fn rewind(&mut self) -> bool {
         self.position = 0;
+        self.null_row = false;
         self.valid = match &self.data {
             CursorData::Table { table } => self.position < table.row_count(),
             CursorData::Ephemeral { rows, .. } => !rows.is_empty(),
@@ -112,8 +200,44 @@ impl<'a> Cursor<'a> {
         self.valid
     }
 
+    /// The `i`-th candidate row of the current hash probe.
+    fn probe_candidate(&self, i: usize) -> Option<usize> {
+        let index = self.hash.as_ref()?;
+        if self.probe.all {
+            return (i < self.rows().len()).then_some(i);
+        }
+        let bucket: &[usize] = match self.probe.bucket {
+            Some(b) => &index.buckets[b],
+            None => &[],
+        };
+        match bucket.get(i) {
+            Some(&row) => Some(row),
+            None => index.wild.get(i - bucket.len()).copied(),
+        }
+    }
+
+    /// Step to the next hash-probe candidate. False when there is none, in
+    /// which case the cursor is left exhausted.
+    fn probe_advance(&mut self) -> bool {
+        match self.probe_candidate(self.probe.pos) {
+            Some(row) => {
+                self.probe.pos += 1;
+                self.position = row;
+                self.valid = true;
+                true
+            }
+            None => {
+                self.valid = false;
+                false
+            }
+        }
+    }
+
     /// Get the current row index (for index-based results)
     fn current_row_idx(&self) -> Option<usize> {
+        if self.null_row {
+            return None;
+        }
         if self.valid {
             Some(self.position)
         } else {
@@ -123,6 +247,9 @@ impl<'a> Cursor<'a> {
 
     /// Get a column value at the current position (Column opcode)
     fn column(&self, idx: usize) -> Option<Value> {
+        if self.null_row {
+            return (idx < self.column_count()).then_some(Value::Null);
+        }
         if !self.valid {
             return None;
         }
@@ -2857,87 +2984,126 @@ impl<'a> VmEngine<'a> {
             }
 
             OpCode::NullRow => {
-                // Load NULL values into registers P1 through P1+P2-1
-                // P1: Start register
-                // P2: Number of registers to set to NULL
-                let start_reg = inst.p1 as usize;
-                let count = inst.p2 as usize;
-
-                for i in 0..count {
-                    self.set_register(start_reg + i, Register::Null)?;
-                }
-
-                if self.verbose {
-                    eprintln!(
-                        "NullRow: Set registers {} to {} to NULL",
-                        start_reg,
-                        start_reg + count - 1
-                    );
-                }
-
+                // Put cursor P1 on a virtual all-NULL row, as SQLite's
+                // OP_NullRow does. It is also left exhausted, so the Next or
+                // HashNext closing its loop falls through instead of
+                // resuming a scan.
+                let cursor = self.cursor_mut(inst.p1)?;
+                cursor.null_row = true;
+                cursor.valid = false;
                 Ok(ExecuteResult::Continue)
             }
 
-            OpCode::RewindInner => {
-                // Rewind cursor P1 for inner loop of nested join
-                // P1: Cursor index
-                // P2: Jump address if table is empty
-                let cursor_idx = inst.p1 as usize;
-                let jump_addr = inst.p2 as usize;
-
-                if let Some(cursor) = self.cursors.get_mut(&cursor_idx) {
-                    if cursor.rewind() {
-                        // Cursor has rows, continue
-                        Ok(ExecuteResult::Continue)
-                    } else {
-                        // Table is empty, jump to P2
-                        Ok(ExecuteResult::Jump(jump_addr))
+            OpCode::HashInsert => {
+                // Index cursor P1's current row under key r[P2..P2+P3].
+                let key_start = inst.p2 as usize;
+                let key_len = inst.p3 as usize;
+                let mut key = Vec::with_capacity(key_len);
+                let mut wild = false;
+                for i in 0..key_len {
+                    match hash_key_class(&self.get_register(key_start + i)?) {
+                        // A NULL key equals nothing: the row can never match.
+                        KeyClass::Never => return Ok(ExecuteResult::Continue),
+                        KeyClass::Wild => wild = true,
+                        KeyClass::Key(part) => key.push(part),
                     }
+                }
+                let cursor = self.cursor_mut(inst.p1)?;
+                let row = cursor.position;
+                let index = cursor.hash.get_or_insert_with(HashIndex::default);
+                if wild {
+                    index.wild.push(row);
                 } else {
-                    Err(SqawkError::VmError(format!(
-                        "Cursor {} not found for RewindInner",
-                        cursor_idx
-                    )))
+                    let next_id = index.buckets.len();
+                    let id = *index.map.entry(key).or_insert(next_id);
+                    if id == next_id {
+                        index.buckets.push(Vec::new());
+                    }
+                    index.buckets[id].push(row);
                 }
-            }
-
-            OpCode::MarkMatch => {
-                // Set register P1 to 1 to indicate a match was found
-                let reg = inst.p1 as usize;
-                self.set_register(reg, Register::Integer(1))?;
-
-                if self.verbose {
-                    eprintln!("MarkMatch: Set r[{}] = 1", reg);
-                }
-
                 Ok(ExecuteResult::Continue)
             }
 
-            OpCode::CheckMatch => {
-                // If register P1 is 0 (no match), jump to P2
-                // Then reset register P1 to 0 for next iteration
-                let reg = inst.p1 as usize;
-                let jump_addr = inst.p2 as usize;
-
-                let should_jump = match self.get_register(reg)? {
-                    Register::Integer(0) => true,
-                    Register::Integer(_) => false,
-                    Register::Null => true, // Treat NULL as no match
-                    _ => true,              // Default to no match for unexpected types
+            OpCode::HashProbe => {
+                // Position cursor P1 on the first row whose key equals
+                // r[P3..P3+P4]; jump to P2 when there is none.
+                let key_start = inst.p3 as usize;
+                let key_len: usize = inst
+                    .p4
+                    .as_deref()
+                    .and_then(|n| n.parse().ok())
+                    .ok_or_else(|| SqawkError::VmError("HashProbe needs a key width".into()))?;
+                let mut key = Vec::with_capacity(key_len);
+                let mut all = false;
+                let mut never = false;
+                for i in 0..key_len {
+                    match hash_key_class(&self.get_register(key_start + i)?) {
+                        KeyClass::Never => never = true,
+                        KeyClass::Wild => all = true,
+                        KeyClass::Key(part) => key.push(part),
+                    }
+                }
+                let cursor = self.cursor_mut(inst.p1)?;
+                cursor.null_row = false;
+                let bucket = match (&cursor.hash, never || all) {
+                    (Some(index), false) => index.map.get(&key).copied(),
+                    _ => None,
                 };
-
-                // Reset the match flag for the next iteration
-                self.set_register(reg, Register::Integer(0))?;
-
-                if should_jump {
-                    if self.verbose {
-                        eprintln!("CheckMatch: No match found, jumping to {}", jump_addr);
-                    }
-                    Ok(ExecuteResult::Jump(jump_addr))
+                cursor.probe = ProbeState {
+                    bucket,
+                    all: all && !never,
+                    pos: 0,
+                };
+                if never {
+                    cursor.valid = false;
+                    return Ok(ExecuteResult::Jump(inst.p2 as usize));
+                }
+                if cursor.probe_advance() {
+                    Ok(ExecuteResult::Continue)
                 } else {
-                    if self.verbose {
-                        eprintln!("CheckMatch: Match found, continuing");
+                    Ok(ExecuteResult::Jump(inst.p2 as usize))
+                }
+            }
+
+            OpCode::HashNext => {
+                // Advance cursor P1 to its next probe match and jump to P2;
+                // fall through when the matches are exhausted.
+                let cursor = self.cursor_mut(inst.p1)?;
+                if cursor.null_row || !cursor.valid {
+                    return Ok(ExecuteResult::Continue);
+                }
+                if cursor.probe_advance() {
+                    Ok(ExecuteResult::Jump(inst.p2 as usize))
+                } else {
+                    Ok(ExecuteResult::Continue)
+                }
+            }
+
+            OpCode::MarkRowMatched => {
+                let cursor = self.cursor_mut(inst.p1)?;
+                if !cursor.null_row && cursor.valid {
+                    let row = cursor.position;
+                    if cursor.matched.len() <= row {
+                        let len = cursor.rows().len().max(row + 1);
+                        cursor.matched.resize(len, false);
                     }
+                    cursor.matched[row] = true;
+                }
+                Ok(ExecuteResult::Continue)
+            }
+
+            OpCode::IfRowMatched => {
+                let cursor = self.cursor_mut(inst.p1)?;
+                let matched = !cursor.null_row
+                    && cursor.valid
+                    && cursor
+                        .matched
+                        .get(cursor.position)
+                        .copied()
+                        .unwrap_or(false);
+                if matched {
+                    Ok(ExecuteResult::Jump(inst.p2 as usize))
+                } else {
                     Ok(ExecuteResult::Continue)
                 }
             }
@@ -3040,6 +3206,11 @@ impl<'a> VmEngine<'a> {
 
                 if let Some(sorter) = self.sorters.get_mut(&sorter_id) {
                     sorter.sort();
+                    // P2, when set, is where to go if there is nothing to
+                    // drain: SorterData on an empty sorter has no row to read.
+                    if inst.p2 > 0 && sorter.rows.is_empty() {
+                        return Ok(ExecuteResult::Jump(inst.p2 as usize));
+                    }
                     if self.verbose {
                         eprintln!(
                             "SorterSort: Sorted {} rows in sorter {}",
@@ -3814,6 +3985,13 @@ impl<'a> VmEngine<'a> {
     #[allow(dead_code)]
     fn is_join_query(&self) -> bool {
         self.cursor_source_order.len() > 1
+    }
+
+    /// The cursor numbered `idx`, for opcodes that modify it.
+    fn cursor_mut(&mut self, idx: i64) -> SqawkResult<&mut Cursor<'a>> {
+        self.cursors
+            .get_mut(&(idx as usize))
+            .ok_or_else(|| SqawkError::VmError(format!("Invalid cursor: {}", idx)))
     }
 
     /// Get a register value by index

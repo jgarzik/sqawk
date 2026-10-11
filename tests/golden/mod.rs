@@ -1942,12 +1942,13 @@ fn inner_join_and_comma_join_agree() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn outer_join_aggregate_is_not_silently_rewritten() -> Result<(), Box<dyn std::error::Error>> {
     // Must not answer as though it were an inner join: Cara has no purchase,
-    // so a LEFT JOIN has 4 rows where the rewritten inner form has 3. Erroring
-    // is acceptable; a wrong number is not.
-    assert_query_fails(
+    // so a LEFT JOIN has 4 rows where the inner form has 3. (This used to be
+    // rejected outright; aggregates now consume the outer join's rows,
+    // NULL-extended ones included. Expected value from SQLite.)
+    assert_query(
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT COUNT(*) FROM customers LEFT JOIN purchases ON customers.id = purchases.customer_id",
-        "Unsupported",
+        "COUNT\n4",
     )
 }
 

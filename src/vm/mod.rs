@@ -19,7 +19,7 @@ pub mod compiler;
 mod compiler_aggregate;
 mod compiler_ddl;
 mod compiler_dml;
-mod compiler_join;
+mod compiler_from;
 mod compiler_window;
 pub mod engine;
 
