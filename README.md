@@ -1,7 +1,6 @@
 # Sqawk
 
 [![Crates.io](https://img.shields.io/crates/v/sqawk.svg)](https://crates.io/crates/sqawk)
-[![Docs.rs](https://docs.rs/sqawk/badge.svg)](https://docs.rs/sqawk)
 [![MIT licensed](https://img.shields.io/crates/l/sqawk.svg)](./LICENSE)
 
 Sqawk is an SQL-based command-line tool for processing delimiter-separated files (CSV, TSV, etc.), inspired by the classic `awk` command. It loads data into in-memory tables, executes SQL queries, and optionally writes results back to files.

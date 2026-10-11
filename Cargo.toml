@@ -7,7 +7,6 @@ description = "An SQL-based command-line tool for processing delimiter-separated
 license = "MIT"
 repository = "https://github.com/jgarzik/sqawk"
 homepage = "https://github.com/jgarzik/sqawk"
-documentation = "https://docs.rs/sqawk"
 readme = "README.md"
 # `cargo run` and `cargo install --path .` would otherwise be ambiguous across
 # the two [[bin]] targets below.
