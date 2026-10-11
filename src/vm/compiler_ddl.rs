@@ -3,14 +3,14 @@
 //! This module extends SqlCompiler with DDL statement compilation methods.
 
 use sqlparser::ast::{
-    AlterTableOperation, ObjectName, ObjectType, SelectItem, SetExpr, TableFactor,
+    AlterTableOperation, Expr, ObjectName, ObjectType, SelectItem, SetExpr, TableFactor,
 };
 
 use super::ast_compat::sql_option_key_value;
 use super::bytecode::OpCode;
 use super::compiler::{NameCtx, SqlCompiler};
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::DataType;
+use crate::table::{DataType, Table};
 
 impl<'a> SqlCompiler<'a> {
     /// Compile a DROP statement (DROP TABLE)
@@ -473,5 +473,29 @@ impl<'a> SqlCompiler<'a> {
         self.patch_jump(init_addr, init_addr + 1);
 
         Ok(())
+    }
+
+    /// Infer schema (name, type) for an expression
+    fn infer_expr_schema(&self, expr: &Expr, table: &Table) -> (String, DataType) {
+        match expr {
+            Expr::Identifier(ident) => {
+                if let Some(col_idx) = table.column_index(&ident.value) {
+                    let col = &table.column_metadata()[col_idx];
+                    (ident.value.clone(), col.data_type)
+                } else {
+                    (ident.value.clone(), DataType::Text)
+                }
+            }
+            Expr::Function(func) => {
+                let name = func.name.to_string();
+                // Window functions return Integer (for ROW_NUMBER, RANK) or the input type (for aggregates)
+                let data_type = match name.to_uppercase().as_str() {
+                    "ROW_NUMBER" | "RANK" | "DENSE_RANK" | "COUNT" => DataType::Integer,
+                    _ => DataType::Float,
+                };
+                (name, data_type)
+            }
+            _ => ("expr".to_string(), DataType::Text),
+        }
     }
 }

@@ -868,7 +868,6 @@ fn fromless_select_applies_limit() -> TestResult {
 /// `SUM(x) OVER ()` computes a running total instead of the partition total
 /// (compiler_window.rs: empty OVER must use the whole partition as frame).
 #[test]
-#[ignore]
 fn window_sum_over_empty_is_total() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -879,7 +878,6 @@ fn window_sum_over_empty_is_total() -> TestResult {
 
 /// Same root cause for `COUNT(*) OVER ()`.
 #[test]
-#[ignore]
 fn window_count_over_empty_is_total() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -890,7 +888,6 @@ fn window_count_over_empty_is_total() -> TestResult {
 
 /// LAG's third (default) argument is ignored.
 #[test]
-#[ignore]
 fn window_lag_default() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -902,7 +899,6 @@ fn window_lag_default() -> TestResult {
 /// `SUM() OVER (ORDER BY k)` uses a ROWS frame; the default frame is RANGE,
 /// so ORDER BY peers share the same running total.
 #[test]
-#[ignore]
 fn window_sum_order_by_includes_peers() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -913,7 +909,6 @@ fn window_sum_order_by_includes_peers() -> TestResult {
 
 /// Two window functions in one SELECT: the second evaluates to 0.
 #[test]
-#[ignore]
 fn window_two_functions_in_one_select() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1071,47 +1066,50 @@ fn delete_using_is_error() -> TestResult {
     )
 }
 
-/// NTILE is accepted and computes ROW_NUMBER.
+/// NTILE used to be accepted and compute ROW_NUMBER. Now implemented: the
+/// first `n % buckets` buckets get one row more.
 #[test]
-#[ignore]
-fn ntile_is_error() -> TestResult {
-    assert_query_fails(
+fn ntile_function() -> TestResult {
+    assert_query(
         &[employees_csv()],
-        "SELECT id, NTILE(2) OVER (ORDER BY id) AS t FROM employees",
-        "Unsupported",
+        "SELECT id, NTILE(3) OVER (ORDER BY id) AS t FROM employees",
+        "id,t\n1,1\n2,1\n3,1\n4,2\n5,2\n6,2\n7,3\n8,3",
     )
 }
 
-/// FIRST_VALUE is accepted and computes ROW_NUMBER.
+/// FIRST_VALUE used to be accepted and compute ROW_NUMBER. Now implemented.
 #[test]
-#[ignore]
-fn first_value_is_error() -> TestResult {
-    assert_query_fails(
+fn first_value_function() -> TestResult {
+    assert_query(
         &[employees_csv()],
-        "SELECT id, FIRST_VALUE(name) OVER (ORDER BY id) AS f FROM employees",
-        "Unsupported",
+        "SELECT id, FIRST_VALUE(name) OVER (PARTITION BY department ORDER BY id) AS f FROM employees",
+        "id,f\n1,Alice\n3,Alice\n6,Alice\n8,Henry\n2,Bob\n5,Bob\n4,David\n7,David",
     )
 }
 
-/// LAST_VALUE is accepted and computes ROW_NUMBER.
+/// LAST_VALUE used to be accepted and compute ROW_NUMBER. Now implemented;
+/// with the default frame the last row is the current row's last peer.
 #[test]
-#[ignore]
-fn last_value_is_error() -> TestResult {
-    assert_query_fails(
+fn last_value_function() -> TestResult {
+    assert_query(
         &[employees_csv()],
-        "SELECT id, LAST_VALUE(name) OVER (ORDER BY id) AS f FROM employees",
-        "Unsupported",
+        "SELECT id, LAST_VALUE(name) OVER (PARTITION BY department ORDER BY id) AS f, \
+         LAST_VALUE(name) OVER (PARTITION BY department ORDER BY id \
+         ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS g FROM employees",
+        "id,f,g\n1,Alice,Frank\n3,Charlie,Frank\n6,Frank,Frank\n8,Henry,Henry\n\
+         2,Bob,Eve\n5,Eve,Eve\n4,David,Grace\n7,Grace,Grace",
     )
 }
 
-/// PERCENT_RANK is accepted and computes ROW_NUMBER.
+/// PERCENT_RANK used to be accepted and compute ROW_NUMBER. Now
+/// implemented: (rank - 1) / (rows - 1), so peers share a value.
 #[test]
-#[ignore]
-fn percent_rank_is_error() -> TestResult {
-    assert_query_fails(
+fn percent_rank_function() -> TestResult {
+    assert_query(
         &[employees_csv()],
-        "SELECT id, PERCENT_RANK() OVER (ORDER BY id) AS f FROM employees",
-        "Unsupported",
+        "SELECT id, PERCENT_RANK() OVER (ORDER BY department) AS f FROM employees",
+        "id,f\n1,0\n3,0\n6,0\n8,0.42857142857142855\n2,0.5714285714285714\n\
+         5,0.5714285714285714\n4,0.8571428571428571\n7,0.8571428571428571",
     )
 }
 
@@ -1530,7 +1528,6 @@ fn lpad_rpad_functions() -> TestResult {
 /// Arithmetic combining two window functions is rejected ("Unsupported
 /// function: SUM").
 #[test]
-#[ignore]
 fn window_function_arithmetic() -> TestResult {
     assert_query(
         &[employees_csv()],

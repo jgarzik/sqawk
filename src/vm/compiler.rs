@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use super::bytecode::{Instruction, OpCode, Program, AGG_COUNT, AGG_DISTINCT};
 use super::compiler_from::{expr_children, FromPlan};
 use super::compiler_subquery::Sub;
+use super::compiler_window::window_call_children;
 use crate::aggregate::AggregateFunction;
 use crate::capacity::DEFAULT_CURSOR_CAPACITY;
 use crate::database::Database;
@@ -175,7 +176,7 @@ impl<'t> NameCtx<'t> {
     }
 
     /// Register holding an already-computed value for `expr`, if bound.
-    fn lookup_agg(&self, expr: &Expr) -> Option<i64> {
+    pub(crate) fn lookup_agg(&self, expr: &Expr) -> Option<i64> {
         if self.agg_bindings.is_empty() {
             return None;
         }
@@ -1997,6 +1998,16 @@ impl<'a> SqlCompiler<'a> {
             // correlated subquery `UPPER(e.department)` silently resolved
             // `e.department` against the SUBQUERY table -- making both sides of
             // a comparison identical and matching every row.
+            // A window call is a value only after the window stage, which
+            // binds it; reaching it here means it is somewhere a window
+            // function may not be (WHERE, GROUP BY, HAVING, an aggregate's
+            // argument).
+            Expr::Function(func) if func.over.is_some() => {
+                return Err(SqawkError::InvalidSqlQuery(format!(
+                    "misuse of window function {}()",
+                    func.name
+                )));
+            }
             Expr::Function(func) => {
                 self.compile_function(func, ctx, dest)?;
             }
@@ -2215,7 +2226,13 @@ impl<'a> SqlCompiler<'a> {
     }
 
     /// Emit whatever loads a resolved column into `dest`.
-    fn emit_column_ref(&mut self, col: ColumnRef, ctx: &NameCtx<'a>, dest: i64, label: &str) {
+    pub(crate) fn emit_column_ref(
+        &mut self,
+        col: ColumnRef,
+        ctx: &NameCtx<'a>,
+        dest: i64,
+        label: &str,
+    ) {
         match col {
             ColumnRef::Cursor { cursor, col } => self.emit(
                 OpCode::Column,
@@ -2308,10 +2325,11 @@ impl<'a> SqlCompiler<'a> {
                 parts.last().map(|p| p.value.clone()).unwrap_or_default()
             }
             Expr::Function(func) => {
-                // For aggregate functions, return just the function name (e.g., "COUNT" not "COUNT(*)")
-                // For other functions, include arguments for clarity
+                // Aggregate and window functions are named by the function
+                // alone ("COUNT" not "COUNT(*)", "ROW_NUMBER" for a window
+                // call); other functions include arguments for clarity.
                 let func_name = func.name.to_string().to_uppercase();
-                if AggregateFunction::is_aggregate_name(&func_name) {
+                if func.over.is_some() || AggregateFunction::is_aggregate_name(&func_name) {
                     func_name
                 } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
                     func_args(func).first()
@@ -2385,7 +2403,16 @@ impl<'a> SqlCompiler<'a> {
             Expr::Function(func) => {
                 let func_name = func.name.to_string().to_uppercase();
                 match func_name.as_str() {
-                    "COUNT" => DataType::Integer,
+                    "COUNT" | "ROW_NUMBER" | "RANK" | "DENSE_RANK" | "NTILE" => DataType::Integer,
+                    "PERCENT_RANK" | "CUME_DIST" => DataType::Float,
+                    "LAG" | "LEAD" | "FIRST_VALUE" | "LAST_VALUE" | "NTH_VALUE" => {
+                        match func_args(func).first() {
+                            Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))) => {
+                                self.infer_expr_type(arg, ctx)
+                            }
+                            _ => DataType::Text,
+                        }
+                    }
                     "SUM" | "AVG" => {
                         // SUM/AVG preserves numeric type, defaults to Float for AVG
                         if func_name == "AVG" {
@@ -2526,47 +2553,14 @@ impl<'a> SqlCompiler<'a> {
         if Self::is_aggregate_call(expr) {
             return true;
         }
-        expr_children(expr)
-            .is_some_and(|children| children.into_iter().any(|c| self.is_aggregate_expr(c)))
-    }
-
-    /// Check if the projection contains any window functions
-    pub(crate) fn has_window_functions(&self, projection: &[SelectItem]) -> bool {
-        for item in projection {
-            match item {
-                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. }
-                    if self.is_window_expr(expr) =>
-                {
-                    return true;
-                }
-                _ => {}
+        if let Expr::Function(f) = expr {
+            if f.over.is_some() {
+                return window_call_children(f)
+                    .into_iter()
+                    .any(|c| self.is_aggregate_expr(c));
             }
         }
-        false
-    }
-
-    /// Check if an expression is a window function (has OVER clause)
-    fn is_window_expr(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::Function(func) => func.over.is_some(),
-            _ => false,
-        }
-    }
-
-    /// Get the window function type code
-    pub(crate) fn get_window_func_type(&self, name: &str) -> i64 {
-        match name.to_uppercase().as_str() {
-            "ROW_NUMBER" => 0,
-            "RANK" => 1,
-            "DENSE_RANK" => 2,
-            "LAG" => 3,
-            "LEAD" => 4,
-            "SUM" => 5,
-            "AVG" => 6,
-            "COUNT" => 7,
-            "MIN" => 8,
-            "MAX" => 9,
-            _ => 0,
-        }
+        expr_children(expr)
+            .is_some_and(|children| children.into_iter().any(|c| self.is_aggregate_expr(c)))
     }
 }

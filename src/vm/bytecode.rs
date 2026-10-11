@@ -258,11 +258,94 @@ pub enum OpCode {
     Divide,    // P1 = left reg, P2 = right reg, P3 = dest reg. dest = left / right
     Remainder, // P1 = left reg, P2 = right reg, P3 = dest reg. dest = left % right
 
-    // Window function operations
-    WindowAggStep, // P1 = func type, P2 = staging cursor, P3 = window cursor, P4 = window spec. Step window state.
-    WindowValue,   // P1 = accum reg, P2 = dest reg, P3 = func type. Get current window value.
-    WindowFinalize, // P1 = column, P2 = staging cursor. Give every staged row of a partition that
-                   // partition's final window value, which for an unordered frame is the total.
+    // Window functions, modelled on SQLite's window pass over a sorted
+    // ephemeral table: the rows of the query (every value the output needs,
+    // plus each window's partition keys, order keys and function arguments)
+    // are first collected into an ephemeral table; WindowCompute then sorts
+    // that table by one window definition's partition and order keys, walks
+    // each partition and writes every function of that definition into its
+    // result column of each row. The output stage reads the rows back.
+    WindowCompute, // Compute window definition Program::windows[P2] over ephemeral cursor P1.
+}
+
+/// A window definition, as WindowCompute executes it: one sort order
+/// (PARTITION BY + ORDER BY) and every window function that shares it.
+///
+/// All positions are column indices of the ephemeral table the window stage
+/// collected its rows into.
+#[derive(Debug, Clone)]
+pub struct WindowDef {
+    /// PARTITION BY key columns.
+    pub partition: Vec<usize>,
+    /// ORDER BY key columns, with `true` for ascending. Rows equal on all of
+    /// them are peers.
+    pub order: Vec<(usize, bool)>,
+    pub funcs: Vec<WindowFunc>,
+}
+
+/// One window function call of a [`WindowDef`].
+#[derive(Debug, Clone)]
+pub struct WindowFunc {
+    pub kind: WindowFuncKind,
+    /// Argument columns, in call order.
+    pub args: Vec<usize>,
+    /// The frame; only aggregates and FIRST_VALUE / LAST_VALUE / NTH_VALUE
+    /// look at it.
+    pub frame: WindowFrame,
+    /// Column receiving the function's value for each row.
+    pub result: usize,
+}
+
+/// What a [`WindowFunc`] computes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowFuncKind {
+    RowNumber,
+    Rank,
+    DenseRank,
+    PercentRank,
+    CumeDist,
+    Ntile,
+    Lag,
+    Lead,
+    FirstValue,
+    LastValue,
+    NthValue,
+    /// An aggregate (`AGG_*` function type) over the frame. `COUNT(*)` is
+    /// `AGG_COUNT` with no argument.
+    Agg(i64),
+}
+
+/// A window frame: the rows, relative to the current row, that an aggregate
+/// or a value function sees. Bounds are already validated (start no later
+/// in the list UNBOUNDED PRECEDING < n PRECEDING < CURRENT ROW < n FOLLOWING
+/// < UNBOUNDED FOLLOWING than end).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowFrame {
+    /// ROWS (`true`) or RANGE. A RANGE frame's bounds are CURRENT ROW or
+    /// UNBOUNDED only, so it is defined by peer groups.
+    pub rows: bool,
+    pub start: FrameBound,
+    pub end: FrameBound,
+}
+
+impl WindowFrame {
+    /// The default frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW,
+    /// which without ORDER BY is the whole partition (every row a peer).
+    pub const DEFAULT: WindowFrame = WindowFrame {
+        rows: false,
+        start: FrameBound::UnboundedPreceding,
+        end: FrameBound::CurrentRow,
+    };
+}
+
+/// One end of a [`WindowFrame`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameBound {
+    UnboundedPreceding,
+    Preceding(u64),
+    CurrentRow,
+    Following(u64),
+    UnboundedFollowing,
 }
 
 /// A SQL VM instruction with opcode and parameters
@@ -348,6 +431,8 @@ pub struct Program {
     /// hold register numbers (`Integer 999999 -> r` being the obvious case),
     /// so scanning for the maximum both over- and under-estimates.
     pub register_count: i64,
+    /// Window definitions, indexed by WindowCompute's P2.
+    pub windows: Vec<WindowDef>,
 }
 
 impl Default for Program {
@@ -362,6 +447,7 @@ impl Program {
             instructions: Vec::with_capacity(DEFAULT_INSTRUCTION_CAPACITY),
             result_schema: ResultSchema::new(),
             register_count: 0,
+            windows: Vec::new(),
         }
     }
 

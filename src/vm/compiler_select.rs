@@ -18,8 +18,8 @@
 //! row, so WHERE, ORDER BY, DISTINCT and LIMIT apply to it like any other.
 
 use sqlparser::ast::{
-    Distinct, Expr, Ident, OrderByExpr, Query, Select, SetExpr, SetOperator, SetQuantifier, Value,
-    ValueWithSpan,
+    Distinct, Expr, Ident, OrderByExpr, Query, Select, SelectItem, SetExpr, SetOperator,
+    SetQuantifier, Value, ValueWithSpan,
 };
 
 use super::ast_compat::{
@@ -29,6 +29,7 @@ use super::ast_compat::{
 use super::bytecode::{OpCode, ResultSchema};
 use super::compiler::{Label, NameCtx, OutCol, SqlCompiler};
 use super::compiler_from::FromPlan;
+use super::compiler_window::contains_window;
 use crate::error::{SqawkError, SqawkResult};
 
 /// LIMIT / OFFSET counter registers, initialized once before the scan.
@@ -489,11 +490,17 @@ impl<'a> SqlCompiler<'a> {
         let has_aggregates = self.has_aggregates(&select.projection)
             || select.having.is_some()
             || order_by.iter().any(|ob| self.is_aggregate_expr(&ob.expr));
+        let windowed = select.projection.iter().any(|item| match item {
+            SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => {
+                contains_window(e)
+            }
+            _ => false,
+        }) || order_by.iter().any(|ob| contains_window(&ob.expr));
 
-        if self.has_window_functions(&select.projection) {
+        if has_group_by || has_aggregates {
+            self.compile_select_grouped(select, &plan, order_by, distinct, dest, windowed)?;
+        } else if windowed {
             self.compile_select_windowed(select, &plan, order_by, distinct, dest)?;
-        } else if has_group_by || has_aggregates {
-            self.compile_select_grouped(select, &plan, order_by, distinct, dest)?;
         } else {
             let outs = self.select_outputs(select, &plan)?;
             let ctx = plan.ctx();
@@ -525,8 +532,9 @@ impl<'a> SqlCompiler<'a> {
         Ok(outs)
     }
 
-    /// A window query: the window stage leaves its rows in a staging table,
-    /// which is then read back through the output stage.
+    /// A window query without aggregation: every row of the FROM/WHERE scan,
+    /// with all its columns, goes to the window stage, which then feeds the
+    /// output stage.
     fn compile_select_windowed(
         &mut self,
         select: &Select,
@@ -535,46 +543,15 @@ impl<'a> SqlCompiler<'a> {
         distinct: bool,
         dest: Dest,
     ) -> SqawkResult<()> {
-        // The window stage numbers its own cursors from 0, which would
-        // collide with an enclosing query's.
-        if self.outer_scope.is_some() {
-            return Err(SqawkError::UnsupportedSqlFeature(
-                "Window functions in a subquery are not supported".into(),
-            ));
-        }
-        let (table, table_name) = plan.single_table().ok_or_else(|| {
-            SqawkError::UnsupportedSqlFeature(
-                "Window functions over a join are not supported".into(),
-            )
+        let outs = self.select_outputs(select, plan)?;
+        let ctx = plan.ctx();
+        let st = self.output_stage(&outs, order_by, distinct, dest, Some(&ctx))?;
+        let mut ws = self.window_stage(select, &outs, &st)?;
+        self.emit_scan(plan, &mut |c, ctx| {
+            let row = c.materialize_row(ctx);
+            c.emit_window_row(&mut ws, &row, None)
         })?;
-        let table_name = table_name.to_string();
-        let outs = self.expand_projection(&select.projection, plan)?;
-        let n = outs.len();
-        let staging = self.alloc_cursor();
-        self.emit(
-            OpCode::OpenEphemeral,
-            staging,
-            n as i64,
-            0,
-            None,
-            "window stage rows",
-        );
-        self.compile_select_with_window(select, table, &table_name, staging)?;
-
-        // The staged rows are finished values, so every ORDER BY key must
-        // name an output column.
-        let st = self.output_stage(&outs, order_by, distinct, dest, None)?;
-        let base = st.out_base();
-        let top = self.label();
-        let done = self.label();
-        self.emit_jump_to(OpCode::Rewind, staging, done, 0, None, "window rows");
-        self.resolve(top);
-        for i in 0..n {
-            self.emit(OpCode::Column, staging, i as i64, base + i as i64, None, "");
-        }
-        self.emit_stage_computed(&st, &NameCtx::empty(), None)?;
-        self.emit_jump_to(OpCode::Next, staging, top, 0, None, "");
-        self.resolve(done);
+        self.finish_window(ws, &st, &outs)?;
         self.finish_stage(&st);
         Ok(())
     }
@@ -584,8 +561,8 @@ impl<'a> SqlCompiler<'a> {
     ///
     /// ORDER BY terms are resolved in output scope first -- an ordinal, a
     /// SELECT alias, a projected expression -- and otherwise become hidden
-    /// sort keys evaluated in `ctx`. With no `ctx` (window queries), hidden
-    /// keys are not available.
+    /// sort keys evaluated in `ctx`. With no `ctx`, hidden keys are not
+    /// available.
     pub(crate) fn output_stage(
         &mut self,
         outs: &[OutCol],

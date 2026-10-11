@@ -455,39 +455,6 @@ impl<'a> Cursor<'a> {
             CursorData::Ephemeral { rows, .. } => rows,
         }
     }
-
-    /// Get a column value at a specific row offset from current position
-    /// Positive offset = forward (for LEAD), negative offset = backward (for LAG)
-    /// Returns None if the offset position is out of bounds
-    fn column_at_offset(&self, col_idx: usize, offset: i64) -> Option<Value> {
-        if !self.valid {
-            return None;
-        }
-
-        let target_pos = (self.position as i64) + offset;
-        if target_pos < 0 {
-            return None;
-        }
-
-        let target_pos = target_pos as usize;
-        match &self.data {
-            CursorData::Table { table } => {
-                if col_idx >= table.column_count() || target_pos >= table.row_count() {
-                    return None;
-                }
-                let rows = table.rows();
-                rows.get(target_pos)?.get(col_idx).cloned()
-            }
-            CursorData::Ephemeral {
-                rows, col_count, ..
-            } => {
-                if col_idx >= *col_count || target_pos >= rows.len() {
-                    return None;
-                }
-                rows.get(target_pos)?.get(col_idx).cloned()
-            }
-        }
-    }
 }
 
 /// Round `num` to `digits` places after the decimal point.
@@ -521,7 +488,7 @@ fn round_to(num: f64, digits: i64) -> f64 {
 /// such text with inferred numbers still sorts numerically. Numbers equal in
 /// value but spelled differently (`7` and `007`) are ordered by their text,
 /// which keeps them in distinct groups.
-fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+pub(super) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
     fn rank(v: &Value) -> u8 {
@@ -614,18 +581,105 @@ struct Sorter {
     sorted: bool,
 }
 
-/// Aggregate accumulator for GROUP BY operations
+/// An aggregate's running state: one group's (or one window frame's) COUNT,
+/// SUM, AVG, MIN or MAX. Shared by AggStep/AggFinal and the window pass.
 #[derive(Debug, Clone)]
-struct AggAccumulator {
-    /// Function type: 0=COUNT, 1=SUM, 2=AVG, 3=MIN, 4=MAX
+pub(super) struct AggAccumulator {
+    /// Function type (`AGG_*`, without the DISTINCT flag).
     func_type: i64,
-    /// Count of values processed (for COUNT and AVG)
+    /// Count of values accumulated (for COUNT and AVG).
     count: i64,
-    /// Accumulated value (sum for SUM/AVG, min/max for MIN/MAX)
+    /// Accumulated value (sum for SUM/AVG, min/max for MIN/MAX).
     value: Option<Value>,
     /// Values already accumulated, for DISTINCT aggregates. `None` when the
     /// aggregate is not DISTINCT, so the ordinary path allocates nothing.
     seen: Option<std::collections::HashSet<String>>,
+}
+
+impl AggAccumulator {
+    /// A fresh accumulator for function-type word `func_type` (which may
+    /// carry the DISTINCT flag).
+    pub(super) fn new(func_type: i64) -> Self {
+        AggAccumulator {
+            func_type: func_type & AGG_TYPE_MASK,
+            count: 0,
+            value: None,
+            seen: (func_type & AGG_DISTINCT != 0).then(Default::default),
+        }
+    }
+
+    /// Accumulate one value; `None` is COUNT(*)'s "a row".
+    pub(super) fn step(&mut self, value: Option<Value>) -> SqawkResult<()> {
+        // DISTINCT: ignore a value already accumulated. NULLs are not
+        // tracked -- every aggregate already skips them.
+        if let (Some(seen), Some(val)) = (self.seen.as_mut(), value.as_ref()) {
+            if !matches!(val, Value::Null) && !seen.insert(format!("{:?}", val)) {
+                return Ok(());
+            }
+        }
+        match self.func_type {
+            AGG_COUNT => {
+                if !matches!(value, Some(Value::Null)) {
+                    self.count += 1;
+                }
+            }
+            AGG_SUM | AGG_AVG => {
+                if let Some(val) = value.as_ref().and_then(sum_operand) {
+                    self.count += 1;
+                    self.value = Some(match (self.value.take(), val) {
+                        (None, v) => v,
+                        (Some(Value::Integer(a)), Value::Integer(b)) => Value::Integer(a + b),
+                        (Some(Value::Float(a)), Value::Float(b)) => Value::Float(a + b),
+                        (Some(Value::Integer(a)), Value::Float(b)) => Value::Float(a as f64 + b),
+                        (Some(Value::Float(a)), Value::Integer(b)) => Value::Float(a + b as f64),
+                        (Some(existing), _) => existing,
+                    });
+                }
+            }
+            AGG_MIN | AGG_MAX => {
+                if let Some(val) = value.filter(|v| !matches!(v, Value::Null)) {
+                    self.count += 1;
+                    let want = if self.func_type == AGG_MIN {
+                        std::cmp::Ordering::Less
+                    } else {
+                        std::cmp::Ordering::Greater
+                    };
+                    let replace = match &self.value {
+                        None => true,
+                        Some(existing) => compare_values(&val, existing) == want,
+                    };
+                    if replace {
+                        self.value = Some(val);
+                    }
+                }
+            }
+            other => {
+                return Err(SqawkError::VmError(format!(
+                    "Unknown aggregate function type: {}",
+                    other
+                )))
+            }
+        }
+        Ok(())
+    }
+
+    /// The aggregate's value. Of no rows, COUNT is 0 and the rest NULL.
+    pub(super) fn finalize(&self) -> Value {
+        match self.func_type {
+            AGG_COUNT => Value::Integer(self.count),
+            AGG_AVG => match &self.value {
+                Some(Value::Integer(i)) if self.count > 0 => {
+                    Value::Float(*i as f64 / self.count as f64)
+                }
+                Some(Value::Float(f)) if self.count > 0 => Value::Float(f / self.count as f64),
+                _ => Value::Null,
+            },
+            _ => match &self.value {
+                Some(v) => v.clone(),
+                None => Value::Null,
+            },
+        }
+    }
 }
 
 impl Sorter {
@@ -748,13 +802,6 @@ pub struct VmEngine<'a> {
     accumulators: HashMap<usize, AggAccumulator>,
     results: Vec<Vec<Value>>,
 
-    /// Index into `results` at which each window partition begins.
-    ///
-    /// Recorded during the streaming window pass so a following WindowFinalize
-    /// can identify each partition's extent without needing the partition key
-    /// to be a projected column.
-    window_partition_starts: Vec<usize>,
-
     /// Result of the most recent Compare, consumed by Jump.
     ///
     /// Mirrors SQLite, where OP_Compare leaves its verdict for a following
@@ -784,7 +831,6 @@ impl<'a> VmEngine<'a> {
             program: Program::new(),
             pc: 0,
             compare_flag: std::cmp::Ordering::Equal,
-            window_partition_starts: Vec::new(),
             registers: Vec::with_capacity(DEFAULT_REGISTER_CAPACITY),
             cursors: HashMap::with_capacity(DEFAULT_CURSOR_CAPACITY),
             sorters: HashMap::with_capacity(DEFAULT_SORTER_CAPACITY),
@@ -814,7 +860,6 @@ impl<'a> VmEngine<'a> {
         self.results.clear();
         self.pending_modifications.clear();
         self.once_flags.clear();
-        self.window_partition_starts.clear();
 
         // Size the register file from the compiler's allocation count.
         //
@@ -1768,484 +1813,27 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Continue)
             }
 
-            OpCode::WindowAggStep => {
-                // Window aggregate step: update window state based on current row
-                // P1 = func type, P2 = staging cursor, P3 = cursor, P4 = window spec
-                let func_type = inst.p1;
-                let staging = inst.p2 as usize;
-                let cursor_id = inst.p3 as usize;
-                let window_spec = inst.p4.clone().unwrap_or_default();
-
-                // Parse state registers from window spec
-                let state_part = window_spec.split(":state=").nth(1).unwrap_or("");
-                let mut row_num_reg = 0usize;
-                let mut prev_part_reg = 0usize;
-                let mut rank_reg = 0usize;
-                let mut prev_ord_reg = 0usize;
-                let mut dense_rank_reg = 0usize;
-                let mut agg_sum_reg = 0usize;
-                let mut agg_count_reg = 0usize;
-                let mut agg_min_reg = 0usize;
-                let mut agg_max_reg = 0usize;
-                let mut agg_col = 0usize;
-
-                for part in state_part.split(',') {
-                    let kv: Vec<&str> = part.split(':').collect();
-                    if kv.len() == 2 {
-                        let val = kv[1].parse::<usize>().unwrap_or(0);
-                        match kv[0] {
-                            "row_num" => row_num_reg = val,
-                            "prev_part" => prev_part_reg = val,
-                            "rank" => rank_reg = val,
-                            "prev_ord" => prev_ord_reg = val,
-                            "dense_rank" => dense_rank_reg = val,
-                            "agg_sum" => agg_sum_reg = val,
-                            "agg_count" => agg_count_reg = val,
-                            "agg_min" => agg_min_reg = val,
-                            "agg_max" => agg_max_reg = val,
-                            "agg_col" => agg_col = val,
-                            _ => {}
-                        }
+            OpCode::WindowCompute => {
+                let def = self
+                    .program
+                    .windows
+                    .get(inst.p2 as usize)
+                    .ok_or_else(|| {
+                        SqawkError::VmError(format!("No window definition {}", inst.p2))
+                    })?
+                    .clone();
+                let cursor = self.cursor_mut(inst.p1)?;
+                match &mut cursor.data {
+                    CursorData::Ephemeral { rows, sorted, .. } => {
+                        *sorted = false;
+                        super::window::compute(rows, &def)?;
+                    }
+                    CursorData::Table { .. } => {
+                        return Err(SqawkError::VmError(
+                            "WindowCompute: cursor is not an ephemeral table".into(),
+                        ))
                     }
                 }
-
-                // Parse partition and order column indices
-                let part_str = window_spec
-                    .split(":part=")
-                    .nth(1)
-                    .and_then(|s| s.split(':').next())
-                    .unwrap_or("");
-                let ord_str = window_spec
-                    .split(":ord=")
-                    .nth(1)
-                    .and_then(|s| s.split(':').next())
-                    .unwrap_or("");
-
-                let part_cols: Vec<usize> =
-                    part_str.split(',').filter_map(|s| s.parse().ok()).collect();
-                let ord_cols: Vec<usize> =
-                    ord_str.split(',').filter_map(|s| s.parse().ok()).collect();
-
-                // Get current partition key value (first partition column if any)
-                let current_part_val = if !part_cols.is_empty() {
-                    if let Some(cursor) = self.cursors.get(&cursor_id) {
-                        cursor.column(part_cols[0]).unwrap_or(Value::Null)
-                    } else {
-                        Value::Null
-                    }
-                } else {
-                    Value::Null // No partition = all rows in same partition
-                };
-
-                // Get current order key value
-                let current_ord_val = if !ord_cols.is_empty() {
-                    if let Some(cursor) = self.cursors.get(&cursor_id) {
-                        cursor.column(ord_cols[0]).unwrap_or(Value::Null)
-                    } else {
-                        Value::Null
-                    }
-                } else {
-                    Value::Null
-                };
-
-                // Check if partition changed
-                // Use a special marker to detect first row: check if row_num is 0
-                let is_first_row = match self.get_register(row_num_reg)? {
-                    Register::Integer(n) => n == 0,
-                    _ => true,
-                };
-
-                let prev_part_val = self.get_register(prev_part_reg)?;
-                let partition_changed = if is_first_row {
-                    true // First row is always a "new partition"
-                } else {
-                    match (&prev_part_val, &current_part_val) {
-                        (Register::Null, Value::Null) => false, // Both null = same partition (or no partition)
-                        (Register::Null, _) => true, // Was null, now has value = new partition
-                        (_, Value::Null) => true,    // Had value, now null = new partition
-                        (Register::Integer(p), Value::Integer(c)) => *p != *c,
-                        (Register::String(p), Value::String(c)) => p != c,
-                        (Register::Float(p), Value::Float(c)) => *p != *c,
-                        _ => true, // Different types = partition changed
-                    }
-                };
-
-                if partition_changed {
-                    // The row about to be emitted starts a new partition.
-                    let staged = self.cursors.get(&staging).map_or(0, |c| c.row_count());
-                    self.window_partition_starts.push(staged);
-                }
-
-                // Check if order value changed (for RANK)
-                let prev_ord_val = self.get_register(prev_ord_reg)?;
-                let order_changed = if is_first_row {
-                    true
-                } else {
-                    match (&prev_ord_val, &current_ord_val) {
-                        (Register::Null, Value::Null) => false,
-                        (Register::Null, _) => true,
-                        (_, Value::Null) => true,
-                        (Register::Integer(p), Value::Integer(c)) => *p != *c,
-                        (Register::String(p), Value::String(c)) => p != c,
-                        (Register::Float(p), Value::Float(c)) => *p != *c,
-                        _ => true,
-                    }
-                };
-
-                // Update window state based on function type
-                match func_type {
-                    0 => {
-                        // ROW_NUMBER: increment, reset on partition change
-                        let current = if partition_changed {
-                            1
-                        } else {
-                            match self.get_register(row_num_reg)? {
-                                Register::Integer(n) => n + 1,
-                                _ => 1,
-                            }
-                        };
-                        self.set_register(row_num_reg, Register::Integer(current))?;
-                    }
-                    1 => {
-                        // RANK: like row_number but same value for ties
-                        let row_num = if partition_changed {
-                            1
-                        } else {
-                            match self.get_register(row_num_reg)? {
-                                Register::Integer(n) => n + 1,
-                                _ => 1,
-                            }
-                        };
-                        self.set_register(row_num_reg, Register::Integer(row_num))?;
-
-                        if partition_changed || order_changed {
-                            self.set_register(rank_reg, Register::Integer(row_num))?;
-                        }
-                        // else rank stays the same (tie)
-                    }
-                    2 => {
-                        // DENSE_RANK: increment only when value changes
-                        let row_num = if partition_changed {
-                            1
-                        } else {
-                            match self.get_register(row_num_reg)? {
-                                Register::Integer(n) => n + 1,
-                                _ => 1,
-                            }
-                        };
-                        self.set_register(row_num_reg, Register::Integer(row_num))?;
-
-                        let dense = if partition_changed {
-                            1
-                        } else if order_changed {
-                            match self.get_register(dense_rank_reg)? {
-                                Register::Integer(n) => n + 1,
-                                _ => 1,
-                            }
-                        } else {
-                            match self.get_register(dense_rank_reg)? {
-                                Register::Integer(n) => n,
-                                _ => 1,
-                            }
-                        };
-                        self.set_register(dense_rank_reg, Register::Integer(dense))?;
-                    }
-                    5..=9 => {
-                        // Aggregate window functions: SUM(5), AVG(6), COUNT(7), MIN(8), MAX(9)
-                        // Track row number for partition detection
-                        let current = if partition_changed {
-                            1
-                        } else {
-                            match self.get_register(row_num_reg)? {
-                                Register::Integer(n) => n + 1,
-                                _ => 1,
-                            }
-                        };
-                        self.set_register(row_num_reg, Register::Integer(current))?;
-
-                        // Get the value from the aggregate column
-                        let agg_value = if let Some(cursor) = self.cursors.get(&cursor_id) {
-                            cursor.column(agg_col).unwrap_or(Value::Null)
-                        } else {
-                            Value::Null
-                        };
-
-                        // Reset aggregates on partition change
-                        if partition_changed {
-                            self.set_register(agg_sum_reg, Register::Integer(0))?;
-                            self.set_register(agg_count_reg, Register::Integer(0))?;
-                            self.set_register(agg_min_reg, Register::Null)?;
-                            self.set_register(agg_max_reg, Register::Null)?;
-                        }
-
-                        // Update aggregates based on current value
-                        if !matches!(agg_value, Value::Null) {
-                            // Update count
-                            let new_count = match self.get_register(agg_count_reg)? {
-                                Register::Integer(n) => n + 1,
-                                _ => 1,
-                            };
-                            self.set_register(agg_count_reg, Register::Integer(new_count))?;
-
-                            // Update sum
-                            let val_num = match &agg_value {
-                                Value::Integer(n) => *n as f64,
-                                Value::Float(f) => *f,
-                                Value::String(s) => s.parse::<f64>().unwrap_or(0.0),
-                                _ => 0.0,
-                            };
-                            let current_sum = match self.get_register(agg_sum_reg)? {
-                                Register::Integer(n) => n as f64,
-                                Register::Float(f) => f,
-                                _ => 0.0,
-                            };
-                            self.set_register(agg_sum_reg, Register::Float(current_sum + val_num))?;
-
-                            // Update min
-                            let should_update_min = match self.get_register(agg_min_reg)? {
-                                Register::Null => true,
-                                Register::Integer(n) => val_num < (n as f64),
-                                Register::Float(f) => val_num < f,
-                                _ => false,
-                            };
-                            if should_update_min {
-                                self.set_register(agg_min_reg, Register::Float(val_num))?;
-                            }
-
-                            // Update max
-                            let should_update_max = match self.get_register(agg_max_reg)? {
-                                Register::Null => true,
-                                Register::Integer(n) => val_num > (n as f64),
-                                Register::Float(f) => val_num > f,
-                                _ => false,
-                            };
-                            if should_update_max {
-                                self.set_register(agg_max_reg, Register::Float(val_num))?;
-                            }
-                        }
-                    }
-                    _ => {
-                        // Other window functions - just track row number
-                        let current = if partition_changed {
-                            1
-                        } else {
-                            match self.get_register(row_num_reg)? {
-                                Register::Integer(n) => n + 1,
-                                _ => 1,
-                            }
-                        };
-                        self.set_register(row_num_reg, Register::Integer(current))?;
-                    }
-                }
-
-                // Store current partition/order values for next iteration
-                self.set_register(prev_part_reg, Register::from(current_part_val))?;
-                self.set_register(prev_ord_reg, Register::from(current_ord_val))?;
-
-                if self.verbose {
-                    eprintln!(
-                        "WindowAggStep: func_type={}, partition_changed={}",
-                        func_type, partition_changed
-                    );
-                }
-
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::WindowFinalize => {
-                // Give every row of a partition that partition's FINAL window
-                // value, which for an unordered frame is the partition total.
-                //
-                // The streaming pass accumulates as it goes, so without this a
-                // window aggregate with PARTITION BY and no ORDER BY returns a
-                // RUNNING total. SQL defines the frame in that case as the
-                // whole partition, so every row should see the same value.
-                let col = inst.p1 as usize;
-                let staging = inst.p2 as usize;
-                let starts = &self.window_partition_starts;
-                let Some(CursorData::Ephemeral { rows, .. }) =
-                    self.cursors.get_mut(&staging).map(|c| &mut c.data)
-                else {
-                    return Err(SqawkError::VmError(format!(
-                        "WindowFinalize: cursor {} is not an ephemeral table",
-                        staging
-                    )));
-                };
-                for (i, &start) in starts.iter().enumerate() {
-                    let end = starts.get(i + 1).copied().unwrap_or(rows.len());
-                    if end == 0 || start >= end {
-                        continue;
-                    }
-                    let final_value = match rows[end - 1].get(col) {
-                        Some(v) => v.clone(),
-                        None => continue,
-                    };
-                    for row in &mut rows[start..end] {
-                        if col < row.len() {
-                            row[col] = final_value.clone();
-                        }
-                    }
-                }
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::WindowValue => {
-                // Get current window function value
-                // P1 = state base reg, P2 = dest reg, P3 = func type
-                // P4 = for LAG/LEAD: "LAG:cursor=N:col=N:offset=N:parts=N,N,..."
-                let state_base_reg = inst.p1 as usize;
-                let dest_reg = inst.p2 as usize;
-                let func_type = inst.p3;
-
-                let value = match func_type {
-                    0 => {
-                        // ROW_NUMBER - value is in state_base_reg (row_num_reg)
-                        self.get_register(state_base_reg)?
-                    }
-                    1 => {
-                        // RANK - value is in rank_reg (state_base_reg + 2)
-                        self.get_register(state_base_reg + 2)?
-                    }
-                    2 => {
-                        // DENSE_RANK - value is in dense_rank_reg (state_base_reg + 4)
-                        self.get_register(state_base_reg + 4)?
-                    }
-                    3 | 4 => {
-                        // LAG (3) or LEAD (4)
-                        // Parse P4 to get cursor, column, offset, partition columns
-                        let p4 = inst.p4.clone().unwrap_or_default();
-                        let mut cursor_id = 1usize;
-                        let mut col_pos = 0usize;
-                        let mut offset = 1i64;
-                        let mut partition_cols: Vec<usize> =
-                            Vec::with_capacity(DEFAULT_SORT_KEYS_CAPACITY);
-
-                        for part in p4.split(':') {
-                            if let Some(val) = part.strip_prefix("cursor=") {
-                                cursor_id = val.parse().unwrap_or(1);
-                            } else if let Some(val) = part.strip_prefix("col=") {
-                                col_pos = val.parse().unwrap_or(0);
-                            } else if let Some(val) = part.strip_prefix("offset=") {
-                                offset = val.parse().unwrap_or(1);
-                            } else if let Some(parts_str) = part.strip_prefix("parts=") {
-                                if !parts_str.is_empty() {
-                                    partition_cols = parts_str
-                                        .split(',')
-                                        .filter_map(|s| s.parse::<usize>().ok())
-                                        .collect();
-                                }
-                            }
-                        }
-
-                        // Get the current row number in partition (1-based)
-                        let row_num = match self.get_register(state_base_reg)? {
-                            Register::Integer(n) => n,
-                            _ => 1,
-                        };
-
-                        // Calculate the row offset
-                        let row_offset = if func_type == 3 { -offset } else { offset }; // LAG = negative, LEAD = positive
-
-                        // For LAG: check if we have enough rows behind us in this partition
-                        // For LEAD: check if target row exists and is in same partition
-                        if let Some(cursor) = self.cursors.get(&cursor_id) {
-                            let current_pos = cursor.position;
-
-                            // For LAG: row_num is 1-based row in partition
-                            // If row_num <= offset, we can't look back that far, return NULL
-                            if func_type == 3 && row_num <= offset {
-                                Register::Null
-                            } else if func_type == 4 {
-                                // For LEAD: need to check if target row is in same partition
-                                let target_pos = (current_pos as i64 + row_offset) as usize;
-                                let rows = cursor.rows();
-
-                                if target_pos >= rows.len() {
-                                    Register::Null
-                                } else {
-                                    // Check if target row has same partition keys
-                                    let current_row = &rows[current_pos];
-                                    let target_row = &rows[target_pos];
-
-                                    let same_partition = if partition_cols.is_empty() {
-                                        true // No partition = all in same partition
-                                    } else {
-                                        partition_cols
-                                            .iter()
-                                            .all(|&col| current_row.get(col) == target_row.get(col))
-                                    };
-
-                                    if same_partition {
-                                        target_row
-                                            .get(col_pos)
-                                            .cloned()
-                                            .map(Register::from)
-                                            .unwrap_or(Register::Null)
-                                    } else {
-                                        Register::Null
-                                    }
-                                }
-                            } else {
-                                // LAG with valid offset
-                                cursor
-                                    .column_at_offset(col_pos, row_offset)
-                                    .map(Register::from)
-                                    .unwrap_or(Register::Null)
-                            }
-                        } else {
-                            Register::Null
-                        }
-                    }
-                    5 => {
-                        // SUM - return running sum
-                        // agg_sum is at state_base_reg + 6
-                        self.get_register(state_base_reg + 6)?
-                    }
-                    6 => {
-                        // AVG - return running average (sum / count)
-                        // agg_sum is at state_base_reg + 6, agg_count is at state_base_reg + 7
-                        let sum = match self.get_register(state_base_reg + 6)? {
-                            Register::Float(f) => f,
-                            Register::Integer(n) => n as f64,
-                            _ => 0.0,
-                        };
-                        let count = match self.get_register(state_base_reg + 7)? {
-                            Register::Integer(n) => n,
-                            _ => 1,
-                        };
-                        if count > 0 {
-                            Register::Float(sum / count as f64)
-                        } else {
-                            Register::Null
-                        }
-                    }
-                    7 => {
-                        // COUNT - return running count
-                        // agg_count is at state_base_reg + 7
-                        self.get_register(state_base_reg + 7)?
-                    }
-                    8 => {
-                        // MIN - return running min
-                        // agg_min is at state_base_reg + 8
-                        self.get_register(state_base_reg + 8)?
-                    }
-                    9 => {
-                        // MAX - return running max
-                        // agg_max is at state_base_reg + 9
-                        self.get_register(state_base_reg + 9)?
-                    }
-                    _ => {
-                        // Default to row number
-                        self.get_register(state_base_reg)?
-                    }
-                };
-
-                self.set_register(dest_reg, value)?;
-
-                if self.verbose {
-                    eprintln!("WindowValue: func_type={}, dest=r[{}]", func_type, dest_reg);
-                }
-
                 Ok(ExecuteResult::Continue)
             }
 
@@ -3291,254 +2879,39 @@ impl<'a> VmEngine<'a> {
             }
 
             OpCode::AggStep => {
-                // Step an aggregate function
-                // P1 = function type (0=COUNT, 1=SUM, 2=AVG, 3=MIN, 4=MAX)
-                // P2 = value register
-                // P3 = accumulator register (used as key for accumulator storage)
-                let func_type = inst.p1 & AGG_TYPE_MASK;
-                let is_distinct = inst.p1 & AGG_DISTINCT != 0;
-                let value_reg = inst.p2 as usize;
+                // P1 = function type (with the DISTINCT flag), P2 = value
+                // register (-1: COUNT(*)), P3 = accumulator register.
+                //
+                // A NULL accumulator register means "start afresh", as in
+                // SQLite: the compiler sets it NULL before each group.
                 let acc_reg = inst.p3 as usize;
-
-                // Get the value to accumulate (skip for COUNT(*) where p2=-1)
                 let value = if inst.p2 >= 0 {
-                    Some(Value::from(self.get_register(value_reg)?))
+                    Some(Value::from(self.get_register(inst.p2 as usize)?))
                 } else {
                     None
                 };
-
-                // Check if the accumulator register is Null - if so, reset the accumulator
-                // This matches SQLite's behavior where Null initialization signals a fresh start
-                let acc_reg_value = self.get_register(acc_reg)?;
-                if matches!(acc_reg_value, Register::Null) {
-                    // Reset the accumulator for this register
-                    self.accumulators.insert(
-                        acc_reg,
-                        AggAccumulator {
-                            func_type,
-                            count: 0,
-                            value: None,
-                            seen: if is_distinct {
-                                Some(std::collections::HashSet::new())
-                            } else {
-                                None
-                            },
-                        },
-                    );
-                    // Mark the register as non-Null to indicate accumulator is active
+                if matches!(self.get_register(acc_reg)?, Register::Null) {
+                    self.accumulators
+                        .insert(acc_reg, AggAccumulator::new(inst.p1));
                     self.registers[acc_reg] = Register::Integer(0);
                 }
-
-                // Get or create the accumulator
-                let acc = self.accumulators.entry(acc_reg).or_insert(AggAccumulator {
-                    func_type,
-                    count: 0,
-                    value: None,
-                    seen: if is_distinct {
-                        Some(std::collections::HashSet::new())
-                    } else {
-                        None
-                    },
-                });
-
-                // DISTINCT: ignore a value already accumulated for this group.
-                // NULLs are not tracked -- every aggregate already skips them.
-                if is_distinct {
-                    if let Some(val) = value.as_ref() {
-                        if !matches!(val, Value::Null) {
-                            let key = format!("{:?}", val);
-                            let seen = acc.seen.get_or_insert_with(Default::default);
-                            if !seen.insert(key) {
-                                return Ok(ExecuteResult::Continue);
-                            }
-                        }
-                    }
-                }
-
-                match func_type {
-                    AGG_COUNT => {
-                        // COUNT - count non-NULL values (or all rows if value is None)
-                        if value.is_none() || !matches!(value.as_ref(), Some(Value::Null)) {
-                            acc.count += 1;
-                        }
-                    }
-                    AGG_SUM => {
-                        // SUM over numbers and numeric text
-                        if let Some(val) = value.as_ref().and_then(sum_operand) {
-                            {
-                                acc.count += 1;
-                                acc.value = Some(match (&acc.value, &val) {
-                                    (None, v) => v.clone(),
-                                    (Some(Value::Integer(a)), Value::Integer(b)) => {
-                                        Value::Integer(a + b)
-                                    }
-                                    (Some(Value::Float(a)), Value::Float(b)) => Value::Float(a + b),
-                                    (Some(Value::Integer(a)), Value::Float(b)) => {
-                                        Value::Float(*a as f64 + b)
-                                    }
-                                    (Some(Value::Float(a)), Value::Integer(b)) => {
-                                        Value::Float(a + *b as f64)
-                                    }
-                                    (Some(existing), _) => existing.clone(),
-                                });
-                            }
-                        }
-                    }
-                    AGG_AVG => {
-                        // AVG (accumulate sum, divide in AggFinal)
-                        if let Some(val) = value.as_ref().and_then(sum_operand) {
-                            {
-                                acc.count += 1;
-                                acc.value = Some(match (&acc.value, &val) {
-                                    (None, v) => v.clone(),
-                                    (Some(Value::Integer(a)), Value::Integer(b)) => {
-                                        Value::Integer(a + b)
-                                    }
-                                    (Some(Value::Float(a)), Value::Float(b)) => Value::Float(a + b),
-                                    (Some(Value::Integer(a)), Value::Float(b)) => {
-                                        Value::Float(*a as f64 + b)
-                                    }
-                                    (Some(Value::Float(a)), Value::Integer(b)) => {
-                                        Value::Float(a + *b as f64)
-                                    }
-                                    (Some(existing), _) => existing.clone(),
-                                });
-                            }
-                        }
-                    }
-                    AGG_MIN => {
-                        // MIN
-                        if let Some(val) = value {
-                            if !matches!(val, Value::Null) {
-                                acc.count += 1;
-                                acc.value = Some(match &acc.value {
-                                    None => val,
-                                    Some(existing) => {
-                                        if compare_values(&val, existing)
-                                            == std::cmp::Ordering::Less
-                                        {
-                                            val
-                                        } else {
-                                            existing.clone()
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                    }
-                    AGG_MAX => {
-                        // MAX
-                        if let Some(val) = value {
-                            if !matches!(val, Value::Null) {
-                                acc.count += 1;
-                                acc.value = Some(match &acc.value {
-                                    None => val,
-                                    Some(existing) => {
-                                        if compare_values(&val, existing)
-                                            == std::cmp::Ordering::Greater
-                                        {
-                                            val
-                                        } else {
-                                            existing.clone()
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                    }
-                    _ => {
-                        return Err(SqawkError::VmError(format!(
-                            "Unknown aggregate function type: {}",
-                            func_type
-                        )));
-                    }
-                }
-
-                if self.verbose {
-                    eprintln!(
-                        "AggStep: func={} acc_reg={} count={}",
-                        func_type, acc_reg, acc.count
-                    );
-                }
-
+                self.accumulators
+                    .entry(acc_reg)
+                    .or_insert_with(|| AggAccumulator::new(inst.p1))
+                    .step(value)?;
                 Ok(ExecuteResult::Continue)
             }
 
             OpCode::AggFinal => {
-                // Finalize an aggregate and store result
-                // P1 = accumulator register
-                // P2 = result register
-                // P3 = function type (0=COUNT, 1=SUM, 2=AVG, 3=MIN, 4=MAX) - used when no accumulator exists
+                // P1 = accumulator register, P2 = result register, P3 =
+                // function type, for an accumulator no row ever stepped.
                 let acc_reg = inst.p1 as usize;
-                let result_reg = inst.p2 as usize;
-                let func_type_hint = inst.p3; // Fallback function type
-
-                // First check if the accumulator register is Null - this means no AggStep was called
-                // (the register was initialized to Null and never updated by AggStep)
-                let acc_reg_value = self.get_register(acc_reg)?;
-                let result = if matches!(acc_reg_value, Register::Null) {
-                    // No AggStep was called this iteration - return default based on function type
-                    if func_type_hint == AGG_COUNT {
-                        Register::Integer(0) // COUNT of no rows is 0
-                    } else {
-                        Register::Null // SUM/AVG/MIN/MAX of no rows is NULL
-                    }
-                } else if let Some(acc) = self.accumulators.get(&acc_reg) {
-                    match acc.func_type {
-                        AGG_COUNT => {
-                            // COUNT - return the count
-                            Register::Integer(acc.count)
-                        }
-                        AGG_SUM => {
-                            // SUM - return the accumulated sum
-                            match &acc.value {
-                                Some(Value::Integer(i)) => Register::Integer(*i),
-                                Some(Value::Float(f)) => Register::Float(*f),
-                                _ => Register::Null,
-                            }
-                        }
-                        AGG_AVG => {
-                            // AVG - divide sum by count
-                            if acc.count == 0 {
-                                Register::Null
-                            } else {
-                                match &acc.value {
-                                    Some(Value::Integer(i)) => {
-                                        Register::Float(*i as f64 / acc.count as f64)
-                                    }
-                                    Some(Value::Float(f)) => Register::Float(f / acc.count as f64),
-                                    _ => Register::Null,
-                                }
-                            }
-                        }
-                        AGG_MIN | AGG_MAX => {
-                            // MIN/MAX - return the accumulated value
-                            match &acc.value {
-                                Some(Value::Integer(i)) => Register::Integer(*i),
-                                Some(Value::Float(f)) => Register::Float(*f),
-                                Some(Value::String(s)) => Register::String(s.clone().into_owned()),
-                                Some(Value::Boolean(b)) => Register::Boolean(*b),
-                                _ => Register::Null,
-                            }
-                        }
-                        _ => Register::Null,
-                    }
-                } else {
-                    // No accumulator found - return appropriate default based on function type
-                    // COUNT with no rows returns 0, others return NULL
-                    if func_type_hint == AGG_COUNT {
-                        Register::Integer(0) // COUNT of no rows is 0
-                    } else {
-                        Register::Null
-                    }
+                let stepped = !matches!(self.get_register(acc_reg)?, Register::Null);
+                let result = match self.accumulators.get(&acc_reg) {
+                    Some(acc) if stepped => acc.finalize(),
+                    _ => AggAccumulator::new(inst.p3).finalize(),
                 };
-
-                self.set_register(result_reg, result)?;
-
-                if self.verbose {
-                    eprintln!("AggFinal: acc_reg={} result_reg={}", acc_reg, result_reg);
-                }
-
+                self.set_register(inst.p2 as usize, Register::from(result))?;
                 Ok(ExecuteResult::Continue)
             }
 

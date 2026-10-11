@@ -218,28 +218,51 @@ function and aggregate arguments, UPDATE SET, DELETE WHERE and INSERT VALUES.
   statement started. (SQLite instead lets a correlated subquery see rows the
   same UPDATE has already changed.)
 - Not supported: row values (`(a, b) IN (SELECT x, y ...)`), `ANY`/`ALL`,
-  window functions inside a subquery, and a derived table inside a subquery
-  used as an expression.
+  and a derived table inside a subquery used as an expression.
 
 ## Window Functions
 
 ```sql
 SELECT name, ROW_NUMBER() OVER (ORDER BY salary DESC) FROM employees
-SELECT name, RANK()       OVER (ORDER BY department) FROM employees
-SELECT name, DENSE_RANK() OVER (ORDER BY department) FROM employees
-SELECT name, LAG(salary)  OVER (ORDER BY salary) FROM employees
-SELECT name, LEAD(salary) OVER (ORDER BY salary) FROM employees
-
--- Aggregates over a window
-SELECT name, SUM(salary) OVER (PARTITION BY department) FROM employees
+SELECT name, RANK()       OVER (PARTITION BY department ORDER BY salary) FROM employees
+SELECT name, LAG(salary, 1, 0) OVER (ORDER BY salary) FROM employees
+SELECT name, salary - AVG(salary) OVER (PARTITION BY department) FROM employees
+SELECT department, COUNT(*), RANK() OVER (ORDER BY COUNT(*) DESC)
+  FROM employees GROUP BY department
+SELECT name, SUM(salary) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+  FROM employees
+SELECT name, SUM(salary) OVER w, RANK() OVER (w ORDER BY salary)
+  FROM employees WINDOW w AS (PARTITION BY department)
 ```
 
-Supported functions: `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`, `LEAD`, and the
-aggregates `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`.
+Supported functions:
 
-The frame follows the standard: **without** `ORDER BY` in the `OVER` clause the
-frame is the whole partition, so every row sees the partition total; **with**
-`ORDER BY` the frame grows row by row, giving a running value.
+| Function | Value |
+|---|---|
+| `ROW_NUMBER()` | 1, 2, ... within the partition |
+| `RANK()` | 1 + number of rows before the current row's peers (gaps after ties) |
+| `DENSE_RANK()` | number of the current peer group (no gaps) |
+| `PERCENT_RANK()` | (rank - 1) / (partition rows - 1); 0 for a one-row partition |
+| `CUME_DIST()` | rows up to and including the last peer / partition rows |
+| `NTILE(n)` | bucket 1..n; the first `rows % n` buckets get one row more |
+| `LAG(x [, offset [, default]])` | `x` from `offset` (default 1) rows back, else `default` (NULL) |
+| `LEAD(x [, offset [, default]])` | likewise, forward |
+| `FIRST_VALUE(x)`, `LAST_VALUE(x)`, `NTH_VALUE(x, n)` | `x` at the first / last / n-th row of the frame |
+| `COUNT(*)`, `COUNT(x)`, `SUM`, `AVG`, `MIN`, `MAX` | the aggregate over the frame |
+
+Partition and order keys may be any expressions, any number of them; NULLs
+sort first. Rows with equal ORDER BY keys are *peers*. A query may use any
+number of window functions with different `OVER` clauses, and window calls
+may appear inside expressions (`ROUND(AVG(x) OVER (...), 1)`) and in ORDER BY.
+Windows work over joins, over grouped rows (they run after GROUP BY and
+HAVING), and in subqueries. A window function in WHERE, GROUP BY, HAVING or
+inside an aggregate is an error (*misuse of window function*).
+
+The frame (the rows an aggregate or FIRST_VALUE / LAST_VALUE / NTH_VALUE
+sees) defaults, as in SQLite, to `RANGE BETWEEN UNBOUNDED PRECEDING AND
+CURRENT ROW`: **without** `ORDER BY` that is the whole partition, so every row
+sees the partition total; **with** `ORDER BY` it is a running value in which
+peers share the same value.
 
 ```sql
 -- 210000 on every Engineering row
@@ -249,7 +272,14 @@ SELECT name, SUM(salary) OVER (PARTITION BY department) FROM employees
 SELECT name, SUM(salary) OVER (PARTITION BY department ORDER BY salary) FROM employees
 ```
 
-Explicit frame clauses (`ROWS BETWEEN ...`) are not supported.
+Explicit frames: `ROWS` with any of `UNBOUNDED PRECEDING`, `n PRECEDING`,
+`CURRENT ROW`, `n FOLLOWING`, `UNBOUNDED FOLLOWING` (`n` a non-negative
+integer literal), and `RANGE` with `UNBOUNDED` / `CURRENT ROW` bounds. Named
+windows (`WINDOW w AS (...)`, `OVER w`, `OVER (w ORDER BY ...)`) are
+supported. Not supported, and rejected with an error: `RANGE` frames with an
+offset, `GROUPS` frames, `EXCLUDE`, `FILTER` on a window function, and
+`DISTINCT` inside one. SUM of integers is an integer; AVG, PERCENT_RANK and
+CUME_DIST are floats.
 
 ## Set Operations
 

@@ -24,6 +24,7 @@ mod compiler_select;
 mod compiler_subquery;
 mod compiler_window;
 pub mod engine;
+mod window;
 
 #[cfg(test)]
 mod compiler_tests;

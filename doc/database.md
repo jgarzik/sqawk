@@ -101,6 +101,19 @@ Every SELECT core runs one pipeline (`src/vm/compiler_select.rs`):
   and ORDER BY. Without GROUP BY there is always exactly one output row (COUNT
   of no rows is 0, SUM/AVG/MIN/MAX of no rows NULL); with GROUP BY, no input
   rows means no output rows.
+- The window stage runs after aggregation, so a window may range over
+  grouped rows (`SUM(COUNT(*)) OVER ()`) and over any join. Each finished row
+  goes into an ephemeral table with everything the output needs (all FROM
+  columns, or the GROUP BY keys and aggregates) plus each window's partition
+  keys, order keys and arguments. For each distinct window definition
+  (PARTITION BY + ORDER BY) one `WindowCompute` stably sorts the table by its
+  keys, walks the partitions and peer groups, and writes each function's
+  value -- each with its own state and frame -- into a result column. The
+  definitions are computed last-first, so without ORDER BY rows come out in
+  the first window's order, as in SQLite. The output stage then reads the
+  rows back, with every window call bound to its value like an aggregate, so
+  a window call may appear in any expression and in ORDER BY; anywhere else
+  (WHERE, GROUP BY, HAVING, an aggregate argument) it is an error.
 - The output stage computes the output columns, then ORDER BY (an ordinal, a
   SELECT alias, a projected expression, or else a hidden sort key such as an
   unprojected column or aggregate), DISTINCT, and LIMIT/OFFSET. HAVING and
@@ -318,8 +331,8 @@ The database engine has several architectural limitations:
 - **No Constraints System**: Referential integrity not enforced
 - **Whole-dataset residency**: A table must fit in memory
 
-Unsupported SQL of note: CTEs (`WITH`), explicit window frames
-(`ROWS BETWEEN ...`), parenthesized joins, and window functions over joins.
+Unsupported SQL of note: CTEs (`WITH`), parenthesized joins, and RANGE
+frames with an offset, GROUPS frames and FILTER on window functions.
 
 ---
 

@@ -20,6 +20,7 @@ use super::bytecode::{OpCode, AGG_TYPE_MASK};
 use super::compiler::{NameCtx, OutCol, SqlCompiler};
 use super::compiler_from::{expr_children, FromPlan};
 use super::compiler_select::{Dest, OutputStage};
+use super::compiler_window::{window_call_children, WindowStage};
 use crate::error::{SqawkError, SqawkResult};
 
 /// What a grouped query's output step needs, shared by its flush points.
@@ -56,6 +57,15 @@ impl<'a> SqlCompiler<'a> {
                 out.push(expr.clone());
             }
             return;
+        }
+        // A window over grouped rows: `SUM(COUNT(*)) OVER ()`.
+        if let Expr::Function(f) = expr {
+            if f.over.is_some() {
+                for child in window_call_children(f) {
+                    Self::collect_aggregates(child, out);
+                }
+                return;
+            }
         }
         if let Some(children) = expr_children(expr) {
             for child in children {
@@ -99,6 +109,7 @@ impl<'a> SqlCompiler<'a> {
         order_by: &[OrderByExpr],
         distinct: bool,
         dest: Dest,
+        windowed: bool,
     ) -> SqawkResult<()> {
         let ctx = plan.ctx();
         let outs = self.select_outputs(select, plan)?;
@@ -138,6 +149,13 @@ impl<'a> SqlCompiler<'a> {
         }
 
         let st = self.output_stage(&outs, order_by, distinct, dest, Some(&ctx))?;
+        // Windows over the grouped rows: each group's row goes to the window
+        // stage, which feeds the output stage once all groups exist.
+        let mut ws = if windowed {
+            Some(self.window_stage(select, &outs, &st)?)
+        } else {
+            None
+        };
 
         let mut calls = Vec::new();
         for out in &outs {
@@ -188,9 +206,8 @@ impl<'a> SqlCompiler<'a> {
                 }
                 Ok(())
             })?;
-            self.emit_group_output(&group, -1, acc)?;
-            self.finish_stage(&st);
-            return Ok(());
+            self.emit_group_output(&group, -1, acc, ws.as_mut())?;
+            return self.finish_grouped(ws, &st, &outs);
         }
 
         self.add_comment("GROUP BY query");
@@ -272,7 +289,7 @@ impl<'a> SqlCompiler<'a> {
         );
         self.emit_jump_to_three(flush, step, flush, "Group changed?");
         self.resolve(flush);
-        self.emit_group_output(&group, key_reg, acc)?;
+        self.emit_group_output(&group, key_reg, acc, ws.as_mut())?;
         for j in 0..na {
             self.emit(OpCode::AggReset, acc + j as i64, 0, 0, None, "");
         }
@@ -301,9 +318,23 @@ impl<'a> SqlCompiler<'a> {
         }
         self.emit_jump_to(OpCode::SorterNext, sorter_id, top, 0, None, "");
         // The last group, which no key change ever flushed.
-        self.emit_group_output(&group, key_reg, acc)?;
+        self.emit_group_output(&group, key_reg, acc, ws.as_mut())?;
         self.resolve(done);
-        self.finish_stage(&st);
+        self.finish_grouped(ws, &st, &outs)
+    }
+
+    /// Close a grouped query: run the window stage, if any, then drain the
+    /// output stage.
+    fn finish_grouped(
+        &mut self,
+        ws: Option<WindowStage<'a>>,
+        st: &OutputStage,
+        outs: &[OutCol],
+    ) -> SqawkResult<()> {
+        if let Some(ws) = ws {
+            self.finish_window(ws, st, outs)?;
+        }
+        self.finish_stage(st);
         Ok(())
     }
 
@@ -321,7 +352,13 @@ impl<'a> SqlCompiler<'a> {
     ///
     /// Called from both flush points of the GROUP BY drain loop, and once for
     /// an aggregate query without GROUP BY.
-    fn emit_group_output(&mut self, g: &Group<'_, 'a>, key_reg: i64, acc: i64) -> SqawkResult<()> {
+    fn emit_group_output(
+        &mut self,
+        g: &Group<'_, 'a>,
+        key_reg: i64,
+        acc: i64,
+        ws: Option<&mut WindowStage<'a>>,
+    ) -> SqawkResult<()> {
         let fin = self.allocate_registers(g.aggs.len().max(1));
         for (j, agg) in g.aggs.iter().enumerate() {
             // p3: the function, for an accumulator no row ever stepped --
@@ -359,6 +396,9 @@ impl<'a> SqlCompiler<'a> {
             }
         }
         ctx.col_bindings = Some(cols);
-        self.emit_stage_row(g.stage, g.outs, &ctx, g.having)
+        match ws {
+            Some(ws) => self.emit_window_row(ws, &ctx, g.having),
+            None => self.emit_stage_row(g.stage, g.outs, &ctx, g.having),
+        }
     }
 }

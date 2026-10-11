@@ -1,710 +1,667 @@
-//! Window function compilation
+//! The window stage of the SELECT pipeline.
 //!
-//! This module extends SqlCompiler with window function compilation methods.
+//! A window function sees other rows of the query's result, so it can only
+//! be evaluated once every row exists. As in SQLite, the stage runs after
+//! FROM / WHERE / aggregation / HAVING:
+//!
+//! 1. Each finished row goes into an ephemeral table: the per-row values
+//!    every window needs (partition keys, order keys, function arguments),
+//!    a NULL placeholder per window call, and every value the row's scope
+//!    holds -- all FROM columns for a plain query, the aggregates and GROUP
+//!    BY keys for a grouped one -- so the output expressions can be evaluated
+//!    later.
+//! 2. For each distinct window definition (PARTITION BY + ORDER BY), one
+//!    `WindowCompute` sorts the table by those keys, walks each partition and
+//!    writes every function of that definition into its result column. Each
+//!    function has its own state and its own frame.
+//! 3. The output stage reads the rows back and evaluates the SELECT list with
+//!    `code_expr` in a scope where each window call is bound, by its text, to
+//!    the register holding its value (as `agg_bindings` binds aggregates). A
+//!    window call may therefore appear inside any expression, and in ORDER BY.
+//!
+//! A window call anywhere else -- WHERE, GROUP BY, HAVING, an aggregate's or
+//! another window's argument -- reaches `code_expr` unbound, which rejects it.
 
-use sqlparser::ast::{Expr, Select, SelectItem, Value, ValueWithSpan, WindowType};
+use sqlparser::ast::{
+    Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, NamedWindowDefinition,
+    NamedWindowExpr, OrderByExpr, Select, UnaryOperator, Value, ValueWithSpan, WindowFrameBound,
+    WindowFrameUnits, WindowSpec, WindowType,
+};
 
-use super::ast_compat::{func_args, order_by_is_asc};
-use super::bytecode::{OpCode, ResultSchema};
-use super::compiler::{NameCtx, SqlCompiler};
+use super::ast_compat::{func_args, func_is_distinct, order_by_is_asc};
+use super::bytecode::{
+    FrameBound, OpCode, WindowDef, WindowFrame, WindowFunc, WindowFuncKind, AGG_COUNT,
+};
+use super::compiler::{ColumnRef, NameCtx, OutCol, SqlCompiler};
+use super::compiler_from::expr_children;
+use super::compiler_select::OutputStage;
 use crate::aggregate::AggregateFunction;
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::{DataType, Table};
+
+/// A planned window stage. Built by [`SqlCompiler::window_stage`], fed rows
+/// by [`SqlCompiler::emit_window_row`], closed by
+/// [`SqlCompiler::finish_window`].
+pub(crate) struct WindowStage<'a> {
+    /// The ephemeral table collecting the rows.
+    eph: i64,
+    /// Address of its OpenEphemeral, whose column count is known only once
+    /// the first row's scope is.
+    open_addr: usize,
+    /// Per-row expressions (partition keys, order keys, arguments). Until
+    /// the first row, the definitions' column numbers index this list.
+    exprs: Vec<Expr>,
+    /// The expressions that need a column of their own (by index into
+    /// `exprs`), stored after the saved scope values. The others are bare
+    /// references to a saved value and read its column. Set by the first row.
+    own: Vec<usize>,
+    /// Window calls; call `j`'s value is ephemeral column `j`.
+    calls: Vec<Expr>,
+    defs: Vec<WindowDef>,
+    /// The pre-window scope with its registers renumbered to `slot_out`:
+    /// the scope the output stage evaluates in. Set by the first row.
+    template: Option<NameCtx<'a>>,
+    /// Number of scope registers saved per row, in the columns after the
+    /// call columns.
+    nslots: usize,
+    /// Register block one row is assembled in.
+    row: i64,
+    /// Registers the saved scope values are read back into.
+    slot_out: i64,
+}
+
+/// The argument expressions of a call, and the expressions of its inline
+/// window specification: where an aggregate inside a window call lives
+/// (`SUM(COUNT(*)) OVER (ORDER BY MAX(x))`).
+pub(crate) fn window_call_children(func: &Function) -> Vec<&Expr> {
+    let mut v: Vec<&Expr> = func_args(func)
+        .iter()
+        .filter_map(|a| match a {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => Some(e),
+            _ => None,
+        })
+        .collect();
+    if let Some(WindowType::WindowSpec(spec)) = &func.over {
+        v.extend(spec.partition_by.iter());
+        v.extend(spec.order_by.iter().map(|o| &o.expr));
+    }
+    v
+}
+
+/// Whether `expr` contains a window call (not counting subqueries, whose
+/// windows are their own).
+pub(crate) fn contains_window(expr: &Expr) -> bool {
+    match expr {
+        Expr::Function(f) if f.over.is_some() => true,
+        _ => expr_children(expr).is_some_and(|c| c.into_iter().any(contains_window)),
+    }
+}
+
+/// Collect the window calls within `expr`, without duplicates.
+fn collect_windows(expr: &Expr, out: &mut Vec<Expr>) {
+    match expr {
+        Expr::Function(f) if f.over.is_some() => {
+            let key = NameCtx::agg_key(expr);
+            if !out.iter().any(|e| NameCtx::agg_key(e) == key) {
+                out.push(expr.clone());
+            }
+        }
+        _ => {
+            for c in expr_children(expr).into_iter().flatten() {
+                collect_windows(c, out);
+            }
+        }
+    }
+}
+
+/// The registers a scope's values live in: its bound aggregates and keys
+/// (grouped) or its materialized columns (plain), in a fixed order.
+fn scope_regs(ctx: &NameCtx<'_>) -> Vec<i64> {
+    let mut regs: Vec<i64> = Vec::new();
+    let bound = ctx.agg_bindings.iter().map(|(_, r)| *r);
+    let cols = ctx.col_bindings.iter().flatten().map(|(_, r)| *r);
+    for r in bound.chain(cols) {
+        if !regs.contains(&r) {
+            regs.push(r);
+        }
+    }
+    regs
+}
+
+/// The register holding `expr` in `ctx`, if it is a bare reference to an
+/// already-computed value: a materialized column, a GROUP BY key or an
+/// aggregate.
+fn bound_reg(ctx: &NameCtx<'_>, expr: &Expr) -> Option<i64> {
+    if let Some(r) = ctx.lookup_agg(expr) {
+        return Some(r);
+    }
+    let found = match expr {
+        Expr::Identifier(i) => ctx.lookup(None, &i.value),
+        Expr::CompoundIdentifier(p) if p.len() >= 2 => {
+            ctx.lookup(Some(&p[p.len() - 2].value), &p[p.len() - 1].value)
+        }
+        _ => return None,
+    };
+    match found {
+        Ok((ColumnRef::Register(r), 0)) => Some(r),
+        _ => None,
+    }
+}
+
+/// `ctx` with register `from[i]` renumbered to `to + i`.
+fn remap<'a>(ctx: &NameCtx<'a>, from: &[i64], to: i64) -> NameCtx<'a> {
+    let map = |r: &mut i64| {
+        let i = from.iter().position(|f| f == r).expect("scope register");
+        *r = to + i as i64;
+    };
+    let mut c = ctx.clone();
+    c.agg_bindings.iter_mut().for_each(|(_, r)| map(r));
+    c.col_bindings
+        .iter_mut()
+        .flatten()
+        .for_each(|(_, r)| map(r));
+    c
+}
+
+/// A frame offset: a non-negative integer literal.
+fn frame_offset(e: &Expr, which: &str) -> SqawkResult<u64> {
+    let bad = || {
+        SqawkError::InvalidSqlQuery(format!(
+            "frame {} offset must be a non-negative integer",
+            which
+        ))
+    };
+    match e {
+        Expr::Value(ValueWithSpan {
+            value: Value::Number(n, _),
+            ..
+        }) => n.parse::<u64>().map_err(|_| bad()),
+        Expr::Nested(inner) => frame_offset(inner, which),
+        Expr::UnaryOp {
+            op: UnaryOperator::Plus,
+            expr,
+        } => frame_offset(expr, which),
+        _ => Err(bad()),
+    }
+}
+
+/// Translate and validate a frame clause.
+fn frame_of(spec: &WindowSpec) -> SqawkResult<WindowFrame> {
+    let Some(f) = &spec.window_frame else {
+        return Ok(WindowFrame::DEFAULT);
+    };
+    let rows = match f.units {
+        WindowFrameUnits::Rows => true,
+        WindowFrameUnits::Range => false,
+        WindowFrameUnits::Groups => {
+            return Err(SqawkError::UnsupportedSqlFeature(
+                "GROUPS window frames are not supported".into(),
+            ))
+        }
+    };
+    let bound = |b: &WindowFrameBound, which: &str| -> SqawkResult<FrameBound> {
+        Ok(match b {
+            WindowFrameBound::CurrentRow => FrameBound::CurrentRow,
+            WindowFrameBound::Preceding(None) => FrameBound::UnboundedPreceding,
+            WindowFrameBound::Following(None) => FrameBound::UnboundedFollowing,
+            WindowFrameBound::Preceding(Some(e)) => FrameBound::Preceding(frame_offset(e, which)?),
+            WindowFrameBound::Following(Some(e)) => FrameBound::Following(frame_offset(e, which)?),
+        })
+    };
+    let start = bound(&f.start_bound, "starting")?;
+    let end = match &f.end_bound {
+        Some(b) => bound(b, "ending")?,
+        None => FrameBound::CurrentRow,
+    };
+    // SQLite's rule: the end may not come before the start in the list
+    // UNBOUNDED PRECEDING, n PRECEDING, CURRENT ROW, n FOLLOWING,
+    // UNBOUNDED FOLLOWING; nor may the start be UNBOUNDED FOLLOWING or the
+    // end UNBOUNDED PRECEDING.
+    let rank = |b: FrameBound| match b {
+        FrameBound::UnboundedPreceding => 0,
+        FrameBound::Preceding(_) => 1,
+        FrameBound::CurrentRow => 2,
+        FrameBound::Following(_) => 3,
+        FrameBound::UnboundedFollowing => 4,
+    };
+    if start == FrameBound::UnboundedFollowing
+        || end == FrameBound::UnboundedPreceding
+        || rank(end) < rank(start)
+    {
+        return Err(SqawkError::InvalidSqlQuery(
+            "unsupported frame specification".into(),
+        ));
+    }
+    if !rows
+        && [start, end]
+            .iter()
+            .any(|b| matches!(b, FrameBound::Preceding(_) | FrameBound::Following(_)))
+    {
+        return Err(SqawkError::UnsupportedSqlFeature(
+            "RANGE window frames with an offset are not supported (use ROWS)".into(),
+        ));
+    }
+    Ok(WindowFrame { rows, start, end })
+}
+
+/// The window specification an OVER clause means, with named windows
+/// (`OVER w`, `OVER (w ORDER BY x)`) resolved against the WINDOW clause.
+fn resolve_window(over: &WindowType, named: &[NamedWindowDefinition]) -> SqawkResult<WindowSpec> {
+    fn lookup(
+        name: &str,
+        named: &[NamedWindowDefinition],
+        depth: usize,
+    ) -> SqawkResult<WindowSpec> {
+        let def = named
+            .iter()
+            .find(|d| d.0.value.eq_ignore_ascii_case(name))
+            .ok_or_else(|| SqawkError::InvalidSqlQuery(format!("no such window: {}", name)))?;
+        if depth > named.len() {
+            return Err(SqawkError::InvalidSqlQuery(format!(
+                "circular window definition: {}",
+                name
+            )));
+        }
+        match &def.1 {
+            NamedWindowExpr::NamedWindow(other) => lookup(&other.value, named, depth + 1),
+            NamedWindowExpr::WindowSpec(spec) => inherit(spec, named, depth + 1),
+        }
+    }
+    /// A spec naming a base window takes the base's PARTITION BY, and its
+    /// ORDER BY unless it has its own; SQLite's override rules.
+    fn inherit(
+        spec: &WindowSpec,
+        named: &[NamedWindowDefinition],
+        depth: usize,
+    ) -> SqawkResult<WindowSpec> {
+        let Some(base_name) = &spec.window_name else {
+            return Ok(spec.clone());
+        };
+        let base = lookup(&base_name.value, named, depth)?;
+        let err = |what: &str| {
+            Err(SqawkError::InvalidSqlQuery(format!(
+                "cannot override {} of window: {}",
+                what, base_name.value
+            )))
+        };
+        if !spec.partition_by.is_empty() {
+            return err("PARTITION BY clause");
+        }
+        if !spec.order_by.is_empty() && !base.order_by.is_empty() {
+            return err("ORDER BY clause");
+        }
+        if base.window_frame.is_some() {
+            return err("frame specification");
+        }
+        Ok(WindowSpec {
+            window_name: None,
+            partition_by: base.partition_by,
+            order_by: if spec.order_by.is_empty() {
+                base.order_by
+            } else {
+                spec.order_by.clone()
+            },
+            window_frame: spec.window_frame.clone(),
+        })
+    }
+    match over {
+        WindowType::NamedWindow(name) => lookup(&name.value, named, 0),
+        WindowType::WindowSpec(spec) => inherit(spec, named, 0),
+    }
+}
+
+/// A window function's kind and allowed argument counts.
+fn window_kind(func: &Function, nargs: usize) -> SqawkResult<WindowFuncKind> {
+    let name = func.name.to_string().to_ascii_uppercase();
+    let (kind, min, max) = match name.as_str() {
+        "ROW_NUMBER" => (WindowFuncKind::RowNumber, 0, 0),
+        "RANK" => (WindowFuncKind::Rank, 0, 0),
+        "DENSE_RANK" => (WindowFuncKind::DenseRank, 0, 0),
+        "PERCENT_RANK" => (WindowFuncKind::PercentRank, 0, 0),
+        "CUME_DIST" => (WindowFuncKind::CumeDist, 0, 0),
+        "NTILE" => (WindowFuncKind::Ntile, 1, 1),
+        "LAG" => (WindowFuncKind::Lag, 1, 3),
+        "LEAD" => (WindowFuncKind::Lead, 1, 3),
+        "FIRST_VALUE" => (WindowFuncKind::FirstValue, 1, 1),
+        "LAST_VALUE" => (WindowFuncKind::LastValue, 1, 1),
+        "NTH_VALUE" => (WindowFuncKind::NthValue, 2, 2),
+        // COUNT() and COUNT(*) count rows.
+        "COUNT" => (WindowFuncKind::Agg(AGG_COUNT), 0, 1),
+        _ => match AggregateFunction::from_name(&name) {
+            Some(agg) => (WindowFuncKind::Agg(agg.vm_type()), 1, 1),
+            None => {
+                return Err(SqawkError::UnsupportedSqlFeature(format!(
+                    "{}() may not be used as a window function",
+                    func.name
+                )))
+            }
+        },
+    };
+    if nargs < min || nargs > max {
+        return Err(SqawkError::InvalidSqlQuery(format!(
+            "wrong number of arguments to function {}()",
+            func.name
+        )));
+    }
+    Ok(kind)
+}
+
+/// The argument expressions of a window call. `COUNT(*)` has none.
+fn window_args(func: &Function) -> SqawkResult<Vec<Expr>> {
+    let name = func.name.to_string();
+    if func.filter.is_some() {
+        return Err(SqawkError::UnsupportedSqlFeature(format!(
+            "FILTER on window function {}() is not supported",
+            name
+        )));
+    }
+    if func.null_treatment.is_some() || !func.within_group.is_empty() {
+        return Err(SqawkError::UnsupportedSqlFeature(format!(
+            "IGNORE/RESPECT NULLS and WITHIN GROUP on {}() are not supported",
+            name
+        )));
+    }
+    if func_is_distinct(func) {
+        return Err(SqawkError::InvalidSqlQuery(
+            "DISTINCT is not supported for window functions".into(),
+        ));
+    }
+    if let FunctionArguments::List(list) = &func.args {
+        if !list.clauses.is_empty() {
+            return Err(SqawkError::UnsupportedSqlFeature(format!(
+                "Clauses inside the argument list of {}() are not supported",
+                name
+            )));
+        }
+    }
+    let is_count = name.eq_ignore_ascii_case("COUNT");
+    let mut out = Vec::new();
+    for a in func_args(func) {
+        match a {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => out.push(e.clone()),
+            FunctionArg::Unnamed(FunctionArgExpr::Wildcard) if is_count => {}
+            _ => {
+                return Err(SqawkError::InvalidSqlQuery(format!(
+                    "Unsupported argument to window function {}(): {}",
+                    name, a
+                )))
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Reject `NULLS FIRST` / `NULLS LAST` in a window's ORDER BY rather than
+/// ignore it.
+fn check_order_key(ob: &OrderByExpr) -> SqawkResult<()> {
+    if ob.options.nulls_first.is_some() {
+        return Err(SqawkError::UnsupportedSqlFeature(
+            "NULLS FIRST / NULLS LAST is not supported".into(),
+        ));
+    }
+    if ob.with_fill.is_some() {
+        return Err(SqawkError::UnsupportedSqlFeature(
+            "WITH FILL is not supported".into(),
+        ));
+    }
+    Ok(())
+}
 
 impl<'a> SqlCompiler<'a> {
-    /// The window stage: compute every output row of a window query into the
-    /// ephemeral table `staging`, from which the output stage reads them.
-    pub(crate) fn compile_select_with_window(
+    /// Plan the window stage for the window calls in `outs` and in the
+    /// output stage's hidden sort keys, and open its ephemeral table.
+    pub(crate) fn window_stage(
         &mut self,
         select: &Select,
-        table: &'a Table,
-        table_name: &str,
-        staging: i64,
-    ) -> SqawkResult<()> {
-        let cursor_idx = 0i64;
-        let ephemeral_cursor = 1i64;
-
-        self.add_comment("Window function query");
-
-        // A wildcard in a window query is not expanded by this path: the
-        // projection analysis below counts one output column per SELECT item,
-        // so `SELECT *, SUM(x) OVER (...)` emitted two columns for a
-        // four-column table and lost the rest. Reject it rather than return a
-        // silently truncated row.
-        if select.projection.iter().any(|i| {
-            matches!(
-                i,
-                SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..)
-            )
-        }) {
-            return Err(SqawkError::UnsupportedSqlFeature(
-                "SELECT * cannot be combined with a window function; list the columns".into(),
-            ));
+        outs: &[OutCol],
+        st: &OutputStage,
+    ) -> SqawkResult<WindowStage<'a>> {
+        let mut calls = Vec::new();
+        for o in outs {
+            collect_windows(&o.expr, &mut calls);
+        }
+        for e in st.key_exprs() {
+            collect_windows(e, &mut calls);
         }
 
-        // Analyze the projection to find window functions and their specs
-        let (window_funcs, mut base_columns) =
-            self.analyze_window_projection(&select.projection, table)?;
-
-        if window_funcs.is_empty() {
-            return Err(SqawkError::InvalidSqlQuery(
-                "No window functions found in projection".to_string(),
-            ));
-        }
-
-        // Get partition and order columns from the first window function (source table indices)
-        // (All window functions should have the same OVER clause for now)
-        let (partition_cols, order_cols, order_asc) =
-            self.extract_window_spec(&window_funcs[0].1, table)?;
-
-        // Add partition/order columns to base_columns if not already present
-        for &col_idx in &partition_cols {
-            if !base_columns.contains(&col_idx) {
-                base_columns.push(col_idx);
-            }
-        }
-        for &col_idx in &order_cols {
-            if !base_columns.contains(&col_idx) {
-                base_columns.push(col_idx);
-            }
-        }
-
-        // Map source table indices to ephemeral cursor positions
-        let partition_positions: Vec<usize> = partition_cols
-            .iter()
-            .filter_map(|&src_idx| base_columns.iter().position(|&bc| bc == src_idx))
-            .collect();
-        let order_positions: Vec<usize> = order_cols
-            .iter()
-            .filter_map(|&src_idx| base_columns.iter().position(|&bc| bc == src_idx))
-            .collect();
-
-        let total_col_count = base_columns.len();
-
-        // Build result schema
-        let schema = self.build_window_result_schema(&select.projection, table);
-        self.program.set_result_schema(schema);
-
-        // Build sort spec: partition columns first, then order columns (using ephemeral positions)
-        let mut sort_spec_parts = Vec::new();
-        for &pos in &partition_positions {
-            sort_spec_parts.push(format!("{}:asc", pos));
-        }
-        for (i, &pos) in order_positions.iter().enumerate() {
-            let dir = if order_asc.get(i).copied().unwrap_or(true) {
-                "asc"
-            } else {
-                "desc"
-            };
-            sort_spec_parts.push(format!("{}:{}", pos, dir));
-        }
-        let sort_spec = sort_spec_parts.join(",");
-
-        // Open ephemeral cursor for collecting rows
-        self.emit(
-            OpCode::OpenEphemeral,
-            ephemeral_cursor,
-            total_col_count as i64,
-            0,
-            Some(sort_spec),
-            "Open ephemeral for window function",
-        );
-
-        // Open source table
-        self.emit(
-            OpCode::OpenRead,
-            cursor_idx,
-            1,
-            0,
-            Some(table_name.to_string()),
-            "",
-        );
-
-        // Rewind source table
-        let rewind_addr = self.program.len();
-        self.emit(OpCode::Rewind, cursor_idx, 0, 0, None, "");
-
-        let collect_loop_start = self.program.len();
-
-        // Allocate registers for base columns
-        let start_reg = self.allocate_registers(total_col_count);
-
-        // Load all base columns
-        for (i, &col_idx) in base_columns.iter().enumerate() {
-            self.emit(
-                OpCode::Column,
-                cursor_idx,
-                col_idx as i64,
-                start_reg + i as i64,
-                None,
-                "",
-            );
-        }
-
-        // Apply WHERE filter if present
-        if let Some(where_expr) = &select.selection {
-            let cond_reg = self.code_expr(where_expr, &NameCtx::single(table, cursor_idx), None)?;
-            self.emit(
-                OpCode::IfZ,
-                cond_reg,
-                (self.program.len() + 2) as i64,
-                0,
-                None,
-                "",
-            );
-        }
-
-        // Insert row into ephemeral
-        self.emit(
-            OpCode::IdxInsert,
-            ephemeral_cursor,
-            start_reg,
-            total_col_count as i64,
-            None,
-            "",
-        );
-
-        // Next row in source
-        self.emit(
-            OpCode::Next,
-            cursor_idx,
-            collect_loop_start as i64,
-            0,
-            None,
-            "",
-        );
-
-        let after_collect = self.program.len();
-
-        // Patch rewind
-        if let Some(inst) = self.program.instructions.get_mut(rewind_addr) {
-            inst.p2 = after_collect as i64;
-        }
-
-        // Sort the ephemeral (by partition + order keys)
-        self.emit(OpCode::Sort, ephemeral_cursor, 0, 0, None, "");
-
-        let sort_jump_target = self.program.len();
-
-        // Rewind ephemeral for output pass
-        let output_rewind_addr = self.program.len();
-        self.emit(OpCode::Rewind, ephemeral_cursor, 0, 0, None, "");
-
-        // Allocate registers for output row
-        let output_col_count = select.projection.len();
-        let output_start_reg = self.allocate_registers(output_col_count);
-
-        // Allocate registers for window state
-        let row_num_reg = self.allocate_register(); // Current row number in partition
-        let prev_partition_reg = self.allocate_register(); // Previous partition key value
-        let rank_reg = self.allocate_register(); // Current rank value
-        let prev_order_reg = self.allocate_register(); // Previous order key value for rank
-        let dense_rank_reg = self.allocate_register(); // Dense rank value
-        let rows_at_rank_reg = self.allocate_register(); // Number of rows at current rank
-
-        // Initialize window state BEFORE the loop
-        self.emit(
-            OpCode::Integer,
-            0,
-            row_num_reg,
-            0,
-            None,
-            "Initialize row number",
-        );
-        self.emit(
-            OpCode::Null,
-            0,
-            prev_partition_reg,
-            0,
-            None,
-            "Initialize prev partition key",
-        );
-        self.emit(OpCode::Integer, 0, rank_reg, 0, None, "Initialize rank");
-        self.emit(
-            OpCode::Null,
-            0,
-            prev_order_reg,
-            0,
-            None,
-            "Initialize prev order key",
-        );
-        self.emit(
-            OpCode::Integer,
-            0,
-            dense_rank_reg,
-            0,
-            None,
-            "Initialize dense rank",
-        );
-        self.emit(
-            OpCode::Integer,
-            0,
-            rows_at_rank_reg,
-            0,
-            None,
-            "Initialize rows at rank",
-        );
-
-        // Allocate registers for aggregate window functions (SUM, AVG, COUNT, MIN, MAX)
-        let agg_sum_reg = self.allocate_register(); // Running sum
-        let agg_count_reg = self.allocate_register(); // Running count
-        let agg_min_reg = self.allocate_register(); // Running min
-        let agg_max_reg = self.allocate_register(); // Running max
-
-        // Initialize aggregate state
-        self.emit(
-            OpCode::Integer,
-            0,
-            agg_sum_reg,
-            0,
-            None,
-            "Initialize aggregate sum",
-        );
-        self.emit(
-            OpCode::Integer,
-            0,
-            agg_count_reg,
-            0,
-            None,
-            "Initialize aggregate count",
-        );
-        self.emit(
-            OpCode::Null,
-            0,
-            agg_min_reg,
-            0,
-            None,
-            "Initialize aggregate min",
-        );
-        self.emit(
-            OpCode::Null,
-            0,
-            agg_max_reg,
-            0,
-            None,
-            "Initialize aggregate max",
-        );
-
-        // Find if we have aggregate window functions and extract their column positions
-        let mut agg_col_pos: Option<usize> = None;
-        for (func_name, _) in &window_funcs {
-            let ft = self.get_window_func_type(func_name);
-            if (5..=9).contains(&ft) {
-                // It's an aggregate function - find the column position
-                // Look through projection to find the argument
-                for item in &select.projection {
-                    if let SelectItem::UnnamedExpr(Expr::Function(func))
-                    | SelectItem::ExprWithAlias {
-                        expr: Expr::Function(func),
-                        ..
-                    } = item
-                    {
-                        if func.name.to_string().to_uppercase() == *func_name && func.over.is_some()
-                        {
-                            if !func_args(func).is_empty() {
-                                if let Ok(Expr::Identifier(ident)) =
-                                    self.extract_function_arg_expr(&func_args(func)[0])
-                                {
-                                    if let Some(src_idx) = table.column_index(&ident.value) {
-                                        agg_col_pos =
-                                            base_columns.iter().position(|&c| c == src_idx);
-                                    }
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-                break;
-            }
-        }
-
-        // WindowAggStep computes window values - we encode state registers in P4
-        let window_state_spec = format!(
-            "row_num:{},prev_part:{},rank:{},prev_ord:{},dense_rank:{},rows_at_rank:{},agg_sum:{},agg_count:{},agg_min:{},agg_max:{},agg_col:{}",
-            row_num_reg, prev_partition_reg, rank_reg, prev_order_reg, dense_rank_reg, rows_at_rank_reg,
-            agg_sum_reg, agg_count_reg, agg_min_reg, agg_max_reg, agg_col_pos.unwrap_or(0)
-        );
-
-        // Build window spec for WindowAggStep (using ephemeral cursor positions)
-        let part_cols_str = partition_positions
-            .iter()
-            .map(|c| c.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        let ord_cols_str = order_positions
-            .iter()
-            .map(|c| c.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        let window_spec_base = format!(
-            "WINDOW:part={}:ord={}:state={}",
-            part_cols_str, ord_cols_str, window_state_spec
-        );
-
-        // NOW start the output loop (after state initialization)
-        let output_loop_start = self.program.len();
-
-        // Emit ONE WindowAggStep at start of loop to update state for this row
-        // Get the first window function type for the step
-        let first_func_type = if !window_funcs.is_empty() {
-            self.get_window_func_type(&window_funcs[0].0)
-        } else {
-            0
+        let mut exprs: Vec<Expr> = Vec::new();
+        let mut push = |e: &Expr| {
+            exprs.push(e.clone());
+            exprs.len() - 1
         };
-        self.emit(
-            OpCode::WindowAggStep,
-            first_func_type,
-            staging,
-            ephemeral_cursor,
-            Some(window_spec_base.clone()),
-            "Update window state for current row",
-        );
-
-        // Compile the output projection
-        let mut output_idx = 0;
-        for item in &select.projection {
-            match item {
-                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-                    match expr {
-                        Expr::Function(func) if func.over.is_some() => {
-                            // Window function - just emit WindowValue (state already updated above)
-                            let func_name = func.name.to_string().to_uppercase();
-                            let func_type = self.get_window_func_type(&func_name);
-
-                            // For LAG/LEAD, extract column position, offset, and partition info
-                            let p4 = if func_name == "LAG" || func_name == "LEAD" {
-                                // LAG/LEAD(column, offset, default)
-                                // Get column position in ephemeral cursor
-                                let col_pos = if !func_args(func).is_empty() {
-                                    if let Ok(Expr::Identifier(ident)) =
-                                        self.extract_function_arg_expr(&func_args(func)[0])
-                                    {
-                                        if let Some(src_idx) = table.column_index(&ident.value) {
-                                            base_columns
-                                                .iter()
-                                                .position(|&c| c == src_idx)
-                                                .unwrap_or(0)
-                                        } else {
-                                            0
-                                        }
-                                    } else {
-                                        0
-                                    }
-                                } else {
-                                    0
-                                };
-
-                                // Get offset (default 1)
-                                let offset = if func_args(func).len() >= 2 {
-                                    if let Ok(Expr::Value(ValueWithSpan {
-                                        value: Value::Number(n, _),
-                                        ..
-                                    })) = self.extract_function_arg_expr(&func_args(func)[1])
-                                    {
-                                        n.parse::<i64>().unwrap_or(1)
-                                    } else {
-                                        1
-                                    }
-                                } else {
-                                    1
-                                };
-
-                                // Partition columns for boundary detection (using ephemeral positions)
-                                let part_str = partition_positions
-                                    .iter()
-                                    .map(|p| p.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(",");
-
-                                Some(format!(
-                                    "{}:cursor={}:col={}:offset={}:parts={}",
-                                    func_name, ephemeral_cursor, col_pos, offset, part_str
-                                ))
-                            } else {
-                                None
-                            };
-
-                            self.emit(
-                                OpCode::WindowValue,
-                                row_num_reg,
-                                output_start_reg + output_idx as i64,
-                                func_type,
-                                p4,
-                                &format!("Get {} value", func_name),
-                            );
-                        }
-                        Expr::Identifier(ident) => {
-                            // Regular column reference
-                            if let Some(col_idx) = table.column_index(&ident.value) {
-                                if let Some(pos) = base_columns.iter().position(|&c| c == col_idx) {
-                                    self.emit(
-                                        OpCode::Column,
-                                        ephemeral_cursor,
-                                        pos as i64,
-                                        output_start_reg + output_idx as i64,
-                                        None,
-                                        "",
-                                    );
-                                }
-                            }
-                        }
-                        _ => {
-                            // Other expressions - compile as usual
-                            self.code_expr(
-                                expr,
-                                &NameCtx::single(table, ephemeral_cursor),
-                                Some(output_start_reg + output_idx as i64),
-                            )?;
-                        }
-                    }
-                }
-                SelectItem::Wildcard(_) => {
-                    // Load all columns
-                    for (i, &_col_idx) in base_columns.iter().enumerate() {
-                        self.emit(
-                            OpCode::Column,
-                            ephemeral_cursor,
-                            i as i64,
-                            output_start_reg + output_idx as i64,
-                            None,
-                            "",
-                        );
-                        output_idx += 1;
-                    }
-                    continue;
-                }
-                _ => {}
+        // Definitions are keyed by the text of their sort keys: functions
+        // that share PARTITION BY and ORDER BY share one sort.
+        let mut def_keys: Vec<String> = Vec::new();
+        let mut defs: Vec<WindowDef> = Vec::new();
+        // (definition, function) per call, for the result columns.
+        let mut placed: Vec<(usize, usize)> = Vec::new();
+        for call in &calls {
+            let Expr::Function(func) = call else {
+                unreachable!("collect_windows collects calls")
+            };
+            let args = window_args(func)?;
+            let kind = window_kind(func, args.len())?;
+            let over = func.over.as_ref().expect("window call");
+            let spec = resolve_window(over, &select.named_window)?;
+            for ob in &spec.order_by {
+                check_order_key(ob)?;
             }
-            output_idx += 1;
+            let frame = frame_of(&spec)?;
+
+            let key = format!(
+                "{} | {}",
+                spec.partition_by
+                    .iter()
+                    .map(NameCtx::agg_key)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                spec.order_by
+                    .iter()
+                    .map(|o| format!("{} {}", NameCtx::agg_key(&o.expr), order_by_is_asc(o)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            let d = match def_keys.iter().position(|k| *k == key) {
+                Some(d) => d,
+                None => {
+                    def_keys.push(key);
+                    defs.push(WindowDef {
+                        partition: spec.partition_by.iter().map(&mut push).collect(),
+                        order: spec
+                            .order_by
+                            .iter()
+                            .map(|o| (push(&o.expr), order_by_is_asc(o)))
+                            .collect(),
+                        funcs: Vec::new(),
+                    });
+                    defs.len() - 1
+                }
+            };
+            let args = args.iter().map(&mut push).collect();
+            defs[d].funcs.push(WindowFunc {
+                kind,
+                args,
+                frame,
+                result: 0,
+            });
+            placed.push((d, defs[d].funcs.len() - 1));
+        }
+        for (j, (d, f)) in placed.into_iter().enumerate() {
+            defs[d].funcs[f].result = j;
         }
 
-        // Stage the row
+        let eph = self.alloc_cursor();
+        let open_addr = self.program.len();
+        self.emit(OpCode::OpenEphemeral, eph, 0, 0, None, "window stage rows");
+        Ok(WindowStage {
+            eph,
+            open_addr,
+            exprs,
+            own: Vec::new(),
+            calls,
+            defs,
+            template: None,
+            nslots: 0,
+            row: 0,
+            slot_out: 0,
+        })
+    }
+
+    /// A plain query's row scope with every column -- of every FROM source,
+    /// and each USING-merged column -- read into a register, so the window
+    /// stage can save the whole row.
+    pub(crate) fn materialize_row(&mut self, ctx: &NameCtx<'a>) -> NameCtx<'a> {
+        let mut cols = Vec::new();
+        for src in &ctx.srcs {
+            for col in 0..src.table.column_count() {
+                let r = self.allocate_register();
+                self.emit(OpCode::Column, src.cursor, col as i64, r, None, "");
+                cols.push((
+                    ColumnRef::Cursor {
+                        cursor: src.cursor,
+                        col,
+                    },
+                    r,
+                ));
+            }
+        }
+        for k in 0..ctx.using.len() {
+            let col = ColumnRef::Using(ctx.using_base + k);
+            let r = self.allocate_register();
+            self.emit_column_ref(col, ctx, r, &ctx.using[k].name);
+            cols.push((col, r));
+        }
+        let mut row = ctx.clone();
+        row.col_bindings = Some(cols);
+        row
+    }
+
+    /// Add one row to the window stage. `ctx` is the pre-window scope, in
+    /// which every value lives in a register: a [`Self::materialize_row`]
+    /// scope, or a grouped query's post-aggregation scope. Rows failing
+    /// `filter` (a grouped query's HAVING) are skipped.
+    pub(crate) fn emit_window_row(
+        &mut self,
+        ws: &mut WindowStage<'a>,
+        ctx: &NameCtx<'a>,
+        filter: Option<&Expr>,
+    ) -> SqawkResult<()> {
+        let skip = self.label();
+        if let Some(f) = filter {
+            let r = self.code_expr(f, ctx, None)?;
+            self.emit_jump_to(OpCode::IfZ, r, skip, 0, None, "HAVING failed");
+        }
+        let regs = scope_regs(ctx);
+        let nc = ws.calls.len();
+        match &ws.template {
+            None => {
+                ws.nslots = regs.len();
+                // Lay the expressions out: a bare reference to a saved value
+                // reads that value's column, anything else gets its own.
+                let mut col_of = Vec::with_capacity(ws.exprs.len());
+                for (i, e) in ws.exprs.iter().enumerate() {
+                    match bound_reg(ctx, e).and_then(|r| regs.iter().position(|x| *x == r)) {
+                        Some(k) => col_of.push(nc + k),
+                        None => {
+                            col_of.push(nc + ws.nslots + ws.own.len());
+                            ws.own.push(i);
+                        }
+                    }
+                }
+                for def in &mut ws.defs {
+                    def.partition.iter_mut().for_each(|c| *c = col_of[*c]);
+                    def.order.iter_mut().for_each(|(c, _)| *c = col_of[*c]);
+                    for f in &mut def.funcs {
+                        f.args.iter_mut().for_each(|c| *c = col_of[*c]);
+                    }
+                }
+                let n = nc + ws.nslots + ws.own.len();
+                ws.row = self.allocate_registers(n.max(1));
+                ws.slot_out = self.allocate_registers(ws.nslots.max(1));
+                ws.template = Some(remap(ctx, &regs, ws.slot_out));
+                self.program.instructions[ws.open_addr].p2 = n as i64;
+            }
+            // A grouped query emits rows from two places, with different
+            // registers but the same scope shape.
+            Some(_) if regs.len() != ws.nslots => {
+                return Err(SqawkError::VmError(
+                    "window stage: inconsistent row scope".into(),
+                ))
+            }
+            Some(_) => {}
+        }
+        for j in 0..nc {
+            let r = ws.row + j as i64;
+            self.emit(OpCode::Null, 0, r, 0, None, "window value: computed later");
+        }
+        for (k, r) in regs.iter().enumerate() {
+            let to = ws.row + (nc + k) as i64;
+            self.emit(OpCode::Copy, *r, to, 0, None, "save row value");
+        }
+        let base = nc + ws.nslots;
+        for (m, &i) in ws.own.iter().enumerate() {
+            self.code_expr(&ws.exprs[i], ctx, Some(ws.row + (base + m) as i64))?;
+        }
+        let n = (base + ws.own.len()) as i64;
         self.emit(
             OpCode::IdxInsert,
-            staging,
-            output_start_reg,
-            output_col_count as i64,
+            ws.eph,
+            ws.row,
+            n,
             None,
-            "stage window row",
+            "window stage row",
         );
-
-        // Next row in ephemeral
-        self.emit(
-            OpCode::Next,
-            ephemeral_cursor,
-            output_loop_start as i64,
-            0,
-            None,
-            "",
-        );
-
-        let after_output = self.program.len();
-
-        // Patch output rewind
-        if let Some(inst) = self.program.instructions.get_mut(output_rewind_addr) {
-            inst.p2 = after_output as i64;
-        }
-
-        // Patch sort jump (empty case)
-        if let Some(inst) = self.program.instructions.get_mut(sort_jump_target - 1) {
-            inst.p2 = after_output as i64;
-        }
-
-        // An aggregate window with PARTITION BY and no ORDER BY has the whole
-        // partition as its frame, so every row must see the partition total.
-        // The streaming pass produces a RUNNING total, whose value at the last
-        // row of each partition IS the total -- back-fill from there.
-        //
-        // With an ORDER BY the running total is the correct answer, so this is
-        // emitted only when the window is unordered.
-        if order_cols.is_empty() && !partition_cols.is_empty() {
-            // With wildcards rejected above, each projection item yields
-            // exactly one output column, so the SELECT-list index IS the
-            // result-column index that WindowFinalize needs.
-            let agg_output_positions: Vec<usize> = select
-                .projection
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| match item {
-                    SelectItem::UnnamedExpr(Expr::Function(f))
-                    | SelectItem::ExprWithAlias {
-                        expr: Expr::Function(f),
-                        ..
-                    } => {
-                        f.over.is_some()
-                            && AggregateFunction::is_aggregate_name(&f.name.to_string())
-                    }
-                    _ => false,
-                })
-                .map(|(i, _)| i)
-                .collect();
-
-            // One per aggregate window column: finalizing only the first left
-            // any others showing a running value.
-            for pos in agg_output_positions {
-                self.emit(
-                    OpCode::WindowFinalize,
-                    pos as i64,
-                    staging,
-                    0,
-                    None,
-                    "Give every row its partition's final window value",
-                );
-            }
-        }
-
+        self.resolve(skip);
         Ok(())
     }
 
-    /// Analyze projection to extract window functions and base columns needed
-    #[allow(clippy::type_complexity)]
-    fn analyze_window_projection(
-        &self,
-        projection: &[SelectItem],
-        table: &Table,
-    ) -> SqawkResult<(Vec<(String, Option<WindowType>)>, Vec<usize>)> {
-        let mut window_funcs = Vec::new();
-        let mut base_columns = Vec::new();
-
-        for item in projection {
-            match item {
-                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-                    match expr {
-                        Expr::Function(func) if func.over.is_some() => {
-                            let name = func.name.to_string().to_uppercase();
-                            window_funcs.push((name, func.over.clone()));
-
-                            // If it's an aggregate window function, add argument column
-                            if !func_args(func).is_empty() {
-                                if let Ok(Expr::Identifier(ident)) =
-                                    self.extract_function_arg_expr(&func_args(func)[0])
-                                {
-                                    if let Some(col_idx) = table.column_index(&ident.value) {
-                                        if !base_columns.contains(&col_idx) {
-                                            base_columns.push(col_idx);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Expr::Identifier(ident) => {
-                            if let Some(col_idx) = table.column_index(&ident.value) {
-                                if !base_columns.contains(&col_idx) {
-                                    base_columns.push(col_idx);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                SelectItem::Wildcard(_) => {
-                    // Include all columns
-                    for i in 0..table.column_count() {
-                        if !base_columns.contains(&i) {
-                            base_columns.push(i);
-                        }
-                    }
-                }
-                _ => {}
-            }
+    /// Compute every window definition over the collected rows, then send
+    /// each row through the output stage.
+    pub(crate) fn finish_window(
+        &mut self,
+        ws: WindowStage<'a>,
+        st: &OutputStage,
+        outs: &[OutCol],
+    ) -> SqawkResult<()> {
+        let template = ws
+            .template
+            .ok_or_else(|| SqawkError::VmError("window stage received no rows".into()))?;
+        // The last definition is computed first, so the rows end up in the
+        // first definition's order -- the order SQLite returns them in when
+        // there is no ORDER BY. Each sort is stable.
+        for def in ws.defs.into_iter().rev() {
+            let idx = self.program.windows.len() as i64;
+            self.program.windows.push(def);
+            self.emit(OpCode::WindowCompute, ws.eph, idx, 0, None, "window pass");
         }
 
-        Ok((window_funcs, base_columns))
-    }
-
-    /// Extract partition and order columns from window specification
-    fn extract_window_spec(
-        &self,
-        window_type: &Option<WindowType>,
-        table: &Table,
-    ) -> SqawkResult<(Vec<usize>, Vec<usize>, Vec<bool>)> {
-        let mut partition_cols = Vec::new();
-        let mut order_cols = Vec::new();
-        let mut order_asc = Vec::new();
-
-        if let Some(WindowType::WindowSpec(spec)) = window_type {
-            // An explicit frame is parsed but not implemented. Accepting it
-            // silently returns the default frame's answer -- `ROWS BETWEEN 1
-            // PRECEDING AND CURRENT ROW` produced a running total over the
-            // whole partition rather than a two-row sliding window -- so it is
-            // rejected instead. A clear error beats a plausible wrong number.
-            if spec.window_frame.is_some() {
-                return Err(SqawkError::UnsupportedSqlFeature(
-                    "Explicit window frames (ROWS/RANGE BETWEEN) are not supported".into(),
-                ));
-            }
-
-            // Extract PARTITION BY columns
-            for expr in &spec.partition_by {
-                if let Expr::Identifier(ident) = expr {
-                    if let Some(col_idx) = table.column_index(&ident.value) {
-                        partition_cols.push(col_idx);
-                    }
-                }
-            }
-
-            // Extract ORDER BY columns
-            for order_expr in &spec.order_by {
-                if let Expr::Identifier(ident) = &order_expr.expr {
-                    if let Some(col_idx) = table.column_index(&ident.value) {
-                        order_cols.push(col_idx);
-                        order_asc.push(order_by_is_asc(order_expr));
-                    }
-                }
-            }
+        let nc = ws.calls.len();
+        let vals = self.allocate_registers(nc.max(1));
+        let mut ctx = template;
+        for (j, call) in ws.calls.iter().enumerate() {
+            ctx.agg_bindings
+                .push((NameCtx::agg_key(call), vals + j as i64));
         }
-
-        Ok((partition_cols, order_cols, order_asc))
-    }
-
-    /// Build result schema for window function query
-    fn build_window_result_schema(&self, projection: &[SelectItem], table: &Table) -> ResultSchema {
-        let mut schema = ResultSchema::new();
-
-        for item in projection {
-            match item {
-                SelectItem::UnnamedExpr(expr) => {
-                    let (name, data_type) = self.infer_expr_schema(expr, table);
-                    schema.add_column(name, data_type);
-                }
-                SelectItem::ExprWithAlias { expr, alias } => {
-                    let (_, data_type) = self.infer_expr_schema(expr, table);
-                    schema.add_column(alias.value.clone(), data_type);
-                }
-                SelectItem::Wildcard(_) => {
-                    for col in table.column_metadata() {
-                        schema.add_column(col.name.clone(), col.data_type);
-                    }
-                }
-                _ => {}
-            }
+        let top = self.label();
+        let done = self.label();
+        self.emit_jump_to(OpCode::Rewind, ws.eph, done, 0, None, "window rows");
+        self.resolve(top);
+        for k in 0..ws.nslots {
+            let col = (nc + k) as i64;
+            self.emit(
+                OpCode::Column,
+                ws.eph,
+                col,
+                ws.slot_out + k as i64,
+                None,
+                "",
+            );
         }
-
-        schema
-    }
-
-    /// Infer schema (name, type) for an expression
-    pub(crate) fn infer_expr_schema(&self, expr: &Expr, table: &Table) -> (String, DataType) {
-        match expr {
-            Expr::Identifier(ident) => {
-                if let Some(col_idx) = table.column_index(&ident.value) {
-                    let col = &table.column_metadata()[col_idx];
-                    (ident.value.clone(), col.data_type)
-                } else {
-                    (ident.value.clone(), DataType::Text)
-                }
-            }
-            Expr::Function(func) => {
-                let name = func.name.to_string();
-                // Window functions return Integer (for ROW_NUMBER, RANK) or the input type (for aggregates)
-                let data_type = match name.to_uppercase().as_str() {
-                    "ROW_NUMBER" | "RANK" | "DENSE_RANK" | "COUNT" => DataType::Integer,
-                    _ => DataType::Float,
-                };
-                (name, data_type)
-            }
-            _ => ("expr".to_string(), DataType::Text),
+        for j in 0..nc {
+            self.emit(OpCode::Column, ws.eph, j as i64, vals + j as i64, None, "");
         }
+        self.emit_stage_row(st, outs, &ctx, None)?;
+        self.emit_jump_to(OpCode::Next, ws.eph, top, 0, None, "");
+        self.resolve(done);
+        Ok(())
     }
 }

@@ -282,14 +282,6 @@ impl<'t> FromPlan<'t> {
         ctx
     }
 
-    /// The table, when the FROM clause is exactly one table.
-    pub(crate) fn single_table(&self) -> Option<(&'t Table, &str)> {
-        match self.srcs.as_slice() {
-            [only] => Some((only.table, &self.table_names[0])),
-            _ => None,
-        }
-    }
-
     /// Whether this FROM belongs to a subquery, whose loop nest may run once
     /// per row of an enclosing query.
     fn nested(&self) -> bool {

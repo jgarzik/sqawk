@@ -2260,16 +2260,16 @@ fn alias_in_implicit_join() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn explicit_window_frame_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
-    // The frame clause was parsed and then ignored, so this returned the
-    // default frame's answer -- a running total over the whole partition
-    // rather than a two-row sliding window. Rejecting it is correct until
-    // frames are implemented: a clear error beats a plausible wrong number.
-    assert_query_fails(
+fn explicit_rows_window_frame() -> Result<(), Box<dyn std::error::Error>> {
+    // The frame clause used to be parsed and then ignored (a running total
+    // over the whole partition), and then rejected. It is a two-row sliding
+    // window.
+    assert_query(
         &["tests/data/employees.csv"],
         "SELECT name, SUM(salary) OVER (ORDER BY salary ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) \
-         FROM employees",
-        "Explicit window frames",
+         AS s FROM employees",
+        "name,s\nHenry,45000\nBob,100000\nEve,115000\nCharlie,125000\nAlice,135000\n\
+         Frank,145000\nDavid,155000\nGrace,170000",
     )
 }
 
@@ -2401,13 +2401,13 @@ fn window_aggregate_over_explicit_columns() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
-fn window_with_wildcard_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
-    // The window path counts one output column per SELECT item, so a wildcard
-    // silently emitted a truncated row (2 columns for a 4-column table).
-    assert_query_fails(
+fn window_with_wildcard() -> Result<(), Box<dyn std::error::Error>> {
+    // The old window path counted one output column per SELECT item, so a
+    // wildcard emitted a truncated row; the window stage saves whole rows.
+    assert_query(
         &["tests/data/windowed.csv"],
-        "SELECT *, SUM(x) OVER (PARTITION BY d) FROM windowed",
-        "SELECT * cannot be combined with a window function",
+        "SELECT *, SUM(x) OVER (PARTITION BY d) AS s FROM windowed",
+        "a,b,d,x,s\n1,p,E,10,30\n2,q,E,20,30\n3,r,S,30,30",
     )
 }
 
