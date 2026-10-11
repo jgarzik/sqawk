@@ -55,14 +55,20 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
   compiler (the analogue of SQLite's `sqlite3ExprCode`) used from the SELECT
   list, WHERE, HAVING, ORDER BY and SET clauses alike, plus `NameCtx`, which
   carries the FROM sources a name can resolve against
+- `compiler_select.rs`: the SELECT driver -- `compile_query`, compound
+  operators (UNION/INTERSECT/EXCEPT via keyed ephemeral tables) and the single
+  output stage (ORDER BY with hidden sort keys, DISTINCT, LIMIT/OFFSET) every
+  SELECT core ends in
 - `compiler_aggregate.rs`: aggregates, GROUP BY, HAVING
 - `compiler_from.rs`: the FROM planner used by every SELECT -- tables, comma
   lists and join chains become nested loop levels (ON per level, WHERE after
   outer-join NULL-extension, hash join on equi-conditions); the projection /
-  aggregate stage is a body callback emitted at the innermost level
+  aggregate stage is a body callback emitted at the innermost level; a
+  FROM-less SELECT is a plan with zero sources (one row)
 - `compiler_dml.rs`: INSERT / UPDATE / DELETE
 - `compiler_ddl.rs`: CREATE / DROP / ALTER / TRUNCATE
-- `compiler_window.rs`: window functions
+- `compiler_window.rs`: window functions (stages rows in an ephemeral table
+  that the output stage reads back)
 - `ast_compat.rs`: thin accessors normalizing sqlparser AST shapes
 - `engine.rs`: Executes bytecode instructions
 

@@ -89,6 +89,31 @@ column lives behind a cursor or in an already-loaded register, and the
 inner/outer scopes a correlated subquery needs. A node supported in one
 position is therefore supported in all of them.
 
+### SELECT Pipeline
+
+Every SELECT core runs one pipeline (`src/vm/compiler_select.rs`):
+
+    FROM planner -> WHERE -> [aggregate stage -> HAVING] -> [window stage] -> output stage
+
+- A SELECT without FROM is a FROM plan with zero sources, producing one row,
+  so WHERE, ORDER BY, DISTINCT and LIMIT apply to it as to any other query.
+- The aggregate stage collects aggregate calls from the SELECT list, HAVING
+  and ORDER BY. Without GROUP BY there is always exactly one output row (COUNT
+  of no rows is 0, SUM/AVG/MIN/MAX of no rows NULL); with GROUP BY, no input
+  rows means no output rows.
+- The output stage computes the output columns, then ORDER BY (an ordinal, a
+  SELECT alias, a projected expression, or else a hidden sort key such as an
+  unprojected column or aggregate), DISTINCT, and LIMIT/OFFSET. HAVING and
+  sort-key expressions may name SELECT aliases. LIMIT and OFFSET accept any
+  expression yielding an integer; a negative LIMIT means no limit.
+- Compound SELECTs (UNION [ALL], INTERSECT, EXCEPT, in any chain) take their
+  header from the leftmost SELECT; ORDER BY (ordinals or leftmost column
+  names) and LIMIT/OFFSET apply to the whole compound, and a DISTINCT on one
+  arm applies to that arm only. As in SQLite, set operators use keyed
+  ephemeral tables (`OpenEphemeral` with p3 = 1, `IdxInsert`, `IdxDelete`,
+  `Found`/`NotFound`), and without ORDER BY a UNION, INTERSECT or EXCEPT
+  result comes out sorted. INTERSECT ALL / EXCEPT ALL are not supported.
+
 ### Statement Execution Model
 
 A script is parsed once, then each statement is compiled and executed on its

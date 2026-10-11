@@ -56,7 +56,7 @@ fn select_literal() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT 1",
-        concat!("col0", "\n1",),
+        concat!("expr", "\n1",),
     )
 }
 
@@ -67,7 +67,7 @@ fn select_literal_expressions() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT UPPER('ab') || 'c', CAST('12' AS INTEGER) + 1, CASE WHEN 1 > 2 THEN 'x' ELSE 'y' END, SUBSTR('hello', 2, 3), -ABS(-4)",
-        concat!("col0,col1,col2,col3,col4", "\nABc,13,y,ell,-4"),
+        concat!("expr,expr,expr,SUBSTR(expr),expr", "\nABc,13,y,ell,-4"),
     )
 }
 
@@ -77,7 +77,7 @@ fn select_three_valued_predicates() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT NULL AND 0, NULL OR 1, NULL OR 0, 2 IN (1, NULL), 1 IN (1, NULL), NULL BETWEEN 1 AND 2, NULL LIKE 'a%'",
-        concat!("col0,col1,col2,col3,col4,col5,col6", "\n0,1,,,1,,"),
+        concat!("expr,expr,expr,expr,expr,expr,expr", "\n0,1,,,1,,"),
     )
 }
 
@@ -575,8 +575,8 @@ fn union() -> Result<(), Box<dyn std::error::Error>> {
         "SELECT department FROM employees WHERE age < 26 UNION SELECT department FROM employees WHERE age > 44",
         concat!(
             "department",
-            "\nMarketing",
             "\nHR",
+            "\nMarketing",
             "\nSales",
         ),
     )
@@ -615,8 +615,8 @@ fn except() -> Result<(), Box<dyn std::error::Error>> {
         "SELECT department FROM employees WHERE age < 31 EXCEPT SELECT department FROM employees WHERE age > 31",
         concat!(
             "department",
-            "\nMarketing",
             "\nHR",
+            "\nMarketing",
         ),
     )
 }
@@ -1526,12 +1526,13 @@ fn join_order_by_with_limit() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn order_by_key_absent_from_select_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
-    // After aggregation only the projected columns still exist, so ordering by
-    // something else must be an error, not a silently ignored clause.
+    // After aggregation a column that is neither a GROUP BY key nor inside
+    // an aggregate has no single value per row, so ordering by it must be an
+    // error, not a silently ignored clause.
     assert_query_fails(
         &["tests/data/employees.csv"],
         "SELECT department, COUNT(*) FROM employees GROUP BY department ORDER BY salary",
-        "must appear in the SELECT list",
+        "must appear in GROUP BY",
     )
 }
 
@@ -2443,5 +2444,167 @@ fn unqualified_column_in_multi_table_is_case_insensitive() -> Result<(), Box<dyn
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT NAME, COUNT(*) FROM users, orders WHERE users.id = orders.user_id GROUP BY NAME",
         "NAME,COUNT\nJane,2\nJohn,3",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Output stage and compound SELECTs. Expected outputs computed with SQLite.
+// ---------------------------------------------------------------------------
+
+const EMP_DEPT: &[&str] = &["tests/data/employees.csv", "tests/data/departments.csv"];
+
+#[test]
+fn compound_order_by_desc_limit_offset() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        EMP_DEPT,
+        "SELECT name FROM employees WHERE id <= 4 UNION ALL SELECT name FROM departments ORDER BY 1 DESC LIMIT 3 OFFSET 2",
+        "name\nEve\nDavid\nDavid",
+    )
+}
+
+#[test]
+fn compound_three_arm_union_except_chain() -> Result<(), Box<dyn std::error::Error>> {
+    // Left-associative: (employees UNION departments) EXCEPT Sales. Without
+    // ORDER BY the set result comes out sorted, as in SQLite.
+    assert_query(
+        EMP_DEPT,
+        "SELECT department FROM employees UNION SELECT name FROM departments EXCEPT SELECT department FROM employees WHERE department = 'Sales'",
+        "department\nAlice\nBob\nCharlie\nDavid\nEngineering\nEve\nFrank\nGrace\nHR\nMarketing",
+    )
+}
+
+#[test]
+fn compound_three_arm_intersect_chain() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        EMP_DEPT,
+        "SELECT department FROM employees INTERSECT SELECT department FROM departments INTERSECT SELECT department FROM employees WHERE age > 30",
+        "department\nEngineering\nSales",
+    )
+}
+
+#[test]
+fn compound_order_by_alias_and_limit_expression() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        EMP_DEPT,
+        "SELECT 1 AS x UNION SELECT 3 UNION SELECT 2 ORDER BY x DESC LIMIT 1 + 1",
+        "x\n3\n2",
+    )
+}
+
+#[test]
+fn compound_column_count_mismatch_is_error() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query_fails(
+        EMP_DEPT,
+        "SELECT id, name FROM employees UNION SELECT id FROM departments",
+        "do not have the same number of result columns",
+    )
+}
+
+#[test]
+fn distinct_order_by_alias() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT DISTINCT department AS d FROM employees ORDER BY d DESC",
+        "d\nSales\nMarketing\nHR\nEngineering",
+    )
+}
+
+#[test]
+fn order_by_hidden_key_then_alias() -> Result<(), Box<dyn std::error::Error>> {
+    // `age` is not projected: a hidden sort key.
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name AS n FROM employees ORDER BY age DESC, n LIMIT 4",
+        "n\nGrace\nDavid\nCharlie\nFrank",
+    )
+}
+
+#[test]
+fn distinct_then_limit_offset() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT DISTINCT department FROM employees ORDER BY department LIMIT 2 OFFSET 1",
+        "department\nHR\nMarketing",
+    )
+}
+
+#[test]
+fn order_by_aggregate_not_in_select() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT department FROM employees GROUP BY department ORDER BY COUNT(*) DESC, department",
+        "department\nEngineering\nMarketing\nSales\nHR",
+    )
+}
+
+#[test]
+fn having_and_order_by_expression_over_alias() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT department, SUM(salary) AS s FROM employees GROUP BY department HAVING s > 100000 ORDER BY s / 2 DESC",
+        "department,s\nEngineering,210000\nSales,170000\nMarketing,115000",
+    )
+}
+
+#[test]
+fn fromless_where_false_is_no_rows() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT 1 AS x WHERE 1 = 0",
+        "x",
+    )
+}
+
+#[test]
+fn fromless_where_order_by_limit() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT 2 AS a, 'z' AS b WHERE 1 < 2 ORDER BY 1 LIMIT 5",
+        "a,b\n2,z",
+    )
+}
+
+#[test]
+fn offset_beyond_result_is_empty() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees ORDER BY id LIMIT 5 OFFSET 100",
+        "name",
+    )
+}
+
+#[test]
+fn negative_limit_means_no_limit() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees LIMIT -1 OFFSET 7",
+        "name\nHenry",
+    )
+}
+
+#[test]
+fn non_integer_limit_is_error() -> Result<(), Box<dyn std::error::Error>> {
+    crate::helpers::assert_query_fails(
+        &["tests/data/employees.csv"],
+        "SELECT name FROM employees LIMIT 'x'",
+        "datatype mismatch",
+    )
+}
+
+#[test]
+fn empty_input_grouped_aggregate_has_no_rows() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT department, COUNT(*) AS c, SUM(salary) AS s FROM employees WHERE id > 100 GROUP BY department",
+        "department,c,s",
+    )
+}
+
+#[test]
+fn empty_input_ungrouped_aggregate_has_one_row() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT COUNT(*) AS c, SUM(salary) AS s FROM employees WHERE id > 100",
+        "c,s\n0,",
     )
 }

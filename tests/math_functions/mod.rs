@@ -177,7 +177,7 @@ fn test_round_precision_without_from() -> Result<(), Box<dyn std::error::Error>>
     crate::helpers::assert_query(
         &["tests/data/employees.csv"],
         "SELECT ROUND(3.14159, 2) AS a, ROUND(1234.5, -2) AS b",
-        concat!("col0,col1", "\n3.14,1200"),
+        concat!("a,b", "\n3.14,1200"),
     )
 }
 

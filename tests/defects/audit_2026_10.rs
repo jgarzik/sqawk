@@ -691,7 +691,6 @@ fn insert_multi_row_omitted_middle_column() -> TestResult {
 
 /// Set operations ignore ORDER BY (compiler.rs:863).
 #[test]
-#[ignore]
 fn union_applies_order_by() -> TestResult {
     assert_query(
         &[employees_csv(), departments_csv()],
@@ -702,7 +701,6 @@ fn union_applies_order_by() -> TestResult {
 
 /// Set operations ignore LIMIT (compiler.rs:863).
 #[test]
-#[ignore]
 fn union_applies_limit() -> TestResult {
     assert_query(
         &[employees_csv(), departments_csv()],
@@ -713,7 +711,6 @@ fn union_applies_limit() -> TestResult {
 
 /// Same root cause on UNION ALL with ORDER BY on two columns.
 #[test]
-#[ignore]
 fn union_all_applies_order_by() -> TestResult {
     assert_query(
         &[employees_csv(), departments_csv()],
@@ -724,7 +721,6 @@ fn union_all_applies_order_by() -> TestResult {
 
 /// Same root cause on INTERSECT.
 #[test]
-#[ignore]
 fn intersect_applies_order_by() -> TestResult {
     assert_query(
         &[employees_csv(), departments_csv()],
@@ -735,7 +731,6 @@ fn intersect_applies_order_by() -> TestResult {
 
 /// Same root cause on EXCEPT.
 #[test]
-#[ignore]
 fn except_applies_order_by() -> TestResult {
     assert_query(
         &[employees_csv(), departments_csv()],
@@ -747,7 +742,6 @@ fn except_applies_order_by() -> TestResult {
 /// A set operation's header comes from the right-hand SELECT; SQL takes
 /// column names from the left.
 #[test]
-#[ignore]
 fn union_header_from_left_side() -> TestResult {
     assert_query(
         &[users_csv(), orders_csv()],
@@ -759,7 +753,6 @@ fn union_header_from_left_side() -> TestResult {
 /// DISTINCT on the right side of UNION ALL deduplicates the left side's rows
 /// too (compiler.rs:1160).
 #[test]
-#[ignore]
 fn union_all_distinct_applies_to_one_side_only() -> TestResult {
     assert_query(
         &[employees_csv(), departments_csv()],
@@ -770,7 +763,6 @@ fn union_all_distinct_applies_to_one_side_only() -> TestResult {
 
 /// LIMIT is ignored on a set operation of literal SELECTs.
 #[test]
-#[ignore]
 fn literal_union_applies_limit() -> TestResult {
     assert_row_count(&[users_csv()], "SELECT 1 UNION ALL SELECT 2 LIMIT 1", 1)
 }
@@ -874,7 +866,6 @@ fn fromless_select_applies_where() -> TestResult {
 
 /// FROM-less SELECT ignores LIMIT.
 #[test]
-#[ignore]
 fn fromless_select_applies_limit() -> TestResult {
     assert_no_rows(&[users_csv()], "SELECT 1 LIMIT 0")
 }
@@ -1286,7 +1277,6 @@ fn current_date_is_today() -> TestResult {
 /// SUM/AVG/MIN/MAX over zero rows return 0; they must return NULL (rendered
 /// as an empty field). COUNT stays 0.
 #[test]
-#[ignore]
 fn empty_set_aggregates_are_null() -> TestResult {
     assert_query(
         &[employees_csv()],
@@ -1447,7 +1437,6 @@ fn having_with_and() -> TestResult {
 
 /// HAVING referencing a SELECT alias is rejected ("Column 'c' not found").
 #[test]
-#[ignore]
 fn having_with_alias() -> TestResult {
     assert_query(
         &[employees_csv()],
