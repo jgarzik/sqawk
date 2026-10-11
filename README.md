@@ -10,7 +10,7 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 - **SQL Query Engine** - SELECT, INSERT, UPDATE, DELETE with WHERE, ORDER BY, GROUP BY, HAVING, LIMIT/OFFSET
 - **Joins** - INNER, LEFT, RIGHT, FULL OUTER, and CROSS joins with ON conditions
 - **Aggregates** - COUNT, SUM, TOTAL, AVG, MIN, MAX, GROUP_CONCAT/STRING_AGG with GROUP BY, DISTINCT and `FILTER (WHERE ...)`
-- **Functions** - String (UPPER, LOWER, LENGTH, SUBSTR, INSTR, REPLACE, TRIM, LPAD/RPAD, PRINTF, ...), math (ABS, ROUND, CEIL, FLOOR, SIGN, multi-argument MIN/MAX), conditional (COALESCE, IFNULL, NULLIF, IIF, TYPEOF), date/time (DATE, TIME, DATETIME, STRFTIME, JULIANDAY, UNIXEPOCH with modifiers)
+- **Functions** - String (UPPER, LOWER, LENGTH, SUBSTR, INSTR, REPLACE, TRIM, LPAD/RPAD, PRINTF, QUOTE, ...), math (ABS, ROUND, CEIL, FLOOR, SIGN, multi-argument MIN/MAX, bitwise operators), conditional (COALESCE, IFNULL, NULLIF, IIF, TYPEOF), date/time (DATE, TIME, DATETIME, STRFTIME, JULIANDAY, UNIXEPOCH, TIMEDIFF with SQLite's modifiers)
 - **SQLite semantics** - 64-bit integer arithmetic, SQLite CAST rules, ASCII case-insensitive LIKE with ESCAPE, character-based strings; unimplemented syntax is an error, never silently ignored
 - **Subqueries** - Scalar, `IN (SELECT ...)`, and `EXISTS`, including correlated
 - **Set Operations** - UNION, UNION ALL, INTERSECT, EXCEPT

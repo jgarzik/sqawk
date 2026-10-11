@@ -32,6 +32,7 @@ pub mod engine;
 mod func;
 pub(crate) mod like;
 pub mod parse;
+mod printf;
 mod window;
 
 #[cfg(test)]

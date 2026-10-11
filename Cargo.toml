@@ -37,6 +37,9 @@ rustyline = "15"
 # Runs sqawk on a large stack (see MAIN_STACK_BYTES in main.rs); already in
 # the build through sqlparser -> recursive.
 stacker = "0.1"
+# The C library's localtime_r / localtime_s for the `localtime` and `utc`
+# date modifiers; already in the build through rustyline and stacker.
+libc = "0.2"
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -25,7 +25,7 @@ use sqlparser::ast::{
 };
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
-use sqlparser::tokenizer::{Location, Token, Tokenizer};
+use sqlparser::tokenizer::{Location, Token, TokenWithSpan, Tokenizer};
 
 use super::dialect::SqawkDialect;
 use crate::error::{SqawkError, SqawkResult};
@@ -35,15 +35,142 @@ pub const MAX_EXPR_DEPTH: usize = 1000;
 /// SQLite's `SQLITE_MAX_COMPOUND_SELECT`.
 pub const MAX_COMPOUND_TERMS: usize = 500;
 
-/// Parse `sql` into statements: SQLite precedence, compound SELECTs
-/// left-deep, depth and compound-term limits enforced.
+/// Parse `sql` into statements: SQLite precedence, hex integer literals,
+/// compound SELECTs left-deep, depth and compound-term limits enforced.
 pub fn parse_sql(sql: &str) -> SqawkResult<Vec<Statement>> {
-    let mut statements =
-        Parser::parse_sql(&SqawkDialect, sql).map_err(SqawkError::SqlParseError)?;
+    let mut tokens = Tokenizer::new(&SqawkDialect, sql)
+        .tokenize_with_location()
+        .map_err(|e| SqawkError::SqlParseError(e.into()))?;
+    rewrite_hex_literals(sql, &mut tokens)?;
+    let mut statements = Parser::new(&SqawkDialect)
+        .with_tokens_with_locations(tokens)
+        .parse_statements()
+        .map_err(SqawkError::SqlParseError)?;
     for statement in &mut statements {
         normalize(statement)?;
     }
     Ok(statements)
+}
+
+/// The byte range in `sql` of each token, from the tokens' (line, column)
+/// locations.
+fn token_offsets(sql: &str, tokens: &[TokenWithSpan]) -> Vec<(usize, usize)> {
+    // Locations only grow, so one forward walk maps them all.
+    let mut walk = (1u64, 1u64, sql.char_indices().peekable());
+    let mut offset = |loc: Location| -> usize {
+        let (line, col, chars) = &mut walk;
+        while (*line, *col) < (loc.line, loc.column) {
+            match chars.next() {
+                Some((_, '\n')) => {
+                    *line += 1;
+                    *col = 1;
+                }
+                Some(_) => *col += 1,
+                None => break,
+            }
+        }
+        chars.peek().map_or(sql.len(), |(i, _)| *i)
+    };
+    tokens
+        .iter()
+        .map(|t| {
+            let start = offset(t.span.start);
+            (start, offset(t.span.end))
+        })
+        .collect()
+}
+
+/// SQLite's hexadecimal integer literals, `0x1F` / `0X1F`: up to 16
+/// significant hex digits, read as a 64-bit two's-complement value
+/// (`0xFFFFFFFFFFFFFFFF` is -1). Each becomes a decimal number token.
+///
+/// The tokenizer reads `0x1F` as a blob literal (the token `X'1F'` makes)
+/// and `0X1F` as a word, so both are found here and told apart from a real
+/// `X'1F'` by their source text. As in SQLite the literal ends at the last
+/// hex digit, so `0x1g` is `0x1 AS g`; more than 16 significant digits are
+/// the error "hex literal too big", and a `0x` with no hex digit after it
+/// is an unrecognized token.
+///
+/// The tokenizer also reads `~~` as one (PostgreSQL) operator; SQLite reads
+/// two `~`, so it is split here.
+fn rewrite_hex_literals(sql: &str, tokens: &mut Vec<TokenWithSpan>) -> SqawkResult<()> {
+    let hex_word = |t: &Token| {
+        matches!(t, Token::Word(w) if w.quote_style.is_none()
+            && (w.value.starts_with("0x") || w.value.starts_with("0X")))
+    };
+    if !tokens.iter().any(|t| {
+        matches!(t.token, Token::HexStringLiteral(_) | Token::DoubleTilde) || hex_word(&t.token)
+    }) {
+        return Ok(());
+    }
+    let offsets = token_offsets(sql, tokens);
+    let mut out = Vec::with_capacity(tokens.len());
+    for (k, t) in std::mem::take(tokens).into_iter().enumerate() {
+        let (start, end) = offsets[k];
+        let text = sql.get(start..end).unwrap_or_default();
+        let is_hex = match &t.token {
+            Token::HexStringLiteral(_) => text.starts_with("0x") || text.starts_with("0X"),
+            Token::DoubleTilde => {
+                let mut second = t.clone();
+                second.span.start.column += 1;
+                let mut first = t;
+                first.token = Token::Tilde;
+                first.span.end.column = first.span.start.column + 1;
+                second.token = Token::Tilde;
+                out.push(first);
+                out.push(second);
+                continue;
+            }
+            other => hex_word(other),
+        };
+        if !is_hex {
+            out.push(t);
+            continue;
+        }
+        let after = &text[2..];
+        let n = after.bytes().take_while(u8::is_ascii_hexdigit).count();
+        if n == 0 {
+            // `0x` alone, or `0xZZ` (the tokenizer splits that in two).
+            let glued_end = match tokens_after(&offsets, k) {
+                Some((s, e)) if s == end => e,
+                _ => end,
+            };
+            return Err(SqawkError::InvalidSqlQuery(format!(
+                "unrecognized token: \"{}\"",
+                sql.get(start..glued_end).unwrap_or(text)
+            )));
+        }
+        let (digits, rest) = after.split_at(n);
+        let significant = digits.trim_start_matches('0');
+        if significant.len() > 16 {
+            return Err(SqawkError::InvalidSqlQuery(format!(
+                "hex literal too big: {}{}",
+                &text[..2],
+                digits
+            )));
+        }
+        let value = u64::from_str_radix(significant, 16).unwrap_or(0) as i64;
+        let mut number = t.clone();
+        number.token = Token::Number(value.to_string(), false);
+        if !rest.is_empty() {
+            number.span.end.column = number.span.start.column + 2 + n as u64;
+        }
+        out.push(number);
+        if !rest.is_empty() {
+            // `0X1G`, one word to the tokenizer: the rest is a word of its own.
+            let mut word = t;
+            word.span.start.column += 2 + n as u64;
+            word.token = Token::make_word(rest, None);
+            out.push(word);
+        }
+    }
+    *tokens = out;
+    Ok(())
+}
+
+/// The byte range of the token after the `k`-th, if any.
+fn tokens_after(offsets: &[(usize, usize)], k: usize) -> Option<(usize, usize)> {
+    offsets.get(k + 1).copied()
 }
 
 fn too_deep() -> SqawkError {
@@ -598,25 +725,8 @@ impl SqlSource {
     pub fn new(sql: &str) -> Self {
         let mut tokens = Vec::new();
         if let Ok(toks) = Tokenizer::new(&SqawkDialect, sql).tokenize_with_location() {
-            // Locations only grow, so one forward walk maps them all.
-            let mut walk = (1u64, 1u64, sql.char_indices().peekable());
-            let mut offset = |loc: Location| -> usize {
-                let (line, col, chars) = &mut walk;
-                while (*line, *col) < (loc.line, loc.column) {
-                    match chars.next() {
-                        Some((_, '\n')) => {
-                            *line += 1;
-                            *col = 1;
-                        }
-                        Some(_) => *col += 1,
-                        None => break,
-                    }
-                }
-                chars.peek().map_or(sql.len(), |(i, _)| *i)
-            };
-            for t in toks {
-                let start = offset(t.span.start);
-                let end = offset(t.span.end);
+            let offsets = token_offsets(sql, &toks);
+            for (t, (start, end)) in toks.into_iter().zip(offsets) {
                 tokens.push((
                     t.token,
                     (t.span.start.line, t.span.start.column),

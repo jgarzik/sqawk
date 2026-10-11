@@ -89,7 +89,7 @@ fn test_current_date() -> Result<(), Box<dyn std::error::Error>> {
 // ---------------------------------------------------------------------------
 
 mod sqlite_semantics {
-    use crate::helpers::{assert_query_on, assert_query_on_fails, ONE};
+    use crate::helpers::{assert_query_on, ONE};
 
     type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -162,13 +162,107 @@ mod sqlite_semantics {
         )
     }
 
-    /// sqawk works in UTC; 'localtime' is refused rather than ignored.
+    /// 'localtime' then 'utc' gives the moment back in any time zone; 'utc'
+    /// after an explicit zone does nothing more.
     #[test]
-    fn localtime_modifier_is_unsupported() -> R {
-        assert_query_on_fails(
+    fn localtime_utc_round_trip() -> R {
+        assert_query_on(
             &[ONE],
-            "SELECT date('now', 'localtime') FROM one",
-            "localtime",
+            "SELECT datetime('2024-01-15 10:30', 'localtime', 'utc') AS a, \
+             datetime('2024-01-15 10:30+02:00', 'utc') AS b, \
+             date('2024-07-04', 'localtime', 'utc') AS c FROM one",
+            "a,b,c\n2024-01-15 10:30:00,2024-01-15 08:30:00,2024-07-04",
+        )
+    }
+
+    /// 'localtime' and 'utc' follow the time zone of the TZ environment
+    /// variable, daylight saving time included (expected values from SQLite
+    /// 3.45 with the same TZ).
+    #[cfg(unix)]
+    #[test]
+    fn localtime_follows_tz() -> R {
+        let dir = crate::helpers::create_temp_dir()?;
+        let one = dir.path().join("one.csv");
+        std::fs::write(&one, "id\n1\n")?;
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_sqawk"))
+            .env("TZ", "EST5EDT,M3.2.0,M11.1.0")
+            .arg("-s")
+            .arg(
+                "SELECT datetime('2024-07-01 10:00', 'localtime') AS a, \
+                 datetime('2024-01-01 10:00', 'localtime') AS b, \
+                 datetime('2024-03-10 02:30', 'utc') AS c, \
+                 datetime('1950-07-01 10:00', 'localtime') AS d FROM one",
+            )
+            .arg(&one)
+            .output()?;
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "a,b,c,d\n2024-07-01 06:00:00,2024-01-01 05:00:00,2024-03-10 07:30:00,\
+             1950-07-01 06:00:00\n"
+        );
+        Ok(())
+    }
+
+    /// Negative years, whitespace around the time, and the time string forms
+    /// SQLite accepts or rejects.
+    #[test]
+    fn time_string_forms() -> R {
+        assert_query_on(
+            &[ONE],
+            "SELECT date('-0001-12-31') AS a, date('2024-01-01 ') AS b, \
+             datetime('2024-01-01  10:00') AS c, date(' 2024-01-01') AS d, \
+             date('0000-01-01', '-1 day') AS e, time('24:00') AS f, \
+             datetime('2024-01-01T10:00:00Z') AS g, date('20240101') AS h FROM one",
+            "a,b,c,d,e,f,g,h\n-0001-12-31,2024-01-01,2024-01-01 10:00:00,,-0001-12-31,\
+             24:00:00,2024-01-01 10:00:00,",
+        )
+    }
+
+    /// The modifiers SQLite 3.45 adds to the classic ones; 'ceiling' and
+    /// 'floor' arrived in 3.46 and are NULL, as in 3.45.
+    #[test]
+    fn newer_modifiers() -> R {
+        assert_query_on(
+            &[ONE],
+            "SELECT datetime('2024-01-01 10:00:00.123', 'subsec') AS a, \
+             unixepoch('2024-01-01 10:00:00.5', 'subsec') AS b, \
+             datetime(1700000000, 'auto') AS c, date(2460000.5, 'auto') AS d, \
+             date(2460000.5, 'julianday') AS e, date(1700000000, 'julianday') AS f, \
+             datetime('2024-01-01 10:00', '-01:30:15') AS g, \
+             datetime('2024-01-31 10:00', '+0001-01-01 02:00') AS h, \
+             date('2024-01-31', 'ceiling') AS i FROM one",
+            "a,b,c,d,e,f,g,h,i\n2024-01-01 10:00:00.123,1704103200.5,2023-11-14 22:13:20,\
+             2023-02-25,2023-02-25,,2024-01-01 08:29:45,2025-03-04 12:00:00,",
+        )
+    }
+
+    /// Every strftime conversion of SQLite 3.45; later ones (%G %V ...) are
+    /// NULL, as is a trailing '%'.
+    #[test]
+    fn strftime_conversions() -> R {
+        assert_query_on(
+            &[ONE],
+            "SELECT strftime('%d|%e|%f|%F|%H|%I|%j|%J|%k|%l|%m|%M|%p|%P|%R|%s|%S|%T|%u|%w|%W|%Y|%%', \
+             '2024-07-07 15:06:07.089') AS a, strftime('%Y %F', '-0012-01-02') AS b, \
+             strftime('%G', '2024-01-01') AS c, strftime('%Y%', '2024-01-01') AS d FROM one",
+            "a,b,c,d\n07| 7|07.089|2024-07-07|15|03|189|2460499.129248715|15| 3|07|06|PM|pm|\
+             15:06|1720364767|07|15:06:07|7|0|27|2024|%,-012 -012-01-02,,",
+        )
+    }
+
+    #[test]
+    fn timediff_values() -> R {
+        assert_query_on(
+            &[ONE],
+            "SELECT timediff('2024-03-01', '2023-01-15 12:00') AS a, \
+             timediff('2023-01-15', '2024-03-01 12:00') AS b, \
+             timediff('2024-01-01', NULL) AS c FROM one",
+            "a,b,c\n+0001-01-14 12:00:00.000,-0001-01-17 12:00:00.000,",
         )
     }
 }

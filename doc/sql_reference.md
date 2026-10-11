@@ -147,8 +147,27 @@ gives NULL, and a number argument is used in its text form.
 | `HEX(x)` | Upper-case hex of the UTF-8 bytes; `''` for NULL |
 | `CHAR(n, ...)` | The characters with these code points |
 | `UNICODE(s)` | Code point of the first character |
-| `PRINTF(fmt, ...)`, `FORMAT` | C-style formatting: `%d %i %u %f %e %g %x %X %o %s %c %%`, flags `-+ 0`, width, precision |
+| `PRINTF(fmt, ...)`, `FORMAT` | SQLite's printf (see below) |
+| `QUOTE(x)` | The SQL literal for `x`: `'it''s'`, `12`, `1.5`, `NULL` |
 | `a \|\| b` | Concatenation; NULL if either side is NULL |
+
+`PRINTF` is SQLite's: conversions `%d %i %u %f %e %E %g %G %x %X %o %c %s
+%z %q %Q %w %p %r %n %%`, flags `-`, `+`, space, `0`, `#` (alternate form:
+`0x` / `0` prefixes, keep trailing zeros), `,` (thousands separators) and
+`!` (widths and precisions in characters, and up to 26 significant digits
+for reals), a width and a precision (`*` takes either from the arguments),
+and the length modifiers `l` / `ll`, which are ignored. Details that follow
+SQLite: `%.3d` of 7 is `007`; `%u` reads the value as unsigned 64-bit
+(`-1` is `18446744073709551615`); `%q` doubles single quotes, `%Q` also
+encloses the text in them (NULL is `NULL`), `%w` doubles double quotes;
+`%r` is an ordinal (`1st`, `22nd`); `%.3c` repeats the character three
+times; a real is printed from at most 16 significant digits, rounded half
+up, so `%.20f` of 0.1 is `0.10000000000000000000`, while a precision of
+zero for `%f` or `%g` rounds nothing (`%.0f` of 2.5 is `2`); `%s` widths and precisions
+count bytes, not characters, unless `!` is given. A missing argument is
+NULL, which prints as 0 or `''`. An unknown conversion ends the output
+(`printf('a%yb')` is `a`), and a result with no output at all is NULL
+(`printf('')`).
 
 `SUBSTR` follows SQLite: positions are 1-based; a negative `start` counts
 from the end (`SUBSTR('hello', -3)` is `llo`); `start` 0 is a position before
@@ -162,9 +181,9 @@ longer than `len` is cut to its first `len` characters (`LPAD('hello', 2)` is
 
 No function builds a string longer than SQLite's default length limit,
 1,000,000,000 bytes: `LPAD('a', 10000000000)`, a `PRINTF` width or precision
-past the limit, or a `REPLACE`, `HEX` or concatenation whose result would
-exceed it is the error "string or blob too big". The length is checked before
-anything is allocated.
+past the limit (SQLite returns NULL or wraps the number), or a `REPLACE`,
+`HEX` or concatenation whose result would exceed it is the error "string or
+blob too big". The length is checked before anything is allocated.
 
 ### Math Functions
 
@@ -204,6 +223,19 @@ unchanged. With one argument, `MIN` and `MAX` are the aggregates.
 - Division or remainder by zero is NULL. Any NULL operand gives NULL.
 - Text is read by its longest numeric prefix: `'12abc' + 0` is `12`,
   `' 5 ' + 1` is `6`, `'1e3' + 0` is the real `1000.0`, `'abc' + 1` is `1`.
+
+The bitwise operators `&`, `|`, `<<`, `>>` and prefix `~` also follow
+SQLite. They bind tighter than `<` and looser than `+` (`1 + 2 << 1` is 6).
+Both operands are read as 64-bit integers: reals are truncated, text is read
+by its integer prefix as `CAST(text AS INTEGER)` reads it (`'12abc' & 7` is
+4). A negative shift count shifts the other way, a shift of 64 or more gives
+0 (or -1 for `>>` of a negative number), `>>` keeps the sign, and a NULL
+operand gives NULL.
+
+Integer literals may be written in hex: `0x1F`, `0XFF`. Up to 16 hex digits
+are read as a 64-bit two's-complement value (`0xFFFFFFFFFFFFFFFF` is -1);
+more is the error "hex literal too big". Text such as `'0x10'` is not read as
+hex.
 
 ### Conditional and Conversion
 
@@ -260,19 +292,37 @@ Use `AS` whenever the header is consumed downstream.
 | `DATETIME(t, modifier...)` | `YYYY-MM-DD HH:MM:SS` |
 | `JULIANDAY(t, modifier...)` | Julian day number (a real) |
 | `UNIXEPOCH(t, modifier...)` | Seconds since 1970-01-01 (an integer) |
-| `STRFTIME(fmt, t, modifier...)` | Formatted: `%d %f %H %j %J %m %M %s %S %w %W %Y %%` |
+| `STRFTIME(fmt, t, modifier...)` | Formatted (see below) |
+| `TIMEDIFF(a, b)` | The time from `b` to `a`: `+YYYY-MM-DD HH:MM:SS.SSS` |
 | `CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_TIMESTAMP`, `NOW()` | Now |
 
-These follow SQLite, in UTC. The time string `t` is `now`, `YYYY-MM-DD`,
-`YYYY-MM-DD HH:MM[:SS[.fff]]` (or with `T` for the space, and an optional
-`Z` / `+HH:MM` zone), `HH:MM[:SS]` (on 2000-01-01), or a number: a Julian day
-number, or seconds since 1970 when the first modifier is `unixepoch`. With no
-arguments the functions return the current moment.
+These follow SQLite 3.45 exactly, in UTC. The time string `t` is `now`,
+`[-]YYYY-MM-DD`, `YYYY-MM-DD HH:MM[:SS[.fff]]` (with any whitespace or `T`
+between date and time, and an optional `Z` / `±HH:MM` zone; trailing
+whitespace is allowed), `HH:MM[:SS[.fff]]` (on 2000-01-01), or a number: a
+Julian day number, or seconds since 1970 with the `unixepoch` modifier.
+With no arguments the functions return the current moment. Years run from
+-4713 to 9999; a negative year prints with its sign (`-0001-12-31`).
 
-Modifiers: `+N days|hours|minutes|seconds|months|years` (or `-N`; fractions
-allowed), `start of day|month|year`,
-`weekday N` (0 = Sunday), `unixepoch`, `utc`. `localtime` is an error, since
-sqawk has no time zone.
+Modifiers:
+
+- `±N days|hours|minutes|seconds|months|years` (fractions allowed),
+  `±HH:MM[:SS[.fff]]`, `±YYYY-MM-DD` and `±YYYY-MM-DD HH:MM[:SS[.fff]]`;
+- `start of day|month|year`, `weekday N` (0 = Sunday);
+- `unixepoch`, `julianday` and `auto` (seconds since 1970 or a Julian day
+  number, by magnitude), each only as the first modifier of a number;
+- `subsec` / `subsecond`: milliseconds in `DATETIME`, `TIME`, `UNIXEPOCH`
+  (then a real) and `STRFTIME('%s')`;
+- `localtime` and `utc`: convert between UTC and the local time zone of the
+  operating system (the `TZ` environment variable where it is set).
+
+`STRFTIME` conversions: `%d` day, `%e` day space-padded, `%f` seconds with
+milliseconds, `%F` `%Y-%m-%d`, `%H` hour, `%k` hour space-padded, `%I` / `%l`
+12-hour hour, `%j` day of year, `%J` Julian day number, `%m` month, `%M`
+minute, `%p` / `%P` `AM` / `am`, `%R` `%H:%M`, `%s` seconds since 1970, `%S`
+seconds, `%T` `%H:%M:%S`, `%u` weekday 1-7 (Monday 1), `%w` weekday 0-6
+(Sunday 0), `%W` week of year, `%Y` year, `%%`. Any other conversion makes
+the result NULL, as in SQLite 3.45.
 
 A malformed time string or an unknown modifier gives NULL. A day past the end
 of its month, up to 31, rolls into the next month: `DATE('2024-02-30')` is
@@ -281,7 +331,7 @@ As in SQLite, a fractional month or year count moves the calendar by its
 whole part and then adds the fraction as 30-day months or 365-day years
 (`DATETIME('2024-01-01', '+1.5 months')` is `2024-02-16 00:00:00`); a count
 beyond a unit's range (about 14713 years) gives NULL; and the result must lie
-in years 0000-9999, which is checked after the last modifier.
+in years -4713 to 9999, which is checked after the last modifier.
 
 ## JOIN
 
@@ -662,7 +712,7 @@ sqawk aims to give SQLite's answers. Where it deliberately does not:
 | Aggregate of outer-query columns in a subquery (`(SELECT MIN(t.x) FROM u)`) | Evaluated in the outer query, which becomes an aggregate query | Rejected; an aggregate that also reads a column of the subquery's own tables aggregates in the subquery, as in SQLite |
 | Derived table (`FROM (SELECT ...)`) reading an outer-query column | Correlated | Rejected (`no such column`): a derived table is computed once, before the statement |
 | `ILIKE`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `TRIM(... FROM ...)` | Not available | Available |
-| `localtime` date modifier | Local time zone | Error (UTC only) |
+| `PRINTF` width or precision past the length limit | NULL, or the number wrapped to 31 bits | Error "string or blob too big" |
 | Parser | SQLite grammar | sqlparser's Hive dialect with SQLite's operator precedence: `GLOB`, `REGEXP`, `LIMIT n, m`, `TRIM(s, chars)`, `REPLACE INTO` do not parse |
 
 Not implemented: common table expressions, views, indexes, triggers,

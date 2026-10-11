@@ -162,6 +162,62 @@ pub(crate) fn to_num(r: &Register) -> Option<Num> {
     }
 }
 
+/// A register as a 64-bit integer, as SQLite's `sqlite3VdbeIntValue` reads
+/// it for the bitwise operators: text by its integer prefix (`'12abc'` is
+/// 12, `'1e3'` is 1), reals truncated toward zero (saturating), NULL 0.
+pub(crate) fn int_value(r: &Register) -> i64 {
+    match r {
+        Register::Integer(i) => *i,
+        Register::Boolean(b) => *b as i64,
+        Register::Float(f) => real_to_int(*f),
+        Register::String(s) => text_to_int(s),
+        Register::Null => 0,
+    }
+}
+
+/// A bitwise operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BitOp {
+    And,
+    Or,
+    ShiftLeft,
+    ShiftRight,
+}
+
+/// `a op b` for `&`, `|`, `<<`, `>>` with SQLite semantics: NULL if either
+/// side is NULL, else both sides as integers ([`int_value`]). A negative
+/// shift count shifts the other way; shifting by 64 or more gives 0, or -1
+/// for `>>` of a negative number; `>>` extends the sign.
+pub(crate) fn bitwise(op: BitOp, a: &Register, b: &Register) -> Register {
+    if matches!(a, Register::Null) || matches!(b, Register::Null) {
+        return Register::Null;
+    }
+    let ia = int_value(a);
+    let mut ib = int_value(b);
+    Register::Integer(match op {
+        BitOp::And => ia & ib,
+        BitOp::Or => ia | ib,
+        BitOp::ShiftLeft | BitOp::ShiftRight => {
+            let mut left = op == BitOp::ShiftLeft;
+            if ib < 0 {
+                left = !left;
+                ib = if ib > -64 { -ib } else { 64 };
+            }
+            if ib >= 64 {
+                if ia >= 0 || left {
+                    0
+                } else {
+                    -1
+                }
+            } else if left {
+                ((ia as u64) << ib) as i64
+            } else {
+                ia >> ib
+            }
+        }
+    })
+}
+
 /// The truth value of a register in a condition, as in SQLite: a number is
 /// true when non-zero, and text is read as a number first, so `'x'` is false
 /// and `'1x'` true. NULL is not true.

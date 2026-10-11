@@ -2,13 +2,12 @@
 //!
 //! Every test in this module encodes **correct** behaviour for a finding of
 //! that review (a 4,923-query adversarial diff against SQLite plus a
-//! release-readiness audit of IO, CLI and REPL behaviour). Each failing test
-//! is `#[ignore]`d until its defect is fixed; remove the attribute then.
-//! Run the red list with:
+//! release-readiness audit of IO, CLI and REPL behaviour). Each was
+//! `#[ignore]`d when written and un-ignored as its defect was fixed; all of
+//! them now pass, so the red list is empty again. A few tests (marked in
+//! their doc comments) passed when written and pin behaviour the fixes had
+//! to keep. Run the red list with:
 //!     cargo test --test mod defects -- --ignored
-//!
-//! A few tests are NOT ignored: they pass today and pin behaviour that the
-//! fixes must keep (each says so in its doc comment).
 //!
 //! Expected outputs were computed with SQLite 3.45 (python3 `sqlite3`) unless
 //! the doc comment says otherwise. Output NULL is rendered as an EMPTY field.
@@ -1486,14 +1485,12 @@ fn repl_tables_pattern_dot_is_literal() -> TestResult {
 
 /// `printf('%.3d', 7)` ignores the precision (prints `7`).
 #[test]
-#[ignore]
 fn printf_integer_precision_pads() -> TestResult {
     one("SELECT printf('%.3d', 7) AS v FROM one", "v\n007")
 }
 
 /// `printf('%u', -1)` prints `-1`; SQLite reinterprets as unsigned 64-bit.
 #[test]
-#[ignore]
 fn printf_unsigned() -> TestResult {
     one(
         "SELECT printf('%u', -1) AS v FROM one",
@@ -1503,28 +1500,24 @@ fn printf_unsigned() -> TestResult {
 
 /// A negative year is rejected (NULL).
 #[test]
-#[ignore]
 fn date_negative_year() -> TestResult {
     one("SELECT date('-0001-12-31') AS v FROM one", "v\n-0001-12-31")
 }
 
 /// A trailing space after the date is rejected (NULL).
 #[test]
-#[ignore]
 fn date_trailing_space() -> TestResult {
     one("SELECT date('2024-01-01 ') AS v FROM one", "v\n2024-01-01")
 }
 
 /// `strftime('%u', ...)` (ISO weekday, Sunday = 7) yields NULL.
 #[test]
-#[ignore]
 fn strftime_iso_weekday() -> TestResult {
     one("SELECT strftime('%u', '2024-01-07') AS v FROM one", "v\n7")
 }
 
 /// The `subsec` modifier yields NULL.
 #[test]
-#[ignore]
 fn date_modifier_subsec() -> TestResult {
     one(
         "SELECT datetime('2024-01-01 10:00:00.123', 'subsec') AS v FROM one",
@@ -1534,7 +1527,6 @@ fn date_modifier_subsec() -> TestResult {
 
 /// The `auto` modifier yields NULL.
 #[test]
-#[ignore]
 fn date_modifier_auto() -> TestResult {
     one(
         "SELECT datetime(1700000000, 'auto') AS v FROM one",
@@ -1544,7 +1536,6 @@ fn date_modifier_auto() -> TestResult {
 
 /// The `julianday` modifier yields NULL.
 #[test]
-#[ignore]
 fn date_modifier_julianday() -> TestResult {
     one(
         "SELECT date(2460000.5, 'julianday') AS v FROM one",
@@ -1554,7 +1545,6 @@ fn date_modifier_julianday() -> TestResult {
 
 /// The `+HH:MM` modifier yields NULL.
 #[test]
-#[ignore]
 fn date_modifier_time_offset() -> TestResult {
     one(
         "SELECT datetime('2024-01-01 10:00:00', '+01:30') AS v FROM one",
@@ -1564,7 +1554,6 @@ fn date_modifier_time_offset() -> TestResult {
 
 /// The `+YYYY-MM-DD` modifier yields NULL.
 #[test]
-#[ignore]
 fn date_modifier_date_offset() -> TestResult {
     one(
         "SELECT date('2024-01-01', '+0001-02-03') AS v FROM one",
@@ -1575,14 +1564,12 @@ fn date_modifier_date_offset() -> TestResult {
 /// `0x10` fails with "Literal X'10' is not supported" (the parser reads it as
 /// a blob literal).
 #[test]
-#[ignore]
 fn hex_integer_literal() -> TestResult {
     one("SELECT 0x10 AS v FROM one", "v\n16")
 }
 
 /// Bitwise operators fail to parse (`<<`) or are unsupported.
 #[test]
-#[ignore]
 fn bitwise_operators() -> TestResult {
     one(
         "SELECT 5 & 3 AS a, 5 | 3 AS b, ~5 AS c, 1 << 4 AS d, 256 >> 4 AS e FROM one",
@@ -1593,7 +1580,6 @@ fn bitwise_operators() -> TestResult {
 /// Bitwise operators bind below `+` and above `=` in SQLite:
 /// `(1 + 2) << 1` = 6 and `(6 & 3) = 2` = 1.
 #[test]
-#[ignore]
 fn bitwise_operator_precedence() -> TestResult {
     one(
         "SELECT 1 + 2 << 1 AS a, 6 & 3 = 2 AS b FROM one",

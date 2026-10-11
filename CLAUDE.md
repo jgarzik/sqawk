@@ -95,12 +95,14 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
 - `ast_compat.rs`: thin accessors normalizing sqlparser AST shapes
 - `engine.rs`: Executes bytecode instructions
 - `arith.rs`: SQLite numeric semantics -- text-to-number coercion, i64
-  arithmetic with overflow to real, CAST, truth values
+  arithmetic with overflow to real, bitwise operators, CAST, truth values
 - `func.rs`: the scalar function table (`FuncDef`: name, arity, body) run by
   the `Function` opcode (SQLite's OP_Function); arity is checked at compile
   time. Lazy functions (COALESCE, IFNULL, IIF, NULLIF) are compiled to jumps
-- `datetime.rs`: DATE/TIME/DATETIME/STRFTIME/... (SQLite time strings and
-  modifiers, UTC)
+- `printf.rs`: SQLite's printf (a port of `sqlite3_str_vappendf`), used by
+  PRINTF/FORMAT, QUOTE and the date functions
+- `datetime.rs`: DATE/TIME/DATETIME/STRFTIME/TIMEDIFF/... (a port of SQLite
+  3.45's date.c: time strings, modifiers, `localtime` via the C library)
 - `like.rs`: the LIKE matcher (no regex; compiled pattern cached per
   instruction)
 - `agg.rs`: aggregate accumulators shared by AggStep/AggFinal and windows

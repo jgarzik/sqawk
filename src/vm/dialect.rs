@@ -170,7 +170,29 @@ impl Dialect for SqawkDialect {
         expr: &Expr,
         _precedence: u8,
     ) -> Option<Result<Expr, ParserError>> {
-        use sqlparser::ast::Value;
+        use sqlparser::ast::{BinaryOperator, Value};
+        // `<<` and `>>`: sqlparser parses them only for PostgreSQL-like
+        // dialects.
+        let shift = match parser.peek_token_ref().token {
+            Token::ShiftLeft => Some(BinaryOperator::PGBitwiseShiftLeft),
+            Token::ShiftRight => Some(BinaryOperator::PGBitwiseShiftRight),
+            _ => None,
+        };
+        if let Some(op) = shift {
+            if left_spine_exceeds(expr, super::parse::MAX_EXPR_DEPTH) {
+                return Some(Err(too_deep()));
+            }
+            parser.advance_token();
+            return Some(
+                parser
+                    .parse_subexpr(PREC_BITWISE)
+                    .map(|right| Expr::BinaryOp {
+                        left: Box::new(expr.clone()),
+                        op,
+                        right: Box::new(right),
+                    }),
+            );
+        }
         let word = |parser: &Parser, n: usize, kw: Keyword| matches!(&parser.peek_nth_token_ref(n).token, Token::Word(w) if w.keyword == kw);
         if !word(parser, 0, Keyword::IS) {
             return None;
@@ -199,10 +221,7 @@ impl Dialect for SqawkDialect {
         // `x IS y IS z ...` costs O(n^2). The depth limit bounds the chain:
         // fail before cloning a left operand that is already too deep.
         if left_spine_exceeds(expr, super::parse::MAX_EXPR_DEPTH) {
-            return Some(Err(ParserError::ParserError(format!(
-                "expression tree is too large (maximum depth {})",
-                super::parse::MAX_EXPR_DEPTH
-            ))));
+            return Some(Err(too_deep()));
         }
         for _ in 0..n {
             parser.advance_token();
@@ -228,6 +247,13 @@ impl Dialect for SqawkDialect {
             _ => Expr::IsNotDistinctFrom(left, Box::new(right)),
         }))
     }
+}
+
+fn too_deep() -> ParserError {
+    ParserError::ParserError(format!(
+        "expression tree is too large (maximum depth {})",
+        super::parse::MAX_EXPR_DEPTH
+    ))
 }
 
 /// Whether the leftmost path down from `expr` is longer than `max` nodes.

@@ -594,6 +594,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "csv",
+ "libc",
  "predicates",
  "rustyline",
  "sqlparser",

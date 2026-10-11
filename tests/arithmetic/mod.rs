@@ -129,7 +129,7 @@ fn test_unary_minus() -> Result<(), Box<dyn std::error::Error>> {
 // ---------------------------------------------------------------------------
 
 mod sqlite_semantics {
-    use crate::helpers::{assert_query_on, ONE};
+    use crate::helpers::{assert_query_on, assert_query_on_fails, ONE};
 
     type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -146,6 +146,40 @@ mod sqlite_semantics {
              5.5%2 AS h, -7.5%2 AS i FROM one",
             "a,b,c,d,e,f,h,i\n3,-3,1,-1,1,3.5,1.0,-1.0",
         )
+    }
+
+    /// `& | << >>` and `~`: integers (text by its integer prefix, reals
+    /// truncated), shifts past 63 bits, negative shifts, NULL; they bind
+    /// below `+` and above `<`.
+    #[test]
+    fn bitwise_operators() -> R {
+        assert_query_on(
+            &[T],
+            "SELECT 12 & 10 AS a, 12 | 3 AS b, ~0 AS c, 1 << 63 AS d, 1 << 64 AS e, \
+             -16 >> 2 AS f, -1 >> 64 AS g, 8 << -2 AS h, '12abc' & 7 AS i, 7.9 | 0 AS j, \
+             ~a AS k, b << 1 AS l, 1 + 2 << 1 AS m, 1 | 2 < 3 AS n, ~~5 AS o FROM t WHERE k < 3",
+            "a,b,c,d,e,f,g,h,i,j,k,l,m,n,o\n8,15,-1,-9223372036854775808,0,-4,-1,2,4,7,-8,4,6,0,5\n\
+             8,15,-1,-9223372036854775808,0,-4,-1,2,4,7,6,,6,0,5",
+        )
+    }
+
+    /// Hex integer literals: 64-bit two's complement, 16 digits at most.
+    #[test]
+    fn hex_literals() -> R {
+        assert_query_on(
+            &[ONE],
+            "SELECT 0x1F AS a, 0XfF AS b, 0xFFFFFFFFFFFFFFFF AS c, 0x8000000000000000 AS d, \
+             -0x10 AS e, 0x00000000000000000010 + 1 AS f, typeof(0x10) AS g, 0x10 FROM one",
+            "a,b,c,d,e,f,g,0x10\n31,255,-1,-9223372036854775808,-16,17,integer,16",
+        )
+    }
+
+    #[test]
+    fn hex_literal_errors() -> R {
+        assert_query_on_fails(&[ONE], "SELECT 0x10000000000000000", "hex literal too big")?;
+        assert_query_on_fails(&[ONE], "SELECT -0x8000000000000000", "hex literal too big")?;
+        assert_query_on_fails(&[ONE], "SELECT 0xZZ", "unrecognized token")?;
+        assert_query_on_fails(&[ONE], "SELECT X'41'", "blob literals are not supported")
     }
 
     #[test]

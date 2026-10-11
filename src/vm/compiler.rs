@@ -1004,13 +1004,20 @@ impl<'a> SqlCompiler<'a> {
                 );
             }
             TableValue::Float(f) => {
-                // Store float as string and use String opcode, then cast
+                // Store float as string and use String opcode, then cast.
+                // Rust spells infinity `inf`, which CAST reads as 0; `1e999`
+                // reads back as infinity (a literal such as 1e999 is one).
+                let text = if f.is_infinite() {
+                    if *f > 0.0 { "1e999" } else { "-1e999" }.to_string()
+                } else {
+                    f.to_string()
+                };
                 self.emit(
                     OpCode::String,
                     0,
                     reg,
                     0,
-                    Some(f.to_string()),
+                    Some(text),
                     &format!("r[{}] = {}", reg, f),
                 );
                 // Cast to float
@@ -1575,9 +1582,15 @@ impl<'a> SqlCompiler<'a> {
                     }
                     Value::Boolean(b) => TableValue::Boolean(*b),
                     Value::Null => TableValue::Null,
-                    // Blobs, placeholders, dollar-quoted and other dialect
-                    // literals used to become their SQL text -- X'00' was
-                    // the four-character string "X'00'".
+                    // `X'00'` (a hex literal `0x10` is an integer by now,
+                    // see parse.rs).
+                    Value::HexStringLiteral(_) => {
+                        return Err(SqawkError::UnsupportedSqlFeature(
+                            "blob literals are not supported".into(),
+                        ))
+                    }
+                    // Placeholders, dollar-quoted and other dialect
+                    // literals used to become their SQL text.
                     other => {
                         return Err(SqawkError::UnsupportedSqlFeature(format!(
                             "Literal {} is not supported",
@@ -1596,6 +1609,33 @@ impl<'a> SqlCompiler<'a> {
                 right,
             } => {
                 self.emit_call_refs("||", &[left, right], ctx, dest)?;
+            }
+
+            // Bitwise operators (SQLite's OP_BitAnd / BitOr / ShiftLeft /
+            // ShiftRight / BitNot), run as the operator entries of the
+            // function table.
+            Expr::BinaryOp {
+                left,
+                op:
+                    op @ (BinaryOperator::BitwiseAnd
+                    | BinaryOperator::BitwiseOr
+                    | BinaryOperator::PGBitwiseShiftLeft
+                    | BinaryOperator::PGBitwiseShiftRight),
+                right,
+            } => {
+                let name = match op {
+                    BinaryOperator::BitwiseAnd => "&",
+                    BinaryOperator::BitwiseOr => "|",
+                    BinaryOperator::PGBitwiseShiftLeft => "<<",
+                    _ => ">>",
+                };
+                self.emit_call_refs(name, &[left, right], ctx, dest)?;
+            }
+            Expr::UnaryOp {
+                op: UnaryOperator::BitwiseNot,
+                expr: inner,
+            } => {
+                self.emit_call_refs("~", &[inner], ctx, dest)?;
             }
 
             // Logical AND / OR with SQL three-valued logic: both operands are
@@ -1761,6 +1801,13 @@ impl<'a> SqlCompiler<'a> {
                     ..
                 }) = &**inner
                 {
+                    // Only a hex literal (0x8000000000000000) becomes a
+                    // number token with a sign; its negation does not fit.
+                    if n == "-9223372036854775808" {
+                        return Err(SqawkError::InvalidSqlQuery(
+                            "hex literal too big: -0x8000000000000000".into(),
+                        ));
+                    }
                     if let Ok(i) = format!("-{}", n).parse::<i64>() {
                         self.emit_value_literal(dest, &TableValue::Integer(i))?;
                         return Ok(dest);
@@ -2173,6 +2220,10 @@ impl<'a> SqlCompiler<'a> {
                     | BinaryOperator::And
                     | BinaryOperator::Or => DataType::Boolean,
                     BinaryOperator::StringConcat => DataType::Text,
+                    BinaryOperator::BitwiseAnd
+                    | BinaryOperator::BitwiseOr
+                    | BinaryOperator::PGBitwiseShiftLeft
+                    | BinaryOperator::PGBitwiseShiftRight => DataType::Integer,
                     _ => DataType::Text,
                 }
             }

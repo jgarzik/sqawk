@@ -902,7 +902,8 @@ from SQLite" in the [SQL reference](sql_reference.md)):
   becomes a real, and division by zero is NULL.
 - `LIKE` is case-insensitive for ASCII letters; `ILIKE` folds all of Unicode.
 - String functions count characters, not bytes; `'a' || NULL` is NULL.
-- Dates are UTC: `DATE('now')`, `DATE(d, '+1 month')`, `STRFTIME('%Y', d)`.
+- Dates are UTC unless converted with `'localtime'`: `DATE('now')`,
+  `DATE(d, '+1 month')`, `STRFTIME('%Y', d)`.
 - Syntax that parses but is not implemented (`RETURNING`, `WITH`,
   `UPDATE ... FROM`, ...) is an error, never silently ignored.
 
