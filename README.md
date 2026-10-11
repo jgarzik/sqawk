@@ -25,10 +25,11 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 ## Installation
 
 ```sh
-cargo install sqawk
+cargo install --locked sqawk
 ```
 
-This installs the `sqawk` binary. Requires Rust 1.88 or newer.
+This installs the `sqawk` binary. Requires Rust 1.88 or newer. `--locked`
+builds with the dependency versions sqawk was tested with.
 
 ## Quick Examples
 

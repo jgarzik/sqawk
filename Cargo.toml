@@ -1,6 +1,6 @@
 [package]
 name = "sqawk"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2021"
 authors = ["Jeff Garzik <jgarzik@pobox.com>"]
 description = "An SQL-based command-line tool for processing delimiter-separated files (CSV, TSV, etc.), inspired by awk"
@@ -9,7 +9,7 @@ repository = "https://github.com/jgarzik/sqawk"
 homepage = "https://github.com/jgarzik/sqawk"
 readme = "README.md"
 keywords = ["csv", "tsv", "sql", "delimited", "awk"]
-categories = ["command-line-utilities", "text-processing", "parser-implementations"]
+categories = ["command-line-utilities", "text-processing"]
 # Minimum supported Rust version.
 #
 # Verified by building with that toolchain, not inferred. The binding
@@ -47,10 +47,13 @@ predicates = "3"
 
 [profile.release]
 lto = true
+codegen-units = 1
+strip = true
 
 [profile.profiling]
 inherits = "release"
 debug = true
+strip = false
 
 [[bin]]
 name = "sqawk"
