@@ -37,7 +37,6 @@ sqlparser = "0.62"
 csv = "1"
 anyhow = "1"
 regex = "1"
-memmap2 = "0.9"
 libc = "0.2"
 tempfile = "3"
 

@@ -48,8 +48,8 @@ fn test_full_join_with_nulls_both_sides() -> Result<(), Box<dyn std::error::Erro
         .success()
         .stdout(predicates::str::contains("1,Alice,1,Engineering"))
         .stdout(predicates::str::contains("2,Bob,2,Sales"))
-        .stdout(predicates::str::contains("3,Charlie,NULL,NULL"))
-        .stdout(predicates::str::contains("NULL,NULL,4,Marketing"));
+        .stdout(predicates::str::contains("3,Charlie,,"))
+        .stdout(predicates::str::contains(",,4,Marketing"));
 
     Ok(())
 }
@@ -72,10 +72,10 @@ fn test_full_join_disjoint() -> Result<(), Box<dyn std::error::Error>> {
     // No matches, all rows should have NULLs on the opposite side
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("1,Alice,NULL,NULL"))
-        .stdout(predicates::str::contains("2,Bob,NULL,NULL"))
-        .stdout(predicates::str::contains("NULL,NULL,3,Engineering"))
-        .stdout(predicates::str::contains("NULL,NULL,4,Sales"));
+        .stdout(predicates::str::contains("1,Alice,,"))
+        .stdout(predicates::str::contains("2,Bob,,"))
+        .stdout(predicates::str::contains(",,3,Engineering"))
+        .stdout(predicates::str::contains(",,4,Sales"));
 
     Ok(())
 }
@@ -120,8 +120,8 @@ fn test_full_join_empty_left() -> Result<(), Box<dyn std::error::Error>> {
     // All right rows should be returned with NULL for left columns
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("NULL,NULL,1,Engineering"))
-        .stdout(predicates::str::contains("NULL,NULL,2,Sales"));
+        .stdout(predicates::str::contains(",,1,Engineering"))
+        .stdout(predicates::str::contains(",,2,Sales"));
 
     Ok(())
 }
@@ -144,8 +144,8 @@ fn test_full_join_empty_right() -> Result<(), Box<dyn std::error::Error>> {
     // All left rows should be returned with NULL for right columns
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("1,Alice,NULL,NULL"))
-        .stdout(predicates::str::contains("2,Bob,NULL,NULL"));
+        .stdout(predicates::str::contains("1,Alice,,"))
+        .stdout(predicates::str::contains("2,Bob,,"));
 
     Ok(())
 }

@@ -143,7 +143,6 @@ fn sqawk_bin() -> PathBuf {
 /// non-canonical integers must stay text). Untouched cells must be
 /// byte-identical.
 #[test]
-#[ignore]
 fn writeback_preserves_leading_zeros() -> TestResult {
     assert_write_back(
         "t.csv",
@@ -155,7 +154,6 @@ fn writeback_preserves_leading_zeros() -> TestResult {
 
 /// Same root cause: `1.50` -> `1.5`, `1e3` -> `1000`, `2.0` -> `2`.
 #[test]
-#[ignore]
 fn writeback_preserves_decimal_spelling() -> TestResult {
     assert_write_back(
         "t.csv",
@@ -168,7 +166,6 @@ fn writeback_preserves_decimal_spelling() -> TestResult {
 /// Writeback drops the quotes from `"  sp  "` (csv writer in file_handler.rs
 /// does not preserve/require quoting for significant whitespace).
 #[test]
-#[ignore]
 fn writeback_preserves_quoted_spaces() -> TestResult {
     assert_write_back(
         "t.csv",
@@ -182,7 +179,6 @@ fn writeback_preserves_quoted_spaces() -> TestResult {
 /// `"say """"hi"""""` (the value is escaped once by sqawk and again by the
 /// csv writer).
 #[test]
-#[ignore]
 fn writeback_preserves_embedded_quotes() -> TestResult {
     assert_write_back(
         "t.csv",
@@ -194,7 +190,6 @@ fn writeback_preserves_embedded_quotes() -> TestResult {
 
 /// An empty field loads as NULL and is written back as the literal `NULL`.
 #[test]
-#[ignore]
 fn writeback_preserves_empty_field() -> TestResult {
     assert_write_back(
         "t.csv",
@@ -207,7 +202,6 @@ fn writeback_preserves_empty_field() -> TestResult {
 /// An explicitly inserted NULL must be written back as an empty field, not
 /// the text `NULL`.
 #[test]
-#[ignore]
 fn writeback_writes_null_as_empty() -> TestResult {
     assert_write_back(
         "t.csv",
@@ -221,7 +215,6 @@ fn writeback_writes_null_as_empty() -> TestResult {
 /// comment and silently dropped on load, so writeback deletes it
 /// (comment skipping in csv_handler.rs must not apply to .csv files).
 #[test]
-#[ignore]
 fn writeback_preserves_hash_row() -> TestResult {
     assert_write_back(
         "h.csv",
@@ -233,7 +226,6 @@ fn writeback_preserves_hash_row() -> TestResult {
 
 /// Same root cause: in a .csv, a `#` line is data.
 #[test]
-#[ignore]
 fn csv_hash_line_is_data() -> TestResult {
     assert_query_on(
         &[("h.csv", "name,v\n#x,1\ny,2\n")],
@@ -244,7 +236,6 @@ fn csv_hash_line_is_data() -> TestResult {
 
 /// Writeback always emits LF, converting a CRLF file to LF line endings.
 #[test]
-#[ignore]
 fn writeback_preserves_crlf() -> TestResult {
     assert_write_back(
         "c.csv",
@@ -258,7 +249,6 @@ fn writeback_preserves_crlf() -> TestResult {
 /// file with mode 0600, so a 0644 file loses group/other read permission.
 #[cfg(unix)]
 #[test]
-#[ignore]
 fn writeback_preserves_file_mode() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
     let dir = create_temp_dir()?;
@@ -277,7 +267,6 @@ fn writeback_preserves_file_mode() -> TestResult {
 /// symlink is replaced by a regular file and the target is left stale.
 #[cfg(unix)]
 #[test]
-#[ignore]
 fn writeback_through_symlink_updates_target() -> TestResult {
     let dir = create_temp_dir()?;
     let target = dir.path().join("target.csv");
@@ -301,7 +290,6 @@ fn writeback_through_symlink_updates_target() -> TestResult {
 /// A quoted field containing a newline is split into two records on load
 /// (line-oriented reading in csv_handler.rs).
 #[test]
-#[ignore]
 fn quoted_newline_is_one_row() -> TestResult {
     assert_query_on(
         &[("n.csv", "a,b\n1,\"x\ny\"\n2,z\n")],
@@ -312,7 +300,6 @@ fn quoted_newline_is_one_row() -> TestResult {
 
 /// Same root cause: the embedded-newline record is mangled on writeback.
 #[test]
-#[ignore]
 fn writeback_preserves_quoted_newline() -> TestResult {
     assert_write_back(
         "n.csv",
@@ -325,7 +312,6 @@ fn writeback_preserves_quoted_newline() -> TestResult {
 /// Output NULL is rendered as the text `NULL`; it must be an empty field
 /// (value formatting for stdout in main.rs / table.rs).
 #[test]
-#[ignore]
 fn stdout_null_is_empty_field() -> TestResult {
     assert_query(
         &[nullable_csv()],
@@ -338,7 +324,6 @@ fn stdout_null_is_empty_field() -> TestResult {
 /// raw (`1,x, y`), so the output cannot be parsed back. RFC 4180 quoting
 /// required.
 #[test]
-#[ignore]
 fn stdout_is_rfc4180_quoted() -> TestResult {
     assert_query_on(
         &[("q.csv", "a,b\n1,\"x, y\"\n2,\"q\"\"r\"\n")],
@@ -350,7 +335,6 @@ fn stdout_is_rfc4180_quoted() -> TestResult {
 /// Numeric-looking text that does not round-trip canonically must stay text:
 /// `007` displays as `7`, `1.50` as `1.5`, `1e3` as `1000`.
 #[test]
-#[ignore]
 fn non_canonical_numbers_display_verbatim() -> TestResult {
     assert_query_on(
         &[("t.csv", "zip,amt,e\n007,1.50,1e3\n")],
@@ -363,7 +347,6 @@ fn non_canonical_numbers_display_verbatim() -> TestResult {
 /// first line is data and names columns a,b. For .csv files the first line is
 /// always the header.
 #[test]
-#[ignore]
 fn csv_first_line_is_always_header() -> TestResult {
     assert_query_on(
         &[("num.csv", "1,2\n3,4\n")],
@@ -374,7 +357,6 @@ fn csv_first_line_is_always_header() -> TestResult {
 
 /// A UTF-8 BOM is kept as part of the first column name, so `id` is not found.
 #[test]
-#[ignore]
 fn utf8_bom_is_stripped() -> TestResult {
     let dir = create_temp_dir()?;
     let p = write_files(dir.path(), &[("bom.csv", b"\xef\xbb\xbfid,name\n1,x\n")])?;
@@ -384,7 +366,6 @@ fn utf8_bom_is_stripped() -> TestResult {
 /// Two input files resolving to the same table name are silently accepted
 /// (the second replaces the first in database.rs); must be an error.
 #[test]
-#[ignore]
 fn duplicate_table_name_is_error() -> TestResult {
     let dir = create_temp_dir()?;
     fs::create_dir(dir.path().join("d1"))?;
@@ -405,7 +386,6 @@ fn duplicate_table_name_is_error() -> TestResult {
 /// `-F ''` panics with index-out-of-bounds (file_handler.rs:250); must be a
 /// clean error.
 #[test]
-#[ignore]
 fn empty_field_separator_is_clean_error() -> TestResult {
     let (_stdout, stderr, ok) = run_sql("SELECT * FROM users", &[users_csv()], &["-F", ""])?;
     assert!(!ok, "empty separator accepted");
@@ -416,7 +396,6 @@ fn empty_field_separator_is_clean_error() -> TestResult {
 /// Writing to a closed pipe (`sqawk ... | head -1`) panics with "failed
 /// printing to stdout: Broken pipe" (println! in main.rs output path).
 #[test]
-#[ignore]
 fn closed_stdout_pipe_does_not_panic() -> TestResult {
     let dir = create_temp_dir()?;
     let p = dir.path().join("big.csv");
@@ -449,7 +428,6 @@ fn closed_stdout_pipe_does_not_panic() -> TestResult {
 /// `-v` diagnostics (arguments, bytecode, execution trace) are printed to
 /// stdout, corrupting the result stream. They belong on stderr.
 #[test]
-#[ignore]
 fn verbose_diagnostics_not_on_stdout() -> TestResult {
     let sql = "SELECT id, name FROM users";
     let (plain, _e, ok1) = run_sql(sql, &[users_csv()], &[])?;
@@ -1249,7 +1227,6 @@ fn cast_text_to_integer_uses_numeric_prefix() -> TestResult {
 /// A float literal inserted into a column is not summed as a number
 /// (SUM gives 7, not 9.5).
 #[test]
-#[ignore]
 fn inserted_float_literal_is_numeric() -> TestResult {
     assert_query(
         &[orders_csv()],

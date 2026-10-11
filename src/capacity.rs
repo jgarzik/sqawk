@@ -7,10 +7,6 @@
 // Row and Column Capacities
 // =============================================================================
 
-/// Default capacity for row vectors (number of fields per row).
-/// Most CSV/TSV files have fewer than 64 columns.
-pub const DEFAULT_ROW_CAPACITY: usize = 16;
-
 /// Default capacity for column definition vectors.
 pub const DEFAULT_COLUMN_CAPACITY: usize = 16;
 
@@ -68,37 +64,8 @@ pub const DEFAULT_SORTER_ROWS_CAPACITY: usize = 256;
 pub const DEFAULT_SORT_KEYS_CAPACITY: usize = 4;
 
 // =============================================================================
-// File-based Estimation
-// =============================================================================
-
-/// Average bytes per row estimate for CSV files.
-/// Used to estimate row count from file size.
-pub const ESTIMATED_BYTES_PER_ROW: usize = 128;
-
-/// Minimum row capacity for file-based estimation.
-pub const MIN_ESTIMATED_ROW_CAPACITY: usize = 64;
-
-/// Maximum row capacity for file-based estimation.
-/// Prevents excessive pre-allocation for very large files.
-pub const MAX_ESTIMATED_ROW_CAPACITY: usize = 10_000_000;
-
-/// Estimate row count from file size (for mmap pre-allocation).
-/// Returns a capacity hint, not an exact count.
-#[inline]
-pub fn estimate_row_count(file_size: usize) -> usize {
-    let estimate = file_size / ESTIMATED_BYTES_PER_ROW;
-    estimate.clamp(MIN_ESTIMATED_ROW_CAPACITY, MAX_ESTIMATED_ROW_CAPACITY)
-}
-
-// =============================================================================
 // Headerless File Detection
 // =============================================================================
-
-/// Check if a line is a comment (starts with #).
-#[inline]
-pub fn is_comment_line(line: &[u8]) -> bool {
-    line.starts_with(b"#")
-}
 
 /// Check if a field looks like data rather than a header name.
 /// Used to auto-detect headerless files like /etc/passwd.

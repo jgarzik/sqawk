@@ -129,7 +129,7 @@ fn test_lag_simple() -> Result<(), Box<dyn std::error::Error>> {
     // First row has NULL, others have previous salary
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("Alice,50000,NULL"))
+        .stdout(predicates::str::contains("Alice,50000,"))
         .stdout(predicates::str::contains("Bob,60000,50000"))
         .stdout(predicates::str::contains("Charlie,70000,60000"));
 
@@ -153,7 +153,7 @@ fn test_lead_simple() -> Result<(), Box<dyn std::error::Error>> {
         .success()
         .stdout(predicates::str::contains("Alice,50000,60000"))
         .stdout(predicates::str::contains("Bob,60000,70000"))
-        .stdout(predicates::str::contains("Charlie,70000,NULL"));
+        .stdout(predicates::str::contains("Charlie,70000,"));
 
     Ok(())
 }
@@ -173,9 +173,9 @@ fn test_lag_partition() -> Result<(), Box<dyn std::error::Error>> {
     // First in each partition gets NULL
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("Charlie,IT,70000,NULL"))
+        .stdout(predicates::str::contains("Charlie,IT,70000,"))
         .stdout(predicates::str::contains("Diana,IT,80000,70000"))
-        .stdout(predicates::str::contains("Alice,Sales,50000,NULL"))
+        .stdout(predicates::str::contains("Alice,Sales,50000,"))
         .stdout(predicates::str::contains("Bob,Sales,60000,50000"));
 
     Ok(())
@@ -197,9 +197,9 @@ fn test_lead_partition() -> Result<(), Box<dyn std::error::Error>> {
     cmd.assert()
         .success()
         .stdout(predicates::str::contains("Charlie,IT,70000,80000"))
-        .stdout(predicates::str::contains("Diana,IT,80000,NULL"))
+        .stdout(predicates::str::contains("Diana,IT,80000,"))
         .stdout(predicates::str::contains("Alice,Sales,50000,60000"))
-        .stdout(predicates::str::contains("Bob,Sales,60000,NULL"));
+        .stdout(predicates::str::contains("Bob,Sales,60000,"));
 
     Ok(())
 }
@@ -221,8 +221,8 @@ fn test_lag_offset() -> Result<(), Box<dyn std::error::Error>> {
     // First two rows have NULL, others have salary from 2 rows back
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("Alice,50000,NULL"))
-        .stdout(predicates::str::contains("Bob,55000,NULL"))
+        .stdout(predicates::str::contains("Alice,50000,"))
+        .stdout(predicates::str::contains("Bob,55000,"))
         .stdout(predicates::str::contains("Charlie,60000,50000"))
         .stdout(predicates::str::contains("Diana,65000,55000"));
 
@@ -246,8 +246,8 @@ fn test_lead_offset() -> Result<(), Box<dyn std::error::Error>> {
         .success()
         .stdout(predicates::str::contains("Alice,50000,60000"))
         .stdout(predicates::str::contains("Bob,55000,65000"))
-        .stdout(predicates::str::contains("Charlie,60000,NULL"))
-        .stdout(predicates::str::contains("Diana,65000,NULL"));
+        .stdout(predicates::str::contains("Charlie,60000,"))
+        .stdout(predicates::str::contains("Diana,65000,"));
 
     Ok(())
 }

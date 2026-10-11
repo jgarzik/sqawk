@@ -441,12 +441,18 @@ impl<'a> Repl<'a> {
                 println!("Query returned no rows");
             } else {
                 println!("Query returned {} rows", result_set.rows.len());
-                // Print column headers
-                println!("{}", result_set.columns.join(","));
-
-                // Print rows
+                // Header and rows as CSV, quoted where a field needs it
+                // (NULL is already an empty field in a ResultSet).
+                let writer = crate::table::RecordWriter {
+                    delimiter: b',',
+                    terminator: b"\n",
+                    comments: false,
+                };
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                let _ = writer.write(&mut out, result_set.columns.iter().map(String::as_str));
                 for row in &result_set.rows {
-                    println!("{}", row.join(","));
+                    let _ = writer.write(&mut out, row.iter().map(String::as_str));
                 }
             }
         }

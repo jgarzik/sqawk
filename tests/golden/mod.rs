@@ -943,7 +943,7 @@ fn nullif() -> Result<(), Box<dyn std::error::Error>> {
             "\nEve,Marketing",
             "\nFrank,Engineering",
             "\nGrace,Sales",
-            "\nHenry,NULL",
+            "\nHenry,",
         ),
     )
 }
@@ -1012,7 +1012,7 @@ fn win_lag() -> Result<(), Box<dyn std::error::Error>> {
         "SELECT name, LAG(salary) OVER (ORDER BY salary) FROM employees",
         concat!(
             "name,LAG",
-            "\nHenry,NULL",
+            "\nHenry,",
             "\nBob,45000",
             "\nEve,55000",
             "\nCharlie,60000",
@@ -1038,7 +1038,7 @@ fn win_lead() -> Result<(), Box<dyn std::error::Error>> {
             "\nAlice,75000",
             "\nFrank,80000",
             "\nDavid,90000",
-            "\nGrace,NULL",
+            "\nGrace,",
         ),
     )
 }
@@ -1114,7 +1114,7 @@ fn outer_join_left_nullfill() -> Result<(), Box<dyn std::error::Error>> {
             "\nAnn,Book",
             "\nAnn,Pen",
             "\nBen,Desk",
-            "\nCara,NULL",
+            "\nCara,",
         ),
     )
 }
@@ -1129,7 +1129,7 @@ fn outer_join_right_nullfill() -> Result<(), Box<dyn std::error::Error>> {
             "\nAnn,Book",
             "\nAnn,Pen",
             "\nBen,Desk",
-            "\nNULL,Orphan",
+            "\n,Orphan",
         ),
     )
 }
@@ -1144,8 +1144,8 @@ fn outer_join_full_nullfill() -> Result<(), Box<dyn std::error::Error>> {
             "\nAnn,Book",
             "\nAnn,Pen",
             "\nBen,Desk",
-            "\nCara,NULL",
-            "\nNULL,Orphan",
+            "\nCara,",
+            "\n,Orphan",
         ),
     )
 }
@@ -1548,7 +1548,7 @@ fn null_excluded_by_negated_comparison_too() -> Result<(), Box<dyn std::error::E
     assert_query(
         &["tests/data/nullable.csv"],
         "SELECT name FROM nullable WHERE score <= 60",
-        "name\nNULL",
+        "name\n\"\"",
     )
 }
 
@@ -1567,7 +1567,7 @@ fn nulls_sort_first() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/nullable.csv"],
         "SELECT id, score FROM nullable ORDER BY score",
-        "id,score\n2,NULL\n4,50\n3,70\n1,90\n5,90",
+        "id,score\n2,\n4,50\n3,70\n1,90\n5,90",
     )
 }
 
@@ -1640,7 +1640,7 @@ fn left_join_reversed_projection_nullfill() -> Result<(), Box<dyn std::error::Er
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT purchases.item, customers.name FROM customers LEFT JOIN purchases \
          ON customers.id = purchases.customer_id",
-        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\nNULL,Cara",
+        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\n,Cara",
     )
 }
 
@@ -1650,7 +1650,7 @@ fn right_join_reversed_projection_nullfill() -> Result<(), Box<dyn std::error::E
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT purchases.item, customers.name FROM customers RIGHT JOIN purchases \
          ON customers.id = purchases.customer_id",
-        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\nOrphan,NULL",
+        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\nOrphan,",
     )
 }
 
@@ -1660,7 +1660,7 @@ fn full_join_reversed_projection_nullfill() -> Result<(), Box<dyn std::error::Er
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT purchases.item, customers.name FROM customers FULL JOIN purchases \
          ON customers.id = purchases.customer_id",
-        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\nNULL,Cara\nOrphan,NULL",
+        "purchases.item,customers.name\nBook,Ann\nPen,Ann\nDesk,Ben\n,Cara\nOrphan,",
     )
 }
 
@@ -2040,7 +2040,7 @@ fn left_join_with_compound_on_keeps_nullfill() -> Result<(), Box<dyn std::error:
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT customers.name, purchases.item FROM customers LEFT JOIN purchases \
          ON customers.id = purchases.customer_id AND purchases.id > 10",
-        "customers.name,purchases.item\nAnn,Pen\nBen,Desk\nCara,NULL",
+        "customers.name,purchases.item\nAnn,Pen\nBen,Desk\nCara,",
     )
 }
 
@@ -2208,7 +2208,7 @@ fn alias_in_left_join() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT c.name, p.item FROM customers c LEFT JOIN purchases p ON c.id = p.customer_id",
-        "c.name,p.item\nAnn,Book\nAnn,Pen\nBen,Desk\nCara,NULL",
+        "c.name,p.item\nAnn,Book\nAnn,Pen\nBen,Desk\nCara,",
     )
 }
 

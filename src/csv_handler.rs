@@ -1,31 +1,290 @@
-//! CSV file handling module for sqawk
+//! Delimited file reading and writing for sqawk
 //!
-//! This module handles loading CSV files into in-memory tables and saving tables back to CSV files.
-//! It provides functionality for:
+//! Every input -- `.csv`, TSV, `-F`-delimited files and standard input -- is
+//! parsed here by the `csv` crate with one configuration: RFC 4180 quoting
+//! (`""` inside a quoted field is a literal quote), quoted fields may span
+//! lines, fields are never trimmed, a UTF-8 byte order mark is stripped, and
+//! rows may be ragged (short rows are padded with NULL).
 //!
-//! - Loading CSV files with automatic header detection
-//! - Parsing file specifications in the format [table_name=]file_path.csv
-//! - Managing a collection of in-memory tables
-//! - Converting between CSV records and the internal Value type
-//! - Writing modified tables back to CSV files
-//!
-//! The module uses buffered I/O operations for efficiency and maintains
-//! a mapping between table names and their source files for writeback operations.
+//! Writeback goes through the same module, so that a file read and written
+//! back without changes is byte-identical: cells are inferred with a rule
+//! that round-trips (see `Value::from(&str)`), NULL is the empty field, and
+//! the header/line-ending/comment layout of the source is recorded on the
+//! table and reproduced.
 
-use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use tempfile::NamedTempFile;
 
+use crate::capacity::{generate_alpha_columns, is_likely_data_row};
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::{Table, Value};
+use crate::table::{FileLayout, Table, Value};
 
-/// Handles loading and saving CSV files
+/// How the first record of a file is treated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderMode {
+    /// The first record is the header (the rule for `.csv` and stdin).
+    Present,
+    /// Every record is data; columns are named a, b, c, ... unless given.
+    Absent,
+    /// Guess from the first record (`is_likely_data_row`); used for
+    /// non-.csv delimited files such as /etc/passwd.
+    Guess,
+}
+
+/// Options for reading one delimited file.
+#[derive(Debug, Clone)]
+pub struct ReadOptions {
+    /// Field separator byte
+    pub delimiter: u8,
+    /// Header policy
+    pub header: HeaderMode,
+    /// Skip lines that start with `#`
+    pub comments: bool,
+    /// Column names to use; implies the file has no header row
+    pub columns: Option<Vec<String>>,
+    /// Skip or repair malformed records instead of failing
+    pub recover_errors: bool,
+}
+
+impl Default for ReadOptions {
+    /// Plain CSV: comma, header row, no comment lines.
+    fn default() -> Self {
+        ReadOptions {
+            delimiter: b',',
+            header: HeaderMode::Present,
+            comments: false,
+            columns: None,
+            recover_errors: false,
+        }
+    }
+}
+
+/// UTF-8 byte order mark
+const BOM: &[u8] = b"\xef\xbb\xbf";
+
+/// Field bytes to text. Invalid UTF-8 is replaced rather than rejected.
+fn field_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    String::from_utf8_lossy(bytes)
+}
+
+/// Parse delimited `data` into a table.
 ///
-/// This struct provides methods for loading tables from CSV files
-/// and writing them back when modified. It's specialized for handling
-/// data in CSV format with commas as separators.
+/// # Arguments
+/// * `table_name` - name of the resulting table
+/// * `data` - the whole file contents
+/// * `file_path` - writeback target recorded on the table (None for stdin)
+/// * `delimiter` - the delimiter string recorded on the table
+/// * `opts` - parsing options
+/// * `source` - file name used in error messages
+pub fn read_table(
+    table_name: &str,
+    data: &[u8],
+    file_path: Option<PathBuf>,
+    delimiter: String,
+    opts: &ReadOptions,
+    source: &str,
+) -> SqawkResult<Table> {
+    let data = data.strip_prefix(BOM).unwrap_or(data);
+
+    // Line ending of the first record decides the writeback terminator.
+    let crlf = data
+        .iter()
+        .position(|&b| b == b'\n')
+        .is_some_and(|i| i > 0 && data[i - 1] == b'\r');
+
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .delimiter(opts.delimiter)
+        .comment(if opts.comments { Some(b'#') } else { None })
+        .from_reader(data);
+
+    let mut record = csv::ByteRecord::new();
+    let mut line = 0usize;
+
+    // First record: the header, or the first data row.
+    let mut pending_first: Option<Vec<Value>> = None;
+    let has_first = read_record(&mut reader, &mut record, source, &mut line)?;
+    let header_mode = if opts.columns.is_some() {
+        HeaderMode::Absent
+    } else {
+        opts.header
+    };
+    let (columns, has_header) = if !has_first {
+        (opts.columns.clone().unwrap_or_default(), false)
+    } else {
+        let fields: Vec<String> = record.iter().map(|f| field_text(f).into_owned()).collect();
+        let is_header = match header_mode {
+            HeaderMode::Present => true,
+            HeaderMode::Absent => false,
+            HeaderMode::Guess => !is_likely_data_row(&fields),
+        };
+        if is_header {
+            (fields, true)
+        } else {
+            let cols = opts
+                .columns
+                .clone()
+                .unwrap_or_else(|| generate_alpha_columns(fields.len()));
+            pending_first = Some(fields.into_iter().map(Value::from).collect());
+            (cols, false)
+        }
+    };
+
+    let mut table = Table::new_with_delimiter(table_name, columns, file_path, delimiter);
+    table.set_file_layout(FileLayout {
+        has_header,
+        crlf,
+        comments: opts.comments,
+    });
+    let width = table.column_count();
+    let mut sink = RowSink {
+        rows: Vec::new(),
+        width,
+        skipped: 0,
+        recover: opts.recover_errors,
+        source,
+    };
+    if let Some(first) = pending_first {
+        sink.push(first, line)?;
+    }
+
+    loop {
+        match read_record(&mut reader, &mut record, source, &mut line) {
+            Ok(true) => {
+                let row: Vec<Value> = record
+                    .iter()
+                    .map(|f| match std::str::from_utf8(f) {
+                        Ok(s) => Value::from(s),
+                        Err(_) => Value::from(field_text(f).into_owned()),
+                    })
+                    .collect();
+                sink.push(row, line)?;
+            }
+            Ok(false) => break,
+            Err(e) if opts.recover_errors => {
+                sink.skipped += 1;
+                eprintln!("Warning: Skipping malformed row: {}", e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    if sink.skipped > 0 {
+        eprintln!(
+            "Note: Skipped {} malformed rows while loading {}",
+            sink.skipped, source
+        );
+    }
+
+    // Loading is not a modification.
+    table.replace_rows(sink.rows);
+    table.mark_unmodified();
+    Ok(table)
+}
+
+/// Collects loaded rows, enforcing the table width.
+struct RowSink<'a> {
+    rows: Vec<Vec<Value>>,
+    width: usize,
+    skipped: usize,
+    recover: bool,
+    source: &'a str,
+}
+
+impl RowSink<'_> {
+    fn push(&mut self, mut row: Vec<Value>, line: usize) -> SqawkResult<()> {
+        if row.len() > self.width {
+            if self.recover {
+                self.skipped += 1;
+                eprintln!(
+                    "Warning: Skipping row at line {} of {}: {} fields, expected {}",
+                    line,
+                    self.source,
+                    row.len(),
+                    self.width
+                );
+                return Ok(());
+            }
+            return Err(SqawkError::CsvParseError {
+                file: self.source.to_string(),
+                line,
+                error: format!(
+                    "record has {} fields, but the table has {} columns",
+                    row.len(),
+                    self.width
+                ),
+            });
+        }
+        // A short record is padded: the missing trailing fields are NULL.
+        row.resize(self.width, Value::Null);
+        self.rows.push(row);
+        Ok(())
+    }
+}
+
+/// Read the next record; false at end of input. `line` tracks the 1-based
+/// line where the record starts, for error messages.
+fn read_record(
+    reader: &mut csv::Reader<&[u8]>,
+    record: &mut csv::ByteRecord,
+    source: &str,
+    line: &mut usize,
+) -> SqawkResult<bool> {
+    match reader.read_byte_record(record) {
+        Ok(more) => {
+            if let Some(pos) = record.position() {
+                *line = pos.line() as usize;
+            }
+            Ok(more)
+        }
+        Err(e) => Err(SqawkError::CsvParseError {
+            file: source.to_string(),
+            line: e.position().map_or(*line + 1, |p| p.line() as usize),
+            error: e.to_string(),
+        }),
+    }
+}
+
+/// Write `table` back to `file_path`, reproducing the source layout.
+///
+/// The write is atomic: a temp file in the target's directory is written,
+/// synced, given the original file's permissions, and renamed over the
+/// target. A symlink is resolved first, so the link survives and its target
+/// is what gets rewritten.
+pub fn save_table(table: &Table, file_path: &Path) -> SqawkResult<()> {
+    let target = match std::fs::canonicalize(file_path) {
+        Ok(real) => real,
+        // A file that does not exist yet (CREATE TABLE ... LOCATION).
+        Err(_) => file_path.to_path_buf(),
+    };
+    let parent = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let temp_file = NamedTempFile::new_in(parent)?;
+
+    {
+        let mut out = BufWriter::new(temp_file.as_file());
+        let layout = table.file_layout();
+        table.write_delimited(&mut out, layout.has_header, layout.crlf, layout.comments)?;
+        out.flush()?;
+    }
+
+    if let Ok(meta) = std::fs::metadata(&target) {
+        temp_file.as_file().set_permissions(meta.permissions())?;
+    }
+    temp_file.as_file().sync_all()?;
+    temp_file
+        .persist(&target)
+        .map_err(|e| SqawkError::IoError(e.error))?;
+    Ok(())
+}
+
+/// Loads and saves CSV files (library convenience API).
+#[allow(dead_code)] // not used by the binary; part of the library API
 pub struct CsvHandler {}
 
 impl Default for CsvHandler {
@@ -34,254 +293,70 @@ impl Default for CsvHandler {
     }
 }
 
+#[allow(dead_code)]
 impl CsvHandler {
     /// Create a new CsvHandler
-    ///
-    /// # Returns
-    /// A new CsvHandler instance ready to load and manage CSV files
     pub fn new() -> Self {
         CsvHandler {}
     }
 
-    /// Save a table to a CSV file
-    ///
-    /// Uses atomic write pattern: writes to a temporary file first, then renames
-    /// into place. This preserves the original file if writing fails midway.
-    ///
-    /// # Arguments
-    /// * `table` - The table to save
-    /// * `file_path` - The path to the file
-    ///
-    /// # Returns
-    /// * `SqawkResult<()>` - Result of the operation
+    /// Save a table to a CSV file (see `save_table`)
     pub fn save_csv(&self, table: &Table, file_path: &Path) -> SqawkResult<()> {
-        // Create temp file in the same directory as target (required for atomic rename)
-        let parent = file_path.parent().unwrap_or(Path::new("."));
-        let temp_file = NamedTempFile::new_in(parent).map_err(SqawkError::IoError)?;
-
-        // Write data in a scope so the writer is dropped before we call persist
-        {
-            // Create a CSV writer writing to the temp file
-            let mut writer = csv::Writer::from_writer(temp_file.as_file());
-
-            // Write header row
-            writer
-                .write_record(table.columns())
-                .map_err(SqawkError::CsvError)?;
-
-            // Write data rows
-            for row in table.rows() {
-                let string_values: Vec<String> =
-                    row.iter().map(|value| value.to_string()).collect();
-
-                writer
-                    .write_record(&string_values)
-                    .map_err(SqawkError::CsvError)?;
-            }
-
-            // Flush the CSV writer before it's dropped
-            writer.flush().map_err(SqawkError::IoError)?;
-        }
-
-        // Sync to disk before rename to ensure data durability
-        temp_file
-            .as_file()
-            .sync_all()
-            .map_err(SqawkError::IoError)?;
-
-        // Atomically rename temp file to target path
-        temp_file
-            .persist(file_path)
-            .map_err(|e| SqawkError::IoError(e.error))?;
-
-        Ok(())
+        save_table(table, file_path)
     }
 
-    /// Load a CSV file into an in-memory table
+    /// Load a CSV file into a table.
     ///
-    /// This method parses CSV files with header rows, creating tables with
-    /// appropriate column names and automatically inferring data types for each cell.
+    /// * `file_spec` - `[table_name=]file_path`
+    /// * `custom_columns` - column names to use; the file then has no header
+    ///   row and its first line is data
+    /// * `recover_errors` - skip malformed records instead of failing
     ///
-    /// # Arguments
-    /// * `file_spec` - File specification in the format `[table_name=]file_path.csv`
-    ///   If table_name is not specified, the file name without extension is used.
-    /// * `custom_columns` - Optional custom column names to use instead of detected/generated ones
-    /// * `recover_errors` - When true, malformed rows will be skipped instead of causing the operation to fail
-    ///
-    /// # Features
-    /// * Supports comments in CSV files (lines starting with #)
-    /// * Can recover from malformed rows by skipping them
-    /// * Provides detailed error information including line numbers
-    ///
-    /// # Returns
-    /// * `Ok(Table)` - The successfully loaded table
-    /// * `Err` if there was an error parsing the file spec, opening the file, or parsing the CSV data
-    ///
-    /// # Enhanced Error Handling
-    /// When the optional `recover_errors` parameter is set to true, the function will:
-    /// * Skip malformed rows instead of failing
-    /// * Log detailed error information including line numbers
-    /// * Continue processing the file to extract all valid rows
+    /// The first line is the header unless `custom_columns` is given. `#`
+    /// lines are data; use `load_with_options` for comment skipping.
     pub fn load_csv(
         &self,
         file_spec: &str,
         custom_columns: Option<Vec<String>>,
         recover_errors: Option<bool>,
     ) -> SqawkResult<Table> {
-        // Parse file spec to get table name and file path
-        let (table_name, file_path) = self.parse_file_spec(file_spec)?;
-
-        // Open the CSV file
-        let file = File::open(&file_path)?;
-        let reader = BufReader::new(file);
-
-        // has_headers is true by default - first row is column names
-        let has_headers = true;
-
-        // Create a CSV reader with enhanced options
-        let mut csv_reader = csv::ReaderBuilder::new()
-            .has_headers(has_headers)
-            .comment(Some(b'#')) // Support comment lines starting with #
-            // Enable flexible mode only if error recovery is requested
-            .flexible(true) // Always use flexible mode to allow for skipping errors
-            .from_reader(reader);
-
-        // Get headers or use custom column names if provided
-        let headers = if let Some(columns) = custom_columns {
-            // Use the provided custom column names (first row will be data)
-            columns
-        } else {
-            // Use column names from the CSV header row
-            csv_reader
-                .headers()
-                .map_err(SqawkError::CsvError)?
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
+        let opts = ReadOptions {
+            columns: custom_columns,
+            recover_errors: recover_errors.unwrap_or(false),
+            ..ReadOptions::default()
         };
+        self.load_with_options(file_spec, &opts)
+    }
 
-        // Create a new table with comma delimiter (since this is the CSV handler)
-        let mut table = Table::new_with_delimiter(
+    /// Load a delimited file with explicit options.
+    pub fn load_with_options(&self, file_spec: &str, opts: &ReadOptions) -> SqawkResult<Table> {
+        let (table_name, file_path) = parse_file_spec(file_spec)?;
+        let data = std::fs::read(&file_path)?;
+        let delimiter = (opts.delimiter as char).to_string();
+        read_table(
             &table_name,
-            headers,
+            &data,
             Some(file_path.clone()),
-            ",".to_string(),
-        );
-
-        // Read rows with enhanced error handling
-        let should_recover = recover_errors.unwrap_or(false);
-        let mut skipped_rows = 0;
-        let mut row_number = 0;
-
-        // Reusable row buffer to avoid per-row allocations
-        let column_count = table.column_count();
-        let mut row_buffer = Vec::with_capacity(column_count);
-
-        for result in csv_reader.records() {
-            row_number += 1;
-
-            match result {
-                Ok(record) => {
-                    // Clear buffer for reuse
-                    row_buffer.clear();
-
-                    if should_recover && record.len() != column_count {
-                        // In recovery mode, handle rows with different column counts
-                        for i in 0..column_count {
-                            if i < record.len() {
-                                // Use the value if it exists
-                                row_buffer.push(Value::from(record.get(i).unwrap_or("")));
-                            } else {
-                                // Pad with null values if we need more
-                                row_buffer.push(Value::Null);
-                            }
-                        }
-
-                        // Now we have a properly sized row, add it by cloning from buffer
-                        table.add_row_from_slice(&row_buffer)?;
-                    } else {
-                        // Normal path - convert record to a row of values and validate
-                        for field in record.iter() {
-                            row_buffer.push(Value::from(field));
-                        }
-                        // This call can fail if the columns don't match and we're not in recovery mode
-                        if let Err(e) = table.add_row_from_slice(&row_buffer) {
-                            if should_recover {
-                                // If we're in recovery mode, log and continue
-                                skipped_rows += 1;
-                                eprintln!(
-                                    "Warning: Skipping row at line {} with inconsistent field count: {}",
-                                    row_number + 1, // +1 for header row
-                                    e
-                                );
-                            } else {
-                                // If we're not in recovery mode, propagate the error
-                                return Err(e);
-                            }
-                        }
-                    }
-                }
-                Err(csv_err) if should_recover => {
-                    // Skip this row and continue processing if recovery is enabled
-                    skipped_rows += 1;
-                    eprintln!(
-                        "Warning: Skipping malformed row at line {}: {}",
-                        row_number + 1, // +1 for header row
-                        csv_err
-                    );
-                }
-                Err(csv_err) => {
-                    // Provide detailed error context when failing
-                    return Err(SqawkError::CsvParseError {
-                        file: file_path.to_string_lossy().to_string(),
-                        line: row_number + 1, // +1 for header row
-                        error: format!("{}", csv_err),
-                    });
-                }
-            }
-        }
-
-        // Report the number of skipped rows if there were any and we're in recovery mode
-        if should_recover && skipped_rows > 0 {
-            eprintln!(
-                "Note: Skipped {} malformed rows while loading {}",
-                skipped_rows,
-                file_path.to_string_lossy()
-            );
-        }
-
-        Ok(table)
+            delimiter,
+            opts,
+            &file_path.to_string_lossy(),
+        )
     }
+}
 
-    /// Parse a file specification into table name and file path
-    ///
-    /// Handles two formats:
-    /// 1. `table_name=file_path.csv` - Explicit table name and file path
-    /// 2. `file_path.csv` - Table name derived from file name
-    ///
-    /// # Arguments
-    /// * `file_spec` - File specification in one of the supported formats
-    ///
-    /// # Returns
-    /// * `Ok((String, PathBuf))` - Tuple of (table_name, file_path)
-    /// * `Err` - If the file specification is invalid
-    fn parse_file_spec(&self, file_spec: &str) -> SqawkResult<(String, PathBuf)> {
-        if let Some((table_name, file_path)) = file_spec.split_once('=') {
-            // Table name specified explicitly
-            Ok((table_name.to_string(), PathBuf::from(file_path)))
-        } else {
-            // Table name derived from file name
-            let path = PathBuf::from(file_spec);
-            // Check that path has a filename
-            path.file_name().ok_or_else(|| {
-                SqawkError::InvalidFileSpec(format!("Invalid file specification: {}", file_spec))
-            })?;
-
-            let stem = path.file_stem().ok_or_else(|| {
-                SqawkError::InvalidFileSpec(format!("Invalid file specification: {}", file_spec))
-            })?;
-
-            Ok((stem.to_string_lossy().to_string(), path))
-        }
+/// Split `[table_name=]file_path`; the table name defaults to the file stem.
+#[allow(dead_code)]
+fn parse_file_spec(file_spec: &str) -> SqawkResult<(String, PathBuf)> {
+    if let Some((table_name, file_path)) = file_spec.split_once('=') {
+        return Ok((table_name.to_string(), PathBuf::from(file_path)));
     }
+    let path = PathBuf::from(file_spec);
+    let stem = path
+        .file_stem()
+        .ok_or_else(|| {
+            SqawkError::InvalidFileSpec(format!("Invalid file specification: {}", file_spec))
+        })?
+        .to_string_lossy()
+        .to_string();
+    Ok((stem, path))
 }

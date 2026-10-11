@@ -23,6 +23,9 @@ pub struct AppConfig {
 
     /// Whether to write changes back to files
     write_changes: bool,
+
+    /// Treat the first line of every input file as data (`--no-header`)
+    no_header: bool,
 }
 
 impl AppConfig {
@@ -44,7 +47,19 @@ impl AppConfig {
             field_separator,
             table_definitions,
             write_changes,
+            no_header: false,
         }
+    }
+
+    /// Set whether input files have no header row
+    pub fn with_no_header(mut self, no_header: bool) -> Self {
+        self.no_header = no_header;
+        self
+    }
+
+    /// Whether input files have no header row
+    pub fn no_header(&self) -> bool {
+        self.no_header
     }
 
     /// Get the verbose flag

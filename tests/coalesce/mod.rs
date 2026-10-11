@@ -40,7 +40,7 @@ fn test_coalesce_fallback_to_second() -> Result<(), Box<dyn std::error::Error>> 
     // VM outputs NULL for null values
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("1,NULL,fallback1"));
+        .stdout(predicates::str::contains("1,,fallback1"));
 
     Ok(())
 }
@@ -124,7 +124,7 @@ fn test_coalesce_multiple_args() -> Result<(), Box<dyn std::error::Error>> {
     // VM outputs NULL for null values
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("1,NULL,NULL,third"));
+        .stdout(predicates::str::contains("1,,,third"));
 
     Ok(())
 }

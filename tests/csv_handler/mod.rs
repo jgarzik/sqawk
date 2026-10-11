@@ -1,14 +1,27 @@
-use sqawk::csv_handler::CsvHandler;
+use sqawk::csv_handler::{CsvHandler, HeaderMode, ReadOptions};
 use sqawk::error::SqawkError;
+
+/// Options for a comma-separated file with `#` comment lines. Plain `.csv`
+/// loading treats `#` lines as data; comment skipping is opt-in (the CLI
+/// enables it for non-.csv delimited files).
+fn commented_options(columns: Option<Vec<String>>) -> ReadOptions {
+    ReadOptions {
+        delimiter: b',',
+        header: HeaderMode::Present,
+        comments: true,
+        columns,
+        recover_errors: false,
+    }
+}
 
 #[test]
 fn test_csv_with_comments() {
     // Create the CSV handler
     let csv_handler = CsvHandler::new();
 
-    // Load the commented CSV file
+    // Load the commented CSV file with comment skipping enabled
     let table = csv_handler
-        .load_csv("tests/data/commented.csv", None, None)
+        .load_with_options("tests/data/commented.csv", &commented_options(None))
         .unwrap();
 
     // Verify the correct data was loaded (comments should be ignored)
@@ -114,7 +127,10 @@ fn test_csv_with_custom_columns() {
 
     // Load the commented CSV file with custom columns
     let table = csv_handler
-        .load_csv("tests/data/commented.csv", custom_columns, None)
+        .load_with_options(
+            "tests/data/commented.csv",
+            &commented_options(custom_columns),
+        )
         .unwrap();
 
     // Verify the column names were properly set
@@ -123,6 +139,19 @@ fn test_csv_with_custom_columns() {
     assert_eq!(columns[1], "full_name");
     assert_eq!(columns[2], "user_age");
 
-    // Verify the data was loaded correctly
-    assert_eq!(table.rows().len(), 3);
+    // Custom columns mean the file has no header row, so its first
+    // non-comment line ("id,name,age") is data: 4 rows, not 3.
+    assert_eq!(table.rows().len(), 4);
+    assert_eq!(table.rows()[0][1].to_string(), "name");
+    assert_eq!(table.rows()[1][1].to_string(), "Alice");
+}
+
+#[test]
+fn test_csv_hash_lines_are_data_by_default() {
+    // Without comment skipping, the first line is the header even though it
+    // starts with '#', and '#' lines are ordinary records.
+    let table = CsvHandler::new()
+        .load_csv("tests/data/commented.csv", None, Some(true))
+        .unwrap();
+    assert_eq!(table.columns(), vec!["# This is a header comment"]);
 }

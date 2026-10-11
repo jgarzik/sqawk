@@ -47,7 +47,7 @@ fn test_left_join_with_nulls() -> Result<(), Box<dyn std::error::Error>> {
         .success()
         .stdout(predicates::str::contains("1,Alice,1,Engineering"))
         .stdout(predicates::str::contains("2,Bob,2,Sales"))
-        .stdout(predicates::str::contains("3,Charlie,NULL,NULL"));
+        .stdout(predicates::str::contains("3,Charlie,,"));
 
     Ok(())
 }
@@ -70,8 +70,8 @@ fn test_left_join_all_nulls() -> Result<(), Box<dyn std::error::Error>> {
     // No matches, all rows should have NULL for right columns
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("1,Alice,NULL,NULL"))
-        .stdout(predicates::str::contains("2,Bob,NULL,NULL"));
+        .stdout(predicates::str::contains("1,Alice,,"))
+        .stdout(predicates::str::contains("2,Bob,,"));
 
     Ok(())
 }
@@ -116,8 +116,8 @@ fn test_left_join_empty_right() -> Result<(), Box<dyn std::error::Error>> {
     // All left rows should be returned with NULL for right columns
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("1,Alice,NULL,NULL"))
-        .stdout(predicates::str::contains("2,Bob,NULL,NULL"));
+        .stdout(predicates::str::contains("1,Alice,,"))
+        .stdout(predicates::str::contains("2,Bob,,"));
 
     Ok(())
 }

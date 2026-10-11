@@ -218,6 +218,7 @@ fn test_round_precision_distinguishes_column_names() -> Result<(), Box<dyn std::
     crate::helpers::assert_query(
         &["tests/data/employees.csv"],
         "SELECT ROUND(3.14159, 1), ROUND(3.14159, 3) FROM employees LIMIT 1",
-        concat!("ROUND(expr, 1),ROUND(expr, 3)", "\n3.1,3.142"),
+        // The names contain the delimiter, so the CSV header quotes them.
+        concat!("\"ROUND(expr, 1)\",\"ROUND(expr, 3)\"", "\n3.1,3.142"),
     )
 }

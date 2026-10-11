@@ -25,7 +25,7 @@ fn test_drop_table_basic() -> Result<(), Box<dyn std::error::Error>> {
 
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("DropTable: queued drop"));
+        .stderr(predicates::str::contains("DropTable: queued drop"));
 
     Ok(())
 }
@@ -67,7 +67,7 @@ fn test_drop_table_if_exists() -> Result<(), Box<dyn std::error::Error>> {
 
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("does not exist (IF EXISTS)"));
+        .stderr(predicates::str::contains("does not exist (IF EXISTS)"));
 
     Ok(())
 }
@@ -91,7 +91,7 @@ fn test_drop_table_if_exists_existing() -> Result<(), Box<dyn std::error::Error>
 
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("DropTable: queued drop"));
+        .stderr(predicates::str::contains("DropTable: queued drop"));
 
     Ok(())
 }
@@ -139,7 +139,7 @@ fn test_truncate_verbose() -> Result<(), Box<dyn std::error::Error>> {
 
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("Truncate: queued truncate"));
+        .stderr(predicates::str::contains("Truncate: queued truncate"));
 
     Ok(())
 }
@@ -280,7 +280,7 @@ fn test_create_table_verbose() -> Result<(), Box<dyn std::error::Error>> {
 
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("CreateTable"));
+        .stderr(predicates::str::contains("CreateTable"));
 
     Ok(())
 }

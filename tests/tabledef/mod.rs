@@ -156,10 +156,8 @@ fn test_tabledef_with_write() -> Result<(), Box<dyn std::error::Error>> {
 
     // Verify the file was updated
     let contents = std::fs::read_to_string(&data_file)?;
-    assert!(
-        contents.contains("999"),
-        "File should contain updated value"
-    );
+    // The file had no header row, and writeback must not add one.
+    assert_eq!(contents, "1,Alice,999\n2,Bob,200\n");
 
     Ok(())
 }

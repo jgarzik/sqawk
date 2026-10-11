@@ -316,25 +316,97 @@ fn round_to(num: f64, digits: i64) -> f64 {
     scaled.round() / factor
 }
 
-/// Compare two Values for ordering
+/// Compare two Values for ordering (ORDER BY, GROUP BY, MIN/MAX).
+///
+/// A total order: NULL first, then booleans, then numbers, then other text.
+/// Text that spells a number (`007`, `1.50`, `1e3` -- loaded as text so it
+/// keeps its spelling) sorts among the numbers by value, so a column mixing
+/// such text with inferred numbers still sorts numerically. Numbers equal in
+/// value but spelled differently (`7` and `007`) are ordered by their text,
+/// which keeps them in distinct groups.
 fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    match (a, b) {
-        (Value::Null, Value::Null) => Ordering::Equal,
-        (Value::Null, _) => Ordering::Less,
-        (_, Value::Null) => Ordering::Greater,
-        (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
-        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-        (Value::Integer(a), Value::Float(b)) => {
-            (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal)
+
+    fn rank(v: &Value) -> u8 {
+        match v {
+            Value::Null => 0,
+            Value::Boolean(_) => 1,
+            Value::Integer(_) | Value::Float(_) => 2,
+            Value::String(_) => 3,
         }
-        (Value::Float(a), Value::Integer(b)) => {
-            a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal)
-        }
-        (Value::String(a), Value::String(b)) => a.cmp(b),
-        (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
-        _ => format!("{:?}", a).cmp(&format!("{:?}", b)),
     }
+
+    match (a, b) {
+        (Value::Integer(a), Value::Integer(b)) => return a.cmp(b),
+        (Value::Float(a), Value::Float(b)) => {
+            return a.partial_cmp(b).unwrap_or(Ordering::Equal);
+        }
+        (Value::String(x), Value::String(y)) => {
+            // Fast path, since this runs inside sort comparators: text that
+            // cannot start a number compares as text.
+            fn may_be_number(s: &str) -> bool {
+                s.bytes().next().is_some_and(|c| {
+                    c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.' | b' ' | b'\t')
+                })
+            }
+            if !may_be_number(x) && !may_be_number(y) {
+                return x.cmp(y);
+            }
+            let (nx, ny) = (a.as_numeric(), b.as_numeric());
+            return match (nx, ny) {
+                (Some(nx), Some(ny)) => {
+                    compare_values(&nx, &ny).then_with(|| x.as_ref().cmp(y.as_ref()))
+                }
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => x.cmp(y),
+            };
+        }
+        _ => {}
+    }
+
+    let na = a.as_numeric();
+    let nb = b.as_numeric();
+    match (&na, &nb) {
+        (Some(x), Some(y)) => {
+            let by_value = match (x, y) {
+                (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
+                (Value::Integer(x), Value::Float(y)) => {
+                    (*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal)
+                }
+                (Value::Float(x), Value::Integer(y)) => {
+                    x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal)
+                }
+                (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
+                _ => Ordering::Equal,
+            };
+            by_value.then_with(|| match (a, b) {
+                // Integer 1 and Float 1.0 are the same value
+                (Value::String(_), _) | (_, Value::String(_)) => a.field_str().cmp(&b.field_str()),
+                _ => Ordering::Equal,
+            })
+        }
+        _ => {
+            let (ra, rb) = (
+                if na.is_some() { 2 } else { rank(a) },
+                if nb.is_some() { 2 } else { rank(b) },
+            );
+            match ra.cmp(&rb) {
+                Ordering::Equal => match (a, b) {
+                    (Value::Boolean(x), Value::Boolean(y)) => x.cmp(y),
+                    _ => Ordering::Equal,
+                },
+                other => other,
+            }
+        }
+    }
+}
+
+/// Coerce a value for SUM/AVG: numbers as-is, numeric text to a number.
+/// None for NULL and for anything with no numeric reading, which the
+/// aggregate skips.
+fn sum_operand(v: &Value) -> Option<Value> {
+    v.as_numeric()
 }
 
 /// Sorter for ORDER BY operations
@@ -589,7 +661,7 @@ impl<'a> VmEngine<'a> {
         self.transaction_state = TransactionState::None;
 
         if self.verbose {
-            println!("VM initialized with program:\n{}", self.program);
+            eprintln!("VM initialized with program:\n{}", self.program);
         }
     }
 
@@ -619,7 +691,7 @@ impl<'a> VmEngine<'a> {
                 .clone(); // Clone the instruction to avoid borrowing issues
 
             if self.verbose {
-                println!("Executing [{}]: {}", self.pc, inst_clone);
+                eprintln!("Executing [{}]: {}", self.pc, inst_clone);
             }
 
             // Execute the instruction
@@ -833,7 +905,7 @@ impl<'a> VmEngine<'a> {
                     .push(TableModification::Insert { table_name, row });
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "InsertRow: queued insert of {} columns into cursor {}",
                         col_count, cursor_idx
                     );
@@ -901,7 +973,7 @@ impl<'a> VmEngine<'a> {
                     });
 
                     if self.verbose {
-                        println!(
+                        eprintln!(
                             "DeleteRow: queued delete of row {} from cursor {}",
                             idx, cursor_idx
                         );
@@ -969,7 +1041,7 @@ impl<'a> VmEngine<'a> {
                     });
 
                 if self.verbose {
-                    println!("CreateTable: queued creation of table '{}'", table_name);
+                    eprintln!("CreateTable: queued creation of table '{}'", table_name);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1003,10 +1075,10 @@ impl<'a> VmEngine<'a> {
                         });
 
                     if self.verbose {
-                        println!("DropTable: queued drop of table '{}'", table_name);
+                        eprintln!("DropTable: queued drop of table '{}'", table_name);
                     }
                 } else if self.verbose {
-                    println!(
+                    eprintln!(
                         "DropTable: table '{}' does not exist (IF EXISTS)",
                         table_name
                     );
@@ -1041,7 +1113,7 @@ impl<'a> VmEngine<'a> {
                     });
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "AlterTableAdd: queued add column '{}' ({}) to table '{}'",
                         column_name, column_type, table_name
                     );
@@ -1068,7 +1140,7 @@ impl<'a> VmEngine<'a> {
                     });
 
                 if self.verbose {
-                    println!("Truncate: queued truncate of table '{}'", table_name);
+                    eprintln!("Truncate: queued truncate of table '{}'", table_name);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1208,7 +1280,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, Register::String(result))?;
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "StringFunc {}: r[{}] -> r[{}]",
                         func_name, src_reg, dest_reg
                     );
@@ -1229,7 +1301,7 @@ impl<'a> VmEngine<'a> {
                 let num = match src_value {
                     Register::Integer(i) => i as f64,
                     Register::Float(f) => f,
-                    Register::String(s) => s.parse::<f64>().unwrap_or(0.0),
+                    Register::String(s) => s.trim().parse::<f64>().unwrap_or(0.0),
                     Register::Null => {
                         // NULL in, NULL out
                         self.set_register(dest_reg, Register::Null)?;
@@ -1299,7 +1371,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result_reg)?;
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "MathFunc {}: r[{}] ({}) -> r[{}] ({})",
                         func_name, src_reg, num, dest_reg, result
                     );
@@ -1420,7 +1492,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, Register::String(result))?;
 
                 if self.verbose {
-                    println!("DateFunc {}: -> r[{}]", func_name, dest_reg);
+                    eprintln!("DateFunc {}: -> r[{}]", func_name, dest_reg);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1436,7 +1508,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result)?;
 
                 if self.verbose {
-                    println!("Add: r[{}] + r[{}] -> r[{}]", left_reg, right_reg, dest_reg);
+                    eprintln!("Add: r[{}] + r[{}] -> r[{}]", left_reg, right_reg, dest_reg);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1452,7 +1524,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result)?;
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "Subtract: r[{}] - r[{}] -> r[{}]",
                         left_reg, right_reg, dest_reg
                     );
@@ -1471,7 +1543,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result)?;
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "Multiply: r[{}] * r[{}] -> r[{}]",
                         left_reg, right_reg, dest_reg
                     );
@@ -1490,7 +1562,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result)?;
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "Divide: r[{}] / r[{}] -> r[{}]",
                         left_reg, right_reg, dest_reg
                     );
@@ -1509,7 +1581,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result)?;
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "Remainder: r[{}] %% r[{}] -> r[{}]",
                         left_reg, right_reg, dest_reg
                     );
@@ -1792,7 +1864,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(prev_ord_reg, Register::from(current_ord_val))?;
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "WindowAggStep: func_type={}, partition_changed={}",
                         func_type, partition_changed
                     );
@@ -1983,7 +2055,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, value)?;
 
                 if self.verbose {
-                    println!("WindowValue: func_type={}, dest=r[{}]", func_type, dest_reg);
+                    eprintln!("WindowValue: func_type={}, dest=r[{}]", func_type, dest_reg);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1998,7 +2070,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, value)?;
 
                 if self.verbose {
-                    println!("Copy: r[{}] -> r[{}]", src_reg, dest_reg);
+                    eprintln!("Copy: r[{}] -> r[{}]", src_reg, dest_reg);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -2110,7 +2182,7 @@ impl<'a> VmEngine<'a> {
                 self.transaction_state = TransactionState::Active;
 
                 if self.verbose {
-                    println!("BEGIN TRANSACTION");
+                    eprintln!("BEGIN TRANSACTION");
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -2130,7 +2202,7 @@ impl<'a> VmEngine<'a> {
                 self.transaction_state = TransactionState::Committed;
 
                 if self.verbose {
-                    println!("COMMIT TRANSACTION");
+                    eprintln!("COMMIT TRANSACTION");
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -2149,7 +2221,7 @@ impl<'a> VmEngine<'a> {
                 self.transaction_state = TransactionState::RolledBack;
 
                 if self.verbose {
-                    println!("ROLLBACK TRANSACTION");
+                    eprintln!("ROLLBACK TRANSACTION");
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -2177,7 +2249,7 @@ impl<'a> VmEngine<'a> {
                     .unwrap_or_else(|| format!("sp_{}", inst.p1));
 
                 if self.verbose {
-                    println!("SAVEPOINT {}", savepoint_name);
+                    eprintln!("SAVEPOINT {}", savepoint_name);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -2205,7 +2277,7 @@ impl<'a> VmEngine<'a> {
                     .unwrap_or_else(|| format!("sp_{}", inst.p1));
 
                 if self.verbose {
-                    println!("RELEASE SAVEPOINT {}", savepoint_name);
+                    eprintln!("RELEASE SAVEPOINT {}", savepoint_name);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -2590,7 +2662,7 @@ impl<'a> VmEngine<'a> {
                 self.results = unique_results;
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "DISTINCT: {} unique rows after deduplication",
                         self.results.len()
                     );
@@ -2636,7 +2708,7 @@ impl<'a> VmEngine<'a> {
                 }
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "LIMIT: offset {} then truncated to {} rows",
                         offset,
                         self.results.len()
@@ -2694,7 +2766,7 @@ impl<'a> VmEngine<'a> {
                 self.results = intersection;
 
                 if self.verbose {
-                    println!("INTERSECT: {} rows in intersection", self.results.len());
+                    eprintln!("INTERSECT: {} rows in intersection", self.results.len());
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -2748,7 +2820,7 @@ impl<'a> VmEngine<'a> {
                 self.results = difference;
 
                 if self.verbose {
-                    println!("EXCEPT: {} rows in difference", self.results.len());
+                    eprintln!("EXCEPT: {} rows in difference", self.results.len());
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -2766,7 +2838,7 @@ impl<'a> VmEngine<'a> {
                 }
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "NullRow: Set registers {} to {} to NULL",
                         start_reg,
                         start_reg + count - 1
@@ -2805,7 +2877,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(reg, Register::Integer(1))?;
 
                 if self.verbose {
-                    println!("MarkMatch: Set r[{}] = 1", reg);
+                    eprintln!("MarkMatch: Set r[{}] = 1", reg);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -2829,12 +2901,12 @@ impl<'a> VmEngine<'a> {
 
                 if should_jump {
                     if self.verbose {
-                        println!("CheckMatch: No match found, jumping to {}", jump_addr);
+                        eprintln!("CheckMatch: No match found, jumping to {}", jump_addr);
                     }
                     Ok(ExecuteResult::Jump(jump_addr))
                 } else {
                     if self.verbose {
-                        println!("CheckMatch: Match found, continuing");
+                        eprintln!("CheckMatch: Match found, continuing");
                     }
                     Ok(ExecuteResult::Continue)
                 }
@@ -2856,7 +2928,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(reg, Register::Integer(new_val))?;
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "DecrJumpZero: r[{}] = {} -> {}, jump if zero to {}",
                         reg, current, new_val, jump_addr
                     );
@@ -2894,7 +2966,7 @@ impl<'a> VmEngine<'a> {
                 self.sorters.insert(sorter_id, sorter);
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "SorterOpen: Created sorter {} with {} columns, spec: {}",
                         sorter_id, col_count, sort_spec
                     );
@@ -2920,7 +2992,7 @@ impl<'a> VmEngine<'a> {
                 if let Some(sorter) = self.sorters.get_mut(&sorter_id) {
                     sorter.insert(row);
                     if self.verbose {
-                        println!("SorterInsert: Added row to sorter {}", sorter_id);
+                        eprintln!("SorterInsert: Added row to sorter {}", sorter_id);
                     }
                 } else {
                     return Err(SqawkError::VmError(format!(
@@ -2939,7 +3011,7 @@ impl<'a> VmEngine<'a> {
                 if let Some(sorter) = self.sorters.get_mut(&sorter_id) {
                     sorter.sort();
                     if self.verbose {
-                        println!(
+                        eprintln!(
                             "SorterSort: Sorted {} rows in sorter {}",
                             sorter.rows.len(),
                             sorter_id
@@ -2976,7 +3048,7 @@ impl<'a> VmEngine<'a> {
                 }
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "SorterData: Copied row {} from sorter {} to r[{}..{}]",
                         position,
                         sorter_id,
@@ -2996,7 +3068,7 @@ impl<'a> VmEngine<'a> {
                 if let Some(sorter) = self.sorters.get_mut(&sorter_id) {
                     if sorter.next() {
                         if self.verbose {
-                            println!(
+                            eprintln!(
                                 "SorterNext: Advanced to row {} in sorter {}, jumping to {}",
                                 sorter.position, sorter_id, jump_addr
                             );
@@ -3004,7 +3076,7 @@ impl<'a> VmEngine<'a> {
                         Ok(ExecuteResult::Jump(jump_addr))
                     } else {
                         if self.verbose {
-                            println!(
+                            eprintln!(
                                 "SorterNext: No more rows in sorter {}, continuing",
                                 sorter_id
                             );
@@ -3046,7 +3118,7 @@ impl<'a> VmEngine<'a> {
                 self.cursors.insert(cursor_id, cursor);
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "OpenEphemeral: Created ephemeral cursor {} with {} columns, spec: {}",
                         cursor_id, col_count, sort_spec
                     );
@@ -3072,7 +3144,7 @@ impl<'a> VmEngine<'a> {
                 if let Some(cursor) = self.cursors.get_mut(&cursor_id) {
                     cursor.insert_row(row)?;
                     if self.verbose {
-                        println!("IdxInsert: Added row to cursor {}", cursor_id);
+                        eprintln!("IdxInsert: Added row to cursor {}", cursor_id);
                     }
                 } else {
                     return Err(SqawkError::VmError(format!(
@@ -3093,7 +3165,7 @@ impl<'a> VmEngine<'a> {
                     let has_rows = cursor.sort()?;
                     if has_rows {
                         if self.verbose {
-                            println!(
+                            eprintln!(
                                 "Sort: Sorted {} rows in cursor {}",
                                 cursor.row_count(),
                                 cursor_id
@@ -3102,7 +3174,7 @@ impl<'a> VmEngine<'a> {
                         Ok(ExecuteResult::Continue)
                     } else {
                         if self.verbose {
-                            println!(
+                            eprintln!(
                                 "Sort: Cursor {} is empty, jumping to {}",
                                 cursor_id, jump_if_empty
                             );
@@ -3126,7 +3198,7 @@ impl<'a> VmEngine<'a> {
                     let seq = cursor.next_sequence()?;
                     self.set_register(dest_reg, Register::Integer(seq))?;
                     if self.verbose {
-                        println!(
+                        eprintln!(
                             "Sequence: Generated sequence {} from cursor {} into r[{}]",
                             seq, cursor_id, dest_reg
                         );
@@ -3214,9 +3286,9 @@ impl<'a> VmEngine<'a> {
                         }
                     }
                     AGG_SUM => {
-                        // SUM
-                        if let Some(val) = value {
-                            if !matches!(val, Value::Null) {
+                        // SUM over numbers and numeric text
+                        if let Some(val) = value.as_ref().and_then(sum_operand) {
+                            {
                                 acc.count += 1;
                                 acc.value = Some(match (&acc.value, &val) {
                                     (None, v) => v.clone(),
@@ -3237,8 +3309,8 @@ impl<'a> VmEngine<'a> {
                     }
                     AGG_AVG => {
                         // AVG (accumulate sum, divide in AggFinal)
-                        if let Some(val) = value {
-                            if !matches!(val, Value::Null) {
+                        if let Some(val) = value.as_ref().and_then(sum_operand) {
+                            {
                                 acc.count += 1;
                                 acc.value = Some(match (&acc.value, &val) {
                                     (None, v) => v.clone(),
@@ -3306,7 +3378,7 @@ impl<'a> VmEngine<'a> {
                 }
 
                 if self.verbose {
-                    println!(
+                    eprintln!(
                         "AggStep: func={} acc_reg={} count={}",
                         func_type, acc_reg, acc.count
                     );
@@ -3387,7 +3459,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(result_reg, result)?;
 
                 if self.verbose {
-                    println!("AggFinal: acc_reg={} result_reg={}", acc_reg, result_reg);
+                    eprintln!("AggFinal: acc_reg={} result_reg={}", acc_reg, result_reg);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -3401,7 +3473,7 @@ impl<'a> VmEngine<'a> {
                 self.accumulators.remove(&acc_reg);
 
                 if self.verbose {
-                    println!("AggReset: cleared accumulator at reg {}", acc_reg);
+                    eprintln!("AggReset: cleared accumulator at reg {}", acc_reg);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -3880,7 +3952,7 @@ impl<'a> VmEngine<'a> {
         let left_num = match left {
             Register::Integer(i) => i as f64,
             Register::Float(f) => f,
-            Register::String(s) => s.parse::<f64>().unwrap_or(0.0),
+            Register::String(s) => s.trim().parse::<f64>().unwrap_or(0.0),
             Register::Boolean(b) => {
                 if b {
                     1.0
@@ -3894,7 +3966,7 @@ impl<'a> VmEngine<'a> {
         let right_num = match right {
             Register::Integer(i) => i as f64,
             Register::Float(f) => f,
-            Register::String(s) => s.parse::<f64>().unwrap_or(0.0),
+            Register::String(s) => s.trim().parse::<f64>().unwrap_or(0.0),
             Register::Boolean(b) => {
                 if b {
                     1.0

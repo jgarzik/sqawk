@@ -14,10 +14,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 
-use anyhow::Result;
-
 use crate::error::{SqawkError, SqawkResult};
-use crate::storage::Storage;
 
 /// Represents a value in a table cell
 ///
@@ -25,9 +22,7 @@ use crate::storage::Storage;
 /// It supports the common SQL data types and allows for type conversions
 /// between numeric types (Integer <-> Float) for comparison operations.
 ///
-/// String values use `Cow<'static, str>` to support both:
-/// - Owned strings (heap-allocated, from in-memory tables)
-/// - Borrowed strings (zero-copy, from memory-mapped files)
+/// String values are `Cow<'static, str>`; every stored string is owned.
 #[derive(Debug, Clone)]
 pub enum Value {
     /// Represents a NULL or missing value
@@ -83,9 +78,16 @@ impl std::hash::Hash for Value {
                 i.hash(state);
             }
             Value::Float(f) => {
-                // Convert float to bits for hashing to avoid NaN issues
-                2_i32.hash(state);
-                f.to_bits().hash(state);
+                // A float equal to an integer must hash like that integer,
+                // because `Integer(1) == Float(1.0)` under PartialEq.
+                if f.fract() == 0.0 && *f >= i64::MIN as f64 && *f < i64::MAX as f64 {
+                    1_i32.hash(state);
+                    (*f as i64).hash(state);
+                } else {
+                    // Bits avoid NaN issues
+                    2_i32.hash(state);
+                    f.to_bits().hash(state);
+                }
             }
             Value::String(s) => {
                 // Hash the string value
@@ -160,65 +162,165 @@ impl fmt::Display for Value {
     }
 }
 
-/// Implementation of string conversion to Value with automatic type inference
+/// Parse `s` as an integer only if `s` is that integer's canonical spelling.
 ///
-/// This implementation enables automatic type detection when loading data from delimiter-separated files.
-/// It attempts to parse the string value in the following order:
-/// 1. As an integer (i64)
-/// 2. As a floating point number (f64)
-/// 3. As a boolean (recognizing various common boolean representations)
-/// 4. Empty strings are converted to NULL values
-/// 5. Any other content is stored as a string
+/// Canonical means `i.to_string() == s`: an optional `-`, no `+`, no leading
+/// zeros (`007`), no `-0`, no surrounding whitespace. Checked by hand rather
+/// than by formatting, since this runs once per loaded cell.
+fn canonical_integer(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    let digits = match b.first()? {
+        b'-' => &b[1..],
+        _ => b,
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    if digits[0] == b'0' && (digits.len() > 1 || digits.len() != b.len()) {
+        return None;
+    }
+    s.parse::<i64>().ok()
+}
+
+/// Parse `s` as a float only if formatting the float back (the same `{}`
+/// formatting `Value`'s Display uses) reproduces `s` exactly.
 ///
-/// This type inference approach allows for efficient data storage and comparisons
-/// without requiring explicit type declarations in the input files.
+/// So `1.5` is a float but `1.50`, `1e3`, `2.0`, `.5`, `NaN` and `inf` are
+/// not: loading them as numbers would change their spelling on output and on
+/// writeback. Display never emits an exponent, so only `-`, digits and `.`
+/// can possibly round-trip; anything else is rejected before formatting.
+fn canonical_float(s: &str) -> Option<f64> {
+    if s.is_empty()
+        || !s
+            .bytes()
+            .all(|c| c.is_ascii_digit() || c == b'-' || c == b'.')
+    {
+        return None;
+    }
+    let f = s.parse::<f64>().ok()?;
+    if !f.is_finite() {
+        return None;
+    }
+    if let Some(canonical) = short_decimal_is_canonical(s) {
+        return canonical.then_some(f);
+    }
+    thread_local! {
+        static BUF: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+    BUF.with(|buf| {
+        use std::fmt::Write;
+        let mut buf = buf.borrow_mut();
+        buf.clear();
+        let _ = write!(buf, "{}", f);
+        (*buf == s).then_some(f)
+    })
+}
+
+/// Decide canonicity of a plain decimal without formatting, when possible.
+///
+/// Display prints the shortest digit string that round-trips, in positional
+/// notation. A decimal of at most 15 significant digits round-trips through
+/// f64 exactly, and no other decimal that short maps to the same double, so
+/// such a string is canonical iff it is in Display's shape:
+/// `-?(0|[1-9][0-9]*)\.[0-9]*[1-9]`. Returns None when the fast rule does not
+/// apply (more digits, or no point), leaving the caller to format and compare.
+fn short_decimal_is_canonical(s: &str) -> Option<bool> {
+    let body = s.strip_prefix('-').unwrap_or(s);
+    let (int, frac) = body.split_once('.')?;
+    if int.is_empty() || frac.is_empty() || frac.contains(['.', '-']) || int.contains('-') {
+        return Some(false);
+    }
+    let digits = || int.bytes().chain(frac.bytes());
+    let significant = digits().skip_while(|&c| c == b'0').count();
+    if significant > 15 {
+        return None;
+    }
+    let shape_ok = (int == "0" || !int.starts_with('0')) && !frac.ends_with('0');
+    Some(shape_ok)
+}
+
+/// Infer the type of a field read from an input file.
+///
+/// The rule is chosen so that every loaded cell renders back to exactly the
+/// text it was read from -- untouched cells survive `--write` byte for byte:
+///
+/// - empty field: NULL (rendered back as an empty field)
+/// - canonical integer (`42`, `-7`): Integer
+/// - canonical float (`1.5`, `-0.25`): Float
+/// - anything else, verbatim and untrimmed: String. That includes `007`,
+///   `1.50`, `1e3`, ` 42`, `true`, `NaN`.
+///
+/// Numeric-looking strings still behave as numbers where a number is needed
+/// (arithmetic, SUM/AVG, comparison with a number, ordering); see the VM.
+fn infer_value(s: &str) -> Option<Value> {
+    if s.is_empty() {
+        return Some(Value::Null);
+    }
+    if let Some(i) = canonical_integer(s) {
+        return Some(Value::Integer(i));
+    }
+    canonical_float(s).map(Value::Float)
+}
+
+/// Field text to Value, with canonical type inference (see `infer_value`).
 impl From<&str> for Value {
     fn from(s: &str) -> Self {
-        // Try to parse as integer first
-        if let Ok(i) = s.parse::<i64>() {
-            return Value::Integer(i);
-        }
-
-        // Try to parse as float
-        if let Ok(fl) = s.parse::<f64>() {
-            return Value::Float(fl);
-        }
-
-        // Try to parse as boolean
-        match s.to_lowercase().as_str() {
-            "true" | "yes" | "1" => return Value::Boolean(true),
-            "false" | "no" | "0" => return Value::Boolean(false),
-            "" => return Value::Null,
-            _ => {}
-        }
-
-        // Default to owned string
-        Value::String(Cow::Owned(s.to_string()))
+        infer_value(s).unwrap_or_else(|| Value::String(Cow::Owned(s.to_string())))
     }
 }
 
 impl From<String> for Value {
     fn from(s: String) -> Self {
-        // Try to parse as integer first
-        if let Ok(i) = s.parse::<i64>() {
-            return Value::Integer(i);
-        }
+        infer_value(&s).unwrap_or(Value::String(Cow::Owned(s)))
+    }
+}
 
-        // Try to parse as float
-        if let Ok(fl) = s.parse::<f64>() {
-            return Value::Float(fl);
+impl Value {
+    /// The text of this value as a delimited-file field.
+    ///
+    /// Identical to Display except that NULL is the empty field, which is
+    /// what NULL loads from. Used for stdout and for writeback.
+    pub fn field_str(&self) -> Cow<'_, str> {
+        match self {
+            Value::Null => Cow::Borrowed(""),
+            Value::String(s) => Cow::Borrowed(s.as_ref()),
+            other => Cow::Owned(other.to_string()),
         }
+    }
 
-        // Try to parse as boolean
-        match s.to_lowercase().as_str() {
-            "true" | "yes" | "1" => return Value::Boolean(true),
-            "false" | "no" | "0" => return Value::Boolean(false),
-            "" => return Value::Null,
-            _ => {}
+    /// This value as a number, if it is one or is text spelling one.
+    ///
+    /// Integers stay integers (text such as `007` included); other numeric
+    /// text becomes a float. Surrounding whitespace is allowed, as awk and
+    /// SQLite allow it. Returns None for NULL, booleans and non-numeric text.
+    pub fn as_numeric(&self) -> Option<Value> {
+        match self {
+            Value::Integer(_) | Value::Float(_) => Some(self.clone()),
+            Value::String(s) => numeric_text(s),
+            _ => None,
         }
+    }
+}
 
-        // Default to owned string (avoid extra allocation)
-        Value::String(Cow::Owned(s))
+/// Interpret text as a number: an i64 if it parses as one, else a finite f64.
+pub fn numeric_text(s: &str) -> Option<Value> {
+    let t = s.trim();
+    // Cheap rejection first: this runs inside sort comparators. A finite
+    // number starts with a digit, a sign or a point.
+    if !t
+        .bytes()
+        .next()
+        .is_some_and(|c| c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.'))
+    {
+        return None;
+    }
+    if let Ok(i) = t.parse::<i64>() {
+        return Some(Value::Integer(i));
+    }
+    // `inf` and `NaN` parse but are not finite, so they stay text.
+    match t.parse::<f64>() {
+        Ok(f) if f.is_finite() => Some(Value::Float(f)),
+        _ => None,
     }
 }
 
@@ -621,7 +723,7 @@ impl<'a> Default for IndexedResultBuilder<'a> {
 // End Index-Based Result Types
 // =============================================================================
 
-/// Represents a table with a storage backend
+/// Represents an in-memory table
 #[derive(Debug)]
 pub struct Table {
     /// Name of the table
@@ -633,8 +735,8 @@ pub struct Table {
     /// Map of column names to their indices
     column_map: HashMap<String, usize>,
 
-    /// Row data storage backend (memory or mmap)
-    storage: Storage,
+    /// Row data
+    rows: Vec<Row>,
 
     /// File path associated with this table (for loading or saving)
     file_path: Option<PathBuf>,
@@ -644,6 +746,37 @@ pub struct Table {
 
     /// Custom delimiter for this table's file (default is comma)
     delimiter: String,
+
+    /// How the source file was laid out, so writeback reproduces it.
+    format: FileLayout,
+
+    /// A `--tabledef` schema with no data yet, waiting for its file
+    placeholder: bool,
+}
+
+/// Layout details of a table's source file that writeback must reproduce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileLayout {
+    /// Whether the file has a header line. Headerless files (`--no-header`,
+    /// `--tabledef`, or a guessed headerless non-.csv file) are written back
+    /// without one.
+    pub has_header: bool,
+    /// Whether records end in CRLF rather than LF.
+    pub crlf: bool,
+    /// Whether `#` lines are comments when the file is read. If so, a data
+    /// row whose first field starts with `#` must be quoted on writeback, or
+    /// it would be skipped as a comment when read again.
+    pub comments: bool,
+}
+
+impl Default for FileLayout {
+    fn default() -> Self {
+        FileLayout {
+            has_header: true,
+            crlf: false,
+            comments: false,
+        }
+    }
 }
 
 /// Data type for a column in a table schema
@@ -719,10 +852,12 @@ impl Table {
             name: name.to_string(),
             cols,
             column_map,
-            storage: Storage::new_memory(),
+            rows: Vec::new(),
             file_path,
             modified: false,
             delimiter: ",".to_string(), // Default to comma delimiter
+            format: FileLayout::default(),
+            placeholder: false,
         }
     }
 
@@ -736,44 +871,6 @@ impl Table {
         let mut table = Self::new(name, column_names, file_path);
         table.delimiter = delimiter;
         table
-    }
-
-    /// Create a new table with a specific storage backend
-    ///
-    /// This constructor is used for memory-mapped file storage where the
-    /// storage already contains the parsed data.
-    pub fn with_storage(
-        name: &str,
-        column_names: Vec<String>,
-        file_path: Option<PathBuf>,
-        delimiter: String,
-        storage: Storage,
-    ) -> Self {
-        // Create column_map from column names
-        let column_map = column_names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), i))
-            .collect();
-
-        // Create full column metadata objects (default to Text type)
-        let cols = column_names
-            .iter()
-            .map(|name| Column {
-                name: name.clone(),
-                data_type: DataType::Text,
-            })
-            .collect();
-
-        Table {
-            name: name.to_string(),
-            cols,
-            column_map,
-            storage,
-            file_path,
-            modified: false,
-            delimiter,
-        }
     }
 
     /// Create a new table with a schema
@@ -806,10 +903,12 @@ impl Table {
             name: name.to_string(),
             cols,
             column_map,
-            storage: Storage::new_memory(),
+            rows: Vec::new(),
             file_path,
             modified: true, // Tables created with schema are considered modified
             delimiter: delimiter.unwrap_or_else(|| ",".to_string()),
+            format: FileLayout::default(),
+            placeholder: false,
         }
     }
 
@@ -846,7 +945,7 @@ impl Table {
     /// of Value enums representing the cell values. This provides read-only
     /// access to the table data for processing or querying.
     pub fn rows(&self) -> &[Row] {
-        self.storage.rows()
+        &self.rows
     }
 
     /// Get the name of the table
@@ -871,7 +970,7 @@ impl Table {
     /// Returns the number of rows in the table. This is useful for
     /// determining the size of the result set or for validation.
     pub fn row_count(&self) -> usize {
-        self.storage.row_count()
+        self.rows.len()
     }
 
     /// Add a row to the table
@@ -897,39 +996,24 @@ impl Table {
             )));
         }
 
-        // Ensure storage is mutable (converts mmap to memory if needed)
-        self.storage.ensure_mutable();
-        self.storage.push_row(row);
+        self.rows.push(row);
         self.modified = true;
         Ok(())
     }
 
-    /// Add a row by cloning values from a slice
-    ///
-    /// This method allows reusing a row buffer by cloning values from a slice.
-    /// It validates that the slice length matches the table column count.
-    ///
-    /// # Arguments
-    /// * `row` - Slice of values to clone and add as a new row
-    ///
-    /// # Returns
-    /// * `Ok(())` if the row was successfully added
-    /// * `Err` if the slice length doesn't match the table schema
-    pub fn add_row_from_slice(&mut self, row: &[Value]) -> SqawkResult<()> {
-        if row.len() != self.column_count() {
-            return Err(SqawkError::InvalidSqlQuery(format!(
-                "Row has {} columns, but table '{}' has {} columns",
-                row.len(),
-                self.name,
-                self.column_count()
-            )));
-        }
+    /// Clear the modified flag (a freshly loaded table is unmodified)
+    pub fn mark_unmodified(&mut self) {
+        self.modified = false;
+    }
 
-        // Ensure storage is mutable (converts mmap to memory if needed)
-        self.storage.ensure_mutable();
-        self.storage.push_row(row.to_vec());
-        self.modified = true;
-        Ok(())
+    /// Whether this is a `--tabledef` placeholder awaiting its file
+    pub fn is_placeholder(&self) -> bool {
+        self.placeholder
+    }
+
+    /// Mark this table as a `--tabledef` placeholder
+    pub fn set_placeholder(&mut self, placeholder: bool) {
+        self.placeholder = placeholder;
     }
 
     /// Get the file path associated with this table
@@ -944,15 +1028,6 @@ impl Table {
     /// * `None` if the table has no associated file
     pub fn file_path(&self) -> Option<&PathBuf> {
         self.file_path.as_ref()
-    }
-
-    /// Detach this table from its backing file.
-    ///
-    /// Used for tables read from standard input: the data was spooled through
-    /// a temporary file to be parsed, but that file is not a writeback target,
-    /// so the table must not claim it as its source.
-    pub fn detach_file_path(&mut self) {
-        self.file_path = None;
     }
 
     /// Get the delimiter for this table
@@ -974,6 +1049,16 @@ impl Table {
         self.delimiter = delimiter;
     }
 
+    /// Layout of the source file (header, line endings, comments)
+    pub fn file_layout(&self) -> FileLayout {
+        self.format
+    }
+
+    /// Record the layout of the source file, for writeback
+    pub fn set_file_layout(&mut self, format: FileLayout) {
+        self.format = format;
+    }
+
     /// Get the index of a column by name
     ///
     /// Looks up a column by name and returns its index in the table.
@@ -990,38 +1075,48 @@ impl Table {
         self.column_map.get(name).copied()
     }
 
-    /// Print the table to stdout
+    /// Print the table to stdout as a delimited file
     ///
-    /// Formats and prints the table contents to standard output in comma-delimited format.
-    /// This is used for displaying query results to the user.
+    /// Header line, then one record per row, using this table's delimiter
+    /// with RFC 4180 quoting where a field needs it. NULL prints as an empty
+    /// field. Returns the raw io::Error so the caller can recognise a closed
+    /// pipe (`sqawk ... | head`) and stop quietly.
+    pub fn print_to_stdout(&self) -> std::io::Result<()> {
+        let stdout = std::io::stdout();
+        let mut out = std::io::BufWriter::new(stdout.lock());
+        self.write_delimited(&mut out, true, false, false)?;
+        std::io::Write::flush(&mut out)
+    }
+
+    /// Write the table as a delimited file to `out`.
     ///
-    /// # Returns
-    /// * `Ok(())` if the table was successfully printed
-    /// * `Err` if there was an error writing to stdout
-    pub fn print_to_stdout(&self) -> Result<()> {
-        let delim = &self.delimiter;
-
-        // Print header
-        let column_names = self.columns();
-        for (i, col) in column_names.iter().enumerate() {
-            if i > 0 {
-                print!("{}", delim);
-            }
-            print!("{}", col);
+    /// * `header` - emit the column names first
+    /// * `crlf` - end records with CRLF instead of LF
+    /// * `comments` - the file will be read with `#` comment skipping, so a
+    ///   leading `#` in a record's first field must be quoted
+    pub fn write_delimited<W: std::io::Write>(
+        &self,
+        out: &mut W,
+        header: bool,
+        crlf: bool,
+        comments: bool,
+    ) -> std::io::Result<()> {
+        let delim = delimiter_byte(&self.delimiter);
+        let w = RecordWriter {
+            delimiter: delim,
+            terminator: if crlf { b"\r\n" } else { b"\n" },
+            comments,
+        };
+        if header {
+            let names = self.columns();
+            w.write(out, names.iter().map(String::as_str))?;
         }
-        println!();
-
-        // Print rows
-        for row in self.rows() {
-            for (i, val) in row.iter().enumerate() {
-                if i > 0 {
-                    print!("{}", delim);
-                }
-                print!("{}", val);
-            }
-            println!();
+        let mut fields: Vec<std::borrow::Cow<'_, str>> = Vec::with_capacity(self.cols.len());
+        for row in &self.rows {
+            fields.clear();
+            fields.extend(row.iter().map(Value::field_str));
+            w.write(out, fields.iter().map(|f| f.as_ref()))?;
         }
-
         Ok(())
     }
 
@@ -1033,9 +1128,7 @@ impl Table {
     /// # Arguments
     /// * `new_rows` - The new set of rows to replace the existing ones
     pub fn replace_rows(&mut self, new_rows: Vec<Row>) {
-        // Ensure storage is mutable (converts mmap to memory if needed)
-        self.storage.ensure_mutable();
-        self.storage.replace_rows(new_rows);
+        self.rows = new_rows;
         self.modified = true;
     }
 
@@ -1044,10 +1137,7 @@ impl Table {
     /// Used by UPDATE. Expressing an update as delete-plus-insert appends the
     /// new row, which reorders the table -- and with --write, the user's file.
     pub fn replace_row(&mut self, row_index: usize, row: Row) -> SqawkResult<()> {
-        self.storage.ensure_mutable();
-        let rows = self.storage.rows_mut().ok_or_else(|| {
-            SqawkError::InvalidSqlQuery("Table storage is not mutable".to_string())
-        })?;
+        let rows = &mut self.rows;
         if row_index >= rows.len() {
             return Err(SqawkError::InvalidSqlQuery(format!(
                 "Row index {} out of range for table '{}'",
@@ -1075,8 +1165,6 @@ impl Table {
         self.cols.push(column);
         let new_index = self.cols.len() - 1;
         self.column_map.insert(name, new_index);
-        // Ensure storage is mutable (converts mmap to memory if needed)
-        self.storage.ensure_mutable();
         self.modified = true;
     }
 
@@ -1095,14 +1183,9 @@ impl Table {
         let new_index = self.cols.len() - 1;
         self.column_map.insert(name, new_index);
 
-        // Ensure storage is mutable (converts mmap to memory if needed)
-        self.storage.ensure_mutable();
-
         // Add default value to all existing rows
-        if let Some(rows) = self.storage.rows_mut() {
-            for row in rows {
-                row.push(default_value.clone());
-            }
+        for row in &mut self.rows {
+            row.push(default_value.clone());
         }
 
         self.modified = true;
@@ -1111,9 +1194,7 @@ impl Table {
 
     /// Clear all rows from the table (TRUNCATE TABLE)
     pub fn clear_rows(&mut self) -> crate::error::SqawkResult<()> {
-        // Ensure storage is mutable (converts mmap to memory if needed)
-        self.storage.ensure_mutable();
-        self.storage.replace_rows(Vec::new());
+        self.rows.clear();
         self.modified = true;
         Ok(())
     }
@@ -1128,7 +1209,89 @@ impl Table {
     pub fn rows_as_strings(&self) -> Vec<Vec<String>> {
         self.rows()
             .iter()
-            .map(|row| row.iter().map(|value| value.to_string()).collect())
+            .map(|row| {
+                row.iter()
+                    .map(|value| value.field_str().into_owned())
+                    .collect()
+            })
             .collect()
+    }
+}
+
+/// The delimiter byte for a table's delimiter string.
+///
+/// The CLI validates `-F` to a single ASCII byte (or the two-character escape
+/// `\t`), so anything else can only come from a bug; it falls back to comma.
+pub fn delimiter_byte(delimiter: &str) -> u8 {
+    match delimiter.as_bytes() {
+        [b] => *b,
+        b"\\t" => b'\t',
+        _ => b',',
+    }
+}
+
+/// Writes delimited records with RFC 4180 quoting.
+///
+/// A field is quoted when it contains the delimiter, a quote, CR or LF, or
+/// has leading or trailing whitespace (which a reader that trims would
+/// lose); embedded quotes are doubled. A record consisting of one empty field
+/// is written as `""`, since a blank line is skipped on read. The csv crate's
+/// writer cannot express the whitespace rule, hence this small writer.
+pub struct RecordWriter {
+    /// Field separator byte
+    pub delimiter: u8,
+    /// Record terminator (`\n` or `\r\n`)
+    pub terminator: &'static [u8],
+    /// Quote a first field that starts with `#` (see `FileLayout::comments`)
+    pub comments: bool,
+}
+
+impl RecordWriter {
+    fn needs_quotes(&self, field: &str, first: bool) -> bool {
+        let b = field.as_bytes();
+        if b.is_empty() {
+            return false;
+        }
+        (first && self.comments && b[0] == b'#')
+            || b.iter()
+                .any(|&c| c == self.delimiter || c == b'"' || c == b'\n' || c == b'\r')
+            || b[0] == b' '
+            || b[0] == b'\t'
+            || b[b.len() - 1] == b' '
+            || b[b.len() - 1] == b'\t'
+    }
+
+    /// Write one record.
+    pub fn write<'a, W: std::io::Write>(
+        &self,
+        out: &mut W,
+        fields: impl Iterator<Item = &'a str>,
+    ) -> std::io::Result<()> {
+        let mut n = 0;
+        let mut lone_empty = false;
+        for (i, field) in fields.enumerate() {
+            if i > 0 {
+                out.write_all(&[self.delimiter])?;
+            }
+            if self.needs_quotes(field, i == 0) {
+                out.write_all(b"\"")?;
+                let mut rest = field;
+                while let Some(pos) = rest.find('"') {
+                    out.write_all(&rest.as_bytes()[..=pos])?;
+                    out.write_all(b"\"")?;
+                    rest = &rest[pos + 1..];
+                }
+                out.write_all(rest.as_bytes())?;
+                out.write_all(b"\"")?;
+            } else {
+                out.write_all(field.as_bytes())?;
+            }
+            lone_empty = i == 0 && field.is_empty();
+            n = i + 1;
+        }
+        if n == 1 && lone_empty {
+            out.write_all(b"\"\"")?;
+        }
+        out.write_all(self.terminator)
     }
 }

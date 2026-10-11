@@ -157,7 +157,8 @@ impl Database {
                     // Create a new table with the specified columns
                     // Note: No file_path is assigned here as this is a table definition only
                     let columns_len = columns.len(); // Store the length before we move columns
-                    let table = Table::new(table_name, columns, None);
+                    let mut table = Table::new(table_name, columns, None);
+                    table.set_placeholder(true);
 
                     // Add the table to the database, overwriting any existing definition with the same name
                     // This ensures CLI definitions take precedence
@@ -170,7 +171,7 @@ impl Database {
                     self.add_table(table_name.to_string(), table)?;
 
                     if config.verbose() {
-                        println!(
+                        eprintln!(
                             "Compiled table definition for '{}' with {} columns",
                             table_name, columns_len
                         );
