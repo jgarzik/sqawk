@@ -150,11 +150,26 @@ SELECT * FROM t1 LEFT JOIN t2 ON t1.id = t2.id
 SELECT * FROM t1 RIGHT JOIN t2 ON t1.id = t2.id
 SELECT * FROM t1 FULL JOIN t2 ON t1.id = t2.id
 
--- Multiple joins
+-- Multiple joins, any mix of INNER / LEFT / CROSS
 SELECT * FROM t1
   JOIN t2 ON t1.id = t2.t1_id
-  JOIN t3 ON t2.id = t3.t2_id
+  LEFT JOIN t3 ON t2.id = t3.t2_id
+
+-- USING and NATURAL: the shared columns appear once in SELECT *
+SELECT * FROM t1 JOIN t2 USING (id)
+SELECT * FROM t1 NATURAL LEFT JOIN t2
 ```
+
+WHERE filters the joined rows, including the NULL-extended rows of an outer
+join (`... LEFT JOIN t2 ON ... WHERE t2.id IS NULL` is an anti-join). An
+unqualified column name must be unambiguous across the joined tables.
+
+A RIGHT JOIN whose left side already contains an outer join, and a FULL JOIN
+followed by further joins, are rejected as unsupported.
+
+Joins on an equality (`ON a.k = b.k`, or the same condition in WHERE for a
+comma or inner join) run as hash joins: the inner table is indexed once
+instead of being rescanned for every outer row.
 
 ## Subqueries
 

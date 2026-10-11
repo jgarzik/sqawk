@@ -56,7 +56,10 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
   list, WHERE, HAVING, ORDER BY and SET clauses alike, plus `NameCtx`, which
   carries the FROM sources a name can resolve against
 - `compiler_aggregate.rs`: aggregates, GROUP BY, HAVING
-- `compiler_join.rs`: joins
+- `compiler_from.rs`: the FROM planner used by every SELECT -- tables, comma
+  lists and join chains become nested loop levels (ON per level, WHERE after
+  outer-join NULL-extension, hash join on equi-conditions); the projection /
+  aggregate stage is a body callback emitted at the innermost level
 - `compiler_dml.rs`: INSERT / UPDATE / DELETE
 - `compiler_ddl.rs`: CREATE / DROP / ALTER / TRUNCATE
 - `compiler_window.rs`: window functions

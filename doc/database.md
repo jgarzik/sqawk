@@ -224,25 +224,37 @@ The database engine supports combining data from multiple tables through SQL-sta
 - **ON constraints**: Supported, and the condition is a full expression, not
   just a single comparison: `ON a.id = b.id AND UPPER(a.name) = 'X'`
 - **Table aliases**: Supported (`FROM users u JOIN orders o ON u.id = o.user_id`)
-- **USING / NATURAL**: Not supported
-- **Multi-table joins**: Supports chaining 3+ tables in a single query
-- **Aggregates over joins**: Supported for inner joins, which are rewritten to
-  the equivalent comma join. Deliberately NOT applied to outer joins, since
-  moving the ON condition into WHERE would discard the NULL-extended rows an
-  outer join exists to produce
+- **USING / NATURAL**: Supported; the shared columns are merged into one
+  output column (the first non-NULL of the joined columns)
+- **Multi-table joins**: Any chain of INNER / LEFT / CROSS joins and comma
+  lists. RIGHT JOIN is supported when everything to its left is inner-joined;
+  FULL JOIN must be the last join
+- **Expressions**: The SELECT list, ON, WHERE, GROUP BY, HAVING and ORDER BY
+  of a join accept the same expressions as a single-table query
+- **Aggregates over joins**: Supported for every join type, including the
+  NULL-extended rows of outer joins
 
 ### Technical Implementation
 
-- Joins are compiled to VM bytecode for efficient execution
-- Nested loop algorithm with appropriate NULL handling for outer joins
-- Column references use table qualifiers for disambiguation in result sets
-- Type coercion rules are applied consistently in join conditions
+- One FROM planner (`src/vm/compiler_from.rs`) serves every SELECT: each
+  source table is a cursor and a loop level, outermost first
+- ON conditions are evaluated at their join's level; WHERE conditions after
+  outer-join NULL-extension, at the innermost level that has all their tables
+- Outer joins keep a per-level match flag; an unmatched row re-runs the inner
+  levels once with the inner tables on a NULL row (`NullRow`). RIGHT JOIN is a
+  LEFT JOIN with the loop order swapped; FULL JOIN adds a pass over the right
+  table for rows that never matched
+- An equality between the inner table and the outer tables becomes a hash
+  join (`HashInsert` / `HashProbe` / `HashNext`). Keys are normalized so that
+  values `=` treats as equal (1, 1.0, '1') share a bucket; NULL keys never
+  match; the full join condition is re-checked on every candidate
 
 ## Current System Limitations
 
 The database engine has several architectural limitations:
 
-- **No Index Structure**: All operations perform full table scans
+- **No Index Structure**: Tables are scanned in full; the only index is the
+  temporary hash index an equi-join builds for its inner table
 - **No Transaction Support**: A statement's modifications are applied once it
   completes; there is no BEGIN/COMMIT and no rollback across statements
 - **Schema Flexibility**: Types are inferred per value rather than enforced
@@ -250,8 +262,7 @@ The database engine has several architectural limitations:
 - **Whole-dataset residency**: A table must fit in memory
 
 Unsupported SQL of note: CTEs (`WITH`), explicit window frames
-(`ROWS BETWEEN ...`), `USING`/`NATURAL` joins, and aggregates over outer
-joins.
+(`ROWS BETWEEN ...`), parenthesized joins, and window functions over joins.
 
 ---
 
