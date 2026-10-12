@@ -249,6 +249,17 @@ struct Group {
     end: usize,
 }
 
+/// What every level of one loop nest shares (see `emit_level`).
+#[derive(Clone, Copy)]
+struct Levels<'r> {
+    /// [`FromPlan::deferred_levels`].
+    deferred: &'r [bool],
+    /// Each outer-join group's match flag register.
+    match_regs: &'r [i64],
+    /// Where each group's NULL-extended row re-enters the nest.
+    match_labels: &'r [Label],
+}
+
 /// A planned FROM clause.
 pub(crate) struct FromPlan<'t> {
     /// Sources in FROM order. A statement-level query opens source `i` on
@@ -316,6 +327,23 @@ impl<'t> FromPlan<'t> {
     /// The outer-join group containing level `lvl`, if any.
     fn group_of(&self, lvl: usize) -> Option<&Group> {
         self.groups.iter().find(|g| g.start <= lvl && lvl <= g.end)
+    }
+
+    /// Per level: whether its table is opened (and its hash index built)
+    /// only when the nest first reaches the level, as SQLite builds an
+    /// automatic index there, rather than before the nest. Every level but
+    /// the outermost, except one a RIGHT JOIN may NULL-extend without
+    /// reaching (an outer-join group's levels after its first) and in a
+    /// FULL JOIN, whose pass over unmatched right rows reads its tables
+    /// after the nest.
+    fn deferred_levels(&self) -> Vec<bool> {
+        (0..self.levels.len())
+            .map(|lvl| {
+                lvl > 0
+                    && self.full_where.is_none()
+                    && !self.groups.iter().any(|g| g.start < lvl && lvl <= g.end)
+            })
+            .collect()
     }
 
     /// The deepest level among `srcs` (level 0 for none).
@@ -866,50 +894,19 @@ impl<'a> SqlCompiler<'a> {
                 "subquery cursors: open once",
             );
         }
-        for (i, name) in plan.table_names.iter().enumerate() {
-            let cursor = plan.cursor(i);
-            self.emit(
-                OpCode::OpenRead,
-                cursor,
-                0,
-                0,
-                Some(name.clone()),
-                &format!("Open {} as cursor {}", name, cursor),
-            );
-        }
-
-        // Build each hash index once, before the nest: its key expressions
-        // read only the inner table.
-        for level in &plan.levels {
-            let Some((inner, _)) = &level.hash else {
-                continue;
-            };
-            let cursor = plan.cursor(level.src);
-            let top = self.label();
-            let done = self.label();
-            self.emit_jump_to(
-                OpCode::Rewind,
-                cursor,
-                done,
-                0,
-                None,
-                "hash build: scan inner",
-            );
-            self.resolve(top);
-            let keys = self.allocate_registers(inner.len());
-            for (j, e) in inner.iter().enumerate() {
-                self.code_expr(e, &ctx, Some(keys + j as i64))?;
+        // An inner level's table is opened, and its hash index built, when
+        // the nest first reaches that level (see `deferred_levels`); every
+        // other table here, before the nest.
+        let deferred = plan.deferred_levels();
+        for (lvl, level) in plan.levels.iter().enumerate() {
+            if !deferred[lvl] {
+                self.emit_open(plan, level.src);
             }
-            self.emit(
-                OpCode::HashInsert,
-                cursor,
-                keys,
-                inner.len() as i64,
-                None,
-                "hash build: index row",
-            );
-            self.emit_jump_to(OpCode::Next, cursor, top, 0, None, "");
-            self.resolve(done);
+        }
+        for (lvl, level) in plan.levels.iter().enumerate() {
+            if !deferred[lvl] {
+                self.emit_hash_build(plan, &ctx, level)?;
+            }
         }
         if once {
             self.resolve(opened);
@@ -925,7 +922,12 @@ impl<'a> SqlCompiler<'a> {
             // No FROM: the body runs once, if WHERE holds.
             body(self, &ctx)?;
         } else {
-            self.emit_level(plan, &ctx, 0, &match_regs, &match_labels, body)?;
+            let levels = Levels {
+                deferred: &deferred,
+                match_regs: &match_regs,
+                match_labels: &match_labels,
+            };
+            self.emit_level(plan, &ctx, 0, &levels, body)?;
         }
 
         // FULL JOIN: right rows no left row matched, with the left side NULL.
@@ -974,19 +976,88 @@ impl<'a> SqlCompiler<'a> {
         Ok(())
     }
 
+    /// Open source `src`'s table on its cursor.
+    fn emit_open(&mut self, plan: &FromPlan<'a>, src: usize) {
+        let cursor = plan.cursor(src);
+        let name = &plan.table_names[src];
+        self.emit(
+            OpCode::OpenRead,
+            cursor,
+            0,
+            0,
+            Some(name.clone()),
+            &format!("Open {} as cursor {}", name, cursor),
+        );
+    }
+
+    /// Build `level`'s hash index, if it is a hash join: its key
+    /// expressions read only the level's own table.
+    fn emit_hash_build(
+        &mut self,
+        plan: &FromPlan<'a>,
+        ctx: &NameCtx<'a>,
+        level: &Level,
+    ) -> SqawkResult<()> {
+        let Some((inner, _)) = &level.hash else {
+            return Ok(());
+        };
+        let cursor = plan.cursor(level.src);
+        let top = self.label();
+        let done = self.label();
+        self.emit_jump_to(
+            OpCode::Rewind,
+            cursor,
+            done,
+            0,
+            None,
+            "hash build: scan inner",
+        );
+        self.resolve(top);
+        let keys = self.allocate_registers(inner.len());
+        for (j, e) in inner.iter().enumerate() {
+            self.code_expr(e, ctx, Some(keys + j as i64))?;
+        }
+        self.emit(
+            OpCode::HashInsert,
+            cursor,
+            keys,
+            inner.len() as i64,
+            None,
+            "hash build: index row",
+        );
+        self.emit_jump_to(OpCode::Next, cursor, top, 0, None, "");
+        self.resolve(done);
+        Ok(())
+    }
+
     fn emit_level(
         &mut self,
         plan: &FromPlan<'a>,
         ctx: &NameCtx<'a>,
         lvl: usize,
-        match_regs: &[i64],
-        match_labels: &[Label],
+        levels: &Levels<'_>,
         body: &mut dyn FnMut(&mut Self, &NameCtx<'a>) -> SqawkResult<()>,
     ) -> SqawkResult<()> {
+        let Levels {
+            deferred,
+            match_regs,
+            match_labels,
+        } = *levels;
         let level = &plan.levels[lvl];
         let cursor = plan.cursor(level.src);
         let starts = plan.groups.iter().position(|g| g.start == lvl);
         let ends = plan.groups.iter().position(|g| g.end == lvl);
+
+        if deferred[lvl] {
+            // First time here: open the table and build its hash index. A
+            // table no outer row reaches is never opened, so a CTE or
+            // derived table there is never computed.
+            let ready = self.label();
+            self.emit_jump_to(OpCode::Once, 0, ready, 0, None, "open on first use");
+            self.emit_open(plan, level.src);
+            self.emit_hash_build(plan, ctx, level)?;
+            self.resolve(ready);
+        }
 
         if let Some(g) = starts {
             self.emit(
@@ -1059,7 +1130,7 @@ impl<'a> SqlCompiler<'a> {
         }
 
         if lvl + 1 < plan.levels.len() {
-            self.emit_level(plan, ctx, lvl + 1, match_regs, match_labels, body)?;
+            self.emit_level(plan, ctx, lvl + 1, levels, body)?;
         } else {
             body(self, ctx)?;
         }

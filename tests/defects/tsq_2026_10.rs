@@ -239,7 +239,6 @@ fn cte_read_only_by_code_that_never_runs_is_never_computed() -> TestResult {
 /// sqawk opened every table of the join first: `d` is 64 million rows (12 s
 /// in a release build, minutes in a debug build).
 #[test]
-#[ignore]
 fn cte_joined_to_an_empty_outer_loop_is_never_computed() -> TestResult {
     let t = csv("id,k", (1..=400).map(|i| format!("{i},{}", i % 6)));
     assert_fast(

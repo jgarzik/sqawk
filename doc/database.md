@@ -225,7 +225,12 @@ false even for a NULL operand).
   only; a correlated one reruns on every evaluation, i.e. per outer row.
 - **Correlated execution**: a subquery's cursors and hash indexes do not
   depend on the outer row, so they are set up once (`Once` around the
-  `OpenRead`s and hash builds). An equality between an inner column and an
+  `OpenRead`s and hash builds). In any loop nest, an inner level's table is
+  opened and its hash index built when the nest first reaches that level
+  (a `Once` there), so a join whose outer loop has no rows never reads its
+  inner tables -- a CTE or derived table there is never computed. (Not in a
+  FULL JOIN, nor for a RIGHT JOIN group's inner levels, which can be
+  NULL-extended unreached.) An equality between an inner column and an
   outer column -- `WHERE d.k = f.k` -- becomes a hash probe, so a correlated
   `EXISTS`/`IN`/scalar lookup costs one probe per outer row instead of a
   rescan. Aggregate accumulators, sorters and DISTINCT tables are reset at
