@@ -64,27 +64,30 @@ status 1; usage errors exit with status 2.
 
 ## `tsq` - test data generator (development only)
 
-The source tree also contains `tsq`, which generates deterministic multi-table
-CSV data plus a corpus of SQL queries for exercising sqawk. It is a separate
-workspace crate (`tsq/`) that is not published, so `cargo install sqawk` does
-not install it. Run it from a checkout:
+The source tree also contains `tsq`, which generates deterministic
+multi-table test data for exercising sqawk. It is a separate workspace crate
+(`tsq/`) that is not published, so `cargo install sqawk` does not install it.
+Run it from a checkout:
 
 ```sh
-cargo run -p tsq -- --seed 42 --rows 1000 --output-dir /tmp/sqawk-test
+cargo run -p tsq -- gen --seed 42 --rows 1000 --output-dir /tmp/sqawk-test
 sqawk -s "SELECT * FROM customers LIMIT 10" /tmp/sqawk-test/data/customers.csv
 ```
 
-It writes `data/` (customers, products, orders, order_items, reviews, with
-realistic foreign-key relationships), `queries/` (numbered `.sql` files
-covering selects, joins, aggregates, subqueries and window functions),
-`verify/run_verification.sh`, and a `metadata.json` recording the seed and row
-counts. The same seed always produces the same data.
+`tsq gen` writes `data/` (customers, products, orders, order_items, reviews,
+with foreign keys and realistic distributions) and a `metadata.json`
+recording the seed, options and row counts. The same seed gives the same
+data on every OS.
 
 | Option | Meaning |
 | --- | --- |
-| `-s`, `--seed` | Seed for reproducible generation; a random one is printed if omitted |
-| `-r`, `--rows` | Base customer row count; other tables scale proportionally (default 100000) |
+| `-s`, `--seed` | 64-bit seed; a clock seed is printed if omitted |
+| `-r`, `--rows` | Customer rows; the other tables scale from it (default 1000) |
 | `-o`, `--output-dir` | Where to write the generated tree (required) |
+| `--edge-rate F` | Replace each non-key cell with an edge value (i64 limits, `007`, `1.50`, ` 5`, Unicode, embedded quotes and line breaks, long strings, ...) with probability F |
+| `--format csv\|tsv` | Field delimiter |
+| `--crlf`, `--bom`, `--no-header` | Line endings, byte order mark, no header line |
+| `--ragged-rate F` | Probability that a row leaves off its trailing empty fields |
 | `-v`, `--verbose` | Show generation progress |
 
 ## Documentation

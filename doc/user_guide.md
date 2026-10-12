@@ -104,7 +104,7 @@ To build from source:
 - The binaries are self-contained with no runtime dependencies
 - Installing the crate provides the `sqawk` command. The source tree also
   contains `tsq`, a development-only generator of deterministic multi-table
-  CSV data and SQL queries for exercising sqawk; it is not installed. Run
+  test data for exercising sqawk; it is not installed. Run
   `cargo run -p tsq -- --help` from a checkout, or see the
   [project README](../README.md#tsq---test-data-generator-development-only)
 

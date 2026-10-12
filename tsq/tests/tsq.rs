@@ -1,13 +1,13 @@
-//! Tests for the `tsq` test-data generator.
+//! Tests for `tsq`, the test-data generator.
 //!
 //! `tsq` is a local development tool (a `publish = false` workspace member),
-//! not part of the published sqawk crate. These tests cover the properties
-//! that make it useful -- determinism, referential integrity of the generated
-//! tables, and that sqawk can actually read what it writes.
+//! not part of the published sqawk crate. These tests cover what makes it
+//! useful: `gen` is deterministic (every output file), its foreign keys
+//! hold, and sqawk reads every layout it writes.
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 /// The sqawk binary from the shared workspace target directory.
 ///
@@ -15,160 +15,201 @@ use std::process::Command;
 /// executable lives in `target/<profile>/deps/`, and the workspace's binaries
 /// in `target/<profile>/`. `cargo test --workspace` builds both packages
 /// before running any test.
-fn sqawk() -> Command {
+fn sqawk_path() -> PathBuf {
     let exe = std::env::current_exe().expect("current test executable");
     let profile_dir = exe
         .parent()
         .and_then(Path::parent)
         .expect("test executable is in target/<profile>/deps");
-    let bin: PathBuf = profile_dir.join(format!("sqawk{}", std::env::consts::EXE_SUFFIX));
+    let bin = profile_dir.join(format!("sqawk{}", std::env::consts::EXE_SUFFIX));
     assert!(
         bin.exists(),
         "{} not found: run `cargo test --workspace`, or build sqawk first",
         bin.display()
     );
-    Command::new(bin)
+    bin
 }
 
-/// Run tsq into a fresh directory and return that directory.
-fn generate(seed: u64, rows: usize) -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let out = dir.path().join("out");
-    let output = assert_cmd::cargo::cargo_bin_cmd!("tsq")
-        .arg("--seed")
-        .arg(seed.to_string())
-        .arg("--rows")
-        .arg(rows.to_string())
+fn sqawk() -> Command {
+    Command::new(sqawk_path())
+}
+
+fn tsq() -> assert_cmd::Command {
+    assert_cmd::cargo::cargo_bin_cmd!("tsq")
+}
+
+fn ok(out: Output, what: &str) -> String {
+    assert!(
+        out.status.success(),
+        "{what} failed ({}):\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Run `tsq gen` into a fresh directory with extra arguments.
+fn generate(seed: u64, rows: usize, extra: &[&str]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = tsq()
+        .args([
+            "gen",
+            "--seed",
+            &seed.to_string(),
+            "--rows",
+            &rows.to_string(),
+        ])
         .arg("--output-dir")
-        .arg(out.to_str().unwrap())
-        .output()?;
-    assert!(
-        output.status.success(),
-        "tsq failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(dir)
+        .arg(dir.path())
+        .args(extra)
+        .output()
+        .expect("run tsq");
+    ok(out, "tsq gen");
+    dir
 }
 
-fn read(dir: &Path, rel: &str) -> String {
-    fs::read_to_string(dir.join("out").join(rel)).unwrap_or_else(|e| panic!("missing {rel}: {e}"))
-}
-
-#[test]
-fn generates_the_expected_tree() -> Result<(), Box<dyn std::error::Error>> {
-    let dir = generate(1, 20)?;
-    let base = dir.path().join("out");
-    for rel in [
-        "metadata.json",
-        "data/customers.csv",
-        "data/products.csv",
-        "data/orders.csv",
-        "data/order_items.csv",
-        "data/reviews.csv",
-        "verify/run_verification.sh",
-    ] {
-        assert!(base.join(rel).exists(), "expected {rel} to be generated");
+/// Every file under `dir`, relative path -> bytes, sorted.
+fn tree(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in fs::read_dir(&d).expect("read dir") {
+            let p = e.expect("dir entry").path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                let rel = p
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push((rel, fs::read(&p).expect("read file")));
+            }
+        }
     }
-    assert!(
-        base.join("queries").read_dir()?.count() > 0,
-        "expected generated queries"
-    );
-    Ok(())
+    out.sort();
+    out
+}
+
+/// sqawk's complete stdout for `sql` over `files`.
+fn query(args: &[&str], sql: &str, files: &[PathBuf]) -> String {
+    let out = sqawk()
+        .args(args)
+        .arg("-s")
+        .arg(sql)
+        .args(files)
+        .output()
+        .expect("run sqawk");
+    ok(out, sql)
+}
+
+const TABLES: [&str; 5] = ["customers", "products", "orders", "order_items", "reviews"];
+
+/// Row counts for `rows` customers (see tsq/src/gen.rs).
+fn counts(rows: usize) -> [usize; 5] {
+    [
+        rows,
+        (rows / 100).max(rows.min(100)),
+        rows * 3,
+        rows * 10,
+        (rows / 2).max(1),
+    ]
 }
 
 #[test]
-fn same_seed_produces_identical_data() -> Result<(), Box<dyn std::error::Error>> {
-    // The whole point of the seed: a run is reproducible.
-    let a = generate(1234, 25)?;
-    let b = generate(1234, 25)?;
-    for rel in ["data/customers.csv", "data/orders.csv", "data/products.csv"] {
-        assert_eq!(
-            read(a.path(), rel),
-            read(b.path(), rel),
-            "{rel} differed between two runs with the same seed"
+fn same_seed_reproduces_every_file() {
+    // The whole point of the seed: data and metadata, byte for byte, with
+    // edge values, layout options and a seed above 2^32 (the old generator
+    // truncated it).
+    let opts = ["--edge-rate", "0.1", "--ragged-rate", "0.3", "--crlf"];
+    let a = generate(18_446_744_073_709_551_557, 25, &opts);
+    let b = generate(18_446_744_073_709_551_557, 25, &opts);
+    let (ta, tb) = (tree(a.path()), tree(b.path()));
+    assert_eq!(
+        ta.len(),
+        6,
+        "five tables and metadata.json: {:?}",
+        ta.iter().map(|t| &t.0).collect::<Vec<_>>()
+    );
+    assert_eq!(ta, tb, "two runs with the same seed differ");
+}
+
+#[test]
+fn different_seeds_produce_different_data() {
+    let a = generate(1, 25, &[]);
+    let b = generate(2, 25, &[]);
+    for t in TABLES {
+        let rel = format!("data/{t}.csv");
+        assert_ne!(
+            fs::read(a.path().join(&rel)).unwrap(),
+            fs::read(b.path().join(&rel)).unwrap(),
+            "{rel}: different seeds gave identical data"
         );
     }
-    Ok(())
 }
 
 #[test]
-fn different_seeds_produce_different_data() -> Result<(), Box<dyn std::error::Error>> {
-    let a = generate(1, 25)?;
-    let b = generate(2, 25)?;
-    assert_ne!(
-        read(a.path(), "data/customers.csv"),
-        read(b.path(), "data/customers.csv"),
-        "different seeds should not produce identical data"
-    );
-    Ok(())
+fn metadata_records_seed_rows_and_options() {
+    let dir = generate(99, 30, &["--format", "tsv", "--bom"]);
+    let meta = fs::read_to_string(dir.path().join("metadata.json")).unwrap();
+    for want in [
+        "\"seed\": 99",
+        "\"rows\": 30",
+        "\"format\": \"tsv\"",
+        "\"bom\": true",
+        "\"customers\": 30",
+        "\"order_items\": 300",
+    ] {
+        assert!(meta.contains(want), "metadata lacks {want}: {meta}");
+    }
 }
 
 #[test]
-fn metadata_records_the_seed_and_row_counts() -> Result<(), Box<dyn std::error::Error>> {
-    let dir = generate(99, 30)?;
-    let meta = read(dir.path(), "metadata.json");
-    assert!(meta.contains("\"seed\": 99"), "seed not recorded: {meta}");
-    assert!(
-        meta.contains("\"customers\": 30"),
-        "row count not recorded: {meta}"
-    );
-    Ok(())
+fn foreign_keys_hold() {
+    // Every reference points at an existing row, so joins are meaningful.
+    let dir = generate(11, 50, &[]);
+    let f = |t: &str| dir.path().join(format!("data/{t}.csv"));
+    let files: Vec<PathBuf> = TABLES.iter().map(|t| f(t)).collect();
+    let checks = [
+        "SELECT COUNT(*) FROM orders o LEFT JOIN customers c ON o.customer_id = c.customer_id WHERE c.customer_id IS NULL",
+        "SELECT COUNT(*) FROM order_items i LEFT JOIN orders o ON i.order_id = o.order_id WHERE o.order_id IS NULL",
+        "SELECT COUNT(*) FROM order_items i LEFT JOIN products p ON i.product_id = p.product_id WHERE p.product_id IS NULL",
+        "SELECT COUNT(*) FROM reviews r LEFT JOIN customers c ON r.customer_id = c.customer_id WHERE c.customer_id IS NULL",
+        "SELECT COUNT(*) FROM reviews r LEFT JOIN products p ON r.product_id = p.product_id WHERE p.product_id IS NULL",
+        "SELECT COUNT(*) FROM customers c LEFT JOIN customers p ON c.referred_by = p.customer_id WHERE c.referred_by IS NOT NULL AND p.customer_id IS NULL",
+    ];
+    for sql in checks {
+        assert_eq!(
+            query(&[], sql, &files),
+            "COUNT(*)\n0\n",
+            "dangling reference: {sql}"
+        );
+    }
 }
 
 #[test]
-fn sqawk_can_query_the_generated_data() -> Result<(), Box<dyn std::error::Error>> {
-    // The data exists to be fed to sqawk, so the two must agree on format.
-    let dir = generate(7, 40)?;
-    let customers = dir.path().join("out/data/customers.csv");
-
-    let output = sqawk()
-        .arg("-s")
-        .arg("SELECT COUNT(*) FROM customers")
-        .arg(customers.to_str().unwrap())
-        .output()?;
-    assert!(
-        output.status.success(),
-        "sqawk could not read tsq output: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    // Exact output, not a substring: `contains("40")` also passes on 140.
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(
-        lines,
-        ["COUNT(*)", "40"],
-        "expected exactly 40 customers, got: {stdout}"
-    );
-    Ok(())
-}
-
-#[test]
-fn generated_orders_reference_real_customers() -> Result<(), Box<dyn std::error::Error>> {
-    // Referential integrity is what makes the join queries meaningful.
-    let dir = generate(11, 50)?;
-    let base = dir.path().join("out/data");
-
-    let output = sqawk()
-        .arg("-s")
-        .arg(
-            "SELECT orders.order_id FROM orders JOIN customers \
-             ON orders.customer_id = customers.customer_id",
-        )
-        .arg(base.join("orders.csv").to_str().unwrap())
-        .arg(base.join("customers.csv").to_str().unwrap())
-        .output()?;
-    assert!(
-        output.status.success(),
-        "join over generated data failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // Every order must match a customer, so the join count equals the row count.
-    let joined = String::from_utf8_lossy(&output.stdout).lines().count() - 1;
-    let orders = read(dir.path(), "data/orders.csv").lines().count() - 1;
-    assert_eq!(
-        joined, orders,
-        "every generated order should reference an existing customer"
-    );
-    Ok(())
+fn sqawk_reads_every_layout() {
+    // Each layout must load with the exact row count of every table.
+    let variants: [(&[&str], &[&str], &str); 7] = [
+        (&[], &[], "csv"),
+        (&["--format", "tsv"], &[], "tsv"),
+        (&["--crlf"], &[], "csv"),
+        (&["--bom"], &[], "csv"),
+        (&["--no-header"], &["--no-header"], "csv"),
+        (&["--ragged-rate", "0.5"], &[], "csv"),
+        (
+            &["--edge-rate", "0.3", "--crlf", "--bom", "--format", "tsv"],
+            &[],
+            "tsv",
+        ),
+    ];
+    for (gen_args, sqawk_args, ext) in variants {
+        let dir = generate(7, 20, gen_args);
+        for (t, n) in TABLES.iter().zip(counts(20)) {
+            let file = dir.path().join(format!("data/{t}.{ext}"));
+            let got = query(sqawk_args, &format!("SELECT COUNT(*) FROM {t}"), &[file]);
+            assert_eq!(got, format!("COUNT(*)\n{n}\n"), "{t} with {gen_args:?}");
+        }
+    }
 }

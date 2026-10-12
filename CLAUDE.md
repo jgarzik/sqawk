@@ -30,7 +30,7 @@ cargo run -- -s "SELECT * FROM data" data.csv
 cargo run -- --interactive data.csv
 
 # Generate test data with tsq (unpublished workspace crate in tsq/)
-cargo run -p tsq -- --seed 42 --rows 1000 --output-dir /tmp/sqawk-test
+cargo run -p tsq -- gen --seed 42 --rows 1000 --output-dir /tmp/sqawk-test
 ```
 
 ## Architecture Overview
