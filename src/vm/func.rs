@@ -501,7 +501,7 @@ fn quote(a: &[Register]) -> SqawkResult<Register> {
         Register::Boolean(b) => (*b as i64).to_string(),
         Register::Float(f) => {
             let s = printf::real_str("%!.15g", *f);
-            if f.is_finite() && s.parse::<f64>().ok() == Some(*f) {
+            if f.is_finite() && arith::atof(&s) == *f {
                 s
             } else {
                 printf::real_str("%!.20e", *f)

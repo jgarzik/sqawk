@@ -32,7 +32,10 @@ prints, and is written back, exactly as it was read.
 ### Real output
 
 A REAL prints exactly as SQLite's `CAST(x AS TEXT)` prints it (`%!.15g`): 15
-significant digits, rounded half up; positional notation when the exponent is
+significant digits, rounded half up from the 18- or 19-digit decimal expansion
+SQLite computes in double-double arithmetic (SQLite 3.50; SQLite 3.45 does the
+same when built without `long double`), so the output is identical on every
+platform; positional notation when the exponent is
 from -4 to 14, else exponent notation with a signed, at least two-digit
 exponent; trailing zeros dropped, but a whole number keeps `.0`. So `0.1 + 0.2`
 is `0.3`, `2.0 * 1` is `2.0`, `1e20` is `1.0e+20`, `1.5e-300` is `1.5e-300`,
@@ -40,6 +43,14 @@ is `0.3`, `2.0 * 1` is `2.0`, `1e20` is `1.0e+20`, `1.5e-300` is `1.5e-300`,
 and the infinities are `Inf` and `-Inf`. The same text is what `||`, string
 functions and `CAST(x AS TEXT)` see, and what `--write` writes for a changed
 cell.
+
+Text becomes a REAL the way SQLite reads it (`sqlite3AtoF`, the same
+double-double arithmetic): up to 19 significant digits scaled by powers of
+ten. That is the nearest double for ordinary input, but for long or extreme
+input it can be a neighbour of it -- the same neighbour SQLite reads (`1e-300`
+reads as the double just below the nearest one, so `QUOTE(1e-300)` is
+`1.0e-300` as in SQLite).
+This applies to SQL literals, `CAST`, arithmetic on text and file loading.
 
 ## SELECT
 

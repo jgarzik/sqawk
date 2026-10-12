@@ -130,7 +130,9 @@ fn atof_pure(z: &[u8]) -> Option<f64> {
         i += 1;
     }
     if i == n && digits > 0 && exp_valid {
-        std::str::from_utf8(&z[start..end]).ok()?.parse().ok()
+        Some(super::arith::atof(
+            std::str::from_utf8(&z[start..end]).ok()?,
+        ))
     } else {
         None
     }

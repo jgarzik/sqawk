@@ -41,39 +41,38 @@ fn concat_ws_skips_empty_strings() -> TestResult {
 /// A real prints as SQLite's `CAST(x AS TEXT)` (doc "Real output"), which
 /// rounds a decimal expansion of about 18 digits half up to 15 digits. The
 /// double nearest 443.85 / 5867 is 0.07565195159365944999..., whose 18-digit
-/// expansion ends ...4945|00 and rounds up to ...595; sqawk rounds the exact
-/// binary value and prints ...594. Every SQLite build agrees on ...595 (3.45
-/// with and without x87 long double, 3.50). Found by tsq diff --seed 1
-/// --only 19555 (also PERCENT_RANK values at --scale large, seed 1 test 26).
+/// expansion ends ...4945|00 and rounds up to ...595; sqawk rounded the exact
+/// binary value and printed ...594. Found by tsq diff --seed 1 --only 19555
+/// (also PERCENT_RANK values at --scale large, seed 1 test 26).
 ///
-/// Values where SQLite's builds disagree are left out: 100.0 / 476.42 is
-/// ...535 with 3.45's long double path (and in sqawk) but ...536 with its
-/// double-double path, which MSVC builds and SQLite 3.50 use and tsq's
-/// oracle is built with. Porting SQLite 3.50's conversion settles both.
+/// The expansion is SQLite's double-double one (3.50, and 3.45 built
+/// without long double as tsq's oracle is): 100.0 / 476.42 is ...536 there
+/// (...535 with x87 long double).
 #[test]
-#[ignore = "defect: real-to-text rounding differs from SQLite's %!.15g"]
 fn real_text_rounds_like_sqlite() -> TestResult {
     assert_query_on(
         ONE,
         "SELECT 443.85 / 5867 AS r, CAST(443.85 / 5867 AS TEXT) AS t, \
-         443.85 / 5867 || '' AS c FROM t",
-        "r,t,c\n0.0756519515936595,0.0756519515936595,0.0756519515936595",
+         443.85 / 5867 || '' AS c, 100.0 / 476.42 AS d FROM t",
+        "r,t,c,d\n0.0756519515936595,0.0756519515936595,0.0756519515936595,0.209898828764536",
     )
 }
 
-/// QUOTE of a real whose 15-digit form does not round-trip falls back to
-/// SQLite's `%!.20e`, which prints the digits SQLite's decoder produces
-/// (`6.44491850400551701e-04`; every SQLite build agrees). sqawk drops the
-/// trailing digits (`6.444918504005517e-04`). Found by tsq diff --seed 1
-/// --only 17090. (QUOTE(1e10 / 3) is build-dependent -- `...349e+09` with
-/// long double, as in sqawk; `...3493e+09` in SQLite 3.50 -- and left out.)
+/// QUOTE of a real whose 15-digit form does not read back as the same value
+/// falls back to SQLite's `%!.20e`, which prints the digits SQLite's decoder
+/// produces (`6.44491850400551701e-04`). sqawk dropped the trailing digits
+/// (`6.444918504005517e-04`). Found by tsq diff --seed 1 --only 17090. The
+/// digits are the double-double ones (SQLite 3.50; 3.45 without long double):
+/// `...392e+01` and `...3493e+09` where x87 long double gives `...39e+01` and
+/// `...349e+09`. "Reads back" is SQLite's own text-to-real reading, which
+/// for 1e-300 gives the double that `1.0e-300` gives, so it quotes short.
 #[test]
-#[ignore = "defect: QUOTE(real) fallback digits differ from SQLite"]
 fn quote_real_fallback_digits() -> TestResult {
     assert_query_on(
         ONE,
-        "SELECT QUOTE(1 / 1551.61) AS a, QUOTE(17 / 1.5) AS b FROM t",
-        "a,b\n6.44491850400551701e-04,1.13333333333333339e+01",
+        "SELECT QUOTE(1 / 1551.61) AS a, QUOTE(17 / 1.5) AS b, QUOTE(1e10 / 3) AS c, \
+         QUOTE(1e-300) AS d FROM t",
+        "a,b,c,d\n6.44491850400551701e-04,1.133333333333333392e+01,3.333333333333333493e+09,1.0e-300",
     )
 }
 

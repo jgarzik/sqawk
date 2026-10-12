@@ -218,7 +218,7 @@ mod sqlite_semantics {
              printf('a%yb') AS i FROM one",
             "a,b,c,d,e,f,g,h,i\n\"0xff|010|-1,234,567|007|18446744073709551615\",\
              \"   7|7   |3.14\",\"it''s|'x'|NULL|a\"\"\"\"b\",aaa|1st|12th|23rd,\
-             0.10000000000000000000|0.100000000000000005|2|1e-05|1.00000,é  |é   |,,,a",
+             0.10000000000000000000|0.1000000000000000055|2|1e-05|1.00000,é  |é   |,,,a",
         )
     }
 
@@ -229,7 +229,7 @@ mod sqlite_semantics {
             &[ONE],
             "SELECT quote('a''b') AS a, quote(12) AS b, quote(NULL) AS c, quote(1.5) AS d, \
              quote(0.1) AS e, quote(1e999) AS f, quote(1.0/3) AS g FROM one",
-            "a,b,c,d,e,f,g\n'a''b',12,NULL,1.5,0.1,Inf,3.33333333333333314e-01",
+            "a,b,c,d,e,f,g\n'a''b',12,NULL,1.5,0.1,Inf,3.333333333333333148e-01",
         )
     }
 

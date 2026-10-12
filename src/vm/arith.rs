@@ -100,7 +100,7 @@ pub(crate) fn text_to_num(s: &str) -> Num {
             return Num::Int(i);
         }
     }
-    Num::Real(text.parse::<f64>().unwrap_or(0.0))
+    Num::Real(atof(text))
 }
 
 /// Text as an integer, the way `CAST(text AS INTEGER)` reads it: an optional
@@ -338,114 +338,316 @@ pub(crate) fn cast(r: Register, target: &str) -> Register {
     }
 }
 
-/// The first `p` (>= 1) significant decimal digits of the finite, nonzero
-/// `v`'s magnitude, rounded half up on its exact decimal expansion as
-/// SQLite's `sqlite3FpDecode` rounds (so 0.25 to one digit is 3, where C's
-/// printf gives 2), and the decimal exponent of the first digit.
-fn decimal_digits(v: f64, p: usize) -> (Vec<u8>, i32) {
-    // Fast path: the shortest digits that read back as `v`, when there are
-    // at most `p` <= 15 of them, are also its rounding to `p` digits (`v`
-    // is within half an ulp of them, far less than half a unit in the 15th
-    // digit), and need no exact expansion. Not for subnormals, whose ulp
-    // is large relative to them (5e-324 is 4.94065645841247e-324).
-    if p <= 15 && v.abs() >= f64::MIN_POSITIVE {
-        let s = format!("{:e}", v.abs());
-        if let Some((mant, exp)) = s.split_once('e') {
-            let d: Vec<u8> = mant
-                .bytes()
-                .filter(u8::is_ascii_digit)
-                .map(|b| b - b'0')
-                .collect();
-            if d.len() <= p {
-                return (d, exp.parse().unwrap_or(0));
-            }
-        }
-    }
-    // Ten guard digits decide the rounding: only a run of ten 9s after the
-    // cut could carry into the digit that decides it.
-    let s = format!("{:.*e}", p + 10, v.abs());
-    let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
-    let mut exp: i32 = exp.parse().unwrap_or(0);
-    let all: Vec<u8> = mant
-        .bytes()
-        .filter(u8::is_ascii_digit)
-        .map(|b| b - b'0')
-        .collect();
-    let mut d = all[..p].to_vec();
-    if all[p] >= 5 {
-        let mut i = p;
-        loop {
-            if i == 0 {
-                // 99..9 rounded up: 100..0, one place higher.
-                d.insert(0, 1);
-                d.truncate(p);
-                exp += 1;
-                break;
-            }
-            i -= 1;
-            if d[i] == 9 {
-                d[i] = 0;
-            } else {
-                d[i] += 1;
-                break;
-            }
-        }
-    }
-    (d, exp)
+// The error of each power of ten as a double (the exact power minus the
+// double), the low halves of SQLite's double-double constants, spelled as
+// SQLite spells them.
+#[allow(clippy::excessive_precision)]
+const E100_LO: f64 = -1.5902891109759918046e+83;
+#[allow(clippy::excessive_precision)]
+const EM100_LO: f64 = -1.99918998026028836196e-117;
+#[allow(clippy::excessive_precision)]
+const EM10_LO: f64 = -3.6432197315497741579e-27;
+#[allow(clippy::excessive_precision)]
+const EM1_LO: f64 = -5.5511151231257827021e-18;
+
+/// Double-double multiplication `x *= (y + yy)` (T. J. Dekker, "A
+/// Floating-Point Technique for Extending the Available Precision", 1971),
+/// SQLite's `dekkerMul2`. Every operation rounds to binary64 (Rust never
+/// fuses or widens f64 arithmetic), as the algorithm requires.
+fn dekker_mul2(x: &mut [f64; 2], y: f64, yy: f64) {
+    const HIGH: u64 = 0xffff_ffff_fc00_0000;
+    let hx = f64::from_bits(x[0].to_bits() & HIGH);
+    let tx = x[0] - hx;
+    let hy = f64::from_bits(y.to_bits() & HIGH);
+    let ty = y - hy;
+    let p = hx * hy;
+    let q = hx * ty + tx * hy;
+    let c = p + q;
+    let cc = p - c + q + tx * ty;
+    let cc = x[0] * yy + x[1] * y + cc;
+    x[0] = c + cc;
+    x[1] = c - x[0];
+    x[1] += cc;
 }
 
-/// Digits past which `%g` precision is not honoured (every digit past a
-/// double's exact expansion is a zero, which `%g` strips anyway).
-const MAX_GENERAL_DIGITS: usize = 1100;
-
-/// `%g` with precision `p` (significant digits, at least 1) of a finite
-/// `v`, as SQLite's printf renders it: trailing zeros removed, exponent
-/// form when the exponent after rounding is below -4 or at least `p` (so
-/// 999999.5 at six digits is `1e+06`), digits rounded half up.
-pub(crate) fn c_general(v: f64, p: usize, upper: bool) -> String {
-    if v == 0.0 {
-        return "0".into();
+/// The numeric prefix of `s` (leading whitespace, sign, digits, point,
+/// exponent) as a real, computed as SQLite's `sqlite3AtoF` (3.50; the
+/// double-double path of 3.45 builds without long double) computes it:
+/// up to 19 significant digits as an integer, then scaled by powers of
+/// ten in double-double arithmetic. The result is the same on every
+/// platform and is what SQLite reads for the same text, which is not
+/// always the correctly rounded double (`1e-300`'s neighbour can come
+/// back for 17-digit input near the ends of the range). Text without a
+/// number reads as 0.0.
+// The bounds are spelled as SQLite spells them.
+#[allow(clippy::excessive_precision)]
+pub(crate) fn atof(s: &str) -> f64 {
+    const LIMIT: u64 = (u64::MAX - 9) / 10;
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() && is_space(b[i]) {
+        i += 1;
     }
-    let p = p.clamp(1, MAX_GENERAL_DIGITS);
-    let (mut d, x) = decimal_digits(v, p);
-    while d.len() > 1 && d.last() == Some(&0) {
-        d.pop();
+    let mut neg = false;
+    if i < b.len() && (b[i] == b'-' || b[i] == b'+') {
+        neg = b[i] == b'-';
+        i += 1;
     }
-    let digit = |b: u8| (b'0' + b) as char;
-    let mut out = String::with_capacity(d.len() + 8);
-    if v < 0.0 {
-        out.push('-');
-    }
-    if x < -4 || x >= p as i32 {
-        out.push(digit(d[0]));
-        if d.len() > 1 {
-            out.push('.');
-            out.extend(d[1..].iter().map(|&b| digit(b)));
+    let mut sig: u64 = 0;
+    let mut d: i64 = 0;
+    while i < b.len() && b[i].is_ascii_digit() {
+        sig = sig * 10 + u64::from(b[i] - b'0');
+        i += 1;
+        if sig >= LIMIT {
+            // Further integer digits only shift the point.
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+                d += 1;
+            }
         }
-        out.push(if upper { 'E' } else { 'e' });
-        out.push(if x < 0 { '-' } else { '+' });
-        out.push_str(&format!("{:02}", x.unsigned_abs()));
-    } else if x < 0 {
-        out.push_str("0.");
-        out.extend(std::iter::repeat_n('0', (-x - 1) as usize));
-        out.extend(d.iter().map(|&b| digit(b)));
+    }
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        while i < b.len() && b[i].is_ascii_digit() {
+            if sig < LIMIT {
+                sig = sig * 10 + u64::from(b[i] - b'0');
+                d -= 1;
+            }
+            i += 1;
+        }
+    }
+    let mut e: i64 = 0;
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        i += 1;
+        let mut eneg = false;
+        if i < b.len() && (b[i] == b'-' || b[i] == b'+') {
+            eneg = b[i] == b'-';
+            i += 1;
+        }
+        while i < b.len() && b[i].is_ascii_digit() {
+            e = if e < 10000 {
+                e * 10 + i64::from(b[i] - b'0')
+            } else {
+                10000
+            };
+            i += 1;
+        }
+        if eneg {
+            e = -e;
+        }
+    }
+    let sign = |f: f64| if neg { -f } else { f };
+    if sig == 0 {
+        return sign(0.0);
+    }
+    e += d;
+    while e > 0 && sig < (u64::MAX - 0x7ff) / 10 {
+        sig *= 10;
+        e -= 1;
+    }
+    while e < 0 && sig.is_multiple_of(10) {
+        sig /= 10;
+        e += 1;
+    }
+    let mut rr = [sig as f64, 0.0];
+    // The largest double that converts to u64 safely.
+    if rr[0] <= 18_446_744_073_709_549_568.0 {
+        let s2 = rr[0] as u64;
+        rr[1] = if sig >= s2 {
+            (sig - s2) as f64
+        } else {
+            -((s2 - sig) as f64)
+        };
+    }
+    if e > 0 {
+        while e >= 100 {
+            e -= 100;
+            dekker_mul2(&mut rr, 1.0e+100, E100_LO);
+        }
+        while e >= 10 {
+            e -= 10;
+            dekker_mul2(&mut rr, 1.0e+10, 0.0);
+        }
+        while e >= 1 {
+            e -= 1;
+            dekker_mul2(&mut rr, 1.0e+01, 0.0);
+        }
     } else {
-        let int_len = x as usize + 1;
-        for i in 0..int_len {
-            out.push(digit(d.get(i).copied().unwrap_or(0)));
+        while e <= -100 {
+            e += 100;
+            dekker_mul2(&mut rr, 1.0e-100, EM100_LO);
         }
-        if d.len() > int_len {
-            out.push('.');
-            out.extend(d[int_len..].iter().map(|&b| digit(b)));
+        while e <= -10 {
+            e += 10;
+            dekker_mul2(&mut rr, 1.0e-10, EM10_LO);
+        }
+        while e <= -1 {
+            e += 1;
+            dekker_mul2(&mut rr, 1.0e-01, EM1_LO);
         }
     }
-    out
+    let mut r = rr[0] + rr[1];
+    if r.is_nan() {
+        r = f64::INFINITY;
+    }
+    sign(r)
+}
+
+/// SQLite's `sqlite3Isspace`: ASCII space, \t \n \v \f \r.
+fn is_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+/// A real decoded to decimal digits: SQLite's `FpDecode`.
+pub(crate) struct FpDecode {
+    /// `b'+'` or `b'-'`.
+    pub(crate) sign: u8,
+    /// 0: finite; 1: infinity; 2: NaN.
+    pub(crate) special: u8,
+    buf: [u8; 24],
+    start: usize,
+    /// Number of significant digits (trailing zeros removed).
+    n: usize,
+    /// Position of the decimal point relative to the first digit.
+    pub(crate) idp: i64,
+}
+
+impl FpDecode {
+    /// The significant digits, ASCII, without trailing zeros.
+    pub(crate) fn digits(&self) -> &[u8] {
+        &self.buf[self.start..self.start + self.n]
+    }
+}
+
+/// SQLite's `sqlite3FpDecode` (3.50, which always uses the portable
+/// double-double path that 3.45 builds without long double use): the
+/// magnitude is scaled by powers of ten in double-double arithmetic until
+/// it lies near 1e18, read as an integer of 18 or 19 digits, and those
+/// digits are rounded half up to `iround` significant digits (when
+/// `iround` is negative, to `-iround` digits after the point; 0 means no
+/// rounding) and to at most `mxround` digits. The result is the same on
+/// every platform.
+// The bounds are spelled as SQLite spells them.
+#[allow(clippy::excessive_precision)]
+pub(crate) fn fp_decode(r: f64, iround: i64, mxround: i64) -> FpDecode {
+    let mut p = FpDecode {
+        sign: b'+',
+        special: 0,
+        buf: [b'0'; 24],
+        start: 0,
+        n: 1,
+        idp: 1,
+    };
+    let mut r = r;
+    if r < 0.0 {
+        p.sign = b'-';
+        r = -r;
+    } else if r == 0.0 {
+        return p;
+    }
+    if !r.is_finite() {
+        p.special = if r.is_nan() { 2 } else { 1 };
+        p.n = 0;
+        p.idp = 0;
+        return p;
+    }
+    // Scale into [9.2e17, 9.2e18]; the low-order constants are the error
+    // of each power of ten as a double, as SQLite has them.
+    let mut exp: i64 = 0;
+    let mut rr = [r, 0.0];
+    if rr[0] > 9.223_372_036_854_774_784e18 {
+        while rr[0] > 9.223_372_036_854_774_784e118 {
+            exp += 100;
+            dekker_mul2(&mut rr, 1.0e-100, EM100_LO);
+        }
+        while rr[0] > 9.223_372_036_854_774_784e28 {
+            exp += 10;
+            dekker_mul2(&mut rr, 1.0e-10, EM10_LO);
+        }
+        while rr[0] > 9.223_372_036_854_774_784e18 {
+            exp += 1;
+            dekker_mul2(&mut rr, 1.0e-01, EM1_LO);
+        }
+    } else {
+        while rr[0] < 9.223_372_036_854_774_784e-83 {
+            exp -= 100;
+            dekker_mul2(&mut rr, 1.0e+100, E100_LO);
+        }
+        while rr[0] < 9.223_372_036_854_774_784e7 {
+            exp -= 10;
+            dekker_mul2(&mut rr, 1.0e+10, 0.0);
+        }
+        while rr[0] < 9.223_372_036_854_774_78e17 {
+            exp -= 1;
+            dekker_mul2(&mut rr, 1.0e+01, 0.0);
+        }
+    }
+    let mut v: u64 = if rr[1] < 0.0 {
+        (rr[0] as u64).wrapping_sub((-rr[1]) as u64)
+    } else {
+        (rr[0] as u64).wrapping_add(rr[1] as u64)
+    };
+
+    // The digits of v, right-aligned in buf; buf[i] is the free slot
+    // before the first one.
+    let mut i = p.buf.len() - 1;
+    while v != 0 {
+        p.buf[i] = b'0' + (v % 10) as u8;
+        i -= 1;
+        v /= 10;
+    }
+    let mut n = (p.buf.len() - 1 - i) as i64;
+    p.idp = n + exp;
+    let mut iround = iround;
+    if iround < 0 {
+        iround = p.idp - iround;
+        if iround == 0 && p.buf[i + 1] >= b'5' {
+            iround = 1;
+            p.buf[i] = b'0';
+            i -= 1;
+            n += 1;
+            p.idp += 1;
+        }
+    }
+    if iround > 0 && (iround < n || n > mxround) {
+        let z = i + 1;
+        if iround > mxround {
+            iround = mxround;
+        }
+        n = iround;
+        if p.buf[z + iround as usize] >= b'5' {
+            let mut j = z + iround as usize - 1;
+            loop {
+                p.buf[j] += 1;
+                if p.buf[j] <= b'9' {
+                    break;
+                }
+                p.buf[j] = b'0';
+                if j == z {
+                    p.buf[i] = b'1';
+                    i -= 1;
+                    n += 1;
+                    p.idp += 1;
+                    break;
+                }
+                j -= 1;
+            }
+        }
+    }
+    p.start = i + 1;
+    let mut n = n as usize;
+    while n > 1 && p.buf[p.start + n - 1] == b'0' {
+        n -= 1;
+    }
+    p.n = n;
+    p
 }
 
 /// A REAL's text, exactly as SQLite's `CAST(x AS TEXT)` renders it
-/// (`%!.15g`): 15 significant digits, an integral value keeps a `.0`
-/// (`2.0`, `1.0e+20`), infinities are `Inf` / `-Inf`, and negative zero is
-/// `0.0`. NaN, which SQLite turns into NULL, renders as the empty string.
+/// (`%!.15g`): 15 significant digits rounded half up from the
+/// [`fp_decode`] expansion, an integral value keeps a `.0` (`2.0`,
+/// `1.0e+20`), infinities are `Inf` / `-Inf`, and negative zero is `0.0`.
+/// NaN, which SQLite turns into NULL, renders as the empty string.
 pub(crate) fn real_text(f: f64) -> String {
     if f.is_nan() {
         return String::new();
@@ -456,14 +658,43 @@ pub(crate) fn real_text(f: f64) -> String {
     if f == 0.0 {
         return "0.0".into();
     }
-    let mut s = c_general(f, 15, false);
-    if !s.contains('.') {
-        match s.find('e') {
-            Some(at) => s.insert_str(at, ".0"),
-            None => s.push_str(".0"),
-        }
+    let d = fp_decode(f, 15, 26);
+    let z = d.digits();
+    let x = d.idp - 1;
+    let mut out = String::with_capacity(24);
+    if d.sign == b'-' {
+        out.push('-');
     }
-    s
+    let push = |out: &mut String, b: &[u8]| out.extend(b.iter().map(|&c| c as char));
+    // At most 15 digits, all of which fit in the 14 places `%.15g` shows
+    // after the first, so no digit is cut here.
+    if !(-4..=14).contains(&x) {
+        push(&mut out, &z[..1]);
+        out.push('.');
+        push(&mut out, if z.len() > 1 { &z[1..] } else { b"0" });
+        out.push('e');
+        out.push(if x < 0 { '-' } else { '+' });
+        out.push_str(&format!("{:02}", x.unsigned_abs()));
+    } else if x < 0 {
+        out.push_str("0.");
+        out.extend(std::iter::repeat_n('0', (-x - 1) as usize));
+        push(&mut out, z);
+    } else {
+        let int_len = x as usize + 1;
+        for k in 0..int_len {
+            out.push(z.get(k).map_or('0', |&c| c as char));
+        }
+        out.push('.');
+        push(
+            &mut out,
+            if z.len() > int_len {
+                &z[int_len..]
+            } else {
+                b"0"
+            },
+        );
+    }
+    out
 }
 
 /// A non-NULL register's text form, as functions and `||` see it.
@@ -539,6 +770,30 @@ mod tests {
         assert_eq!(n("0x10"), Num::Int(0));
         assert_eq!(n("3.9x"), Num::Real(3.9));
         assert_eq!(n("99999999999999999999"), Num::Real(1e20));
+    }
+
+    /// Values checked against SQLite 3.50.2 and 3.45.0 built without long
+    /// double (tsq's oracle).
+    #[test]
+    fn double_double_conversions() {
+        assert_eq!(real_text(443.85 / 5867.0), "0.0756519515936595");
+        assert_eq!(real_text(100.0 / 476.42), "0.209898828764536");
+        assert_eq!(real_text(1e20), "1.0e+20");
+        assert_eq!(real_text(-1e-5), "-1.0e-05");
+        assert_eq!(real_text(5e-324), "4.94065645841247e-324");
+        assert_eq!(real_text(f64::MAX), "1.79769313486232e+308");
+        assert_eq!(real_text(123456789012345.0), "123456789012345.0");
+        assert_eq!(real_text(0.0001), "0.0001");
+        assert_eq!(atof("1e-300").to_bits(), 0x01a5_6e1f_c2f8_f358);
+        assert_eq!(atof("1.0e-300"), atof("1e-300"));
+        assert_eq!(atof(" -2.5e3x"), -2500.0);
+        assert_eq!(atof("0.1"), 0.1);
+        assert_eq!(atof("1e400"), f64::INFINITY);
+        assert_eq!(atof("1e-400"), 0.0);
+        assert_eq!(atof("."), 0.0);
+        let d = fp_decode(17.0 / 1.5, 21, 26);
+        assert_eq!(d.digits(), b"1133333333333333392");
+        assert_eq!(d.idp, 2);
     }
 
     #[test]

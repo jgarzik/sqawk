@@ -199,7 +199,8 @@ fn canonical_float(s: &str) -> Option<f64> {
     {
         return None;
     }
-    let f = s.parse::<f64>().ok()?;
+    s.parse::<f64>().ok()?;
+    let f = crate::vm::arith::atof(s);
     if !f.is_finite() {
         return None;
     }
@@ -362,11 +363,12 @@ pub fn numeric_text(s: &str) -> Option<Value> {
     if let Ok(i) = t.parse::<i64>() {
         return Some(Value::Integer(i));
     }
-    // `inf` and `NaN` parse but are not finite, so they stay text.
-    match t.parse::<f64>() {
-        Ok(f) if f.is_finite() => Some(Value::Float(f)),
-        _ => None,
-    }
+    // `inf` and `NaN` parse but are not finite, so they stay text. The
+    // value is SQLite's reading of the text.
+    t.parse::<f64>().ok()?;
+    Some(crate::vm::arith::atof(t))
+        .filter(|f| f.is_finite())
+        .map(Value::Float)
 }
 
 /// Represents a row in a table

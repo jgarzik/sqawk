@@ -12,14 +12,15 @@
 //!   that is nothing at all; an empty format is NULL too);
 //! - a width or precision past the length limit is the error "string or
 //!   blob too big" (SQLite wraps it to 31 bits or returns NULL);
-//! - reals are decoded to at most 16 significant digits (26 with `!`),
-//!   rounded half up, as `sqlite3FpDecode` does -- so `%.20f` of 0.1 is
+//! - reals are decoded by [`fp_decode`] (SQLite's double-double
+//!   `sqlite3FpDecode`, identical on every platform) to at most 16
+//!   significant digits (26 with `!`), rounded half up -- so `%.20f` of 0.1 is
 //!   `0.10000000000000000000`, and `%.0f` truncates (`%.0f` of 2.5 is `2`);
 //! - `%s` widths and precisions count bytes unless the `!` flag is given;
 //! - a missing argument is NULL; NULL is 0 for numeric conversions, `''`
 //!   for `%s`, `(NULL)` for `%q` / `%w` and `NULL` for `%Q`.
 
-use super::arith::{real_to_int, text_of, text_to_int, text_to_num};
+use super::arith::{fp_decode, real_to_int, text_of, text_to_int, text_to_num};
 use super::bytecode::Register;
 use super::func::{too_big, MAX_LENGTH};
 use crate::error::SqawkResult;
@@ -557,98 +558,6 @@ fn integer(
     Ok(body)
 }
 
-/// A real decoded to decimal digits (SQLite's `FpDecode`).
-struct FpDecode {
-    sign: u8,
-    /// 0: finite; 1: infinity; 2: NaN.
-    special: u8,
-    /// The significant digits (ASCII), trailing zeros removed.
-    z: Vec<u8>,
-    /// Position of the decimal point relative to the first digit.
-    idp: i64,
-}
-
-/// `sqlite3FpDecode`: the digits of `r`, rounded to `iround` significant
-/// digits (or, when `iround` is negative, to `-iround` digits after the
-/// point), and to at most `mxround` digits.
-///
-/// SQLite reads the value as an 18-digit integer (19 from 1e18 up) before
-/// rounding; that integer is the truncation of the exact decimal expansion,
-/// which is what is taken here.
-fn fp_decode(r: f64, iround: i64, mxround: i64) -> FpDecode {
-    let (sign, r) = if r < 0.0 {
-        (b'-', -r)
-    } else if r == 0.0 {
-        return FpDecode {
-            sign: b'+',
-            special: 0,
-            z: b"0".to_vec(),
-            idp: 1,
-        };
-    } else {
-        (b'+', r)
-    };
-    if !r.is_finite() {
-        return FpDecode {
-            sign,
-            special: if r.is_nan() { 2 } else { 1 },
-            z: Vec::new(),
-            idp: 0,
-        };
-    }
-    let ndig = if r >= 1e18 { 19 } else { 18 };
-    let s = format!("{:.*e}", 60, r);
-    let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
-    let exp: i64 = exp.parse().unwrap_or(0);
-    let mut z: Vec<u8> = mant.bytes().filter(u8::is_ascii_digit).take(ndig).collect();
-    z.resize(ndig, b'0');
-    let mut n = ndig as i64;
-    let mut idp = exp + 1;
-    let mut iround = iround;
-    if iround < 0 {
-        iround = idp - iround;
-        if iround == 0 && z[0] >= b'5' {
-            iround = 1;
-            z.insert(0, b'0');
-            n += 1;
-            idp += 1;
-        }
-    }
-    if iround > 0 && (iround < n || n > mxround) {
-        if iround > mxround {
-            iround = mxround;
-        }
-        n = iround;
-        if z[iround as usize] >= b'5' {
-            let mut j = iround as usize - 1;
-            loop {
-                z[j] += 1;
-                if z[j] <= b'9' {
-                    break;
-                }
-                z[j] = b'0';
-                if j == 0 {
-                    z.insert(0, b'1');
-                    n += 1;
-                    idp += 1;
-                    break;
-                }
-                j -= 1;
-            }
-        }
-    }
-    z.truncate(n as usize);
-    while z.len() > 1 && z.last() == Some(&b'0') {
-        z.pop();
-    }
-    FpDecode {
-        sign,
-        special: 0,
-        z,
-        idp,
-    }
-}
-
 /// The real conversions (`f e E g G`).
 #[allow(clippy::too_many_arguments)]
 fn real(
@@ -673,7 +582,9 @@ fn real(
         Kind::Generic => precision,
         _ => precision + 1,
     };
-    let mut s = fp_decode(v, iround, if alt2 { 26 } else { 16 });
+    let s = fp_decode(v, iround, if alt2 { 26 } else { 16 });
+    let mut z: &[u8] = s.digits();
+    let mut idp = s.idp;
     if s.special == 2 {
         return Ok(if zeropad {
             b"null".to_vec()
@@ -683,8 +594,8 @@ fn real(
     }
     if s.special == 1 {
         if zeropad {
-            s.z = b"9".to_vec();
-            s.idp = 1000;
+            z = b"9";
+            idp = 1000;
         } else {
             let mut b = b"-Inf".to_vec();
             if s.sign == b'-' {
@@ -697,7 +608,7 @@ fn real(
         }
     }
     let prefix = if s.sign == b'-' { b'-' } else { flag_prefix };
-    let exp = s.idp - 1;
+    let exp = idp - 1;
     let mut kind = kind;
     let flag_rtz;
     if kind == Kind::Generic && precision > 0 {
@@ -714,7 +625,7 @@ fn real(
     } else {
         flag_rtz = alt2;
     }
-    let mut e2 = if kind == Kind::Exp { 0 } else { s.idp - 1 };
+    let mut e2 = if kind == Kind::Exp { 0 } else { idp - 1 };
     let mut need = e2.max(0) + precision + width + 15;
     if thousand && e2 > 0 {
         need += (e2 + 2) / 3;
@@ -727,9 +638,9 @@ fn real(
     }
     let mut j = 0usize;
     let digit = |j: &mut usize| {
-        if *j < s.z.len() {
+        if *j < z.len() {
             *j += 1;
-            s.z[*j - 1]
+            z[*j - 1]
         } else {
             b'0'
         }
@@ -771,7 +682,7 @@ fn real(
         }
     }
     if kind == Kind::Exp {
-        let mut exp = s.idp - 1;
+        let mut exp = idp - 1;
         b.push(if upper { b'E' } else { b'e' });
         if exp < 0 {
             b.push(b'-');
@@ -853,7 +764,7 @@ mod tests {
     fn reals() {
         assert_eq!(p("%.0f %.0f %.0f", &[f(0.5), f(1.5), f(2.5)]), "0 1 2");
         assert_eq!(p("%.20f", &[f(0.1)]), "0.10000000000000000000");
-        assert_eq!(p("%!.20f", &[f(0.1)]), "0.100000000000000005");
+        assert_eq!(p("%!.20f", &[f(0.1)]), "0.1000000000000000055");
         assert_eq!(
             p("%g|%#g|%G", &[f(0.00001), f(1.0), f(1e20)]),
             "1e-05|1.00000|1E+20"

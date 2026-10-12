@@ -989,6 +989,26 @@ impl<'a> SqlCompiler<'a> {
     }
 
     /// Emit bytecode to load a value as a literal
+    /// `reg = CAST(text AS REAL)`: a real constant from its text.
+    fn emit_real_literal(&mut self, reg: i64, text: &str) {
+        self.emit(
+            OpCode::String,
+            0,
+            reg,
+            0,
+            Some(text.to_string()),
+            &format!("r[{}] = {}", reg, text),
+        );
+        self.emit(
+            OpCode::Cast,
+            reg,
+            reg,
+            0,
+            Some("REAL".to_string()),
+            &format!("Cast r[{}] to REAL", reg),
+        );
+    }
+
     fn emit_value_literal(&mut self, reg: i64, value: &TableValue) -> SqawkResult<()> {
         match value {
             TableValue::Integer(i) => {
@@ -1002,7 +1022,6 @@ impl<'a> SqlCompiler<'a> {
                 );
             }
             TableValue::Float(f) => {
-                // Store float as string and use String opcode, then cast.
                 // Rust spells infinity `inf`, which CAST reads as 0; `1e999`
                 // reads back as infinity (a literal such as 1e999 is one).
                 let text = if f.is_infinite() {
@@ -1010,23 +1029,7 @@ impl<'a> SqlCompiler<'a> {
                 } else {
                     f.to_string()
                 };
-                self.emit(
-                    OpCode::String,
-                    0,
-                    reg,
-                    0,
-                    Some(text),
-                    &format!("r[{}] = {}", reg, f),
-                );
-                // Cast to float
-                self.emit(
-                    OpCode::Cast,
-                    reg,
-                    reg,
-                    0,
-                    Some("REAL".to_string()),
-                    &format!("Cast r[{}] to REAL", reg),
-                );
+                self.emit_real_literal(reg, &text);
             }
             TableValue::String(s) => {
                 self.emit(
@@ -1568,7 +1571,13 @@ impl<'a> SqlCompiler<'a> {
                     Value::Number(n, _) => match n.parse::<i64>() {
                         Ok(i) => TableValue::Integer(i),
                         Err(_) => match n.parse::<f64>() {
-                            Ok(f) => TableValue::Float(f),
+                            // A real literal is read from its own text by
+                            // CAST, i.e. by SQLite's text-to-real reading
+                            // (arith::atof), as SQLite reads it.
+                            Ok(_) => {
+                                self.emit_real_literal(dest, n);
+                                return Ok(dest);
+                            }
                             Err(_) => TableValue::String(n.clone().into()),
                         },
                     },
