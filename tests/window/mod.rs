@@ -627,6 +627,28 @@ fn sum_over_integers_stays_integer() -> TestResult {
     )
 }
 
+/// Moving frames follow SQLite's step / inverse evaluation (values from
+/// SQLite 3.45): SUM stays a real once a real has been in the frame, an
+/// emptied GROUP_CONCAT is NULL, MIN / MAX and COUNT over frames that
+/// start ahead of the current row.
+#[test]
+fn moving_frames_match_sqlite() -> TestResult {
+    let dir = create_temp_dir()?;
+    let f = dir.path().join("m.csv");
+    std::fs::write(&f, "i,x,s\n1,1.5,a\n2,2,\n3,3,\n4,4,b\n5,,cc\n6,6,d\n")?;
+    assert_query(
+        &[f.to_str().unwrap()],
+        "SELECT i, SUM(x) OVER (ORDER BY i ROWS 1 PRECEDING) AS s, \
+         GROUP_CONCAT(s, '-') OVER (ORDER BY i ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS g, \
+         MIN(x) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS mn, \
+         COUNT(x) OVER (ORDER BY i ROWS BETWEEN 2 FOLLOWING AND UNBOUNDED FOLLOWING) AS c, \
+         MAX(s) OVER (ORDER BY i ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) AS mx, \
+         TOTAL(x) OVER (ORDER BY i ROWS BETWEEN 3 PRECEDING AND 2 PRECEDING) AS t FROM m",
+        "i,s,g,mn,c,mx,t\n1,1.5,a,1.5,3,,0.0\n2,3.5,a,2,2,b,0.0\n3,5.0,,3,1,cc,1.5\n\
+         4,7.0,b,4,1,d,3.5\n5,4.0,b-cc,6,0,d,5.0\n6,6.0,cc-d,6,0,,7.0",
+    )
+}
+
 #[test]
 fn window_function_where_group_by_having_is_error() -> TestResult {
     check_fails(

@@ -223,12 +223,54 @@ impl AggAccumulator {
         Ok(())
     }
 
+    /// Remove one value accumulated earlier -- the oldest, as a window
+    /// frame's start moves -- for COUNT, SUM, AVG and TOTAL (SQLite's
+    /// `countInverse` / `sumInverse`). The state is not rewound: once a real
+    /// has been added SUM stays a real, and reals are subtracted in the
+    /// compensated sum, so the value is the one SQLite computes.
+    pub(super) fn inverse(&mut self, value: Option<Value>) {
+        match self.func_type {
+            AGG_COUNT => {
+                if !matches!(value, Some(Value::Null)) {
+                    self.count -= 1;
+                }
+            }
+            AGG_SUM | AGG_AVG | AGG_TOTAL => {
+                let Some(v) = value.as_ref().and_then(sum_operand) else {
+                    return;
+                };
+                self.count -= 1;
+                let Some(sum) = self.sum.as_mut() else {
+                    return;
+                };
+                match (*sum, v) {
+                    (Sum::Int(a), Addend::Int(b)) => *sum = Sum::Int(a.wrapping_sub(b)),
+                    (Sum::Int(a), Addend::Real(r)) => {
+                        *sum = Sum::Int(a.wrapping_sub(arith::real_to_int(r)))
+                    }
+                    (Sum::Real { .. }, Addend::Int(b)) => {
+                        if b == i64::MIN {
+                            sum.add_int(i64::MAX);
+                            sum.add_int(1);
+                        } else {
+                            sum.add_int(-b);
+                        }
+                    }
+                    (Sum::Real { .. }, Addend::Real(r)) => sum.add_real(-r),
+                }
+            }
+            // MIN / MAX and GROUP_CONCAT frames are handled by the window
+            // code itself.
+            _ => {}
+        }
+    }
+
     /// The aggregate's value. Of no rows, COUNT is 0, TOTAL 0.0 and the
     /// rest NULL. A SUM of integers that overflowed (with no real added
     /// after the overflow) is an "integer overflow" error, as in SQLite;
     /// AVG and TOTAL carry on in floating point.
     pub(super) fn finalize(&self) -> SqawkResult<Value> {
-        if self.func_type == AGG_SUM && self.overflow {
+        if self.func_type == AGG_SUM && self.overflow && self.count > 0 {
             return Err(arith::overflow());
         }
         Ok(match self.func_type {
@@ -239,6 +281,7 @@ impl AggAccumulator {
             },
             AGG_TOTAL => Value::Float(self.sum.map_or(0.0, Sum::as_f64)),
             AGG_SUM => match self.sum {
+                _ if self.count == 0 => Value::Null,
                 Some(Sum::Int(i)) => Value::Integer(i),
                 Some(s) => Value::Float(s.as_f64()),
                 None => Value::Null,

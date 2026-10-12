@@ -625,6 +625,15 @@ offset, `GROUPS` frames, `EXCLUDE`, `FILTER` on a window function, and
 `DISTINCT` inside one. SUM of integers is an integer; TOTAL, AVG,
 PERCENT_RANK and CUME_DIST are floats.
 
+An aggregate over a moving frame is computed as SQLite computes it: rows enter
+the frame (and leave it, when its start moves) one at a time, each once, so
+any frame costs time linear in the partition. The values are SQLite's too: a
+SUM that has seen a real stays a real after the real leaves the frame
+(`SUM(x) OVER (ROWS 1 PRECEDING)` over 1.5, 2, 3 gives 1.5, 3.5, 5.0), reals
+that leave are subtracted from the running compensated sum, GROUP_CONCAT
+drops a leaving value and the separator after it, and an empty GROUP_CONCAT
+is NULL.
+
 ## Set Operations
 
 ```sql

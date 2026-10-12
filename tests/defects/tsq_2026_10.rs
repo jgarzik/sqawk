@@ -147,14 +147,12 @@ fn exists_with_outer_only_predicate_is_not_quadratic() -> TestResult {
 
 /// A window frame that ends at UNBOUNDED FOLLOWING while its start moves
 /// (`ROWS BETWEEN 2 PRECEDING AND UNBOUNDED FOLLOWING`, `RANGE BETWEEN
-/// CURRENT ROW AND UNBOUNDED FOLLOWING`) is recomputed from scratch for
-/// every row in sqawk: O(n^2), about 75 s for these 60000 rows in a debug
-/// build where SQLite takes 0.01 s (it removes rows leaving the frame
-/// instead). Frames
-/// ending at the current row or a fixed offset are fast. Found by tsq diff
-/// --scale large --seed 7 (tests 277 and 392).
+/// CURRENT ROW AND UNBOUNDED FOLLOWING`) was recomputed from scratch for
+/// every row in sqawk: O(n^2), about 77 s for these 60000 rows in a debug
+/// build (0.2 s once fixed) where SQLite takes 0.01 s (it removes rows
+/// leaving the frame instead). Found by tsq diff --scale large --seed 7
+/// (tests 277 and 392).
 #[test]
-#[ignore = "defect: window frames ending at UNBOUNDED FOLLOWING are quadratic"]
 fn window_frame_to_unbounded_following_is_not_quadratic() -> TestResult {
     let w = csv("id,x", (1..=60000).map(|i| format!("{i},{}", i % 97)));
     assert_fast(
