@@ -6,19 +6,29 @@
 //! * `tsq diff`: random SQL run through sqawk and through SQLite (rusqlite's
 //!   bundled build) holding the same values; every result set compared byte
 //!   for byte; failures shrunk to minimal reproductions;
-//! * `tsq corpus`: hand-written query files judged the same way.
+//! * `tsq corpus`: hand-written query files judged the same way;
+//! * `tsq wb`: random files and DML run with `--write`; every file checked
+//!   byte for byte against the oracle's final tables rendered by the
+//!   writeback rules (and, on Unix, killed mid-write);
+//! * `tsq cli`: command-line and REPL surface fuzzing (exit statuses,
+//!   one-line errors, no panics, hangs or stray files);
+//! * `tsq stress`: performance workloads with wall time and peak RSS,
+//!   compared against a saved baseline.
 //!
 //! Everything random comes from one ChaCha8 stream per seed (`rng.rs`), so a
 //! seed reproduces the same data and queries on every OS.
 
 #![forbid(unsafe_code)]
 
+mod clifuzz;
 mod corpus;
 mod data;
 mod diff;
 mod gen;
 mod rng;
 mod run;
+mod stress;
+mod wb;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -31,12 +41,14 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(
     name = "tsq",
     version,
-    about = "Test data generator and differential SQL tester for sqawk",
-    long_about = "Test data generator and differential SQL tester for sqawk.\n\n\
+    about = "Test data generator, differential tester and fuzzer for sqawk",
+    long_about = "Test data generator, differential tester and fuzzer for sqawk.\n\n\
                   gen writes deterministic multi-table CSV/TSV data; diff runs random SQL \
                   through sqawk and SQLite and compares the answers byte for byte; corpus \
-                  runs hand-written query files the same way. The same seed gives the same \
-                  data and queries on every OS."
+                  runs hand-written query files the same way; wb checks --write output \
+                  against SQLite's final tables; cli fuzzes the command line and the REPL; \
+                  stress times performance workloads. The same seed gives the same data \
+                  and queries on every OS."
 )]
 struct Cli {
     /// The sqawk binary (default: $SQAWK, else sqawk next to tsq)
@@ -140,6 +152,67 @@ enum Command {
         /// Per-test time limit in seconds
         #[arg(long, default_value_t = 10)]
         timeout: u64,
+    },
+    /// Writeback fuzzer: random files and DML with --write, checked against
+    /// the oracle byte for byte (plus kill-during-write trials on Unix)
+    Wb {
+        /// Number of iterations
+        #[arg(long, short = 'n', default_value_t = 300)]
+        iterations: usize,
+        /// Run only iteration N (prints its files' flags and script)
+        #[arg(long)]
+        only: Option<usize>,
+        /// Probability that an iteration adds a kill-during-write trial
+        /// (Unix only)
+        #[arg(long, default_value_t = 0.04)]
+        kill_rate: f64,
+        /// Per-run time limit in seconds
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
+    },
+    /// Command-line and REPL surface fuzzer: random flags, operands, REPL
+    /// scripts, malformed files, garbage and huge SQL, closed stdout
+    Cli {
+        /// Number of iterations
+        #[arg(long, short = 'n', default_value_t = 300)]
+        iterations: usize,
+        /// Run only iteration N (prints its command line)
+        #[arg(long)]
+        only: Option<usize>,
+        /// Per-run time limit in seconds (a run past it is a hang)
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
+    },
+    /// Performance workloads on generated data: wall time and peak RSS
+    Stress {
+        /// Rows of the largest table (order_items), 1000000 to 10000000
+        #[arg(long, short = 'r', default_value_t = 1_000_000)]
+        rows: usize,
+        /// Comma-separated workload names (default: all; see --list)
+        #[arg(long)]
+        workloads: Option<String>,
+        /// Print the workload names and exit
+        #[arg(long)]
+        list: bool,
+        /// Write the results as JSON to this file
+        #[arg(long)]
+        json: Option<PathBuf>,
+        /// Compare with an earlier --json file; exit 1 on a regression
+        #[arg(long)]
+        baseline: Option<PathBuf>,
+        /// Allowed regression in percent (time and peak RSS)
+        #[arg(long, default_value_t = 25.0)]
+        tolerance: f64,
+        /// Runs per workload; the best time and the lowest peak RSS count
+        #[arg(long, default_value_t = 1)]
+        repeat: usize,
+        /// Per-run time limit in seconds
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+        /// Directory for the generated data, kept and reused by later runs
+        /// with the same seed and size (default: a temp dir, removed)
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
     },
 }
 
@@ -253,6 +326,63 @@ fn real_main() -> Result<i32> {
                 keep_going: true,
             };
             corpus::run(&sqawk, &opts, cli.verbose)
+        }
+        Command::Wb {
+            iterations,
+            only,
+            kill_rate,
+            timeout,
+        } => {
+            let opts = wb::WbOptions {
+                iterations,
+                timeout: Duration::from_secs(timeout),
+                kill_rate,
+            };
+            match only {
+                Some(n) => wb::run_one(seed, n, &sqawk, &opts),
+                None => wb::run(seed, &sqawk, &opts, cli.verbose),
+            }
+        }
+        Command::Cli {
+            iterations,
+            only,
+            timeout,
+        } => {
+            let opts = clifuzz::CliOptions {
+                iterations,
+                only,
+                timeout: Duration::from_secs(timeout),
+            };
+            clifuzz::run(seed, &sqawk, &opts, cli.verbose)
+        }
+        Command::Stress {
+            rows,
+            workloads,
+            list,
+            json,
+            baseline,
+            tolerance,
+            repeat,
+            timeout,
+            data_dir,
+        } => {
+            if list {
+                for w in stress::WORKLOADS {
+                    println!("{:<16} {}", w.name, w.about);
+                }
+                return Ok(0);
+            }
+            let opts = stress::StressOptions {
+                rows,
+                workloads,
+                json,
+                baseline,
+                tolerance,
+                repeat: repeat.max(1),
+                timeout: Duration::from_secs(timeout),
+                data_dir,
+            };
+            stress::run(seed, &sqawk, &opts, cli.verbose)
         }
     }
 }

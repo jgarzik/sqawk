@@ -1,11 +1,11 @@
-//! Tests for `tsq`, the test-data generator and differential tester.
+//! Tests for `tsq`, the test-data generator, differential tester and fuzzer.
 //!
 //! `tsq` is a local development tool (a `publish = false` workspace member),
 //! not part of the published sqawk crate. These tests cover what makes it
 //! useful: `gen` is deterministic (every output file), its foreign keys
-//! hold, and sqawk reads every layout it writes; `diff` and `corpus` run
-//! clean against the current sqawk (small budgets, so `cargo test
-//! --workspace` stays fast).
+//! hold, and sqawk reads every layout it writes; `diff`, `corpus`, `wb` and
+//! `cli` run clean against the current sqawk (small budgets, so `cargo test
+//! --workspace` stays fast; `stress` is not run here).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -243,10 +243,43 @@ fn diff_smoke_runs_clean() {
     }
 }
 
+/// The last line of a tsq run that must pass.
+fn summary(args: &[&str]) -> String {
+    let out = tsq().args(args).output().expect("run tsq");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "tsq {args:?} failed ({}):\n{text}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    text.lines().last().unwrap_or("").to_string()
+}
+
+#[test]
+fn wb_smoke_runs_clean() {
+    // Random files and DML with --write: every file equals the oracle's
+    // rendering, nothing stray is left (and, on Unix, killed runs leave the
+    // old or the new file).
+    let last = summary(&["wb", "--seed", "1", "--iterations", "50"]);
+    assert!(
+        last.starts_with("WB SUMMARY {ok: 50, bad: 0, crash: 0}"),
+        "{last}"
+    );
+}
+
+#[test]
+fn cli_smoke_runs_clean() {
+    // Random flags, operands, REPL scripts, malformed files, garbage and
+    // huge SQL, closed stdout: clean exits and one-line errors only.
+    let last = summary(&["cli", "--seed", "1", "--iterations", "100"]);
+    assert_eq!(last, "CLI SUMMARY {ok: 100, bad: 0, crash: 0}");
+}
+
 #[test]
 fn corpus_counts_match_the_python_harness() {
-    // The same files gave these numbers under tests/sqlite_diff/harness.py
-    // and diffh.py; every non-pass is a documented difference.
+    // The same files gave these numbers under the retired Python harness
+    // (harness.py / diffh.py); every non-pass is a documented difference.
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
     let run = |files: &[&str]| {
         let out = tsq()

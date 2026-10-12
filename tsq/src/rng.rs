@@ -57,6 +57,13 @@ impl Rng {
     pub fn pick<'a, T>(&mut self, xs: &'a [T]) -> &'a T {
         &xs[self.below(xs.len())]
     }
+
+    /// One of `xs` by value: for a slice of `&str` (or other `Copy` items)
+    /// picked straight into a `&str` argument, where `pick`'s `&&str` would
+    /// leave the item type to inference.
+    pub fn pick_copy<T: Copy>(&mut self, xs: &[T]) -> T {
+        xs[self.below(xs.len())]
+    }
 }
 
 #[cfg(test)]

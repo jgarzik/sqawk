@@ -3,7 +3,7 @@ name = "tsq"
 version = "0.2.0"
 edition = "2021"
 authors = ["Jeff Garzik <jgarzik@pobox.com>"]
-description = "Test data generator and differential SQL tester for sqawk"
+description = "Test data generator, differential tester and fuzzer for sqawk"
 license = "MIT"
 rust-version = "1.88"
 # Local development tool only; never published to crates.io.

@@ -70,7 +70,7 @@ pub fn infer(conn: &Connection, s: &str) -> Value {
     Value::Text(s.to_string())
 }
 
-fn quote_ident(s: &str) -> String {
+pub fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
@@ -139,6 +139,12 @@ impl Oracle {
         }
         conn.execute_batch("COMMIT")?;
         Ok(Oracle { conn })
+    }
+
+    /// The connection itself, for modes that keep state across statements
+    /// (`tsq wb` runs a whole statement sequence on it).
+    pub fn conn(&self) -> &Connection {
+        &self.conn
     }
 
     /// Every value of `table`, as loaded, column by column.
