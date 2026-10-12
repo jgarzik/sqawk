@@ -186,3 +186,24 @@ fn in_subquery_filter_applies_before_the_joins() -> TestResult {
         "COUNT(*)\n40000\n",
     )
 }
+
+/// A CTE is computed when a query first reads it, and a WHERE term that
+/// reads no table is tested before the FROM tables are opened: here `d` is
+/// read only by an arm whose WHERE is constant false ('D' sorts before
+/// 'abc'), so SQLite never computes `d` -- nor `c`, read only by `d`. sqawk
+/// computed every referenced CTE before the statement ran: `c` is 26667 rows
+/// and its self-join in `d` 118 million (18 s in a release build, minutes
+/// in a debug build); SQLite takes 0.001 s. Found by tsq diff --seed 4 --only
+/// 3486 (91 s there).
+#[test]
+#[ignore]
+fn cte_read_only_under_a_false_where_is_never_computed() -> TestResult {
+    let t = csv("id,k", (1..=400).map(|i| format!("{i},{}", i % 6)));
+    assert_fast(
+        &[("t.csv", t)],
+        "WITH c AS (SELECT t1.k AS k FROM t t1 JOIN t t2 USING (k)), \
+         d(k) AS (SELECT id FROM t INTERSECT SELECT x.k FROM c x JOIN c y USING (k)) \
+         SELECT k FROM d WHERE 'D' > 'abc' UNION SELECT COUNT(*) FROM t",
+        "k\n400\n",
+    )
+}
