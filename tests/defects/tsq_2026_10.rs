@@ -19,25 +19,6 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 const ONE: &[(&str, &str)] = &[("t.csv", "x\n1\n")];
 
-/// CONCAT_WS skips empty-string arguments as well as NULLs in SQLite 3.45
-/// (and 3.46): no separator is written for them. sqawk writes one (`a,,b`,
-/// `,x`). Found by tsq diff --seed 2 --only 14411 (and seeds 3, 4, 5: every
-/// CONCAT_WS with a '' argument or an empty SUBSTR result).
-///
-/// Upstream changed this: SQLite 3.50.2 writes the separator, as sqawk
-/// does. Fixing sqawk to 3.45 here is one resolution; listing it under
-/// "Differences from SQLite" (and dropping this test) is the other.
-#[test]
-#[ignore = "defect: CONCAT_WS writes a separator for an empty-string argument"]
-fn concat_ws_skips_empty_strings() -> TestResult {
-    assert_query_on(
-        ONE,
-        "SELECT CONCAT_WS(',', 'a', '', 'b') AS a, CONCAT_WS(',', '', 'x') AS b, \
-         CONCAT_WS('-', SUBSTR('UK', -3, 1), 1, 'red') AS c, CONCAT('a', '', 'b') AS d FROM t",
-        "a,b,c,d\n\"a,b\",x,1-red,ab",
-    )
-}
-
 /// A real prints as SQLite's `CAST(x AS TEXT)` (doc "Real output"), which
 /// rounds a decimal expansion of about 18 digits half up to 15 digits. The
 /// double nearest 443.85 / 5867 is 0.07565195159365944999..., whose 18-digit

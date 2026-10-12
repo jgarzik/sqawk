@@ -170,7 +170,7 @@ gives NULL, and a number argument is used in its text form.
 | `REPLACE(s, from, to)` | Replace every occurrence; an empty `from` leaves `s` alone |
 | `INSTR(s, t)` | 1-based position of the first `t` in `s`, 0 if absent |
 | `CONCAT(a, b, ...)` | Concatenation; NULL arguments count as `''` |
-| `CONCAT_WS(sep, a, ...)` | Concatenation with a separator; NULL arguments skipped |
+| `CONCAT_WS(sep, a, ...)` | Concatenation with a separator; NULL arguments skipped (empty strings are not, see Differences from SQLite) |
 | `LEFT(s, n)`, `RIGHT(s, n)` | First / last `n` characters |
 | `LPAD(s, len [, fill])`, `RPAD` | Pad to `len` characters (see below) |
 | `HEX(x)` | Upper-case hex of the UTF-8 bytes; `''` for NULL |
@@ -905,6 +905,7 @@ sqawk aims to give SQLite's answers. Where it deliberately does not:
 | `CAST(x AS STRING)` | NUMERIC affinity: `CAST('x' AS STRING)` is the integer `0` | TEXT: `CAST('x' AS STRING)` is the text `x` |
 | `UPPER` / `LOWER` | ASCII letters only | All of Unicode |
 | `TRIM(s)` | Strips spaces only | Strips all whitespace |
+| `CONCAT_WS` with an empty-string argument | SQLite 3.45 skips it like NULL: `CONCAT_WS(',', 'a', '', 'b')` is `a,b` | The separator is written: `a,,b` (as in SQLite 3.50 and PostgreSQL); only NULL arguments are skipped |
 | `SUM` / `AVG` over text | Non-numeric text counts as 0: `SUM` becomes real, `AVG` divides by every non-NULL value, and over only non-numeric text both give `0.0` | Non-numeric text is skipped: `SUM` stays an integer over integers and integer text, `AVG` divides by the count of numeric values, and over only non-numeric text both give NULL |
 | Bare column in an aggregate query (`SELECT k, MAX(y), s FROM t GROUP BY k`, `SELECT COUNT(*), x FROM t`) | Allowed: the value comes from one row of the group | Rejected: `'s' must appear in GROUP BY or be used in an aggregate` |
 | `INSERT OR REPLACE`, `ON CONFLICT` | Plain INSERT when the table has no unique constraint | Rejected: sqawk tables have no keys, so the statement cannot do what it asks |

@@ -235,6 +235,47 @@ fn sum_avg_text(ctx: &Ctx) -> bool {
     })
 }
 
+/// The separators of the `CONCAT_WS('sep', ...)` calls in `sql` that are
+/// non-empty string literals.
+fn concat_ws_separators(sql: &str) -> Vec<String> {
+    let toks = tokens(sql);
+    toks.windows(3)
+        .filter(|w| upper(&w[0]) == "CONCAT_WS" && w[1] == "(" && w[2].len() > 2)
+        .filter_map(|w| {
+            w[2].strip_prefix('\'')?
+                .strip_suffix('\'')
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// "CONCAT_WS with an empty-string argument": SQLite 3.45 writes no
+/// separator for it, sqawk does (`a,,b`). The rows must agree once every
+/// separator is removed from both sides.
+fn concat_ws_empty(ctx: &Ctx) -> bool {
+    if ctx.outcome != Outcome::Diff || ctx.sqawk_sets.len() != ctx.sqlite_sets.len() {
+        return false;
+    }
+    let seps = concat_ws_separators(ctx.sql);
+    if seps.is_empty() {
+        return false;
+    }
+    let strip = |r: &String| {
+        let mut r = r.clone();
+        for sep in &seps {
+            r = r.replace(sep.as_str(), "");
+        }
+        r
+    };
+    ctx.sqawk_sets.iter().zip(ctx.sqlite_sets).all(|(a, b)| {
+        let mut x: Vec<String> = a.rows.iter().map(strip).collect();
+        let mut y: Vec<String> = b.rows.iter().map(strip).collect();
+        x.sort();
+        y.sort();
+        x == y
+    })
+}
+
 /// "Bare column in an aggregate query": rejected by sqawk.
 fn bare_column(ctx: &Ctx) -> bool {
     ctx.outcome == Outcome::SqawkErr
@@ -411,6 +452,11 @@ pub const RULES: &[Rule] = &[
         matches: sum_avg_text,
     },
     Rule {
+        name: "concat_ws_empty",
+        doc: "Differences from SQLite: CONCAT_WS with an empty-string argument",
+        matches: concat_ws_empty,
+    },
+    Rule {
         name: "bare_column",
         doc: "Differences from SQLite: Bare column in an aggregate query",
         matches: bare_column,
@@ -526,5 +572,31 @@ mod tests {
             Some("sqawk_extensions")
         );
         assert_eq!(r("SELECT k FROM t1 WHERE a = 10", Outcome::Diff, ""), None);
+    }
+
+    #[test]
+    fn concat_ws_needs_rows_equal_without_separators() {
+        let e = BTreeSet::new();
+        let set = |rows: &[&str]| ResultSet {
+            header: "c".into(),
+            rows: rows.iter().map(|r| r.to_string()).collect(),
+            source: 0,
+        };
+        let sql = "SELECT CONCAT_WS('-', a, b) AS c FROM t";
+        let ours = [set(&["x--y", "z"])];
+        let same = [set(&["x-y", "z"])];
+        let other = [set(&["x-w", "z"])];
+        let with = |theirs: &[ResultSet]| {
+            let mut c = ctx(sql, Outcome::Diff, "", &e);
+            c.sqawk_sets = &ours;
+            c.sqlite_sets = theirs;
+            classify(&c).map(|r| r.name)
+        };
+        assert_eq!(with(&same), Some("concat_ws_empty"));
+        assert_eq!(with(&other), None);
+        assert_eq!(
+            concat_ws_separators("SELECT CONCAT_WS(', ', a), concat_ws('', b)"),
+            vec![", ".to_string()]
+        );
     }
 }
