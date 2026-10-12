@@ -321,7 +321,6 @@ fn update_write_on_a_wide_file_is_not_quadratic() -> TestResult {
 /// under Windows (a `--write` error on a file in another directory).
 #[cfg(windows)]
 #[test]
-#[ignore]
 fn write_error_path_has_no_verbatim_prefix() -> TestResult {
     let data = create_temp_dir()?;
     let cwd = create_temp_dir()?;

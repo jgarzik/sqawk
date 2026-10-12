@@ -278,7 +278,11 @@ impl FileHandler {
         let file_path = match table.file_path() {
             Some(path) => {
                 if self.config.verbose() {
-                    diag!("Table '{}' has file_path '{:?}'", table_name, path);
+                    diag!(
+                        "Table '{}' has file_path '{}'",
+                        table_name,
+                        crate::error::display_path(path)
+                    );
                 }
                 path
             }

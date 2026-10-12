@@ -81,7 +81,7 @@ impl SqawkError {
     pub fn open(path: impl AsRef<Path>, error: std::io::Error) -> Self {
         SqawkError::FileError {
             action: "cannot open",
-            path: path.as_ref().display().to_string(),
+            path: display_path(path.as_ref()),
             error,
         }
     }
@@ -90,10 +90,42 @@ impl SqawkError {
     pub fn write(path: impl AsRef<Path>, error: std::io::Error) -> Self {
         SqawkError::FileError {
             action: "cannot write",
-            path: path.as_ref().display().to_string(),
+            path: display_path(path.as_ref()),
             error,
         }
     }
+}
+
+/// `path` as shown to the user. A canonical Windows path is verbatim
+/// (`\\?\C:\dir\f.csv`, `\\?\UNC\server\share\f.csv`), a spelling
+/// the user never types; it is shown as the plain path (`C:\dir\f.csv`,
+/// `\\server\share\f.csv`). The canonical form stays the file's identity.
+pub fn display_path(path: &Path) -> String {
+    let shown = path.display().to_string();
+    if cfg!(windows) {
+        strip_verbatim(&shown).to_string()
+    } else {
+        shown
+    }
+}
+
+/// `s` without a Windows verbatim prefix: `\\?\UNC\` becomes `\\`, and a
+/// `\\?\` before a drive letter is dropped. Any other verbatim path (a
+/// volume GUID, say) has no plain spelling and is kept.
+fn strip_verbatim(s: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}").into();
+    }
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if is_drive_path(rest) => rest.into(),
+        _ => s.into(),
+    }
+}
+
+/// Whether `s` starts with a drive letter and a colon (`C:`).
+fn is_drive_path(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
 }
 
 /// The reason part of an I/O error, without the `(os error N)` suffix the
@@ -231,5 +263,19 @@ mod tests {
             e.to_string(),
             format!("cannot open 'np.csv': {}", denied_text())
         );
+    }
+
+    #[test]
+    fn verbatim_prefix_is_not_shown() {
+        assert_eq!(strip_verbatim(r"\\?\C:\d\f.csv"), r"C:\d\f.csv");
+        assert_eq!(
+            strip_verbatim(r"\\?\UNC\srv\share\f.csv"),
+            r"\\srv\share\f.csv"
+        );
+        assert_eq!(
+            strip_verbatim(r"\\?\Volume{x}\f.csv"),
+            r"\\?\Volume{x}\f.csv"
+        );
+        assert_eq!(strip_verbatim("d/f.csv"), "d/f.csv");
     }
 }
