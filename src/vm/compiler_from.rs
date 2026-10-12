@@ -13,7 +13,12 @@
 //! * ON conjuncts are evaluated at their own level, before that level's
 //!   "match" point. WHERE conjuncts are evaluated after it, at the innermost
 //!   level that has every table they mention, so the NULL-extended rows an
-//!   outer join produces are filtered by WHERE like any other row.
+//!   outer join produces are filtered by WHERE like any other row. A
+//!   conjunct with a subquery is placed by the columns its compiled code
+//!   reads (a correlated subquery's references included), so `t1.k IN
+//!   (SELECT ...)` filters at t1's loop. A conjunct reading no table of the
+//!   FROM at all is tested once, before the nest: in a correlated subquery,
+//!   `t1.b < t1.c` skips the scan for an outer row that fails it.
 //! * An outer join's preserved side owns a match flag. When an inner loop
 //!   finishes without a match, its cursors are put on a NULL row (`NullRow`)
 //!   and control re-enters the loop body at the match point once, so the rest
@@ -368,6 +373,29 @@ fn collect_sources(expr: &Expr, ctx: &NameCtx<'_>, out: &mut Vec<usize>) -> Opti
             }
             Some(())
         }
+    }
+}
+
+impl<'a> SqlCompiler<'a> {
+    /// The sources of this FROM that a WHERE conjunct reads when
+    /// [`expr_sources`] cannot tell (a subquery -- whose correlated
+    /// references count -- or another node it does not analyze): found by
+    /// compiling the conjunct in a scratch compiler and collecting the
+    /// cursors its `Column` reads name. `None` when the conjunct does not
+    /// compile (the real compilation reports why).
+    fn compiled_term_sources(&self, term: &Expr, ctx: &NameCtx<'a>) -> Option<Vec<usize>> {
+        let mut scratch = self.scratch();
+        scratch.code_expr(term, ctx, None).ok()?;
+        let mut out: Vec<usize> = scratch
+            .program
+            .instructions
+            .iter()
+            .filter(|inst| inst.opcode == OpCode::Column)
+            .filter_map(|inst| ctx.srcs.iter().position(|s| s.cursor == inst.p1))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        Some(out)
     }
 }
 
@@ -733,8 +761,16 @@ impl<'a> SqlCompiler<'a> {
             plan.full_where = Some(where_terms);
         } else {
             for term in where_terms {
-                match expr_sources(&term, &ctx) {
+                let sources =
+                    expr_sources(&term, &ctx).or_else(|| self.compiled_term_sources(&term, &ctx));
+                match sources {
                     None => plan.levels[last].post_terms.push(term),
+                    // A conjunct reading no table of this FROM (a constant,
+                    // a test of an enclosing query's row, an uncorrelated
+                    // subquery) is tested once, before the nest: when it is
+                    // false no row can qualify, and in a correlated
+                    // subquery the scan is skipped for that outer row.
+                    Some(s) if s.is_empty() => plan.const_where.push(term),
                     Some(s) => {
                         let at = plan.max_level(&s);
                         match plan.group_of(at).map(|g| g.end) {
@@ -885,7 +921,13 @@ impl<'a> SqlCompiler<'a> {
             body(self, &ctx)?;
             self.resolve(skip);
         } else {
+            let skip = self.label();
+            for term in &plan.const_where {
+                let r = self.code_expr(term, &ctx, None)?;
+                self.emit_jump_to(OpCode::IfZ, r, skip, 0, None, "WHERE: before the scan");
+            }
             self.emit_level(plan, &ctx, 0, &match_regs, &match_labels, body)?;
+            self.resolve(skip);
         }
 
         // FULL JOIN: right rows no left row matched, with the left side NULL.

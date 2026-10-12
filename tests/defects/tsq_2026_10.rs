@@ -128,11 +128,10 @@ fn csv(header: &str, rows: impl Iterator<Item = String>) -> String {
 /// An EXISTS subquery whose only tie to the outer row is a predicate on the
 /// outer columns (`t1.b < t1.c`) must not rescan the inner table for every
 /// outer row: SQLite evaluates such a term once per outer row and stops the
-/// subquery at its first row; sqawk is O(n^2) (about 95 s for these 12000
-/// rows in a debug build, 14 s in a release build). Found by tsq diff --scale large --seed 1
+/// subquery at its first row; sqawk was O(n^2) (about 95 s for these 12000
+/// rows in a debug build, 14 s in a release build; 0.04 s once fixed). Found by tsq diff --scale large --seed 1
 /// --only 35.
 #[test]
-#[ignore = "defect: EXISTS with an outer-only predicate is quadratic"]
 fn exists_with_outer_only_predicate_is_not_quadratic() -> TestResult {
     let r = csv(
         "id,a,b,c",
@@ -169,14 +168,13 @@ fn window_frame_to_unbounded_following_is_not_quadratic() -> TestResult {
 }
 
 /// A WHERE term on the first table of a join that is an `IN (SELECT ...)`
-/// is applied only after the whole join is built, while a plain comparison
-/// on the same column is applied at that table's loop. Here the join is
-/// 40 million rows unfiltered (over a minute in a debug build) and 40000
-/// filtered; SQLite takes 0.2 s.
+/// was applied only after the whole join was built, while a plain
+/// comparison on the same column is applied at that table's loop. Here the join is
+/// 40 million rows unfiltered (93 s in a debug build) and 40000 filtered
+/// (0.4 s); SQLite takes 0.2 s.
 /// Found by tsq diff --scale large --seed 7 --only 233 (and --seed 3
 /// --only 12902 at small scale).
 #[test]
-#[ignore = "defect: an IN (SELECT ...) WHERE term is not applied before the joins"]
 fn in_subquery_filter_applies_before_the_joins() -> TestResult {
     let p = csv("pid,q", (1..=1000).map(|i| format!("{i},{i}")));
     let it = csv(

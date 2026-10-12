@@ -503,6 +503,23 @@ impl<'a> SqlCompiler<'a> {
         self
     }
 
+    /// A throwaway compiler in this one's state (scope, cursor and register
+    /// numbering), for compiling an expression only to see what it reads:
+    /// its program is discarded.
+    pub(crate) fn scratch(&self) -> SqlCompiler<'a> {
+        let mut c = SqlCompiler::new(self.database, false);
+        c.table_map = self.table_map.clone();
+        c.register_counter = self.register_counter;
+        c.outer_scope = self.outer_scope.clone();
+        c.correlated = self.correlated.clone();
+        c.next_cursor = self.next_cursor;
+        c.next_sorter = self.next_sorter;
+        c.source = self.source.clone();
+        c.derived = self.derived;
+        c.cte_names = self.cte_names.clone();
+        c
+    }
+
     /// A fresh cursor id for an ephemeral table.
     pub(crate) fn alloc_cursor(&mut self) -> i64 {
         self.next_cursor += 1;
