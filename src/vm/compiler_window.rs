@@ -22,6 +22,8 @@
 //! A window call anywhere else -- WHERE, GROUP BY, HAVING, an aggregate's or
 //! another window's argument -- reaches `code_expr` unbound, which rejects it.
 
+use std::collections::{HashMap, HashSet};
+
 use sqlparser::ast::{
     Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, NamedWindowDefinition,
     NamedWindowExpr, Select, UnaryOperator, Value, ValueWithSpan, WindowFrameBound,
@@ -32,7 +34,7 @@ use super::ast_compat::{func_args, func_is_distinct, order_by_is_asc};
 use super::bytecode::{
     FrameBound, KeyOrder, OpCode, WindowDef, WindowFrame, WindowFunc, WindowFuncKind, AGG_COUNT,
 };
-use super::compiler::{ColumnRef, NameCtx, OutCol, SqlCompiler};
+use super::compiler::{ColBindings, ColumnRef, NameCtx, OutCol, SqlCompiler};
 use super::compiler_check::check_order_by_expr;
 use super::compiler_from::expr_children;
 use super::compiler_select::OutputStage;
@@ -118,10 +120,11 @@ fn collect_windows(expr: &Expr, out: &mut Vec<Expr>) {
 /// (grouped) or its materialized columns (plain), in a fixed order.
 fn scope_regs(ctx: &NameCtx<'_>) -> Vec<i64> {
     let mut regs: Vec<i64> = Vec::new();
+    let mut seen = HashSet::new();
     let bound = ctx.agg_bindings.iter().map(|(_, r)| *r);
-    let cols = ctx.col_bindings.iter().flatten().map(|(_, r)| *r);
+    let cols = ctx.col_bindings.iter().flat_map(|b| b.regs());
     for r in bound.chain(cols) {
-        if !regs.contains(&r) {
+        if seen.insert(r) {
             regs.push(r);
         }
     }
@@ -150,16 +153,20 @@ fn bound_reg(ctx: &NameCtx<'_>, expr: &Expr) -> Option<i64> {
 
 /// `ctx` with register `from[i]` renumbered to `to + i`.
 fn remap<'a>(ctx: &NameCtx<'a>, from: &[i64], to: i64) -> NameCtx<'a> {
+    let mut index = HashMap::with_capacity(from.len());
+    for (i, f) in from.iter().enumerate() {
+        index.entry(*f).or_insert(i);
+    }
     let map = |r: &mut i64| {
-        let i = from.iter().position(|f| f == r).expect("scope register");
+        let i = index[r];
         *r = to + i as i64;
     };
     let mut c = ctx.clone();
     c.agg_bindings.iter_mut().for_each(|(_, r)| map(r));
     c.col_bindings
         .iter_mut()
-        .flatten()
-        .for_each(|(_, r)| map(r));
+        .flat_map(|b| b.regs_mut())
+        .for_each(map);
     c
 }
 
@@ -532,7 +539,7 @@ impl<'a> SqlCompiler<'a> {
             cols.push((col, r));
         }
         let mut row = ctx.clone();
-        row.col_bindings = Some(cols);
+        row.col_bindings = Some(ColBindings::new(cols));
         row
     }
 

@@ -84,8 +84,97 @@ pub(crate) struct UsingCol {
     pub refs: Vec<(i64, usize)>,
 }
 
+/// The USING / NATURAL merged columns of a FROM clause, indexed by name and
+/// by joined column, so that a NATURAL JOIN of wide tables resolves each
+/// column in constant time.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct UsingCols {
+    cols: Vec<UsingCol>,
+    /// ASCII-lowercased name -> index into `cols` (the first with the name).
+    by_name: HashMap<String, usize>,
+    /// Each merged (cursor, column) -> index into `cols`.
+    by_ref: HashMap<(i64, usize), usize>,
+}
+
+impl UsingCols {
+    /// Add `(cursor, column)` to the merged column that holds `left`, or
+    /// start a new merged column `name` of `left` and `right`.
+    pub(crate) fn merge(&mut self, name: String, left: (i64, usize), right: (i64, usize)) {
+        let i = match self.by_ref.get(&left) {
+            Some(&i) => {
+                self.cols[i].refs.push(right);
+                i
+            }
+            None => {
+                let i = self.cols.len();
+                self.by_name.entry(name.clone()).or_insert(i);
+                self.by_ref.insert(left, i);
+                self.cols.push(UsingCol {
+                    name,
+                    refs: vec![left, right],
+                });
+                i
+            }
+        };
+        self.by_ref.entry(right).or_insert(i);
+    }
+
+    /// Index of the merged column named `name` (ASCII-lowercased).
+    pub(crate) fn position(&self, name: &str) -> Option<usize> {
+        self.by_name.get(name).copied()
+    }
+
+    /// The merged column whose leftmost column is `(cursor, col)`.
+    pub(crate) fn first_at(&self, at: (i64, usize)) -> Option<&UsingCol> {
+        let u = &self.cols[*self.by_ref.get(&at)?];
+        (u.refs.first() == Some(&at)).then_some(u)
+    }
+}
+
+impl std::ops::Deref for UsingCols {
+    type Target = [UsingCol];
+    fn deref(&self) -> &[UsingCol] {
+        &self.cols
+    }
+}
+
+/// The post-aggregation (or materialized-row) bindings of a scope: each
+/// column reference and the register holding its value, in order, with a
+/// map so binding a reference costs constant time.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ColBindings {
+    list: Vec<(ColumnRef, i64)>,
+    /// Column -> index into `list` (its first binding).
+    index: HashMap<ColumnRef, usize>,
+}
+
+impl ColBindings {
+    pub(crate) fn new(list: Vec<(ColumnRef, i64)>) -> Self {
+        let mut index = HashMap::with_capacity(list.len());
+        for (i, (c, _)) in list.iter().enumerate() {
+            index.entry(*c).or_insert(i);
+        }
+        ColBindings { list, index }
+    }
+
+    /// The register bound to `col`.
+    pub(crate) fn get(&self, col: &ColumnRef) -> Option<i64> {
+        self.index.get(col).map(|&i| self.list[i].1)
+    }
+
+    /// The bound registers, in binding order.
+    pub(crate) fn regs(&self) -> impl Iterator<Item = i64> + '_ {
+        self.list.iter().map(|(_, r)| *r)
+    }
+
+    /// The bound registers, to renumber them.
+    pub(crate) fn regs_mut(&mut self) -> impl Iterator<Item = &mut i64> {
+        self.list.iter_mut().map(|(_, r)| r)
+    }
+}
+
 /// A resolved column: where its value lives at run time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ColumnRef {
     /// Read column `col` from cursor `cursor`.
     Cursor { cursor: i64, col: usize },
@@ -139,7 +228,7 @@ pub(crate) struct NameCtx<'t> {
     agg_kinds: Vec<std::mem::Discriminant<Expr>>,
 
     /// Columns merged by USING / NATURAL JOIN.
-    pub using: Vec<UsingCol>,
+    pub using: UsingCols,
 
     /// Post-aggregation column scope.
     ///
@@ -148,7 +237,7 @@ pub(crate) struct NameCtx<'t> {
     /// a column reference must be one of these (bound to the register holding
     /// the key) or it is an error -- reading the cursor at that point would
     /// return whatever row the scan happened to stop on.
-    pub col_bindings: Option<Vec<(ColumnRef, i64)>>,
+    pub col_bindings: Option<ColBindings>,
 }
 
 impl<'t> NameCtx<'t> {
@@ -170,7 +259,7 @@ impl<'t> NameCtx<'t> {
             using_base: 0,
             agg_bindings: Vec::new(),
             agg_kinds: Vec::new(),
-            using: Vec::new(),
+            using: UsingCols::default(),
             col_bindings: None,
         }
     }
@@ -209,16 +298,12 @@ impl<'t> NameCtx<'t> {
     fn bind(&self, col: ColumnRef, name: &str) -> SqawkResult<ColumnRef> {
         match &self.col_bindings {
             None => Ok(col),
-            Some(bound) => bound
-                .iter()
-                .find(|(c, _)| *c == col)
-                .map(|(_, reg)| ColumnRef::Register(*reg))
-                .ok_or_else(|| {
-                    SqawkError::InvalidSqlQuery(format!(
-                        "'{}' must appear in GROUP BY or be used in an aggregate",
-                        name
-                    ))
-                }),
+            Some(bound) => bound.get(&col).map(ColumnRef::Register).ok_or_else(|| {
+                SqawkError::InvalidSqlQuery(format!(
+                    "'{}' must appear in GROUP BY or be used in an aggregate",
+                    name
+                ))
+            }),
         }
     }
 
@@ -276,7 +361,7 @@ impl<'t> NameCtx<'t> {
             };
         }
         // A USING-merged column is one column by definition, never ambiguous.
-        if let Some(i) = self.using.iter().position(|u| u.name == want) {
+        if let Some(i) = self.using.position(&want) {
             return Ok(Some(ColumnRef::Using(self.using_base + i)));
         }
         let mut found: Option<ColumnRef> = None;

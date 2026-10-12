@@ -493,7 +493,7 @@ impl<'a> SqlCompiler<'a> {
                 cols.push((col, reg));
             }
         }
-        ctx.col_bindings = Some(cols);
+        ctx.col_bindings = Some(super::compiler::ColBindings::new(cols));
         match ws {
             Some(ws) => self.emit_window_row(ws, &ctx, g.having),
             None => self.emit_stage_row(g.stage, g.outs, &ctx, g.having),

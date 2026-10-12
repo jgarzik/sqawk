@@ -34,13 +34,15 @@
 //! The rest of the SELECT (projection, aggregation, sorting) is a "body"
 //! callback emitted at the innermost point of the nest.
 
+use std::collections::HashSet;
+
 use sqlparser::ast::{
     BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, JoinConstraint,
     JoinOperator, ObjectName, TableFactor, TableWithJoins,
 };
 
 use super::bytecode::OpCode;
-use super::compiler::{ColumnRef, Label, NameCtx, SqlCompiler, Src, UsingCol};
+use super::compiler::{ColumnRef, Label, NameCtx, SqlCompiler, Src, UsingCol, UsingCols};
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
 
@@ -272,9 +274,9 @@ pub(crate) struct FromPlan<'t> {
     levels: Vec<Level>,
     groups: Vec<Group>,
     /// USING / NATURAL merged columns.
-    pub using: Vec<UsingCol>,
+    pub using: UsingCols,
     /// (source, column) pairs a USING merge hides from `*`.
-    hidden: Vec<(usize, usize)>,
+    hidden: HashSet<(usize, usize)>,
     /// The FROM clause ends in a FULL JOIN: the WHERE conjuncts, re-applied
     /// in the pass over unmatched right rows.
     full_where: Option<Vec<Expr>>,
@@ -311,9 +313,7 @@ impl<'t> FromPlan<'t> {
 
     /// The USING column first appearing at `(src, col)`, if any.
     pub(crate) fn using_at(&self, src: usize, col: usize) -> Option<&UsingCol> {
-        self.using
-            .iter()
-            .find(|u| u.refs.first() == Some(&(self.cursor(src), col)))
+        self.using.first_at((self.cursor(src), col))
     }
 
     /// The level holding source `src`.
@@ -528,8 +528,8 @@ impl<'a> SqlCompiler<'a> {
                 table_names: Vec::new(),
                 levels: Vec::new(),
                 groups: Vec::new(),
-                using: Vec::new(),
-                hidden: Vec::new(),
+                using: UsingCols::default(),
+                hidden: HashSet::new(),
                 full_where: None,
                 const_where,
                 outer: self.outer_scope.clone().map(Box::new),
@@ -616,8 +616,8 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // ---- ON conjuncts per join, with USING / NATURAL lowered onto ON.
-        let mut using: Vec<UsingCol> = Vec::new();
-        let mut hidden: Vec<(usize, usize)> = Vec::new();
+        let mut using = UsingCols::default();
+        let mut hidden: HashSet<(usize, usize)> = HashSet::new();
         let mut join_terms: Vec<Vec<Expr>> = vec![Vec::new(); srcs.len()];
         for (i, (_, op)) in factors.iter().enumerate() {
             let Some((_, constraint)) = op else { continue };
@@ -663,17 +663,11 @@ impl<'a> SqlCompiler<'a> {
                     &srcs[i].refname,
                     &name,
                 ));
-                hidden.push((i, right_col));
+                hidden.insert((i, right_col));
                 let key = name.to_ascii_lowercase();
                 let left_ref = (srcs[left_src].cursor, left_col);
                 let right_ref = (srcs[i].cursor, right_col);
-                match using.iter_mut().find(|u| u.refs.contains(&left_ref)) {
-                    Some(u) => u.refs.push(right_ref),
-                    None => using.push(UsingCol {
-                        name: key,
-                        refs: vec![left_ref, right_ref],
-                    }),
-                }
+                using.merge(key, left_ref, right_ref);
             }
         }
 
