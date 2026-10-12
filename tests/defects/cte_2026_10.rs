@@ -1053,6 +1053,29 @@ fn recursive_multiple_arms() -> TestResult {
     )
 }
 
+/// DISTINCT in a recursive arm dedupes within one queue row's run only, so
+/// two parents each yield the child. (Pins that the one-run-per-generation
+/// evaluation is not used for such an arm.)
+#[test]
+fn recursive_arm_distinct_is_per_row() -> TestResult {
+    assert_query_on(
+        FILES,
+        "WITH RECURSIVE c(n) AS (SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT DISTINCT 99 FROM c WHERE n < 10) SELECT n FROM c",
+        "n\n2\n3\n99\n99",
+    )
+}
+
+/// Each row's children follow it in queue order across a whole generation
+/// (a binary tree of decimal paths).
+#[test]
+fn recursive_children_in_queue_order() -> TestResult {
+    assert_query_on(
+        FILES,
+        "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n * 10 + k FROM c, (SELECT 1 AS k UNION ALL SELECT 2) d WHERE n < 100) SELECT n FROM c",
+        "n\n1\n11\n12\n111\n112\n121\n122",
+    )
+}
+
 /// Two-column recursion.
 #[test]
 fn recursive_fibonacci() -> TestResult {

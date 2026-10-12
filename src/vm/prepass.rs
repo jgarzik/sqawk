@@ -554,11 +554,27 @@ impl Walker<'_> {
                 }
             }
         }
-        let (limit, mut offset) = self.limits(limit_clause)?;
+        let (limit, offset) = self.limits(limit_clause)?;
 
-        // The working table: one row at a time, under the CTE's column
-        // names (its column list, else the setup's).
-        let defs: Vec<ColumnDefinition> = table
+        // A FIFO queue is breadth-first: it holds the rows of one
+        // generation, each followed by its children, in order. So when every
+        // recursive arm maps each working row independently (no DISTINCT
+        // across rows) a whole generation can be the working table at once,
+        // each row tagged with its position: one run per generation instead
+        // of one per row, then the children are put back in queue order by
+        // (position, arm). A wildcard would expose the tag, so it keeps the
+        // row-at-a-time algorithm, as does an ordered queue.
+        let by_generation = keys.is_empty()
+            && recursive_arms.iter().all(|arm| {
+                matches!(arm, SetExpr::Select(s)
+                    if s.distinct.is_none()
+                        && s.projection.iter().all(|item| matches!(item,
+                            SelectItem::UnnamedExpr(_) | SelectItem::ExprWithAlias { .. })))
+            });
+
+        // The working table, under the CTE's column names (its column list,
+        // else the setup's), plus the position tag in generation mode.
+        let mut defs: Vec<ColumnDefinition> = table
             .column_metadata()
             .iter()
             .enumerate()
@@ -570,6 +586,13 @@ impl Walker<'_> {
                 decl_type: None,
             })
             .collect();
+        if by_generation {
+            defs.push(ColumnDefinition {
+                name: POSITION.to_string(),
+                data_type: crate::table::DataType::Integer,
+                decl_type: None,
+            });
+        }
         let mut work = Table::new_with_schema("work", defs, None, None);
         work.dedup_column_names();
         let work_name = self.register(work, "sqawk_cte_work_")?;
@@ -578,56 +601,141 @@ impl Walker<'_> {
         // arm is an error from here on.
         self.scopes[k].borrow_mut().ctes[i].state = CteState::InProgress(MULTIPLE_RECURSIVE);
         let op = if distinct { "UNION" } else { "UNION ALL" };
+        let width = ncols + usize::from(by_generation);
         let mut programs: Vec<Program> = Vec::with_capacity(recursive_arms.len());
         for mut arm in recursive_arms {
             if let SetExpr::Select(select) = &mut arm {
-                bind_working_table(select, name, &work_name);
+                let bound = bind_working_table(select, name, &work_name);
+                if by_generation {
+                    select
+                        .projection
+                        .push(SelectItem::UnnamedExpr(Expr::CompoundIdentifier(vec![
+                            bound,
+                            Ident::new(POSITION),
+                        ])));
+                }
             }
             let mut query = with_body(arm);
             self.visit_query(&mut query)?;
-            programs.push(self.compile_recursive_arm(query, ncols, op)?);
+            programs.push(self.compile_recursive_arm(query, width, op)?);
         }
 
-        let rows: Vec<Row> = table.rows().to_vec();
-        let mut out: Vec<Row> = Vec::new();
+        let setup_rows: Vec<Row> = table.rows().to_vec();
+        let mut run = Recursion {
+            seen: HashSet::new(),
+            distinct,
+            limit,
+            offset,
+            out: Vec::new(),
+        };
         if limit != Some(0) {
-            let mut seen: HashSet<Vec<RowKey>> = HashSet::new();
-            let mut queue = Queue::new(keys);
-            let mut admit = |row: Row, queue: &mut Queue| {
-                if !distinct || seen.insert(row.iter().map(engine::row_key).collect()) {
-                    queue.push(row);
-                }
-            };
-            for row in rows {
-                admit(row, &mut queue);
-            }
-            while let Some(row) = queue.pop() {
-                if offset > 0 {
-                    offset -= 1;
-                } else {
-                    out.push(row.clone());
-                    if limit == Some(out.len()) {
-                        break;
-                    }
-                }
-                let work = self.database.get_table_mut(&work_name)?;
-                work.clear_rows()?;
-                work.add_row(row)?;
-                for program in &programs {
-                    let mut vm = VmEngine::new_mut(self.database, false);
-                    vm.init(program.clone());
-                    vm.execute()?;
-                    for r in vm.take_results() {
-                        admit(r, &mut queue);
-                    }
-                }
+            if by_generation {
+                self.recurse_by_generation(&mut run, setup_rows, &work_name, &programs)?;
+            } else {
+                self.recurse_by_row(&mut run, setup_rows, keys, &work_name, &programs)?;
             }
         }
         table.clear_rows()?;
-        for row in out {
+        for row in run.out {
             table.add_row(row)?;
         }
         Ok(table)
+    }
+
+    /// Run `program` over the database as it stands; its result rows.
+    fn run_program(&self, program: &Program) -> SqawkResult<Vec<Row>> {
+        let mut vm = VmEngine::new_mut(self.database, false);
+        vm.init(program.clone());
+        vm.execute()?;
+        Ok(vm.take_results())
+    }
+
+    /// Make `rows` the content of the working table.
+    fn fill_working_table(&mut self, work: &str, rows: Vec<Row>) -> SqawkResult<()> {
+        let table = self.database.get_table_mut(work)?;
+        table.clear_rows()?;
+        for row in rows {
+            table.add_row(row)?;
+        }
+        Ok(())
+    }
+
+    /// SQLite's algorithm as written: one queue row at a time.
+    fn recurse_by_row(
+        &mut self,
+        run: &mut Recursion,
+        setup: Vec<Row>,
+        keys: Vec<KeyOrder>,
+        work: &str,
+        programs: &[Program],
+    ) -> SqawkResult<()> {
+        let mut queue = Queue::new(keys);
+        for row in setup {
+            if run.admit(&row) {
+                queue.push(row);
+            }
+        }
+        while let Some(row) = queue.pop() {
+            if run.emit(&row) {
+                break;
+            }
+            self.fill_working_table(work, vec![row])?;
+            for program in programs {
+                for r in self.run_program(program)? {
+                    if run.admit(&r) {
+                        queue.push(r);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The FIFO algorithm one generation at a time (see
+    /// `evaluate_recursive`): the same rows in the same order.
+    fn recurse_by_generation(
+        &mut self,
+        run: &mut Recursion,
+        setup: Vec<Row>,
+        work: &str,
+        programs: &[Program],
+    ) -> SqawkResult<()> {
+        let mut generation: Vec<Row> = setup.into_iter().filter(|r| run.admit(r)).collect();
+        while !generation.is_empty() {
+            for row in &generation {
+                if run.emit(row) {
+                    return Ok(());
+                }
+            }
+            let tagged = generation
+                .into_iter()
+                .enumerate()
+                .map(|(n, mut row)| {
+                    row.push(crate::table::Value::Integer(n as i64));
+                    row
+                })
+                .collect();
+            self.fill_working_table(work, tagged)?;
+            let mut children: Vec<(i64, usize, Row)> = Vec::new();
+            for (arm, program) in programs.iter().enumerate() {
+                for mut r in self.run_program(program)? {
+                    let Some(crate::table::Value::Integer(n)) = r.pop() else {
+                        return Err(SqawkError::VmError(
+                            "internal error: recursive row lost its position".into(),
+                        ));
+                    };
+                    children.push((n, arm, r));
+                }
+            }
+            // Stable: within one parent and arm, the rows keep their order.
+            children.sort_by_key(|(n, arm, _)| (*n, *arm));
+            generation = children
+                .into_iter()
+                .map(|(.., r)| r)
+                .filter(|r| run.admit(r))
+                .collect();
+        }
+        Ok(())
     }
 
     /// Compile one recursive arm, after SQLite's checks on it.
@@ -884,10 +992,42 @@ fn direct_references(select: &Select, key: &str) -> usize {
         .count()
 }
 
+/// The working table's position column in generation mode.
+const POSITION: &str = "sqawk_position";
+
+/// The output side of a recursive CTE: the rows UNION has seen, LIMIT and
+/// OFFSET, and the rows output so far.
+struct Recursion {
+    seen: HashSet<Vec<RowKey>>,
+    distinct: bool,
+    limit: Option<usize>,
+    offset: usize,
+    out: Vec<Row>,
+}
+
+impl Recursion {
+    /// Whether `row` joins the queue: under UNION, only the first time.
+    fn admit(&mut self, row: &Row) -> bool {
+        !self.distinct || self.seen.insert(row.iter().map(engine::row_key).collect())
+    }
+
+    /// Output a row taken from the queue, unless OFFSET skips it. True when
+    /// LIMIT is reached, which ends the recursion.
+    fn emit(&mut self, row: &Row) -> bool {
+        if self.offset > 0 {
+            self.offset -= 1;
+            return false;
+        }
+        self.out.push(row.clone());
+        self.limit == Some(self.out.len())
+    }
+}
+
 /// Point a recursive arm's direct reference to the CTE at the working
-/// table, keeping the name it is qualified by.
-fn bind_working_table(select: &mut Select, name: &Ident, work: &str) {
+/// table, keeping the name it is qualified by, which is returned.
+fn bind_working_table(select: &mut Select, name: &Ident, work: &str) -> Ident {
     let key = key_of(name);
+    let mut bound = name.clone();
     for t in &mut select.from {
         for factor in
             std::iter::once(&mut t.relation).chain(t.joins.iter_mut().map(|j| &mut j.relation))
@@ -908,10 +1048,12 @@ fn bind_working_table(select: &mut Select, name: &Ident, work: &str) {
                     columns: Vec::new(),
                     at: None,
                 });
+                bound = alias.name.clone();
                 *factor = table_factor(work.to_string(), Some(alias));
             }
         }
     }
+    bound
 }
 
 /// The arms of a left-deep compound in order, and the operators between
