@@ -217,7 +217,8 @@ mod tests {
     fn io_reason_strips_os_error_and_temp_path() {
         let e = std::io::Error::from_raw_os_error(DENIED);
         assert_eq!(io_reason(&e), denied_text());
-        #[cfg(unix)]
+        // glibc's wording; Miri supplies its own lower-case text.
+        #[cfg(all(unix, not(miri)))]
         assert_eq!(io_reason(&e), "Permission denied");
         let e = std::io::Error::other("Permission denied (os error 13) at path \"/d/.tmpAb12\"");
         assert_eq!(io_reason(&e), "Permission denied");
