@@ -697,7 +697,7 @@ fn numeric_modifier(z: &[u8], p: &mut DateTime) -> bool {
     rc
 }
 
-/// One local broken-down time from the C library.
+/// One local broken-down time (calendar year, month 1-12, day 1-31).
 struct LocalTm {
     year: i64,
     mon: i64,
@@ -707,64 +707,22 @@ struct LocalTm {
     sec: i64,
 }
 
-/// `t` as the C library's `time_t`, which is 32 bits on some targets.
-#[cfg(any(unix, windows))]
-#[allow(clippy::useless_conversion)]
-fn to_time_t(t: i64) -> Option<libc::time_t> {
-    libc::time_t::try_from(t).ok()
-}
-
-#[cfg(unix)]
+/// The Unix time `t` (seconds) in the local time zone, as `localtime_r`
+/// gives it: `$TZ` (a zone name, `:path` or a POSIX rule string) when set,
+/// else the system zone (`/etc/localtime` on Unix, the Windows time zone
+/// settings on Windows). A UTC moment has exactly one local time, so the
+/// mapping is never ambiguous.
 fn os_localtime(t: i64) -> Option<LocalTm> {
-    extern "C" {
-        fn tzset();
-    }
-    static TZSET: std::sync::Once = std::sync::Once::new();
-    // SAFETY: tzset only (re)reads the TZ environment variable into the C
-    // library's time zone state; it is called once, before any conversion.
-    TZSET.call_once(|| unsafe { tzset() });
-    let tt = to_time_t(t)?;
-    // SAFETY: `tm` is plain old data, so all-zero is a valid value.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    // SAFETY: both pointers are valid for the duration of the call, and
-    // localtime_r writes only into `tm`.
-    let r = unsafe { libc::localtime_r(&tt, &mut tm) };
-    if r.is_null() {
-        return None;
-    }
+    use chrono::{Datelike, TimeZone, Timelike};
+    let local = chrono::Local.timestamp_opt(t, 0).single()?;
     Some(LocalTm {
-        year: i64::from(tm.tm_year),
-        mon: i64::from(tm.tm_mon),
-        mday: i64::from(tm.tm_mday),
-        hour: i64::from(tm.tm_hour),
-        min: i64::from(tm.tm_min),
-        sec: i64::from(tm.tm_sec),
+        year: i64::from(local.year()),
+        mon: i64::from(local.month()),
+        mday: i64::from(local.day()),
+        hour: i64::from(local.hour()),
+        min: i64::from(local.minute()),
+        sec: i64::from(local.second()),
     })
-}
-
-#[cfg(windows)]
-fn os_localtime(t: i64) -> Option<LocalTm> {
-    let tt = to_time_t(t)?;
-    // SAFETY: `tm` is plain old data, so all-zero is a valid value.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    // SAFETY: both pointers are valid for the duration of the call, and
-    // localtime_s writes only into `tm`.
-    if unsafe { libc::localtime_s(&mut tm, &tt) } != 0 {
-        return None;
-    }
-    Some(LocalTm {
-        year: i64::from(tm.tm_year),
-        mon: i64::from(tm.tm_mon),
-        mday: i64::from(tm.tm_mday),
-        hour: i64::from(tm.tm_hour),
-        min: i64::from(tm.tm_min),
-        sec: i64::from(tm.tm_sec),
-    })
-}
-
-#[cfg(not(any(unix, windows)))]
-fn os_localtime(_t: i64) -> Option<LocalTm> {
-    None
 }
 
 /// `toLocaltime`: shift a UTC moment to local time. Outside 1970-2037 the
@@ -785,8 +743,8 @@ fn to_localtime(p: &mut DateTime) -> SqawkResult<()> {
     };
     let tm = os_localtime(t)
         .ok_or_else(|| SqawkError::InvalidSqlQuery("local time unavailable".into()))?;
-    p.y = tm.year + 1900 - year_diff;
-    p.m = tm.mon + 1;
+    p.y = tm.year - year_diff;
+    p.m = tm.mon;
     p.d = tm.mday;
     p.h = tm.hour;
     p.mi = tm.min;

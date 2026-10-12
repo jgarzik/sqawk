@@ -29,6 +29,8 @@
 //! Any error ends the run with one line on stderr, `sqawk: <message>`, and
 //! exit status 1 (clap's own usage errors exit with status 2).
 
+#![forbid(unsafe_code)]
+
 #[macro_use]
 mod diag;
 
