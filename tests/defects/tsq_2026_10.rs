@@ -206,3 +206,47 @@ fn cte_read_only_under_a_false_where_is_never_computed() -> TestResult {
         "k\n400\n",
     )
 }
+
+/// The same for a derived table (64 million rows here; 8 s in a release
+/// build before the fix above, 0.006 s after).
+#[test]
+fn derived_table_read_only_under_a_false_where_is_never_computed() -> TestResult {
+    let t = csv("id,k", (1..=400).map(|i| format!("{i},{}", i % 6)));
+    assert_fast(
+        &[("t.csv", t)],
+        "SELECT COUNT(*) FROM (SELECT t1.k FROM t t1, t t2, t t3) WHERE 'D' > 'abc'",
+        "COUNT(*)\n0\n",
+    )
+}
+
+/// ... and for a CTE read only by a scalar subquery in a CASE branch that is
+/// not taken, or in the SELECT list of a query with no rows.
+#[test]
+fn cte_read_only_by_code_that_never_runs_is_never_computed() -> TestResult {
+    let t = csv("id,k", (1..=400).map(|i| format!("{i},{}", i % 6)));
+    assert_fast(
+        &[("t.csv", t)],
+        "WITH d AS (SELECT t1.k AS k FROM t t1, t t2, t t3) \
+         SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE (SELECT COUNT(*) FROM d) END AS x FROM t \
+         UNION ALL SELECT (SELECT COUNT(*) FROM d) FROM t WHERE id < 0",
+        "x\n1\n",
+    )
+}
+
+/// The inner table of a join is opened, and its hash index built, when the
+/// loop first reaches it: an outer loop with no rows never reads it, so a
+/// CTE or derived table there is never computed, as in SQLite (0.0001 s).
+/// sqawk opened every table of the join first: `d` is 64 million rows (12 s
+/// in a release build, minutes in a debug build).
+#[test]
+#[ignore]
+fn cte_joined_to_an_empty_outer_loop_is_never_computed() -> TestResult {
+    let t = csv("id,k", (1..=400).map(|i| format!("{i},{}", i % 6)));
+    assert_fast(
+        &[("t.csv", t)],
+        "WITH d AS (SELECT t1.k AS k FROM t t1, t t2, t t3) \
+         SELECT COUNT(*) AS n FROM t a JOIN d ON a.id = d.k WHERE a.id < 0 \
+         UNION ALL SELECT COUNT(*) FROM t a LEFT JOIN d ON a.k = d.k WHERE a.id < 0",
+        "n\n0\n0\n",
+    )
+}
