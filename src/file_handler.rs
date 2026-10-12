@@ -30,13 +30,11 @@ pub const STDIN_TABLE: &str = "stdin";
 /// Key responsibilities:
 /// - Determining the appropriate handler based on file format
 /// - Managing the relationship between tables and their source files
-/// - Providing access to the database for table operations
 /// - Handling table loading and saving with proper format detection
+///
+/// It holds no tables: the [`Database`] it loads into or saves from is
+/// passed to each call.
 pub struct FileHandler {
-    /// Reference to a database object which is the source of truth for tables
-    /// Stored as a raw pointer to avoid borrowing limitations
-    database: *mut Database,
-
     /// Application configuration for global settings like verbosity and field separators
     config: AppConfig,
 
@@ -53,23 +51,16 @@ pub struct FileHandler {
     stdin_available: bool,
 }
 
-// Add safety implementation for the raw pointer to Database
-unsafe impl Send for FileHandler {}
-unsafe impl Sync for FileHandler {}
-
 impl FileHandler {
-    /// Create a new FileHandler with application config and database
+    /// Create a new FileHandler with application config
     ///
     /// # Arguments
     /// * `config` - Application configuration with global settings
-    /// * `database` - Mutable reference to the database to use as source of truth
     ///
     /// # Returns
     /// A new FileHandler instance ready to load and manage tables
-    pub fn new(config: &AppConfig, database: &mut Database) -> Self {
+    pub fn new(config: &AppConfig) -> Self {
         FileHandler {
-            // SAFETY: The caller must ensure that the database outlives this FileHandler
-            database: database as *mut Database,
             config: config.clone(),
             stdin_consumed: false,
             stdin_table: None,
@@ -108,27 +99,7 @@ impl FileHandler {
         Ok(data)
     }
 
-    /// Get a mutable reference to the database
-    ///
-    /// Provides safe access to the database reference stored as a raw pointer.
-    /// This design allows the FileHandler to maintain a reference to the Database
-    /// while avoiding Rust's borrowing conflicts in complex operations.
-    ///
-    /// # Safety
-    /// Safety is guaranteed because:
-    /// - The database pointer is initialized in the constructor and never changes
-    /// - The FileHandler's lifetime is tied to the Database through the constructor's contract
-    /// - All access to the database happens through this controlled interface
-    ///
-    /// # Returns
-    /// * `&mut Database` - Mutable reference to the database
-    fn database_mut(&mut self) -> &mut Database {
-        // SAFETY: The caller of `new` ensures the database outlives this FileHandler,
-        // and we have exclusive access through `&mut self`
-        unsafe { &mut *self.database }
-    }
-
-    /// Load a file into an in-memory table and add it to the database
+    /// Load a file into an in-memory table and add it to `db`
     ///
     /// * `file_spec` - `[table_name=]file_path` (see [`parse_table_spec`]);
     ///   `-` is standard input
@@ -145,7 +116,11 @@ impl FileHandler {
     ///
     /// # Returns
     /// * `(table_name, file_path)` as given
-    pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<Option<(String, String)>> {
+    pub fn load_file(
+        &mut self,
+        db: &mut Database,
+        file_spec: &str,
+    ) -> SqawkResult<Option<(String, String)>> {
         let (table_name, file_path) = parse_table_spec(file_spec)?;
 
         // A "-" operand reads standard input. It is parsed as CSV (comma,
@@ -172,16 +147,13 @@ impl FileHandler {
         // A table that already exists is either a --tabledef placeholder,
         // whose column names this file supplies the data for, or a genuine
         // table, in which case two inputs resolve to the same name.
-        let predefined_columns: Option<Vec<String>> = {
-            let db = self.database_mut();
-            match db.get_table(&table_name) {
-                Ok(t) if t.is_placeholder() => Some(t.columns().to_vec()),
-                Ok(_) => return Err(SqawkError::TableAlreadyExists(table_name)),
-                Err(_) => None,
-            }
+        let predefined_columns: Option<Vec<String>> = match db.get_table(&table_name) {
+            Ok(t) if t.is_placeholder() => Some(t.columns().to_vec()),
+            Ok(_) => return Err(SqawkError::TableAlreadyExists(table_name)),
+            Err(_) => None,
         };
         if let Some(real) = &canonical {
-            check_not_loaded(self.database_mut(), real, &file_path_str)?;
+            check_not_loaded(db, real, &file_path_str)?;
         }
 
         let verbose = self.config.verbose();
@@ -234,7 +206,6 @@ impl FileHandler {
             self.stdin_table = Some(table_name.clone());
         }
 
-        let db = self.database_mut();
         if predefined_columns.is_some() {
             // Replace the --tabledef placeholder with the loaded table.
             if verbose {
@@ -248,46 +219,6 @@ impl FileHandler {
         db.add_table(table_name.clone(), table)?;
 
         Ok(Some((table_name, file_path_str)))
-    }
-
-    /// Get a reference to a table by name
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table to retrieve
-    ///
-    /// # Returns
-    /// * `SqawkResult<&Table>` - Reference to the requested table
-    pub fn get_table(&self, table_name: &str) -> SqawkResult<&Table> {
-        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
-        let db = unsafe { &*self.database };
-        db.get_table(table_name)
-    }
-
-    /// Get all table names
-    ///
-    /// # Returns
-    /// * `Vec<String>` - Vector of table names
-    pub fn table_names(&self) -> Vec<String> {
-        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
-        let db = unsafe { &*self.database };
-        db.table_names()
-    }
-
-    /// Get the number of tables
-    ///
-    /// # Returns
-    /// * `usize` - Number of tables
-    pub fn table_count(&self) -> usize {
-        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
-        let db = unsafe { &*self.database };
-        db.table_count()
-    }
-
-    /// Fail if a `--tabledef` names a table that no input file loaded.
-    pub fn check_table_definitions_used(&self) -> SqawkResult<()> {
-        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
-        let db = unsafe { &*self.database };
-        db.check_table_definitions_used()
     }
 
     /// Explain why `table_name` has no writeback target.
@@ -315,8 +246,8 @@ impl FileHandler {
     ///   CREATE TABLE ... AS): it has no file, and writeback skips it
     /// * `Err` - a table read from standard input, or a file that is
     ///   read-only or in a directory that cannot be written
-    pub fn check_table_writable(&self, table_name: &str) -> SqawkResult<bool> {
-        let table = self.get_table(table_name)?;
+    pub fn check_table_writable(&self, db: &Database, table_name: &str) -> SqawkResult<bool> {
+        let table = db.get_table(table_name)?;
         match table.file_path() {
             Some(path) => {
                 csv_handler::check_writable(path)?;
@@ -329,48 +260,18 @@ impl FileHandler {
         }
     }
 
-    /// Check if a table exists
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table to check
-    ///
-    /// # Returns
-    /// * `bool` - True if the table exists
-    pub fn has_table(&self, table_name: &str) -> bool {
-        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
-        let db = unsafe { &*self.database };
-        db.has_table(table_name)
-    }
-
-    /// Save a modified table back to its original file
+    /// Save a modified table of `db` back to its original file
     ///
     /// # Arguments
     /// * `table_name` - Name of the table to save
     ///
     /// # Returns
     /// * `SqawkResult<()>` - Result of the operation
-    pub fn save_table(&self, table_name: &str) -> SqawkResult<()> {
-        // Get a reference to the table
-        let table = self.get_table(table_name)?;
+    pub fn save_table(&self, db: &Database, table_name: &str) -> SqawkResult<()> {
+        let table = db.get_table(table_name)?;
 
         if self.config.verbose() {
             diag!("In FileHandler::save_table for table '{}'", table_name);
-
-            // Access database directly to check if the table exists there
-            let db = unsafe { &*self.database };
-            if let Ok(db_table) = db.get_table(table_name) {
-                if let Some(path) = db_table.file_path() {
-                    diag!(
-                        "Database has table '{}' with file_path '{:?}'",
-                        table_name,
-                        path
-                    );
-                } else {
-                    diag!("Database has table '{}' but NO file_path", table_name);
-                }
-            } else {
-                diag!("Table '{}' not found in database", table_name);
-            }
         }
 
         // Check if the table has an associated file path

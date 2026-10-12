@@ -19,12 +19,12 @@ use crate::file_handler::FileHandler;
 ///
 /// This executor wraps the VM execution engine and provides additional functionality
 /// for tracking modified tables and integrating with the REPL interface.
-pub struct SqlExecutor<'a> {
+pub struct SqlExecutor {
     /// Database for storing and accessing tables
-    database: &'a mut Database,
+    database: Database,
 
     /// File handler for loading and saving tables
-    file_handler: &'a mut FileHandler,
+    file_handler: FileHandler,
 
     /// Application configuration for global settings
     config: AppConfig,
@@ -35,13 +35,10 @@ pub struct SqlExecutor<'a> {
     dml_executed: bool,
 }
 
-impl<'a> SqlExecutor<'a> {
-    /// Create a new SQL executor with the given database, file handler, and application configuration
-    pub fn new(
-        database: &'a mut Database,
-        file_handler: &'a mut FileHandler,
-        config: &AppConfig,
-    ) -> Self {
+impl SqlExecutor {
+    /// Create a new SQL executor that owns the given database and file
+    /// handler, with the application configuration
+    pub fn new(database: Database, file_handler: FileHandler, config: &AppConfig) -> Self {
         SqlExecutor {
             database,
             file_handler,
@@ -72,7 +69,7 @@ impl<'a> SqlExecutor<'a> {
 
         // Execute via VM engine (which also records the modified tables in
         // the database)
-        let result = crate::vm::execute_vm(sql, self.database, self.config.verbose())?;
+        let result = crate::vm::execute_vm(sql, &mut self.database, self.config.verbose())?;
 
         // Track affected rows from the last statement
         self.affected_rows = result.affected_rows;
@@ -106,7 +103,10 @@ impl<'a> SqlExecutor<'a> {
     pub fn save_modified_tables(&self) -> SqawkResult<usize> {
         let mut targets = Vec::new();
         for table_name in self.database.modified_tables() {
-            if self.file_handler.check_table_writable(&table_name)? {
+            if self
+                .file_handler
+                .check_table_writable(&self.database, &table_name)?
+            {
                 targets.push(table_name);
             } else if self.config.verbose() {
                 diag!(
@@ -118,7 +118,7 @@ impl<'a> SqlExecutor<'a> {
 
         for table_name in &targets {
             // Use the file handler to write the table back to its source file
-            self.file_handler.save_table(table_name)?;
+            self.file_handler.save_table(&self.database, table_name)?;
         }
 
         Ok(targets.len())
@@ -215,7 +215,7 @@ impl<'a> SqlExecutor<'a> {
                 "cannot load a file within a transaction".to_string(),
             ));
         }
-        self.file_handler.load_file(file_spec)
+        self.file_handler.load_file(&mut self.database, file_spec)
     }
 
     /// Whether the last executed script ran a row-counting DML statement.
@@ -234,7 +234,7 @@ impl<'a> SqlExecutor<'a> {
     /// # Returns
     /// * `bool` - True if the table exists
     pub fn table_exists(&self, table_name: &str) -> bool {
-        self.file_handler.has_table(table_name)
+        self.database.has_table(table_name)
     }
 
     /// Check if a table is modified (alias for is_table_modified)
@@ -256,7 +256,7 @@ impl<'a> SqlExecutor<'a> {
     /// # Returns
     /// * `SqawkResult<()>` - Success or error
     pub fn save_table(&self, table_name: &str) -> SqawkResult<()> {
-        if !self.file_handler.has_table(table_name) {
+        if !self.database.has_table(table_name) {
             return Err(SqawkError::TableNotFound(table_name.to_string()));
         }
 
@@ -265,7 +265,7 @@ impl<'a> SqlExecutor<'a> {
             return Ok(());
         }
 
-        self.file_handler.save_table(table_name)
+        self.file_handler.save_table(&self.database, table_name)
     }
 
     /// Get the number of rows affected by the last executed statement

@@ -194,7 +194,7 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
 
     // Initialize the file handler with the application configuration
     // The file handler uses config for field separator and verbosity
-    let mut file_handler = FileHandler::new(&config, &mut database);
+    let mut file_handler = FileHandler::new(&config);
 
     // The REPL reads its commands from stdin, so it cannot also consume stdin
     // as table data: whichever got there first would starve the other.
@@ -209,15 +209,15 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
     // Load all specified files into in-memory tables
     // Each file can specify its table name with table_name=file_path syntax
     for file_spec in &args.files {
-        file_handler.load_file(file_spec)?;
+        file_handler.load_file(&mut database, file_spec)?;
     }
-    file_handler.check_table_definitions_used()?;
+    database.check_table_definitions_used()?;
 
     // Log table loading results in verbose mode
     if config.verbose() {
-        let table_count = file_handler.table_count();
+        let table_count = database.table_count();
         diag!("Loaded {table_count} tables");
-        for table_name in file_handler.table_names() {
+        for table_name in database.table_names() {
             diag!("Table '{table_name}' loaded");
         }
     }
@@ -228,9 +228,9 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
         file_handler.disable_stdin();
     }
 
-    // Create SQL executor
+    // Create SQL executor, which takes ownership of the database and file handler
     // The executor maintains state across statements, allowing multi-statement operations
-    let mut sql_executor = SqlExecutor::new(&mut database, &mut file_handler, &config);
+    let mut sql_executor = SqlExecutor::new(database, file_handler, &config);
 
     // Check if interactive mode is requested
     if args.interactive {
@@ -292,9 +292,7 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
 
     // The process is about to exit, so freeing every loaded cell one by one
     // is wasted work (measurable on large inputs); let the OS reclaim it.
-    drop(sql_executor);
-    drop(file_handler);
-    std::mem::forget(database);
+    std::mem::forget(sql_executor);
 
     Ok(0)
 }

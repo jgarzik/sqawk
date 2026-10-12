@@ -484,9 +484,9 @@ enum ReplCommand {
 }
 
 /// REPL interface for interactive SQL entry
-pub struct Repl<'a> {
+pub struct Repl {
     /// SQL executor for running queries
-    executor: SqlExecutor<'a>,
+    executor: SqlExecutor,
     /// Application configuration for global settings
     config: AppConfig,
     /// Standard input is a terminal: line editing, prompt, banner, history
@@ -508,9 +508,9 @@ pub struct Repl<'a> {
     show_stats: bool,
 }
 
-impl<'a> Repl<'a> {
+impl Repl {
     /// Create a new REPL
-    pub fn new(executor: SqlExecutor<'a>, app_config: &AppConfig) -> Self {
+    pub fn new(executor: SqlExecutor, app_config: &AppConfig) -> Self {
         let interactive = std::io::stdin().is_terminal();
         let mut editor = None;
         let mut history = None;
