@@ -252,6 +252,70 @@ fn cte_joined_to_an_empty_outer_loop_is_never_computed() -> TestResult {
     )
 }
 
+/// A wide table costs time linear in its cells. sqawk copied every column
+/// name of the table for each column it read, so a row of n columns cost
+/// O(n^2): `SELECT *` over these 3000 columns x 400 rows took about 84 s in
+/// a debug build (1000 columns x 1000 rows: 12.8 s in a release build, where
+/// `SELECT COUNT(*)` takes 0.02 s). Found by tsq stress (`wide_select`).
+#[test]
+#[ignore]
+fn select_star_over_a_wide_table_is_not_quadratic() -> TestResult {
+    let cols = 3000;
+    let header: Vec<String> = (0..cols).map(|c| format!("c{c}")).collect();
+    let w = csv(
+        &header.join(","),
+        (0..400).map(|r| {
+            (0..cols)
+                .map(|c| (r * cols + c).to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        }),
+    );
+    assert_fast(&[("w.csv", w.clone())], "SELECT * FROM w", &w)
+}
+
+/// A one-cell UPDATE written back to a wide file costs time linear in the
+/// row's columns: each column read copied every column name of the table,
+/// about 80 s for this 36000-column row in a debug build (10000 columns x 20
+/// rows: 20 s in a release build). Found by tsq stress.
+#[test]
+#[ignore]
+fn update_write_on_a_wide_file_is_not_quadratic() -> TestResult {
+    let cols = 36000;
+    let row = |r: usize, set: Option<usize>| {
+        (0..cols)
+            .map(|c| match set {
+                Some(s) if s == c => "-1".to_string(),
+                _ => (r * cols + c).to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let header: Vec<String> = (0..cols).map(|c| format!("c{c}")).collect();
+    let header = header.join(",");
+    let before = csv(&header, (0..3).map(|r| row(r, None)));
+    let after = csv(&header, (0..3).map(|r| row(r, (r == 1).then_some(7))));
+    let dir = create_temp_dir()?;
+    let path = dir.path().join("w.csv");
+    std::fs::write(&path, before)?;
+    let out = assert_cmd::cargo::cargo_bin_cmd!("sqawk")
+        .args([
+            "-w",
+            "-s",
+            &format!("UPDATE w SET c7 = -1 WHERE c0 = {cols}"),
+        ])
+        .arg(&path)
+        .timeout(Duration::from_secs(20))
+        .output()?;
+    assert!(
+        out.status.success(),
+        "sqawk did not finish within 20 s ({})",
+        out.status
+    );
+    assert_eq!(std::fs::read_to_string(&path)?, after);
+    Ok(())
+}
+
 /// A write error names a file outside the working directory by its plain
 /// absolute path (`cannot write 'C:\...\ro.csv': file is read-only`). On
 /// Windows sqawk printed the verbatim form that `fs::canonicalize` returns,
