@@ -1,10 +1,12 @@
 //! Red list: defects found by `tsq diff` (2026-10), the differential tester
-//! that runs random SQL through sqawk and through SQLite 3.45.
+//! that runs random SQL through sqawk and through SQLite 3.45, and by its
+//! fuzzers `tsq wb` and `tsq cli`.
 //!
 //! Every test encodes **correct** behaviour: the answer SQLite 3.45 gives
 //! (python3 `sqlite3` 3.45.1 and rusqlite's bundled 3.45.0 agree on each),
 //! which is the behaviour sqawk documents (doc/sql_reference.md: "Semantics
-//! follow SQLite 3.45"; none of these is a listed difference). Each is
+//! follow SQLite 3.45"; none of these is a listed difference), or for a
+//! fuzzer finding the documented command-line behaviour. Each is
 //! `#[ignore]`d until fixed; remove the attribute with the fix. Run with:
 //!     cargo test --test mod defects -- --ignored
 //!
@@ -248,4 +250,38 @@ fn cte_joined_to_an_empty_outer_loop_is_never_computed() -> TestResult {
          UNION ALL SELECT COUNT(*) FROM t a LEFT JOIN d ON a.k = d.k WHERE a.id < 0",
         "n\n0\n0\n",
     )
+}
+
+/// A write error names a file outside the working directory by its plain
+/// absolute path (`cannot write 'C:\...\ro.csv': file is read-only`). On
+/// Windows sqawk printed the verbatim form that `fs::canonicalize` returns,
+/// `\\?\C:\...\ro.csv`, a spelling the user never typed. Found by tsq cli
+/// under Windows (a `--write` error on a file in another directory).
+#[cfg(windows)]
+#[test]
+#[ignore]
+fn write_error_path_has_no_verbatim_prefix() -> TestResult {
+    let data = create_temp_dir()?;
+    let cwd = create_temp_dir()?;
+    let file = data.path().join("ro.csv");
+    std::fs::write(&file, "id,v\n1,a\n")?;
+    let mut perms = std::fs::metadata(&file)?.permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&file, perms.clone())?;
+    let out = assert_cmd::cargo::cargo_bin_cmd!("sqawk")
+        .current_dir(cwd.path())
+        .args(["-w", "-s", "UPDATE ro SET v = 'b'"])
+        .arg(&file)
+        .output()?;
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&file, perms)?;
+    let real = std::fs::canonicalize(&file)?;
+    let plain = real.to_string_lossy().replacen(r"\\?\", "", 1);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!("sqawk: cannot write '{plain}': file is read-only\n")
+    );
+    Ok(())
 }
