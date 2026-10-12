@@ -9,9 +9,9 @@
 //! them) on demand. The calendar arithmetic is Meeus's algorithm exactly as
 //! SQLite writes it, C integer truncation included.
 //!
-//! Times are UTC. `localtime` converts with the operating system's time
-//! zone rules (the C library's `localtime_r` / `localtime_s`, as SQLite
-//! does) and `utc` converts back.
+//! Times are UTC. `localtime` converts with the local time zone rules
+//! (`$TZ`, else the system zone, via chrono; the same answers SQLite gets
+//! from the C library's `localtime_r`) and `utc` converts back.
 
 use super::arith::text_of;
 use super::bytecode::Register;
