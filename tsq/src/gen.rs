@@ -403,7 +403,7 @@ fn random_text(r: &mut Rng, special: bool) -> String {
     let n = r.range(3, 10) as usize;
     let mut words: Vec<&str> = (0..n).map(|_| *r.pick(WORDS)).collect();
     if special && r.chance(0.1) {
-        words.push(r.pick(SPECIAL_WORDS));
+        words.push(*r.pick(SPECIAL_WORDS));
     }
     words.join(" ")
 }
