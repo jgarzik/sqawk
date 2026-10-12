@@ -244,10 +244,55 @@ consequences follow:
 - A statement observes the database as the previous one left it, which is what
   `CREATE TABLE t; INSERT INTO t ...; SELECT * FROM t` requires.
 
-A subquery in `FROM` (a derived table) is materialized before its enclosing
-statement compiles: the subquery runs, its result is registered under an
-internal name, and the FROM item is rewritten to reference that name (keeping
-the alias). The registration lasts only for that statement.
+### Derived Tables and CTEs: the pre-pass
+
+The compiler only opens cursors on named tables. Before a statement compiles,
+a pre-pass (`src/vm/prepass.rs`) turns every derived table and CTE reference
+into one. It walks the statement with `parse::for_each_child` -- the same
+enumeration of queries, FROM items and expressions the parser's limit check
+uses (CTE bodies, the statement inside `WITH ... INSERT`, JOIN ON, GROUP BY,
+window specs, function arguments, LIMIT, UPDATE SET, ...) -- and for each FROM
+item that is:
+
+- a **derived table** `(SELECT ...) d`: walks its query (innermost first),
+  runs it, registers the result as `sqawk_derived_N` and rewrites the item to
+  that table with alias `d`;
+- a **one-part name of a CTE in scope**: materializes the CTE on its first
+  reference (every other reference reuses the table) as `sqawk_cte_N`, and rewrites
+  the item to it, aliased as written or else by the CTE's name -- so `c.col`
+  resolves and the internal name never appears in output or errors;
+- **any other one-part name that a CTE of the statement declares**: rewrites
+  it to `main.name`, the loaded table.
+
+CTE scopes are a stack of WITH lists. A CTE is Pending, InProgress (being
+computed: a reference now is `circular reference`) or Done. Its body is
+walked with the stack cut back to its own WITH list, so it sees its siblings
+and itself but not the scopes around the reference. The WITH is removed from
+the query; an unused CTE's body is never walked or run; `WITH ... DML`
+becomes the DML statement.
+
+**Guard**: the compiler receives the set of CTE names declared in the
+statement (`SqlCompiler::cte_names`). Since the pre-pass rewrote every
+reference it reached -- to an internal name or to `main.name` -- a one-part
+table name from that set reaching `get_table_name` is a reference the walk
+missed, and is the error `internal error: unresolved CTE c` instead of a
+silent read of the loaded table of that name.
+
+**Recursive CTEs** run in Rust, as SQLite does: the setup arms run as one
+query whose rows seed a queue; recursive arms are compiled once, with their
+self-reference rewritten to a registered working table; each row taken from
+the queue is output (OFFSET / LIMIT) and becomes the working table's content
+for a run of each arm's program, whose rows join the queue (UNION: only rows
+not seen before, by the compound row key). The queue is FIFO, or a stable
+heap ordered by the CTE body's ORDER BY. A FIFO queue is breadth-first, so
+when no arm has DISTINCT or a wildcard, a whole generation is loaded into
+the working table at once with a position column, and the children are put
+back in queue order by (position, arm): the same rows in the same order, one
+run per generation instead of per row.
+
+Everything registered lasts until the statement ends, success or failure.
+A derived table or CTE body is computed up front, so one that reads a column
+of an enclosing query fails to resolve (`no such column`).
 
 ### File Handlers
 
@@ -447,5 +492,6 @@ The database engine has several architectural limitations:
 - **No Constraints System**: Referential integrity not enforced
 - **Whole-dataset residency**: A table must fit in memory
 
-Unsupported SQL of note: CTEs (`WITH`), parenthesized joins, and RANGE
-frames with an offset, GROUPS frames and FILTER on window functions.
+Unsupported SQL of note: correlated derived tables and CTE bodies,
+parenthesized joins, and RANGE frames with an offset, GROUPS frames and
+FILTER on window functions.

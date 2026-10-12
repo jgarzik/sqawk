@@ -44,6 +44,7 @@ cell.
 ## SELECT
 
 ```sql
+[WITH [RECURSIVE] name [(columns)] AS (query), ...]
 SELECT [DISTINCT] column_list | *
 FROM table [alias] [, table2 ...]
 [JOIN ...]
@@ -455,6 +456,98 @@ function and aggregate arguments, UPDATE SET, DELETE WHERE and INSERT VALUES.
   same UPDATE has already changed.)
 - Not supported: row values (`(a, b) IN (SELECT x, y ...)`), `ANY`/`ALL`.
 
+## WITH (Common Table Expressions)
+
+```sql
+WITH [RECURSIVE] name [(col, ...)] AS [[NOT] MATERIALIZED] (query) [, ...]
+statement
+```
+
+`statement` is a SELECT (or compound), INSERT, UPDATE or DELETE. WITH may
+also start the query of `INSERT INTO t WITH ... SELECT`, of `CREATE TABLE t
+AS WITH ...`, of a derived table and of any subquery.
+
+```sql
+WITH big AS (SELECT * FROM employees WHERE salary > 70000)
+SELECT department, COUNT(*) FROM big GROUP BY department
+
+WITH totals(dept, n) AS (SELECT department, COUNT(*) FROM employees GROUP BY department)
+SELECT e.name, t.n FROM employees e JOIN totals t ON t.dept = e.department
+
+WITH old AS (SELECT id FROM orders WHERE year < 2020)
+DELETE FROM orders WHERE id IN (SELECT id FROM old)
+```
+
+- Each CTE is computed once, the first time the statement references it,
+  and exists only for that statement. A CTE that is never referenced is
+  never computed (so its errors never surface).
+- A CTE is visible to the whole statement, to every CTE of its WITH list --
+  those declared after it and itself included -- and to subqueries. An inner WITH
+  shadows an outer CTE of the same name. A CTE body resolves names where it
+  is defined, not where it is referenced.
+- A CTE shadows a loaded table of the same name; `main.name` still names the
+  loaded table. The table an INSERT, UPDATE, DELETE or CREATE TABLE ... AS
+  writes is always a loaded table, never a CTE (`no such table: c` when only
+  a CTE has the name).
+- The column list renames the CTE's columns and must match the body's
+  column count (*"table c has 1 values for 2 columns"*); without one, the
+  body's result columns name them, made unique like a derived table's
+  (`a`, `a:1`).
+- A reference is qualified by its alias, else by the CTE name:
+  `WITH c AS (...) SELECT c.v FROM c` works, `... SELECT c.v FROM c AS x`
+  does not.
+- `MATERIALIZED` / `NOT MATERIALIZED` are accepted and change nothing.
+- Errors: *"duplicate WITH table name: c"*; *"circular reference: c"* for a
+  CTE that reads itself (other than as a recursive CTE below) or for CTEs
+  that read each other.
+- A CTE body that refers to a column of an enclosing query cannot be
+  computed up front and is an error (`no such column`), as for a derived
+  table.
+
+### Recursive CTEs
+
+```sql
+WITH RECURSIVE cnt(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM cnt WHERE n < 5)
+SELECT n FROM cnt                                  -- 1 2 3 4 5
+
+WITH RECURSIVE sub(id, depth) AS (
+  SELECT id, 0 FROM staff WHERE manager IS NULL
+  UNION ALL
+  SELECT staff.id, sub.depth + 1 FROM staff JOIN sub ON staff.manager = sub.id)
+SELECT id, depth FROM sub
+```
+
+A CTE whose body is a `UNION` or `UNION ALL` compound with an arm that names
+the CTE in its FROM is recursive, with or without the RECURSIVE keyword. As
+in SQLite:
+
+- The arms to the left of the first self-referencing arm are the *setup*;
+  the trailing self-referencing arms are *recursive*. The setup's rows seed
+  a queue. Each row taken from the queue is output and then is the entire
+  content of the CTE for one run of every recursive arm (in order), whose
+  rows join the queue. Under `UNION` a row joins the queue only the first
+  time it is seen, so cycles end.
+- The queue is first-in first-out (breadth-first). An `ORDER BY` on the
+  CTE body orders the queue instead (ties first-in first-out): `ORDER BY
+  depth DESC` walks a tree depth-first. Its terms are result-column
+  positions or the setup's result-column names.
+- `LIMIT` on the CTE body stops the recursion once that many rows are
+  output; `OFFSET` skips output rows, which still recurse. There is no
+  other limit: a recursion that neither LIMIT nor a WHERE condition ends
+  runs until memory is exhausted, as in SQLite.
+- Errors: a recursive arm may name the CTE once in its FROM (*"multiple
+  references to recursive table: c"*) and nowhere else (*"multiple
+  recursive references: c"* from a subquery); a setup arm, a derived table
+  or a non-UNION compound may not name it (*"circular reference: c"*); a
+  recursive arm may not aggregate or GROUP BY (*"recursive aggregate queries
+  not supported"*) or use window functions (*"cannot use window functions
+  in recursive queries"*); every arm has the setup's column count.
+
+Performance: without an ORDER BY on the body, and with no DISTINCT or `*` in
+a recursive arm, each recursive arm runs once per generation of rows (the
+order of the rows is still SQLite's). Otherwise it runs once per row, which
+re-reads the arm's other tables for every row: slow when they are large.
+
 ## Window Functions
 
 ```sql
@@ -759,7 +852,9 @@ nothing is modified. That includes:
   and `RETURNING` on INSERT, UPDATE and DELETE (`REPLACE INTO` does not parse)
 - `UPDATE ... FROM`, `DELETE ... USING`, `DELETE t FROM t JOIN ...`, and
   UPDATE / DELETE with `ORDER BY` or `LIMIT`
-- `WITH` (common table expressions), `FETCH FIRST`, `FOR UPDATE`, `TOP`,
+- `WITH` on a parenthesized compound operand (`SELECT 1 UNION (WITH ...)`),
+  a CTE body that is an INSERT / UPDATE / DELETE, typed CTE columns
+- `FETCH FIRST`, `FOR UPDATE`, `TOP`,
   `QUALIFY`, `SORT BY` / `CLUSTER BY` / `DISTRIBUTE BY`, `LATERAL VIEW`,
   `SELECT ... INTO`, `GROUP BY ... WITH ROLLUP`
 - `TABLESAMPLE`, table hints, `LATERAL` subqueries, column aliases on a FROM
@@ -800,9 +895,10 @@ sqawk aims to give SQLite's answers. Where it deliberately does not:
 | Subqueries in UPDATE / DELETE | A correlated subquery sees rows already changed | Sees the table as it was before the statement |
 | Aggregate of outer-query columns in a subquery (`(SELECT MIN(t.x) FROM u)`) | Evaluated in the outer query, which becomes an aggregate query | Rejected; an aggregate that also reads a column of the subquery's own tables aggregates in the subquery, as in SQLite |
 | Derived table (`FROM (SELECT ...)`) reading an outer-query column | Correlated | Rejected (`no such column`): a derived table is computed once, before the statement |
+| CTE body reading an outer-query column (`SELECT (WITH c AS (SELECT t.x) SELECT * FROM c) FROM t`) | Correlated | Rejected (`no such column`): a CTE is computed once, on first reference |
 | `ILIKE`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `TRIM(... FROM ...)` | Not available | Available |
 | `PRINTF` width or precision past the length limit | NULL, or the number wrapped to 31 bits | Error "string or blob too big" |
 | Parser | SQLite grammar | sqlparser's Hive dialect with SQLite's operator precedence: `GLOB`, `LIMIT n, m`, `TRIM(s, chars)`, `REPLACE INTO`, `x IN ()` do not parse, `REGEXP` is rejected, and parentheses nest at most 47 deep |
 
-Not implemented: common table expressions, views, indexes, triggers,
+Not implemented: views, indexes, triggers,
 `RETURNING`, row values, `GLOB`, and blob values.

@@ -164,3 +164,21 @@ DELETE FROM t2 WHERE k IS NULL; SELECT t1.k FROM t1 WHERE k NOT IN (SELECT k FRO
 UPDATE t1 SET s = s || '!' WHERE s IS NOT NULL; SELECT * FROM t1
 UPDATE t1 SET a = -a WHERE a < 0; SELECT * FROM t1
 UPDATE t1 SET a = a / 4; SELECT * FROM t1
+-- common table expressions
+WITH b AS (SELECT id FROM a WHERE salary > 70), a AS (SELECT id, salary FROM emp) SELECT id FROM b
+WITH emp AS (SELECT * FROM main.emp WHERE salary < 80) SELECT COUNT(*), SUM(salary) FROM emp
+WITH c AS (SELECT 1 AS v) SELECT (WITH c AS (SELECT 2 AS v) SELECT v FROM c), v FROM c
+WITH m AS (SELECT dept, MAX(salary) AS mx FROM emp GROUP BY dept) SELECT name FROM emp e WHERE salary = (SELECT mx FROM m WHERE m.dept = e.dept)
+SELECT (SELECT COUNT(*) FROM emp), (WITH emp AS (SELECT 1 AS id) SELECT COUNT(*) FROM emp)
+WITH u AS (SELECT k FROM t1 UNION ALL SELECT k FROM t2 EXCEPT SELECT k FROM t3) SELECT k FROM u
+WITH r AS (SELECT id FROM emp WHERE salary < 70) DELETE FROM emp WHERE id IN (SELECT id FROM r); SELECT id FROM emp
+INSERT INTO t3 WITH r AS (SELECT k + 50, 'w' FROM t2 WHERE k IS NOT NULL) SELECT * FROM r; SELECT k, c FROM t3
+CREATE TABLE z AS WITH r AS (SELECT id, salary FROM emp WHERE salary > 70) SELECT * FROM r; SELECT id, salary FROM z
+O:WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 2 FROM c WHERE n < 9) SELECT n FROM c
+O:WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c LIMIT 4 OFFSET 2) SELECT n FROM c
+O:WITH RECURSIVE c(n) AS (SELECT 3 UNION SELECT (n * 3) % 11 FROM c) SELECT n FROM c
+O:WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 3 UNION ALL SELECT n * 10 FROM c WHERE n < 3) SELECT n FROM c
+O:WITH RECURSIVE sub(id, lvl) AS (SELECT id, 0 FROM emp WHERE id = 1 UNION ALL SELECT emp.id, sub.lvl + 1 FROM emp JOIN sub ON emp.mgr = sub.id) SELECT id, lvl FROM sub
+O:WITH RECURSIVE sub(id, lvl) AS (SELECT id, 0 FROM emp WHERE id = 1 UNION ALL SELECT emp.id, sub.lvl + 1 FROM emp, sub WHERE emp.mgr = sub.id ORDER BY 2 DESC) SELECT id, lvl FROM sub
+O:WITH RECURSIVE anc(id, mgr) AS (SELECT id, mgr FROM emp WHERE id = 9 UNION ALL SELECT emp.id, emp.mgr FROM emp, anc WHERE emp.id = anc.mgr) SELECT id, mgr FROM anc
+WITH RECURSIVE sub(id) AS (SELECT 3 UNION ALL SELECT emp.id FROM emp JOIN sub ON emp.mgr = sub.id) UPDATE emp SET bonus = -1 WHERE id IN (SELECT id FROM sub); SELECT id, bonus FROM emp

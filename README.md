@@ -13,6 +13,7 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 - **Functions** - String (UPPER, LOWER, LENGTH, SUBSTR, INSTR, REPLACE, TRIM, LPAD/RPAD, PRINTF, QUOTE, ...), math (ABS, ROUND, CEIL, FLOOR, SIGN, multi-argument MIN/MAX, bitwise operators), conditional (COALESCE, IFNULL, NULLIF, IIF, TYPEOF), date/time (DATE, TIME, DATETIME, STRFTIME, JULIANDAY, UNIXEPOCH, TIMEDIFF with SQLite's modifiers)
 - **SQLite semantics** - 64-bit integer arithmetic, SQLite CAST rules, ASCII case-insensitive LIKE with ESCAPE, character-based strings; unimplemented syntax is an error, never silently ignored
 - **Subqueries** - Scalar, `IN (SELECT ...)`, and `EXISTS`, including correlated
+- **Common Table Expressions** - `WITH` and `WITH RECURSIVE` (tree walks, counters), on SELECT, INSERT, UPDATE and DELETE
 - **Set Operations** - UNION, UNION ALL, INTERSECT, EXCEPT
 - **Window Functions** - ROW_NUMBER, RANK, DENSE_RANK, PERCENT_RANK, CUME_DIST, NTILE, LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE, and aggregates with `OVER (PARTITION BY ... ORDER BY ...)`, ROWS frames and named windows
 - **DDL** - CREATE TABLE, CREATE TABLE AS SELECT, DROP, ALTER TABLE ADD COLUMN, TRUNCATE

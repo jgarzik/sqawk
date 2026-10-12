@@ -21,8 +21,8 @@
 //! `SqlCompiler::cte_names`): a reference this walk missed can never
 //! silently read the loaded table of the same name.
 //!
-//! CTE scoping follows SQLite: a WITH list's CTEs see every sibling (later
-//! ones too) and themselves; an inner WITH shadows an outer one; a CTE body
+//! CTE scoping follows SQLite: a WITH list's CTEs see every sibling (those
+//! declared after them too) and themselves; an inner WITH shadows an outer one; a CTE body
 //! resolves names in the scope of its WITH, not of its reference; an unused
 //! CTE is never evaluated. A CTE whose body references itself directly in a
 //! UNION [ALL] arm is recursive (with or without RECURSIVE) and is computed

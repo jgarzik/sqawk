@@ -192,7 +192,7 @@ fn star_uses_cte_column_names() -> TestResult {
     )
 }
 
-/// A later CTE reads an earlier one.
+/// A CTE reads one declared before it.
 #[test]
 fn chained_ctes() -> TestResult {
     assert_query_on(
@@ -203,7 +203,8 @@ fn chained_ctes() -> TestResult {
     )
 }
 
-/// Every CTE of a WITH list sees all its siblings, including later ones.
+/// Every CTE of a WITH list sees all its siblings, including those declared
+/// after it.
 #[test]
 fn forward_reference_to_sibling() -> TestResult {
     assert_query_on(

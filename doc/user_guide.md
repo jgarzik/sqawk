@@ -36,6 +36,7 @@
    - [Aggregation and Grouping](#aggregation-and-grouping)
    - [Distinct Values](#distinct-values)
    - [Joins](#joins)
+   - [Common Table Expressions (WITH)](#common-table-expressions-with)
    - [Data Modification](#data-modification)
    - [String Functions](#string-functions)
    - [SQL Semantics](#sql-semantics)
@@ -61,6 +62,7 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 - Automatic type inference and cross-file operations
 - Powerful SQL dialect including joins, sorting, filtering, and aggregations
 - Subqueries (scalar, `IN`, `EXISTS`, correlated) and derived tables
+- Common table expressions (`WITH`), including recursive ones
 - Set operations (UNION, INTERSECT, EXCEPT) and window functions
 - Interactive REPL mode for SQL exploration and execution
 - Safe operation with explicit write-back control
@@ -966,6 +968,76 @@ sqawk -s "SELECT u.name, p.name AS product, o.date
       users.csv orders.csv products.csv
 ```
 
+### Common Table Expressions (WITH)
+
+`WITH` names a query for the statement that follows, which reads it like a
+table:
+
+```sh
+sqawk -s "WITH big AS (SELECT * FROM employees WHERE salary > 70000)
+          SELECT department, COUNT(*) FROM big GROUP BY department" employees.csv
+```
+
+```
+department,COUNT(*)
+Engineering,1
+Sales,2
+```
+
+A CTE that names itself in a `UNION ALL` arm is recursive: the first arm
+seeds the rows, and the second runs on each new row until it produces no
+more. Given `staff.csv`:
+
+```
+id,name,manager
+1,Ann,
+2,Bob,1
+3,Cid,1
+4,Dee,2
+5,Eve,4
+```
+
+```sh
+# Count without a table
+sqawk -s "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5)
+          SELECT i, i * i AS square FROM n" staff.csv
+
+# Walk the reporting chain from the top, breadth-first
+sqawk -s "WITH RECURSIVE chain(id, name, depth, path) AS (
+            SELECT id, name, 0, name FROM staff WHERE manager IS NULL
+            UNION ALL
+            SELECT s.id, s.name, c.depth + 1, c.path || ' > ' || s.name
+            FROM staff s JOIN chain c ON s.manager = c.id)
+          SELECT name, depth, path FROM chain" staff.csv
+```
+
+```
+name,depth,path
+Ann,0,Ann
+Bob,1,Ann > Bob
+Cid,1,Ann > Cid
+Dee,2,Ann > Bob > Dee
+Eve,3,Ann > Bob > Dee > Eve
+```
+
+Add `ORDER BY 3 DESC` inside the CTE (after its last arm) to walk depth-first
+instead: Ann, Bob, Dee, Eve, Cid. WITH also drives modifications -- this
+removes Bob and everyone under him:
+
+```sh
+sqawk -s "WITH RECURSIVE under(id) AS (
+            SELECT id FROM staff WHERE name = 'Bob'
+            UNION ALL
+            SELECT s.id FROM staff s JOIN under u ON s.manager = u.id)
+          DELETE FROM staff WHERE id IN (SELECT id FROM under)" staff.csv --write
+```
+
+A recursion that nothing stops runs forever; end it with a WHERE condition
+in the recursive arm, or with `LIMIT` on the CTE body
+(`... UNION ALL SELECT i + 1 FROM n LIMIT 10`). See the
+[SQL reference](sql_reference.md#with-common-table-expressions) for the
+full rules.
+
 ### Data Modification
 
 ```sh
@@ -1009,7 +1081,7 @@ from SQLite" in the [SQL reference](sql_reference.md)):
 - String functions count characters, not bytes; `'a' || NULL` is NULL.
 - Dates are UTC unless converted with `'localtime'`: `DATE('now')`,
   `DATE(d, '+1 month')`, `STRFTIME('%Y', d)`.
-- Syntax that parses but is not implemented (`RETURNING`, `WITH`,
+- Syntax that parses but is not implemented (`RETURNING`,
   `UPDATE ... FROM`, ...) is an error, never silently ignored.
 
 ### System Files (--tabledef)

@@ -92,7 +92,7 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
   same query compiler as fragments of the enclosing program (`Once` when
   uncorrelated; correlation found by `NameCtx` outward resolution)
 - `compiler_check.rs`: rejects every parsed clause sqawk does not implement
-  (RETURNING, ON CONFLICT, UPDATE FROM, WITH, QUALIFY, ...) before
+  (RETURNING, ON CONFLICT, UPDATE FROM, QUALIFY, ...) before
   compilation; INSERT/UPDATE/DELETE/Query/Select are destructured
   exhaustively so a new sqlparser field fails to compile until handled
 - `parse.rs`: `parse_sql`, the only SQL-to-AST entry point: parses with
@@ -100,6 +100,21 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
   rewrites compound SELECTs left-deep (equal precedence, left to right), and
   enforces SQLite's limits (expression depth 1000, 500 compound terms) with an
   iterative walk before anything recurses over the tree
+- `mod.rs`: `execute_vm` / `execute_statements`, the per-statement loop:
+  pre-pass, compile, execute, apply modifications, drop the statement's
+  registered tables
+- `prepass.rs`: runs before each statement compiles. Derived tables and CTEs
+  become registered tables (`sqawk_derived_N`, `sqawk_cte_N`) and FROM items
+  are rewritten to them; CTE scoping (siblings, self, shadowing, lazy single
+  materialization), `WITH ... DML` unwrapping, and recursive CTEs (SQLite's
+  queue algorithm, one run per generation when the queue is FIFO). Other
+  one-part references sharing a CTE's name become `main.t`, and the compiler
+  refuses any one-part CTE name left over (`SqlCompiler::cte_names`), so a
+  missed rewrite cannot read the loaded table
+- `parse.rs`: `parse_sql` (SQLite precedence, hex literals, MATERIALIZED
+  hints dropped, compounds left-deep, depth / compound limits) and
+  `for_each_child`, the one enumeration of a statement's queries, FROM items
+  and expressions shared by the limit walk and the pre-pass
 - `ast_compat.rs`: thin accessors normalizing sqlparser AST shapes
 - `engine.rs`: Executes bytecode instructions
 - `arith.rs`: SQLite numeric semantics -- text-to-number coercion, i64
