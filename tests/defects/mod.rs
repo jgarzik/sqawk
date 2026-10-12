@@ -12,7 +12,9 @@
 //! submodule (code defects found by the 2026-10 documentation review). All
 //! serve as regression cover. The `schema_2026_10` submodule holds the
 //! `CREATE TABLE ... LOCATION` over an existing file defect, and the
-//! `cte_2026_10` submodule the common table expression (`WITH`) rules. Add a
+//! `cte_2026_10` submodule the common table expression (`WITH`) rules. The
+//! `tsq_2026_10` submodule holds the defects found by `tsq diff`, the
+//! differential tester against SQLite (still red). Add a
 //! new `#[ignore]`d test when a defect is found, and remove the attribute
 //! when it is fixed.
 //!
@@ -30,6 +32,7 @@ mod code_review_2026_10;
 mod cte_2026_10;
 mod doc_review_2026_10;
 mod schema_2026_10;
+mod tsq_2026_10;
 mod v1_review_2026_10;
 
 use crate::helpers::{
