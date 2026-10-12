@@ -1,0 +1,12 @@
+# Build flags for the bundled SQLite in tsq's differential oracle (rusqlite
+# -> libsqlite3-sys reads this variable; sqawk itself does not use SQLite):
+#
+# * SQLITE_ENABLE_MATH_FUNCTIONS: ceil, floor, ... as in SQLite's own
+#   builds (the bundled amalgamation leaves them out).
+# * LONGDOUBLE_TYPE=double: real <-> text conversion uses SQLite's
+#   double-double arithmetic on every platform, as MSVC builds always do and
+#   as SQLite itself does from 3.47 on, instead of x87 80-bit long double
+#   where the compiler offers it. Without this the oracle's last digits
+#   depend on the OS and on the x87 precision control word.
+[env]
+LIBSQLITE3_FLAGS = "-DSQLITE_ENABLE_MATH_FUNCTIONS -DLONGDOUBLE_TYPE=double"

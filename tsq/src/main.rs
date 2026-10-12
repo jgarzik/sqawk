@@ -2,20 +2,25 @@
 //!
 //! * `tsq gen`: deterministic multi-table test data (foreign keys, realistic
 //!   distributions, optional edge-case cells, every file layout sqawk
-//!   reads).
+//!   reads);
+//! * `tsq diff`: random SQL run through sqawk and through SQLite (rusqlite's
+//!   bundled build) holding the same values; every result set compared byte
+//!   for byte; failures shrunk to minimal reproductions.
 //!
 //! Everything random comes from one ChaCha8 stream per seed (`rng.rs`), so a
-//! seed reproduces the same data on every OS.
+//! seed reproduces the same data and queries on every OS.
 
 #![forbid(unsafe_code)]
 
 mod data;
+mod diff;
 mod gen;
 mod rng;
+mod run;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -24,17 +29,22 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(
     name = "tsq",
     version,
-    about = "Test data generator for sqawk",
-    long_about = "Test data generator for sqawk.\n\n\
-                  gen writes deterministic multi-table CSV/TSV data. The same seed gives \
-                  the same data on every OS."
+    about = "Test data generator and differential SQL tester for sqawk",
+    long_about = "Test data generator and differential SQL tester for sqawk.\n\n\
+                  gen writes deterministic multi-table CSV/TSV data; diff runs random SQL \
+                  through sqawk and SQLite and compares the answers byte for byte. The same \
+                  seed gives the same data and queries on every OS."
 )]
 struct Cli {
+    /// The sqawk binary (default: $SQAWK, else sqawk next to tsq)
+    #[arg(long, global = true)]
+    sqawk: Option<PathBuf>,
+
     /// Random seed (full 64 bits; printed when chosen from the clock)
     #[arg(long, short = 's', global = true)]
     seed: Option<u64>,
 
-    /// Progress messages
+    /// Progress and every non-passing result, documented ones included
     #[arg(long, short = 'v', global = true)]
     verbose: bool,
 
@@ -77,6 +87,42 @@ enum Command {
         #[arg(long, default_value_t = 0.0)]
         ragged_rate: f64,
     },
+    /// Random SQL through sqawk and SQLite; compare every result set
+    Diff {
+        /// Number of generated tests
+        #[arg(long, short = 'n', default_value_t = 1000)]
+        queries: usize,
+        /// Table size: small (12 customers), large (100000) or a row count
+        #[arg(long, default_value = "small")]
+        scale: diff::Scale,
+        /// Tables: gen (tsq gen's), edge (adversarial values) or harness
+        #[arg(long, default_value = "gen")]
+        tables: String,
+        /// Edge-value rate for --tables gen
+        #[arg(long, default_value_t = 0.0)]
+        edge_rate: f64,
+        /// Run every test even after a finding
+        #[arg(long)]
+        keep_going: bool,
+        /// Shrink each finding to a minimal reproduction
+        #[arg(long)]
+        shrink: bool,
+        /// Directory for shrunk reproductions (default ./tsq-repro)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Parallel jobs (default: available cores, at most 8 at large scale)
+        #[arg(long, short = 'j')]
+        jobs: Option<usize>,
+        /// Per-test time limit in seconds, for each engine
+        #[arg(long, default_value_t = 10)]
+        timeout: u64,
+        /// Run only test number N
+        #[arg(long)]
+        only: Option<usize>,
+        /// Print the generated scripts instead of running them
+        #[arg(long)]
+        print: bool,
+    },
 }
 
 fn clock_seed() -> u64 {
@@ -85,6 +131,12 @@ fn clock_seed() -> u64 {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     t ^ u64::from(std::process::id()).rotate_left(32)
+}
+
+fn cores() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
 }
 
 fn real_main() -> Result<i32> {
@@ -97,6 +149,7 @@ fn real_main() -> Result<i32> {
             s
         }
     };
+    let sqawk = run::locate_sqawk(cli.sqawk.as_deref());
     match cli.command {
         Command::Gen {
             output_dir,
@@ -128,6 +181,42 @@ fn real_main() -> Result<i32> {
             };
             gen::run(seed, &opts, cli.verbose)?;
             Ok(0)
+        }
+        Command::Diff {
+            queries,
+            scale,
+            tables,
+            edge_rate,
+            keep_going,
+            shrink,
+            out,
+            jobs,
+            timeout,
+            only,
+            print,
+        } => {
+            let diff::Scale::Rows(rows) = scale;
+            let jobs = jobs.unwrap_or_else(|| {
+                if rows >= 5000 {
+                    cores().min(8)
+                } else {
+                    cores()
+                }
+            });
+            let opts = diff::DiffOptions {
+                queries,
+                scale,
+                tables,
+                edge_rate,
+                keep_going,
+                shrink,
+                out,
+                jobs,
+                timeout: Duration::from_secs(timeout),
+                only,
+                print,
+            };
+            diff::run(seed, &sqawk, &opts, cli.verbose)
         }
     }
 }

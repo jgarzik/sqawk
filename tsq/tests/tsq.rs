@@ -1,9 +1,11 @@
-//! Tests for `tsq`, the test-data generator.
+//! Tests for `tsq`, the test-data generator and differential tester.
 //!
 //! `tsq` is a local development tool (a `publish = false` workspace member),
 //! not part of the published sqawk crate. These tests cover what makes it
 //! useful: `gen` is deterministic (every output file), its foreign keys
-//! hold, and sqawk reads every layout it writes.
+//! hold, and sqawk reads every layout it writes; `diff` runs clean against
+//! the current sqawk (small budgets, so `cargo test --workspace` stays
+//! fast).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,7 +37,9 @@ fn sqawk() -> Command {
 }
 
 fn tsq() -> assert_cmd::Command {
-    assert_cmd::cargo::cargo_bin_cmd!("tsq")
+    let mut c = assert_cmd::cargo::cargo_bin_cmd!("tsq");
+    c.arg("--sqawk").arg(sqawk_path());
+    c
 }
 
 fn ok(out: Output, what: &str) -> String {
@@ -211,5 +215,30 @@ fn sqawk_reads_every_layout() {
             let got = query(sqawk_args, &format!("SELECT COUNT(*) FROM {t}"), &[file]);
             assert_eq!(got, format!("COUNT(*)\n{n}\n"), "{t} with {gen_args:?}");
         }
+    }
+}
+
+#[test]
+fn diff_smoke_runs_clean() {
+    // A small random run over generated tables and over the adversarial
+    // set: any finding (wrong answer, unexpected error, crash) fails.
+    for args in [
+        &["diff", "--seed", "1", "--queries", "300"][..],
+        &[
+            "diff",
+            "--seed",
+            "1",
+            "--queries",
+            "150",
+            "--tables",
+            "edge",
+        ][..],
+    ] {
+        let out = ok(tsq().args(args).output().expect("run tsq"), "tsq diff");
+        let last = out.lines().last().unwrap_or("");
+        assert!(
+            last.starts_with("DIFF SUMMARY") && last.ends_with("findings 0"),
+            "{args:?}:\n{out}"
+        );
     }
 }

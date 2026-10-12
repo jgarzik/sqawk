@@ -25,6 +25,7 @@
 //! injector draws from its own stream.
 
 use std::fs;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 
@@ -724,6 +725,15 @@ pub fn run(seed: u64, opts: &GenOptions, verbose: bool) -> Result<()> {
         tables.len(),
         tables.iter().map(|t| t.rows.len()).sum::<usize>()
     );
+    Ok(())
+}
+
+/// Write `tables` as CSV into `dir` (the differential modes' layout).
+pub fn write_csv_tables(dir: &Path, tables: &[Table]) -> Result<()> {
+    let mut r = Rng::new(0);
+    for t in tables {
+        write_table(dir, t, &Format::default(), &mut r)?;
+    }
     Ok(())
 }
 

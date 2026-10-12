@@ -15,7 +15,11 @@ clap = { version = "4", features = ["derive"] }
 # Portable seeded RNG: the same seed gives the same stream on every OS.
 rand = { version = "0.9", default-features = false, features = ["std"] }
 rand_chacha = "0.9"
+# The differential oracle. The 0.31 line bundles SQLite 3.45.0, the release
+# whose semantics sqawk follows (doc/sql_reference.md); later lines bundle
+# newer SQLite releases whose answers differ in places sqawk does not track.
+rusqlite = { version = "0.31", features = ["bundled", "backup", "hooks"] }
+tempfile = "3"
 
 [dev-dependencies]
 assert_cmd = "2"
-tempfile = "3"
