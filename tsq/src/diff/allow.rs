@@ -249,9 +249,28 @@ fn concat_ws_separators(sql: &str) -> Vec<String> {
         .collect()
 }
 
+/// The fields of one output record (sqawk's CSV quoting undone).
+fn record_fields(rec: &str) -> Vec<String> {
+    let mut fields = vec![String::new()];
+    let mut quoted = false;
+    let mut cs = rec.chars().peekable();
+    while let Some(c) = cs.next() {
+        match c {
+            '"' if quoted && cs.peek() == Some(&'"') => {
+                cs.next();
+                fields.last_mut().expect("one field").push('"');
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => fields.push(String::new()),
+            c => fields.last_mut().expect("one field").push(c),
+        }
+    }
+    fields
+}
+
 /// "CONCAT_WS with an empty-string argument": SQLite 3.45 writes no
-/// separator for it, sqawk does (`a,,b`). The rows must agree once every
-/// separator is removed from both sides.
+/// separator for it, sqawk does (`a,,b`). The rows must agree field by
+/// field once every separator is removed from both sides.
 fn concat_ws_empty(ctx: &Ctx) -> bool {
     if ctx.outcome != Outcome::Diff || ctx.sqawk_sets.len() != ctx.sqlite_sets.len() {
         return false;
@@ -261,15 +280,19 @@ fn concat_ws_empty(ctx: &Ctx) -> bool {
         return false;
     }
     let strip = |r: &String| {
-        let mut r = r.clone();
-        for sep in &seps {
-            r = r.replace(sep.as_str(), "");
-        }
-        r
+        record_fields(r)
+            .into_iter()
+            .map(|mut f| {
+                for sep in &seps {
+                    f = f.replace(sep.as_str(), "");
+                }
+                f
+            })
+            .collect::<Vec<String>>()
     };
     ctx.sqawk_sets.iter().zip(ctx.sqlite_sets).all(|(a, b)| {
-        let mut x: Vec<String> = a.rows.iter().map(strip).collect();
-        let mut y: Vec<String> = b.rows.iter().map(strip).collect();
+        let mut x: Vec<Vec<String>> = a.rows.iter().map(strip).collect();
+        let mut y: Vec<Vec<String>> = b.rows.iter().map(strip).collect();
         x.sort();
         y.sort();
         x == y
@@ -583,6 +606,7 @@ mod tests {
             source: 0,
         };
         let sql = "SELECT CONCAT_WS('-', a, b) AS c FROM t";
+        assert_eq!(record_fields("1,\"a, b\",\"q\"\"\""), ["1", "a, b", "q\""]);
         let ours = [set(&["x--y", "z"])];
         let same = [set(&["x-y", "z"])];
         let other = [set(&["x-w", "z"])];
