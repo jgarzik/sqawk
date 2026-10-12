@@ -530,9 +530,10 @@ fn abs(a: &[Register]) -> SqawkResult<Register> {
     })
 }
 
-/// ROUND(x[, d]): always a real. Rounds half away from zero on the decimal
-/// digits of x (so 2.675, stored as 2.67499..., rounds to 2.67 as in
-/// SQLite). A negative `d` is 0, as in SQLite: ROUND(1234.5, -2) is 1235.0.
+/// ROUND(x[, d]): always a real, SQLite's `roundFunc`. Halves are judged
+/// on the value actually stored (2.675 is 2.67499..., so it rounds to
+/// 2.67 as in SQLite). A negative `d` is 0 and one above 30 is 30, as in
+/// SQLite: ROUND(1234.5, -2) is 1235.0.
 fn round(a: &[Register]) -> SqawkResult<Register> {
     if matches!(a[0], Register::Null) {
         return Ok(Register::Null);
@@ -556,63 +557,22 @@ fn round(a: &[Register]) -> SqawkResult<Register> {
     Ok(Register::Float(round_decimal(x, digits)))
 }
 
-/// Round `x` to `digits` decimal places, half away from zero, deciding the
-/// tie on x's shortest 17-significant-digit decimal expansion. A negative
-/// `digits` is 0.
+/// Round `x` to `digits` decimal places as SQLite's `roundFunc` does: a
+/// magnitude above 2^52 has no fraction and is returned as is; to 0
+/// places, `x + 0.5` (`- 0.5` when negative) truncated toward zero; else
+/// `%!.*f` of x (digits from SQLite's decimal expansion, rounded half up)
+/// read back as a real.
 pub(crate) fn round_decimal(x: f64, digits: i64) -> f64 {
-    if !x.is_finite() {
-        return x;
+    const TWO_52: f64 = 4_503_599_627_370_496.0;
+    let n = digits.clamp(0, 30);
+    if !(-TWO_52..=TWO_52).contains(&x) {
+        // Also NaN, which SQLite passes through the same way.
+        x
+    } else if n == 0 {
+        (x + if x < 0.0 { -0.5 } else { 0.5 }) as i64 as f64
+    } else {
+        arith::atof(&printf::real_str(&format!("%!.{n}f"), x))
     }
-    if digits <= 0 {
-        return x.round();
-    }
-    if digits > 30 {
-        return x;
-    }
-    // d.dddddddddddddddde[+-]X: 17 significant digits.
-    let s = format!("{:.16e}", x.abs());
-    let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
-    let exp: i64 = exp.parse().unwrap_or(0);
-    let mut ds: Vec<u8> = mant
-        .bytes()
-        .filter(u8::is_ascii_digit)
-        .map(|b| b - b'0')
-        .collect();
-    // Digits kept: those before the point plus `digits` after it.
-    let keep = exp + 1 + digits;
-    if keep < 0 {
-        return 0.0f64.copysign(x);
-    }
-    let keep = keep as usize;
-    if keep >= ds.len() {
-        return x;
-    }
-    let round_up = ds[keep] >= 5;
-    ds.truncate(keep);
-    let mut exp = exp;
-    if round_up {
-        let mut i = ds.len();
-        loop {
-            if i == 0 {
-                ds.insert(0, 1);
-                exp += 1;
-                break;
-            }
-            i -= 1;
-            if ds[i] == 9 {
-                ds[i] = 0;
-            } else {
-                ds[i] += 1;
-                break;
-            }
-        }
-    }
-    if ds.is_empty() {
-        return 0.0f64.copysign(x);
-    }
-    let mant: String = ds.iter().map(|d| (b'0' + d) as char).collect();
-    let v: f64 = format!("0.{}e{}", mant, exp + 1).parse().unwrap_or(x);
-    v.copysign(x)
 }
 
 /// CEIL / FLOOR: an integer is returned as is; a real stays a real.
@@ -745,6 +705,11 @@ mod tests {
         assert_eq!(round_decimal(99.5, 0), 100.0);
         assert_eq!(round_decimal(0.0004, 2), 0.0);
         assert_eq!(round_decimal(1234.5, -2), 1235.0);
+        assert_eq!(round_decimal(1058.05, 1), 1058.0);
+        assert_eq!(round_decimal(-1058.05, 1), -1058.0);
+        assert_eq!(round_decimal(0.49999999999999994, 0), 1.0);
+        assert_eq!(round_decimal(1e300, 2), 1e300);
+        assert_eq!(round_decimal(f64::INFINITY, 2), f64::INFINITY);
     }
 
     #[test]

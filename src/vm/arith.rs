@@ -272,6 +272,19 @@ pub(crate) fn arith(op: ArithOp, a: &Register, b: &Register) -> Register {
                 None => real_arith(op, x as f64, y as f64),
             }
         }
+        // With a real operand SQLite still takes an integer remainder: of
+        // each operand read as an integer (`sqlite3VdbeIntValue` --
+        // integers exactly, reals truncated and clamped to the i64 range,
+        // text by its integer prefix), returned as a real. 5.5 % 2 is 1.0,
+        // 9007199254740993 % 2.0 is 1.0.
+        _ if op == ArithOp::Rem => {
+            let (ix, iy) = (int_value(a), int_value(b));
+            if iy == 0 {
+                return Register::Null;
+            }
+            let iy = if iy == -1 { 1 } else { iy };
+            Register::Float((ix % iy) as f64)
+        }
         (x, y) => real_arith(op, x.as_f64(), y.as_f64()),
     }
 }
@@ -288,7 +301,8 @@ fn real_arith(op: ArithOp, x: f64, y: f64) -> Register {
             x / y
         }
         // SQLite takes the remainder of the operands truncated to integers,
-        // but returns it as a real: 5.5 % 2 is 1.0.
+        // but returns it as a real (reached only from `arith`'s integer
+        // path, which never overflows for `%`).
         ArithOp::Rem => {
             let (ix, iy) = (real_to_int(x), real_to_int(y));
             if iy == 0 {

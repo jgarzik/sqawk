@@ -227,7 +227,10 @@ blob too big". The length is checked before anything is allocated.
 
 `ROUND(3.14159, 2)` is `3.14`. Halves round away from zero, judged on the
 value actually stored: `ROUND(2.675, 2)` is `2.67`, because 2.675 is stored as
-2.67499999.... A negative `d` is treated as 0, as in SQLite:
+2.67499999..., and `ROUND(1058.05, 1)` is `1058.0`. As in SQLite, the value is
+printed with `d` decimals (`%!.*f`, see Real output) and read back, and a
+value beyond 2^52 is returned unchanged. `d` above 30 is 30; a negative `d`
+is treated as 0, as in SQLite:
 `ROUND(1234.5, -2)` is `1235.0`. A `d` that is not a number is an error rather
 than a silent `0`.
 
@@ -247,8 +250,10 @@ unchanged. With one argument, `MIN` and `MAX` are the aggregates.
 - A result that does not fit in 64 bits is computed as a real instead:
   `9223372036854775807 + 1` is the real `9.22337203685478e+18`.
 - A real operand makes the result real (`7.0 / 2` is `3.5`). `%` with a real
-  operand takes the remainder of the operands truncated to integers, as a
-  real (`5.5 % 2` is `1.0`).
+  operand takes the remainder of the operands read as integers, as a real:
+  reals truncated toward zero (clamped to the 64-bit range), integers exactly,
+  text by its integer prefix as `CAST(text AS INTEGER)` reads it (`5.5 % 2` is
+  `1.0`, `9007199254740993 % 2.0` is `1.0`, `'1e3' % 7.0` is `1.0`).
 - Division or remainder by zero is NULL. Any NULL operand gives NULL.
 - Text is read by its longest numeric prefix: `'12abc' + 0` is `12`,
   `' 5 ' + 1` is `6`, `'1e3' + 0` is the real `1000.0`, `'abc' + 1` is `1`.

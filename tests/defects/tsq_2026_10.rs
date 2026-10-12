@@ -78,12 +78,11 @@ fn quote_real_fallback_digits() -> TestResult {
 
 /// `%` with a real operand takes the remainder of the operands truncated to
 /// integers (doc "Arithmetic"), and integers beyond 2^53 stay exact: the
-/// integer operand must not pass through a double. sqawk rounds
-/// 9007199254740993 to ...992 first (`% 2.0` gives 0.0, not 1.0); an
+/// integer operand must not pass through a double. sqawk rounded
+/// 9007199254740993 to ...992 first (`% 2.0` gave 0.0, not 1.0); an
 /// out-of-range real clamps to the i64 limit as in SQLite. Found by tsq diff
 /// --seed 2 --only 175.
 #[test]
-#[ignore = "defect: % with a real operand loses the integer operand's precision"]
 fn remainder_with_real_keeps_integers_exact() -> TestResult {
     assert_query_on(
         ONE,
@@ -96,9 +95,8 @@ fn remainder_with_real_keeps_integers_exact() -> TestResult {
 /// ROUND judges halves "on the value actually stored" (doc "Math
 /// Functions": `ROUND(2.675, 2)` is 2.67). 1058.05 is stored as
 /// 1058.04999999999995..., so ROUND(1058.05, 1) is 1058.0 in SQLite; sqawk
-/// gives 1058.1. Found by tsq diff --seed 4 --only 2989.
+/// gave 1058.1. Found by tsq diff --seed 4 --only 2989.
 #[test]
-#[ignore = "defect: ROUND rounds 1058.05 up although the stored value is below the half"]
 fn round_judges_the_stored_value() -> TestResult {
     assert_query_on(
         ONE,
