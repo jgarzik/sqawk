@@ -12,12 +12,18 @@ use crate::capacity::DEFAULT_TABLE_CAPACITY;
 use crate::config::AppConfig;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
+use crate::vm::bytecode::Program;
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
 /// Represents the central database that holds all tables
 pub struct Database {
     /// In-memory tables indexed by their names
     tables: HashMap<String, Table>,
+
+    /// The tables of `tables` whose rows a program computes when a cursor
+    /// first opens them (see [`Database::add_lazy_table`]).
+    lazy: HashMap<String, LazyTable>,
 
     /// Names of the tables whose contents or schema changed since they were
     /// loaded or created: the tables `--write` writes back. DROP TABLE takes
@@ -42,8 +48,62 @@ struct Transaction {
     modified: HashSet<String>,
 }
 
+/// A CTE's or derived table's rows, computed on first use: SQLite codes such
+/// a subquery behind OP_Once (or as a co-routine) where the query first
+/// reads it, so a subquery that is never read is never run.
+pub struct LazyTable {
+    /// The query; its result columns are the table's.
+    program: Program,
+    /// The table with its rows, once computed.
+    filled: OnceCell<Table>,
+}
+
+impl LazyTable {
+    /// The program that computes the rows.
+    pub fn program(&self) -> &Program {
+        &self.program
+    }
+
+    /// The computed table, or `None` before it is computed.
+    pub fn filled(&self) -> Option<&Table> {
+        self.filled.get()
+    }
+
+    /// Record the computed table and return it. A table already recorded
+    /// is kept: its rows are the same.
+    pub fn fill(&self, table: Table) -> &Table {
+        self.filled.get_or_init(|| table)
+    }
+}
+
 /// Methods for direct table manipulation - used only in special cases
 impl Database {
+    /// Add `table`, which has columns and no rows, as a table whose rows
+    /// `program` computes when a cursor first opens it ([`LazyTable`]). The
+    /// program runs over the database as it is then; nothing it reads
+    /// changes within a statement, and the table lives only for one.
+    pub fn add_lazy_table(
+        &mut self,
+        name: String,
+        table: Table,
+        program: Program,
+    ) -> SqawkResult<()> {
+        self.add_table(name.clone(), table)?;
+        self.lazy.insert(
+            name,
+            LazyTable {
+                program,
+                filled: OnceCell::new(),
+            },
+        );
+        Ok(())
+    }
+
+    /// The lazy table named `name`, if it is one.
+    pub fn lazy_table(&self, name: &str) -> Option<&LazyTable> {
+        self.lazy.get(name)
+    }
+
     /// Remove a table from the database by name
     ///
     /// # Arguments
@@ -55,6 +115,7 @@ impl Database {
         let Some(table) = self.tables.remove(name) else {
             return false;
         };
+        self.lazy.remove(name);
         self.modified.remove(name);
         if let Some(txn) = &mut self.transaction {
             txn.originals.entry(name.to_string()).or_insert(Some(table));
@@ -138,6 +199,7 @@ impl Database {
     pub fn new() -> Self {
         Database {
             tables: HashMap::with_capacity(DEFAULT_TABLE_CAPACITY),
+            lazy: HashMap::new(),
             modified: HashSet::new(),
             transaction: None,
         }

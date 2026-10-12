@@ -255,14 +255,23 @@ window specs, function arguments, LIMIT, UPDATE SET, ...) -- and for each FROM
 item that is:
 
 - a **derived table** `(SELECT ...) d`: walks its query (innermost first),
-  runs it, registers the result as `sqawk_derived_N` and rewrites the item to
-  that table with alias `d`;
-- a **one-part name of a CTE in scope**: materializes the CTE on its first
+  compiles it, registers the result as `sqawk_derived_N` and rewrites the
+  item to that table with alias `d`;
+- a **one-part name of a CTE in scope**: compiles the CTE on its first
   reference (every other reference reuses the table) as `sqawk_cte_N`, and rewrites
   the item to it, aliased as written or else by the CTE's name -- so `c.col`
   resolves and the internal name never appears in output or errors;
 - **any other one-part name that a CTE of the statement declares**: rewrites
   it to `main.name`, the loaded table.
+
+A registered derived table or (non-recursive) CTE is a *lazy table*
+(`Database::add_lazy_table`): its columns come from the compiled query and
+its rows from running that program the first time an `OpenRead` opens it
+(`VmEngine::fill_lazy`), as SQLite runs a FROM subquery behind `OP_Once`
+where it is first read. Since the FROM planner tests WHERE terms that read
+no table before opening any cursor, a CTE read only under a false WHERE --
+or only in a CASE branch not taken -- is never run. A recursive CTE is
+computed in the pre-pass.
 
 CTE scopes are a stack of WITH lists. A CTE is Pending, InProgress (being
 computed: a reference now is `circular reference`) or Done. Its body is

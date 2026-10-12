@@ -196,7 +196,6 @@ fn in_subquery_filter_applies_before_the_joins() -> TestResult {
 /// in a debug build); SQLite takes 0.001 s. Found by tsq diff --seed 4 --only
 /// 3486 (91 s there).
 #[test]
-#[ignore]
 fn cte_read_only_under_a_false_where_is_never_computed() -> TestResult {
     let t = csv("id,k", (1..=400).map(|i| format!("{i},{}", i % 6)));
     assert_fast(

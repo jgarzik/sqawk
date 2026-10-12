@@ -445,8 +445,9 @@ SELECT name FROM (SELECT name, salary FROM employees WHERE salary > 70000) t
 SELECT COUNT(*) FROM (SELECT department FROM employees GROUP BY department) t
 ```
 
-A derived table is materialized before the statement runs and exists only for
-the statement that declares it. It may appear in any FROM -- including inside
+A derived table is computed the first time the statement reads it (never, if
+the code reading it never runs) and exists only for the statement that
+declares it. It may appear in any FROM -- including inside
 a subquery, a compound arm or an INSERT ... SELECT -- and its alias is
 optional and may shadow a real table's name. A derived table that refers to a
 column of an enclosing query cannot be materialized up front and is an error.
@@ -494,9 +495,11 @@ WITH old AS (SELECT id FROM orders WHERE year < 2020)
 DELETE FROM orders WHERE id IN (SELECT id FROM old)
 ```
 
-- Each CTE is computed once, the first time the statement references it,
-  and exists only for that statement. A CTE that is never referenced is
-  never computed (so its errors never surface).
+- Each CTE is computed once, the first time the statement reads it, and
+  exists only for that statement. A CTE that is never read -- not
+  referenced, or referenced only by code that never runs, such as a
+  compound arm whose WHERE is false or a CASE branch not taken -- is never
+  computed (so its run-time errors never surface).
 - A CTE is visible to the whole statement, to every CTE of its WITH list --
   those declared after it and itself included -- and to subqueries. An inner WITH
   shadows an outer CTE of the same name. A CTE body resolves names where it

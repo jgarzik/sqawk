@@ -6,15 +6,21 @@
 //! the parser's limit check uses, so it reaches every query, FROM item and
 //! expression) and, for each FROM item that is
 //!
-//! - a derived table `(SELECT ...) d`: walks its query, runs it, registers
-//!   the result under an internal name (`sqawk_derived_N`) and rewrites the
-//!   item to that table with alias `d`;
-//! - a one-part name `c` that a CTE in scope declares: materializes the CTE
-//!   (once, on its first reference) as `sqawk_cte_N` and rewrites the item
-//!   to that table, aliased as written or else as `c`, so `c.col` works and
-//!   the internal name never reaches the user;
+//! - a derived table `(SELECT ...) d`: walks its query, compiles it,
+//!   registers the result under an internal name (`sqawk_derived_N`) and
+//!   rewrites the item to that table with alias `d`;
+//! - a one-part name `c` that a CTE in scope declares: compiles the CTE
+//!   (once, on its first reference), registers it as `sqawk_cte_N` and
+//!   rewrites the item to that table, aliased as written or else as `c`, so
+//!   `c.col` works and the internal name never reaches the user;
 //! - any other one-part name that some CTE of the statement declares: spells
 //!   it `main.name`, the loaded table.
+//!
+//! A registered table's rows are computed the first time the statement
+//! opens it, by the compiled query (`Database::add_lazy_table`), as SQLite
+//! computes a CTE or FROM subquery where it is first read: one read only by
+//! code that never runs (a compound arm whose WHERE is false, a CASE branch
+//! not taken) costs nothing. A recursive CTE is computed here.
 //!
 //! The compiler is then given the set of CTE names, and a one-part table
 //! name from that set is an internal error there (see
@@ -150,6 +156,14 @@ fn collect_cte_names(node: Node<'_>, out: &mut HashSet<String>) {
 /// How names are matched: case-insensitively, as SQL identifiers.
 fn key_of(ident: &Ident) -> String {
     ident.value.to_ascii_lowercase()
+}
+
+/// The rows of a CTE or derived table, as registered: a table with the
+/// result columns and, unless the rows are already in it, the program that
+/// computes them on first use (see `Database::add_lazy_table`).
+struct Rows {
+    table: Table,
+    program: Option<Program>,
 }
 
 /// The error prefix for a reference to a CTE that is being computed.
@@ -387,9 +401,9 @@ impl Walker<'_> {
         let mut inner = std::mem::replace(subquery, Box::new(empty_query()));
         // Nested derived tables and CTE references first.
         self.visit_query(&mut inner)?;
-        let mut table = self.run_query(*inner)?;
-        table.dedup_column_names();
-        let name = self.register(table, "sqawk_derived_")?;
+        let mut rows = self.compile_lazy(*inner)?;
+        rows.table.dedup_column_names();
+        let name = self.register_rows(rows, "sqawk_derived_")?;
         *factor = table_factor(name, alias);
         Ok(())
     }
@@ -423,7 +437,8 @@ impl Walker<'_> {
                 let saved = std::mem::replace(&mut self.scopes, inner);
                 let result = self.evaluate_cte(&name, &columns, *query, k, i);
                 self.scopes = saved;
-                let mut table = result?;
+                let mut rows = result?;
+                let table = &mut rows.table;
                 if !columns.is_empty() {
                     if columns.len() != table.column_count() {
                         return Err(SqawkError::InvalidSqlQuery(format!(
@@ -437,14 +452,15 @@ impl Walker<'_> {
                     table.rename_columns(&names);
                 }
                 table.dedup_column_names();
-                let registered = self.register(table, "sqawk_cte_")?;
+                let registered = self.register_rows(rows, "sqawk_cte_")?;
                 self.scopes[k].borrow_mut().ctes[i].state = CteState::Done(registered.clone());
                 Ok(registered)
             }
         }
     }
 
-    /// Compute a CTE's rows: run its body, or iterate it when recursive.
+    /// A CTE's rows: its compiled body, run on first use, or, when it is
+    /// recursive, the rows iterating it gives now.
     fn evaluate_cte(
         &mut self,
         name: &Ident,
@@ -452,7 +468,7 @@ impl Walker<'_> {
         mut query: Query,
         k: usize,
         i: usize,
-    ) -> SqawkResult<Table> {
+    ) -> SqawkResult<Rows> {
         if matches!(
             *query.body,
             SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Delete(_)
@@ -464,7 +480,7 @@ impl Walker<'_> {
         let recursive = recursive_arm_count(&query.body, name)?;
         if recursive == 0 {
             self.visit_query(&mut query)?;
-            return self.run_query(query);
+            return self.compile_lazy(query);
         }
         // The body's own WITH list is in scope for every arm.
         let with = query.with.take();
@@ -479,7 +495,10 @@ impl Walker<'_> {
         if pushed {
             self.scopes.pop();
         }
-        result
+        Ok(Rows {
+            table: result?,
+            program: None,
+        })
     }
 
     /// SQLite's recursive CTE: the setup arms' rows seed a queue; each row
@@ -848,16 +867,66 @@ impl Walker<'_> {
         })
     }
 
+    /// Compile a query (already walked) whose rows are computed when the
+    /// statement first reads them: its result columns as a table with no
+    /// rows, and the program.
+    fn compile_lazy(&mut self, query: Query) -> SqawkResult<Rows> {
+        let mut compiler = SqlCompiler::new(self.database, self.verbose)
+            .with_source(Some(Arc::clone(&self.source)), true)
+            .with_cte_names(Arc::clone(&self.cte_names));
+        let program = compiler.compile_statement_program(&Statement::Query(Box::new(query)))?;
+        if program.result_schema.is_empty() {
+            return Err(SqawkError::InvalidSqlQuery(
+                "Subquery in FROM produced no result".to_string(),
+            ));
+        }
+        let defs = program
+            .result_schema
+            .columns
+            .iter()
+            .map(|col| ColumnDefinition {
+                name: col.name.clone(),
+                data_type: col.data_type,
+                decl_type: None,
+            })
+            .collect();
+        Ok(Rows {
+            table: Table::new_with_schema("result", defs, None, None),
+            program: Some(program),
+        })
+    }
+
+    /// Register `rows` under a fresh internal name starting `prefix`.
+    fn register_rows(&mut self, rows: Rows, prefix: &str) -> SqawkResult<String> {
+        let Rows { mut table, program } = rows;
+        let Some(program) = program else {
+            return self.register(table, prefix);
+        };
+        let name = self.fresh_name(prefix);
+        table.set_name(name.clone());
+        if self.verbose {
+            diag!("Bytecode for {} (run on first use):\n{}", name, program);
+        }
+        self.database.add_lazy_table(name.clone(), table, program)?;
+        self.registered.push(name.clone());
+        Ok(name)
+    }
+
     /// Register `table` under a fresh internal name starting `prefix`.
     fn register(&mut self, mut table: Table, prefix: &str) -> SqawkResult<String> {
-        let name = (1..)
-            .map(|n| format!("{}{}", prefix, n))
-            .find(|n| !self.database.has_table(n))
-            .expect("an unused name");
+        let name = self.fresh_name(prefix);
         table.set_name(name.clone());
         self.database.add_table(name.clone(), table)?;
         self.registered.push(name.clone());
         Ok(name)
+    }
+
+    /// The first internal table name `prefix`N not in use.
+    fn fresh_name(&self, prefix: &str) -> String {
+        (1..)
+            .map(|n| format!("{}{}", prefix, n))
+            .find(|n| !self.database.has_table(n))
+            .expect("an unused name")
     }
 }
 

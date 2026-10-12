@@ -840,6 +840,16 @@ impl<'a> SqlCompiler<'a> {
         body: &mut dyn FnMut(&mut Self, &NameCtx<'a>) -> SqawkResult<()>,
     ) -> SqawkResult<()> {
         let ctx = plan.ctx();
+        // WHERE terms that read no table are tested before anything else, as
+        // SQLite does: when one is false no table is opened, so a CTE or
+        // derived table read only here is never computed (see
+        // `Database::add_lazy_table`), and no hash index is built. Nothing
+        // is output then, not even a FULL JOIN's unmatched rows.
+        let skip = self.label();
+        for term in &plan.const_where {
+            let r = self.code_expr(term, &ctx, None)?;
+            self.emit_jump_to(OpCode::IfZ, r, skip, 0, None, "WHERE: before the scan");
+        }
         // A subquery's loop nest may run once per outer row. Its cursors and
         // hash indexes do not depend on the outer row, so they are set up
         // only the first time. (Not for FULL JOIN, whose per-row match marks
@@ -913,21 +923,9 @@ impl<'a> SqlCompiler<'a> {
         let match_labels: Vec<Label> = plan.groups.iter().map(|_| self.label()).collect();
         if plan.levels.is_empty() {
             // No FROM: the body runs once, if WHERE holds.
-            let skip = self.label();
-            for term in &plan.const_where {
-                let r = self.code_expr(term, &ctx, None)?;
-                self.emit_jump_to(OpCode::IfZ, r, skip, 0, None, "WHERE");
-            }
             body(self, &ctx)?;
-            self.resolve(skip);
         } else {
-            let skip = self.label();
-            for term in &plan.const_where {
-                let r = self.code_expr(term, &ctx, None)?;
-                self.emit_jump_to(OpCode::IfZ, r, skip, 0, None, "WHERE: before the scan");
-            }
             self.emit_level(plan, &ctx, 0, &match_regs, &match_labels, body)?;
-            self.resolve(skip);
         }
 
         // FULL JOIN: right rows no left row matched, with the left side NULL.
@@ -967,6 +965,7 @@ impl<'a> SqlCompiler<'a> {
             self.resolve(done);
         }
 
+        self.resolve(skip);
         if !once {
             for i in 0..plan.srcs.len() {
                 self.emit(OpCode::Close, plan.cursor(i), 0, 0, None, "");

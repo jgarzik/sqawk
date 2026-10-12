@@ -13,7 +13,7 @@ use crate::capacity::{
     DEFAULT_REGISTER_CAPACITY, DEFAULT_RESULT_CAPACITY, DEFAULT_SORTER_CAPACITY,
     DEFAULT_SORTER_ROWS_CAPACITY,
 };
-use crate::database::Database;
+use crate::database::{Database, LazyTable};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{numeric_text, ColumnDefinition, Table, Value};
 use std::collections::HashMap;
@@ -847,8 +847,11 @@ impl<'a> VmEngine<'a> {
                     return Err(SqawkError::TableNotFound(table_name.to_string()));
                 }
 
-                // Borrow the table from the database (safe to unwrap since we checked it exists)
-                let table = self.database.get_table(table_name).unwrap();
+                let table = match self.database.lazy_table(table_name) {
+                    Some(lazy) => self.fill_lazy(table_name, lazy)?,
+                    // Borrow the table from the database (safe to unwrap since we checked it exists)
+                    None => self.database.get_table(table_name).unwrap(),
+                };
 
                 // Create a cursor for the table (borrows, no clone)
                 let cursor = Cursor::from_table(table);
@@ -2242,6 +2245,25 @@ impl<'a> VmEngine<'a> {
         }
 
         Ok(Some(table))
+    }
+
+    /// The rows of the lazy table `name` (a CTE or derived table), computed
+    /// now if this is the first time any cursor opens it.
+    fn fill_lazy(&self, name: &str, lazy: &'a LazyTable) -> SqawkResult<&'a Table> {
+        if let Some(table) = lazy.filled() {
+            return Ok(table);
+        }
+        if self.verbose {
+            diag!("Computing {} on first use", name);
+        }
+        let mut vm = VmEngine::new(self.database, self.verbose);
+        vm.init(lazy.program().clone());
+        vm.execute()?;
+        let mut table = self.database.get_table(name)?.clone();
+        for row in vm.take_results() {
+            table.add_row(row)?;
+        }
+        Ok(lazy.fill(table))
     }
 
     /// The cursor numbered `idx`, for opcodes that modify it.
