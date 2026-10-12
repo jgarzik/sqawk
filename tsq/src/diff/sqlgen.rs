@@ -1,7 +1,7 @@
 //! The random SQL generator: typed expressions over a schema, built as
 //! shrinkable trees (`ast`).
 //!
-//! It descends from tests/sqlite_diff/diffh.py's `Gen` (typed expressions,
+//! It descends from the retired Python diffh.py's `Gen` (typed expressions,
 //! functions, CASE/CAST/COALESCE, LIKE/BETWEEN/IN, scalar/IN/EXISTS
 //! subqueries with correlation, every join kind, GROUP BY/HAVING/FILTER,
 //! windows with frames, compounds, DISTINCT, derived tables, DML) and adds

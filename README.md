@@ -62,12 +62,14 @@ sqawk -f report.sql --output-delimiter '\t' --no-output-header employees.csv
 Errors are one line on stderr (`sqawk: no such column: nmae`) with exit
 status 1; usage errors exit with status 2.
 
-## `tsq` - test data generator and differential tester (development only)
+## `tsq` - test data generator, differential tester and fuzzer (development only)
 
 The source tree also contains `tsq`, the tool that tests sqawk: it generates
-deterministic test data and checks sqawk's answers against SQLite. It is a
-separate workspace crate (`tsq/`) that is not published, so `cargo install
-sqawk` does not install it. Run it from a checkout:
+deterministic test data, checks sqawk's answers and its `--write` output
+against SQLite, fuzzes the command line and the REPL, and measures
+performance. It is a separate workspace crate (`tsq/`) that is not
+published, so `cargo install sqawk` does not install it. Run it from a
+checkout:
 
 ```sh
 cargo build --release --workspace
@@ -75,6 +77,9 @@ target/release/tsq gen --seed 42 --rows 1000 --output-dir /tmp/sqawk-test
 sqawk -s "SELECT * FROM customers LIMIT 10" /tmp/sqawk-test/data/customers.csv
 target/release/tsq diff --seed 1 --queries 20000 --keep-going --shrink
 target/release/tsq corpus tsq/corpus/*.sql
+target/release/tsq wb --seed 1 --iterations 2000
+target/release/tsq cli --seed 1 --iterations 2000
+target/release/tsq stress --rows 1000000 --json stress.json
 ```
 
 The global options `--seed` (64-bit; a clock seed is printed when omitted),
@@ -103,6 +108,33 @@ queries on every OS.
   are counted separately, and any other is a finding (exit status 1).
 - **`tsq corpus FILE...`** runs hand-written query files (one test per line,
   `O:` for an ordered comparison) the same way; `tsq/corpus/` holds them.
+- **`tsq wb`** fuzzes `--write`: random files (CSV / TSV / `-F` separators,
+  LF / CRLF / mixed line endings, byte order marks, ragged rows, blank and
+  `#` comment lines, quoted and multi-line fields, edge values) and random
+  UPDATE / DELETE / INSERT / ALTER TABLE / TRUNCATE sequences with
+  transactions and `CREATE TABLE ... LOCATION`. Every file must equal what
+  the writeback rules give for SQLite's final table (untouched rows byte for
+  byte, changed rows from their values); rolled-back work and read-only
+  targets must leave files untouched. On Unix it also kills sqawk during a
+  large write: the file must be the old or the new content, never partial.
+  `--iterations N`, `--only N`, `--kill-rate F`. Last line: `WB SUMMARY
+  {ok, bad, crash}`.
+- **`tsq cli`** fuzzes the command line and the REPL: random flag and
+  operand combinations, piped REPL scripts, malformed files, garbage and
+  very large SQL, standard output closed early. Every run must exit 0, 1 or
+  2 (or a `.exit N` status) within the time limit, print errors as one
+  `sqawk: ` line, never panic, and leave no stray files. `--iterations N`,
+  `--only N`. Last line: `CLI SUMMARY {ok, bad, crash}`.
+- **`tsq stress`** times workloads (scan, filter, group, joins, sort,
+  distinct, windows, CTEs, subqueries, compounds, `--write`, a 1000-column
+  table) over generated data, `--rows` 1,000,000 to 10,000,000 in the
+  largest table, recording wall time and, on Linux, the peak RSS of sqawk.
+  `--json OUT` saves the results; `--baseline FILE --tolerance PCT` exits 1
+  when a workload regressed; `--repeat K` keeps the best of K runs;
+  `--workloads a,b` / `--list`.
+
+`cargo test --workspace` runs small budgets of `diff`, `corpus`, `wb` and
+`cli`; `stress` is run by hand.
 
 ## Documentation
 

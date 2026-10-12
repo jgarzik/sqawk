@@ -1,7 +1,7 @@
 //! Built-in table sets and the generator's view of any table set.
 //!
-//! `harness` is tests/sqlite_diff/harness.py's fixed TABLES (emp, dept, t1,
-//! t2, t3, e, uni); `edge` is diffh.py's `build_tables(7)` (a, b, c, d, e,
+//! `harness` is the retired Python harness.py's fixed TABLES (emp, dept, t1,
+//! t2, t3, e, uni); `edge` is the retired diffh.py's `build_tables(7)` (a, b, c, d, e,
 //! dup, u, dt: i64 extremes, numeric-looking text, mixed types, NULLs,
 //! duplicates, Unicode, embedded quotes/commas/LF, a 5000-character string,
 //! date strings), transcribed cell for cell from the Python output so the

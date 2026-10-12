@@ -1,7 +1,7 @@
 //! `tsq corpus`: hand-written test files, judged by the same oracle and
 //! renderer as `tsq diff`.
 //!
-//! Format (from tests/sqlite_diff/harness.py): one test per line; blank
+//! Format (from the retired Python harness, harness.py): one test per line; blank
 //! lines and lines starting with `--` are skipped; a line prefixed `O:` is
 //! compared in order, any other as a multiset of rows. A line may hold
 //! several `;`-separated statements: both engines run all of them and every

@@ -104,9 +104,10 @@ To build from source:
 - The binaries are self-contained with no runtime dependencies
 - Installing the crate provides the `sqawk` command. The source tree also
   contains `tsq`, a development-only generator of deterministic multi-table
-  test data and differential tester against SQLite; it is not installed. Run
+  test data, differential tester against SQLite, writeback and command-line
+  fuzzer and performance runner; it is not installed. Run
   `cargo run -p tsq -- --help` from a checkout, or see the
-  [project README](../README.md#tsq---test-data-generator-and-differential-tester-development-only)
+  [project README](../README.md#tsq---test-data-generator-differential-tester-and-fuzzer-development-only)
 
 ## Getting Started
 

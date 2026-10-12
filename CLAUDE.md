@@ -190,12 +190,15 @@ Two suites carry the correctness contract:
   defects. Run with `cargo test --test mod defects -- --ignored`. Remove the
   `#[ignore]` when a defect is fixed; the list only shrinks.
 
-`tsq/` (the unpublished `tsq` crate) is the differential tester. Build with
-`cargo build --release --workspace`; `--sqawk PATH` or `SQAWK=path`
-overrides the binary (default: the `sqawk` next to `tsq`). Data goes to temp
-dirs. Module map: `rng.rs` (ChaCha8, the only randomness), `data.rs` (tables,
-lossless CSV/TSV writer), `gen.rs` (`tsq gen`), `run.rs` (spawning sqawk with
-the SQL on stdin and a time limit), `corpus.rs`, and `diff/`: `oracle.rs`
+`tsq/` (the unpublished `tsq` crate) is the differential tester and fuzzer.
+Build with `cargo build --release --workspace`; `--sqawk PATH` or
+`SQAWK=path` overrides the binary (default: the `sqawk` next to `tsq`). Data
+goes to temp dirs. Module map: `rng.rs` (ChaCha8, the only randomness),
+`data.rs` (tables, lossless CSV/TSV writer), `gen.rs` (`tsq gen`), `run.rs`
+(spawning sqawk: time limit, stdin, cwd/env, stdout kept / drained / closed
+early, Linux peak RSS from `/proc/<pid>/status`), `corpus.rs`, `wb.rs`
+(`tsq wb`), `clifuzz.rs` (`tsq cli`), `stress.rs` (`tsq stress`), and
+`diff/`: `oracle.rs`
 (rusqlite's bundled SQLite 3.45 -- `.cargo/config.toml` enables its math
 functions -- loaded with sqawk's per-cell inference into untyped columns,
 results rendered as sqawk prints them: reals via `CAST(x AS TEXT)`, NULL
@@ -214,21 +217,32 @@ agree on), `sqlgen.rs` (the generator, built on `ast.rs` shrinkable trees),
 - `tsq corpus tsq/corpus/*.sql`: the hand corpora (`queries*.sql` on the
   `harness` tables, `hand*.sql` on `edge`, chosen by a `-- tsq-tables:`
   line); same summary as `CORPUS SUMMARY`.
-- `cargo test --workspace` runs fast smoke budgets of both (a few seconds).
-
-`tests/sqlite_diff/` still holds Python robustness testers, not part of
-`cargo test`; run `cargo build --release` first (`SQAWK=path` overrides the
-binary). `harness.py` and `diffh.py` are superseded by `tsq corpus` / `tsq
-diff` (same corpora, same counts).
-
-- `python3 -I tests/sqlite_diff/wb.py [SEED [N]]`: `--write` round-trip
-  fuzzer; WRITEBACK SUMMARY must show bad 0 and sqawk_err 0 (untouched
-  records byte-identical; BOM, comments and CRLF kept).
-- `python3 -I tests/sqlite_diff/csvfuzz.py`: malformed and huge inputs;
-  CSVFUZZ SUMMARY must show crash 0 and writeback_bad 0 (clean `sqawk:`
-  errors are expected).
-- `python3 -I tests/sqlite_diff/fuzz.py`: garbage SQL, limit values, deep
-  nesting; FUZZ SUMMARY must show findings 0.
+- `tsq wb --seed N --iterations 2000 [--only N] [--kill-rate F]`:
+  `--write` fuzzer. Random files (delimiters, LF/CRLF/mixed, BOM, ragged
+  rows, blank and `#` lines under `--comments`, quoted / multi-line /
+  invalid-UTF-8 cells, gen's edge values, `--no-header`, `CREATE TABLE ...
+  LOCATION` files) and random UPDATE / DELETE / INSERT / ALTER / TRUNCATE /
+  SELECT with BEGIN / COMMIT / END / ROLLBACK, run statement by statement on
+  the oracle too. Each file must equal the oracle's final table rendered by
+  the writeback rules (untouched rows = source bytes, tracked by rowid);
+  read-only targets refuse with nothing written; SELECT output and a
+  re-read must match; no stray files. Unix: SIGKILL (`kill -KILL`) during a
+  large write leaves old or new content (temp `.tmp*` leftovers are counted,
+  not failures). `WB SUMMARY {ok, bad, crash}`, must be bad 0 crash 0.
+- `tsq cli --seed N --iterations 2000 [--only N]`: CLI / REPL surface fuzz
+  (flag and operand combinations, piped REPL scripts, the retired
+  csvfuzz.py's malformed files and mutations, the retired fuzz.py's garbage
+  SQL, limit values and huge statements via `-f`, closed stdout). Oracle: exit 0/1/2 (or `.exit
+  N`), no panic / overflow text, one `sqawk: ` line per error (clap's usage
+  format for 2), no hang, nothing created in cwd / HOME / XDG_STATE_HOME
+  (temp dirs), no banner or prompt in piped REPL output. `CLI SUMMARY {ok,
+  bad, crash}`, must be bad 0 crash 0.
+- `tsq stress --rows 1000000 [--workloads a,b] [--json OUT] [--baseline FILE
+  --tolerance PCT] [--repeat K]`: wall time and (Linux) peak RSS per
+  workload; with `--baseline`, exit 1 on a regression. Not in CI.
+- `cargo test --workspace` runs smoke budgets in `tsq/tests/tsq.rs`: `diff
+  --queries 300` (+150 on `edge`), `corpus` on all corpora, `wb --iterations
+  50`, `cli --iterations 100` -- about 10 s serialized in a debug build.
 
 Every remaining DIFF / sqawk_err must be a difference or an unsupported
 feature listed in `doc/sql_reference.md` ("Differences from SQLite",
