@@ -10,9 +10,10 @@
 //! - Column resolution with qualified names (table.column)
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use crate::error::{SqawkError, SqawkResult};
 
@@ -410,6 +411,12 @@ pub struct Table {
     /// The source bytes of the header and of each loaded row, so writeback
     /// reproduces untouched rows byte-for-byte (see [`RawRows`]).
     raw: Option<Box<RawRows>>,
+
+    /// Lower-cased column name -> index, built on the first
+    /// [`Table::column_index`] of a wide table so that resolving every
+    /// column of a wide table costs linear, not quadratic, time. Reset
+    /// whenever the columns change.
+    name_index: OnceLock<HashMap<String, usize>>,
 }
 
 /// The bytes each record of a table's source file was read from.
@@ -643,6 +650,7 @@ impl Table {
             comments: CommentLines::default(),
             placeholder: false,
             raw: None,
+            name_index: OnceLock::new(),
         }
     }
 
@@ -686,6 +694,7 @@ impl Table {
             comments: CommentLines::default(),
             placeholder: false,
             raw: None,
+            name_index: OnceLock::new(),
         }
     }
 
@@ -693,6 +702,7 @@ impl Table {
     /// over an existing file). `schema` has one entry per column.
     pub fn set_declared_columns(&mut self, schema: Vec<ColumnDefinition>) {
         debug_assert_eq!(schema.len(), self.cols.len());
+        self.name_index = OnceLock::new();
         self.cols = schema
             .into_iter()
             .map(|c| Column {
@@ -725,7 +735,7 @@ impl Table {
     /// validation when adding rows or performing operations that need to
     /// check column bounds.
     pub fn column_count(&self) -> usize {
-        self.columns().len()
+        self.cols.len()
     }
 
     /// Get the rows of the table
@@ -865,15 +875,28 @@ impl Table {
     /// SELECT, an INSERT column list and an UPDATE SET. A loaded or created
     /// table cannot have two columns that match the same name.
     pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.cols
-            .iter()
-            .position(|c| c.name.eq_ignore_ascii_case(name))
+        // A short list is scanned; a wide one is looked up in a map.
+        if self.cols.len() <= 16 {
+            return self
+                .cols
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(name));
+        }
+        let index = self.name_index.get_or_init(|| {
+            let mut map = HashMap::with_capacity(self.cols.len());
+            for (i, c) in self.cols.iter().enumerate() {
+                map.entry(c.name.to_ascii_lowercase()).or_insert(i);
+            }
+            map
+        });
+        index.get(&name.to_ascii_lowercase()).copied()
     }
 
     /// Rename the columns in order, as a CTE's column list does. `names`
     /// has one entry per column.
     pub fn rename_columns(&mut self, names: &[String]) {
         debug_assert_eq!(names.len(), self.cols.len());
+        self.name_index = OnceLock::new();
         for (col, name) in self.cols.iter_mut().zip(names) {
             col.name = name.clone();
         }
@@ -885,6 +908,7 @@ impl Table {
     pub fn dedup_column_names(&mut self) {
         let mut names: Vec<String> = self.cols.iter().map(|c| c.name.clone()).collect();
         unique_column_names(&mut names);
+        self.name_index = OnceLock::new();
         for (col, name) in self.cols.iter_mut().zip(names) {
             col.name = name;
         }
@@ -1111,6 +1135,7 @@ impl Table {
             data_type,
             decl_type: None,
         };
+        self.name_index = OnceLock::new();
         self.cols.push(column);
         self.raw = None;
         self.modified = true;
@@ -1129,6 +1154,7 @@ impl Table {
             data_type: DataType::from_declared(&decl_type),
             decl_type: Some(decl_type),
         };
+        self.name_index = OnceLock::new();
         self.cols.push(column);
         // Every line of the file gains a field.
         self.raw = None;

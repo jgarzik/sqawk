@@ -258,7 +258,6 @@ fn cte_joined_to_an_empty_outer_loop_is_never_computed() -> TestResult {
 /// a debug build (1000 columns x 1000 rows: 12.8 s in a release build, where
 /// `SELECT COUNT(*)` takes 0.02 s). Found by tsq stress (`wide_select`).
 #[test]
-#[ignore]
 fn select_star_over_a_wide_table_is_not_quadratic() -> TestResult {
     let cols = 3000;
     let header: Vec<String> = (0..cols).map(|c| format!("c{c}")).collect();
@@ -279,7 +278,6 @@ fn select_star_over_a_wide_table_is_not_quadratic() -> TestResult {
 /// about 80 s for this 36000-column row in a debug build (10000 columns x 20
 /// rows: 20 s in a release build). Found by tsq stress.
 #[test]
-#[ignore]
 fn update_write_on_a_wide_file_is_not_quadratic() -> TestResult {
     let cols = 36000;
     let row = |r: usize, set: Option<usize>| {

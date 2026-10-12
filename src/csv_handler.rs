@@ -243,11 +243,17 @@ fn check_column_names(cols: &[String], source: &str, line: usize) -> SqawkResult
     if let Some(i) = cols.iter().position(String::is_empty) {
         return Err(err(format!("column {} has an empty name", i + 1)));
     }
+    let mut seen = std::collections::HashSet::with_capacity(cols.len());
+    let mut reported = std::collections::HashSet::new();
     let mut dups: Vec<&str> = Vec::new();
-    for (i, name) in cols.iter().enumerate() {
-        let repeated = cols[..i].iter().any(|n| n.eq_ignore_ascii_case(name));
-        if repeated && !dups.iter().any(|d| d.eq_ignore_ascii_case(name)) {
-            dups.push(name);
+    for name in cols {
+        let key = name.to_ascii_lowercase();
+        if seen.contains(&key) {
+            if reported.insert(key) {
+                dups.push(name);
+            }
+        } else {
+            seen.insert(key);
         }
     }
     if !dups.is_empty() {
