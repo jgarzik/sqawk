@@ -112,10 +112,12 @@ fn round_judges_the_stored_value() -> TestResult {
 // Performance cliffs. The answers are right; the time is the defect: each
 // query finishes in milliseconds in SQLite and takes quadratic time in
 // sqawk, so `tsq diff --scale large` reports it as a crash (its 10 s limit).
-// Each test allows 5 s for work SQLite does in well under one.
+// The data is sized so the quadratic code needs over a minute (debug build)
+// while linear code needs well under a second; the 20 s limit leaves room
+// for slow runners without letting the quadratic code pass.
 // ---------------------------------------------------------------------------
 
-/// Run `sql` over `files` (written to a temp dir), killed after 5 s, and
+/// Run `sql` over `files` (written to a temp dir), killed after 20 s, and
 /// require the exact stdout.
 fn assert_fast(files: &[(&str, String)], sql: &str, expected: &str) -> TestResult {
     let dir = create_temp_dir()?;
@@ -126,10 +128,10 @@ fn assert_fast(files: &[(&str, String)], sql: &str, expected: &str) -> TestResul
         std::fs::write(&path, content)?;
         cmd.arg(path);
     }
-    let out = cmd.timeout(Duration::from_secs(5)).output()?;
+    let out = cmd.timeout(Duration::from_secs(20)).output()?;
     assert!(
         out.status.success(),
-        "sqawk did not finish within 5 s ({})\n  sql: {sql}",
+        "sqawk did not finish within 20 s ({})\n  sql: {sql}",
         out.status
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
@@ -148,8 +150,8 @@ fn csv(header: &str, rows: impl Iterator<Item = String>) -> String {
 /// An EXISTS subquery whose only tie to the outer row is a predicate on the
 /// outer columns (`t1.b < t1.c`) must not rescan the inner table for every
 /// outer row: SQLite evaluates such a term once per outer row and stops the
-/// subquery at its first row; sqawk is O(n^2) (about 14 s for these 12000
-/// rows in a release build). Found by tsq diff --scale large --seed 1
+/// subquery at its first row; sqawk is O(n^2) (about 95 s for these 12000
+/// rows in a debug build, 14 s in a release build). Found by tsq diff --scale large --seed 1
 /// --only 35.
 #[test]
 #[ignore = "defect: EXISTS with an outer-only predicate is quadratic"]
@@ -169,8 +171,9 @@ fn exists_with_outer_only_predicate_is_not_quadratic() -> TestResult {
 /// A window frame that ends at UNBOUNDED FOLLOWING while its start moves
 /// (`ROWS BETWEEN 2 PRECEDING AND UNBOUNDED FOLLOWING`, `RANGE BETWEEN
 /// CURRENT ROW AND UNBOUNDED FOLLOWING`) is recomputed from scratch for
-/// every row in sqawk: O(n^2), about 1.2 s and 1.7 s for 30000 rows where
-/// SQLite takes 0.01 s (it removes rows leaving the frame instead). Frames
+/// every row in sqawk: O(n^2), about 75 s for these 60000 rows in a debug
+/// build where SQLite takes 0.01 s (it removes rows leaving the frame
+/// instead). Frames
 /// ending at the current row or a fixed offset are fast. Found by tsq diff
 /// --scale large --seed 7 (tests 277 and 392).
 #[test]
@@ -190,7 +193,8 @@ fn window_frame_to_unbounded_following_is_not_quadratic() -> TestResult {
 /// A WHERE term on the first table of a join that is an `IN (SELECT ...)`
 /// is applied only after the whole join is built, while a plain comparison
 /// on the same column is applied at that table's loop. Here the join is
-/// 90 million rows unfiltered and 90000 filtered; SQLite takes 0.3 s.
+/// 40 million rows unfiltered (over a minute in a debug build) and 40000
+/// filtered; SQLite takes 0.2 s.
 /// Found by tsq diff --scale large --seed 7 --only 233 (and --seed 3
 /// --only 12902 at small scale).
 #[test]
@@ -199,12 +203,12 @@ fn in_subquery_filter_applies_before_the_joins() -> TestResult {
     let p = csv("pid,q", (1..=1000).map(|i| format!("{i},{i}")));
     let it = csv(
         "iid,pid",
-        (1..=300000).map(|i| format!("{i},{}", i % 1000 + 1)),
+        (1..=200000).map(|i| format!("{i},{}", i % 1000 + 1)),
     );
     assert_fast(
         &[("p.csv", p), ("it.csv", it)],
         "SELECT COUNT(*) FROM p t1 JOIN it t2 ON t1.pid = t2.pid \
          JOIN it t3 ON t1.pid = t3.pid WHERE t1.pid IN (SELECT pid FROM p WHERE q = 7)",
-        "COUNT(*)\n90000\n",
+        "COUNT(*)\n40000\n",
     )
 }
