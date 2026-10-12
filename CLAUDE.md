@@ -61,12 +61,12 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
 
 ### VM Module (`src/vm/`)
 
-- `mod.rs`: `execute_vm`, the statement loop: parses the script, then per
-  statement runs BEGIN/COMMIT/ROLLBACK directly on the `Database`,
-  materializes each derived table (`FROM (SELECT ...) t`) as a temporary
-  table under its alias, compiles and executes the statement, and applies the
-  engine's `TableModification`s (insert/replace/delete rows, create/drop/alter/
-  truncate tables) to the `Database`, marking each changed table modified
+- `mod.rs`: `execute_vm` / `execute_statements`, the statement loop: parses
+  the script, then per statement runs BEGIN/COMMIT/ROLLBACK directly on the
+  `Database`, runs the pre-pass, compiles and executes the statement, applies
+  the engine's `TableModification`s (insert/replace/delete rows, create/drop/
+  alter/truncate tables) to the `Database`, marking each changed table
+  modified, and drops the statement's registered tables
 - `bytecode.rs`: Bytecode instruction set and register/program types
 - `compiler.rs`: SQL AST to bytecode. Holds `code_expr`, the single expression
   compiler (the analogue of SQLite's `sqlite3ExprCode`) used from the SELECT
@@ -103,14 +103,15 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
   rewrites compound SELECTs left-deep (equal precedence, left to right), and
   enforces SQLite's limits (expression depth 1000, 500 compound terms) with an
   iterative walk before anything recurses over the tree
-- `mod.rs`: `execute_vm` / `execute_statements`, the per-statement loop:
-  pre-pass, compile, execute, apply modifications, drop the statement's
-  registered tables
 - `prepass.rs`: runs before each statement compiles. Derived tables and CTEs
   become registered tables (`sqawk_derived_N`, `sqawk_cte_N`) and FROM items
-  are rewritten to them; CTE scoping (siblings, self, shadowing, lazy single
-  materialization), `WITH ... DML` unwrapping, and recursive CTEs (SQLite's
-  queue algorithm, one run per generation when the queue is FIFO). Other
+  are rewritten to them. A non-recursive one is only compiled here and
+  registered lazily (`Database::add_lazy_table`); its rows are computed the
+  first time a cursor opens it (`OpenRead` → `VmEngine::fill_lazy`, SQLite's
+  `OP_Once`), so one read only by code that never runs is never computed.
+  Also CTE scoping (siblings, self, shadowing), `WITH ... DML` unwrapping, and
+  recursive CTEs, computed here (SQLite's queue algorithm, one run per
+  generation when the queue is FIFO). Other
   one-part references sharing a CTE's name become `main.t`, and the compiler
   refuses any one-part CTE name left over (`SqlCompiler::cte_names`), so a
   missed rewrite cannot read the loaded table
