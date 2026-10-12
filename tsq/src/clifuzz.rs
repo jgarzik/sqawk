@@ -1032,9 +1032,7 @@ fn build(r: &mut Rng, data: &Path, scratch: &Path) -> Result<Case> {
             args.push(os("SELECT length(b) FROM hugefield"));
             args.push(p.into_os_string());
         } else {
-            // Time grows with the square of the column count (a known
-            // limit: 10000 columns take seconds even in a release build).
-            let ncol = *r.pick(&[500usize, 1000, 2000]);
+            let ncol = *r.pick(&[500usize, 1000, 2000, 10000]);
             let hdr: Vec<String> = (0..ncol).map(|i| format!("c{i}")).collect();
             let mut text = hdr.join(",");
             text.push('\n');
