@@ -1,3 +1,4 @@
+-- tsq-tables: edge
 -- loader type inference cross-check
 SELECT aid, typeof(k), typeof(x), typeof(y), typeof(s), typeof(g), typeof(n), typeof(m) FROM a
 SELECT bid, typeof(aid), typeof(k), typeof(v), typeof(w) FROM b

@@ -18,7 +18,7 @@ types per column, NULLs, duplicates, Unicode, embedded quotes/commas/LF, a
 Usage (from anywhere; paths resolve from this file's location):
 
     cargo build --release
-    python3 -I tests/sqlite_diff/diffh.py --only-hand tests/sqlite_diff/hand1.sql tests/sqlite_diff/hand2.sql tests/sqlite_diff/hand3.sql
+    python3 -I tests/sqlite_diff/diffh.py --only-hand tsq/corpus/hand1.sql tsq/corpus/hand2.sql tsq/corpus/hand3.sql
     python3 -I tests/sqlite_diff/diffh.py --only-random --seed 1 --random 700
 
 Options: --seed N (random generator seed, default 12345), --random N (number

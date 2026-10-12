@@ -3,9 +3,9 @@
 //! `tsq` is a local development tool (a `publish = false` workspace member),
 //! not part of the published sqawk crate. These tests cover what makes it
 //! useful: `gen` is deterministic (every output file), its foreign keys
-//! hold, and sqawk reads every layout it writes; `diff` runs clean against
-//! the current sqawk (small budgets, so `cargo test --workspace` stays
-//! fast).
+//! hold, and sqawk reads every layout it writes; `diff` and `corpus` run
+//! clean against the current sqawk (small budgets, so `cargo test
+//! --workspace` stays fast).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -241,4 +241,33 @@ fn diff_smoke_runs_clean() {
             "{args:?}:\n{out}"
         );
     }
+}
+
+#[test]
+fn corpus_counts_match_the_python_harness() {
+    // The same files gave these numbers under tests/sqlite_diff/harness.py
+    // and diffh.py; every non-pass is a documented difference.
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
+    let run = |files: &[&str]| {
+        let out = tsq()
+            .arg("corpus")
+            .args(files.iter().map(|f| dir.join(f)))
+            .output()
+            .expect("run tsq");
+        let s = ok(out, "tsq corpus");
+        s.lines().last().unwrap_or("").to_string()
+    };
+    assert_eq!(
+        run(&["queries.sql", "queries2.sql"]),
+        "CORPUS SUMMARY {pass: 544, diff: 3, sqawk_err: 9, sqlite_err: 1, both_err: 7, crash: 0} \
+         documented {column_types: 2, insert_or_replace: 1, parser: 3, sqawk_extensions: 1, \
+         unsupported_syntax: 5, upper_lower: 1} oracle_timeouts 0 findings 0"
+    );
+    assert_eq!(
+        run(&["hand1.sql", "hand2.sql", "hand3.sql"]),
+        "CORPUS SUMMARY {pass: 359, diff: 13, sqawk_err: 15, sqlite_err: 0, both_err: 36, crash: 0} \
+         documented {bare_column: 7, column_types: 9, derived_correlated: 1, parser: 5, \
+         sum_avg_text: 2, unsupported_syntax: 2, update_snapshot: 1, upper_lower: 1} \
+         oracle_timeouts 0 findings 0"
+    );
 }

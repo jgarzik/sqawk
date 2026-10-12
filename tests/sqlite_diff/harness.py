@@ -4,7 +4,9 @@
 Usage (from anywhere; paths resolve from this file's location):
 
     cargo build --release
-    python3 -I tests/sqlite_diff/harness.py tests/sqlite_diff/queries.sql tests/sqlite_diff/queries2.sql
+    python3 -I tests/sqlite_diff/harness.py tsq/corpus/queries.sql tsq/corpus/queries2.sql
+
+(`tsq corpus` runs the same files with the same rules; see tsq/.)
 
 SQAWK overrides the binary (default: <repo>/target/release/sqawk).  Not
 part of `cargo test`.  The fixed tables below are written as CSV files into
@@ -272,7 +274,7 @@ def show(ordered, rows):
 
 
 def main():
-    files = sys.argv[1:] or [os.path.join(HERE, "queries.sql")]
+    files = sys.argv[1:] or [os.path.join(REPO, "tsq", "corpus", "queries.sql")]
     stats = collections.Counter()
     with tempfile.TemporaryDirectory(prefix="sqawk-diff-") as data_dir:
         write_data(data_dir)

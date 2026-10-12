@@ -29,8 +29,11 @@ cargo run -- -s "SELECT * FROM data" data.csv
 # Run in interactive REPL mode
 cargo run -- --interactive data.csv
 
-# Generate test data with tsq (unpublished workspace crate in tsq/)
+# tsq (unpublished workspace crate in tsq/): data, differential testing
 cargo run -p tsq -- gen --seed 42 --rows 1000 --output-dir /tmp/sqawk-test
+cargo build --release --workspace
+target/release/tsq diff --seed 1 --queries 20000 --keep-going --shrink
+target/release/tsq corpus tsq/corpus/*.sql
 ```
 
 ## Architecture Overview
@@ -186,23 +189,37 @@ Two suites carry the correctness contract:
   defects. Run with `cargo test --test mod defects -- --ignored`. Remove the
   `#[ignore]` when a defect is fixed; the list only shrinks.
 
-`tests/sqlite_diff/` holds differential and robustness testers, not part of
-`cargo test`. Run `cargo build --release` first; `SQAWK=path` overrides the
-binary. All write their data to temp dirs.
+`tsq/` (the unpublished `tsq` crate) is the differential tester. Build with
+`cargo build --release --workspace`; `--sqawk PATH` or `SQAWK=path`
+overrides the binary (default: the `sqawk` next to `tsq`). Data goes to temp
+dirs. Module map: `rng.rs` (ChaCha8, the only randomness), `data.rs` (tables,
+lossless CSV/TSV writer), `gen.rs` (`tsq gen`), `run.rs` (spawning sqawk with
+the SQL on stdin and a time limit), `corpus.rs`, and `diff/`: `oracle.rs`
+(rusqlite's bundled SQLite 3.45 -- `.cargo/config.toml` enables its math
+functions -- loaded with sqawk's per-cell inference into untyped columns,
+results rendered as sqawk prints them: reals via `CAST(x AS TEXT)`, NULL
+empty, RFC 4180 quoting, headers included, compared byte for byte),
+`schema.rs` (per-column properties deciding which comparisons both engines
+agree on), `sqlgen.rs` (the generator, built on `ast.rs` shrinkable trees),
+`allow.rs` (one rule per documented difference), `shrink.rs`, `tables.rs`
+(built-in `harness` / `edge` table sets).
 
-- `python3 -I tests/sqlite_diff/harness.py tests/sqlite_diff/queries.sql
-  tests/sqlite_diff/queries2.sql`: fixed tables vs SQLite (python3
-  `sqlite3`), loaded as the same typed values sqawk infers (columns have no
-  affinity) and rendered as sqawk prints them (reals via `CAST(x AS TEXT)`,
-  NULL empty, RFC 4180 quoting compared byte for byte). SUMMARY counts pass /
-  DIFF (wrong answer) / sqawk_err (sqawk rejected what SQLite ran) /
-  sqlite_err / both_err / panic / hang.
-- `python3 -I tests/sqlite_diff/diffh.py --only-hand
-  tests/sqlite_diff/hand1.sql tests/sqlite_diff/hand2.sql
-  tests/sqlite_diff/hand3.sql` and `... diffh.py --only-random --seed N`:
-  adversarial tables plus a hand corpus or a seeded random query generator;
-  SUMMARY counts pass / diff / loose (differs only in number formatting) /
-  sqawk_err / sqlite_err / both_err / panic / hang.
+- `tsq diff --seed N --queries 20000 --keep-going [--scale large]
+  [--tables edge] [--edge-rate 0.05] [--shrink --out DIR]`: random SQL
+  vs SQLite. `DIFF SUMMARY {pass, diff, sqawk_err, sqlite_err, both_err,
+  crash}`, then the documented-difference counts, SQLite time-outs (too
+  heavy for the reference; not findings) and `findings N` (exit 1 when
+  non-zero). `--only N` replays one test; `--print` shows the SQL.
+- `tsq corpus tsq/corpus/*.sql`: the hand corpora (`queries*.sql` on the
+  `harness` tables, `hand*.sql` on `edge`, chosen by a `-- tsq-tables:`
+  line); same summary as `CORPUS SUMMARY`.
+- `cargo test --workspace` runs fast smoke budgets of both (a few seconds).
+
+`tests/sqlite_diff/` still holds Python robustness testers, not part of
+`cargo test`; run `cargo build --release` first (`SQAWK=path` overrides the
+binary). `harness.py` and `diffh.py` are superseded by `tsq corpus` / `tsq
+diff` (same corpora, same counts).
+
 - `python3 -I tests/sqlite_diff/wb.py [SEED [N]]`: `--write` round-trip
   fuzzer; WRITEBACK SUMMARY must show bad 0 and sqawk_err 0 (untouched
   records byte-identical; BOM, comments and CRLF kept).

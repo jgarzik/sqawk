@@ -1,3 +1,4 @@
+-- tsq-tables: edge
 -- aggregates / group by
 SELECT count(DISTINCT p), count(DISTINCT q), count(p), count(*), sum(DISTINCT p), avg(DISTINCT p), group_concat(DISTINCT q) FROM dup
 SELECT p, q, count(*) FROM dup GROUP BY p, q

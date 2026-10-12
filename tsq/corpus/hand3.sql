@@ -1,3 +1,4 @@
+-- tsq-tables: edge
 -- DML sequences
 INSERT INTO d SELECT a.k, b.w, b.v FROM a JOIN b ON a.aid = b.aid WHERE b.v > 0; SELECT * FROM d
 INSERT INTO d (label) VALUES ('only'); SELECT * FROM d

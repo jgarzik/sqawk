@@ -62,33 +62,47 @@ sqawk -f report.sql --output-delimiter '\t' --no-output-header employees.csv
 Errors are one line on stderr (`sqawk: no such column: nmae`) with exit
 status 1; usage errors exit with status 2.
 
-## `tsq` - test data generator (development only)
+## `tsq` - test data generator and differential tester (development only)
 
-The source tree also contains `tsq`, which generates deterministic
-multi-table test data for exercising sqawk. It is a separate workspace crate
-(`tsq/`) that is not published, so `cargo install sqawk` does not install it.
-Run it from a checkout:
+The source tree also contains `tsq`, the tool that tests sqawk: it generates
+deterministic test data and checks sqawk's answers against SQLite. It is a
+separate workspace crate (`tsq/`) that is not published, so `cargo install
+sqawk` does not install it. Run it from a checkout:
 
 ```sh
-cargo run -p tsq -- gen --seed 42 --rows 1000 --output-dir /tmp/sqawk-test
+cargo build --release --workspace
+target/release/tsq gen --seed 42 --rows 1000 --output-dir /tmp/sqawk-test
 sqawk -s "SELECT * FROM customers LIMIT 10" /tmp/sqawk-test/data/customers.csv
+target/release/tsq diff --seed 1 --queries 20000 --keep-going --shrink
+target/release/tsq corpus tsq/corpus/*.sql
 ```
 
-`tsq gen` writes `data/` (customers, products, orders, order_items, reviews,
-with foreign keys and realistic distributions) and a `metadata.json`
-recording the seed, options and row counts. The same seed gives the same
-data on every OS.
+The global options `--seed` (64-bit; a clock seed is printed when omitted),
+`--sqawk PATH` (default: `$SQAWK`, else the `sqawk` next to `tsq`) and
+`--verbose` apply to every subcommand. The same seed gives the same data and
+queries on every OS.
 
-| Option | Meaning |
-| --- | --- |
-| `-s`, `--seed` | 64-bit seed; a clock seed is printed if omitted |
-| `-r`, `--rows` | Customer rows; the other tables scale from it (default 1000) |
-| `-o`, `--output-dir` | Where to write the generated tree (required) |
-| `--edge-rate F` | Replace each non-key cell with an edge value (i64 limits, `007`, `1.50`, ` 5`, Unicode, embedded quotes and line breaks, long strings, ...) with probability F |
-| `--format csv\|tsv` | Field delimiter |
-| `--crlf`, `--bom`, `--no-header` | Line endings, byte order mark, no header line |
-| `--ragged-rate F` | Probability that a row leaves off its trailing empty fields |
-| `-v`, `--verbose` | Show generation progress |
+- **`tsq gen`** writes `data/` (customers, products, orders, order_items,
+  reviews, with foreign keys and realistic distributions) and a
+  `metadata.json` recording the seed, options and row counts. `--rows N`
+  (customers; the other tables scale from it), `--edge-rate F` (replace
+  non-key cells with edge values: i64 limits, `007`, `1.50`, ` 5`, Unicode,
+  embedded quotes and line breaks, long strings, ...), `--format csv|tsv`,
+  `--crlf`, `--bom`, `--no-header`, `--ragged-rate F` (rows that leave off
+  trailing empty fields).
+- **`tsq diff`** generates random SQL (expressions, joins of every kind,
+  subqueries, aggregates, windows, compounds, CTEs including recursive ones,
+  DML sequences, transactions, `CREATE TABLE AS`, `ALTER TABLE`) and runs
+  each test through sqawk and through SQLite 3.45 loaded with the same
+  values, comparing every result set byte for byte. `--queries N`,
+  `--scale small|large|ROWS`, `--tables gen|edge|harness`, `--edge-rate F`,
+  `--keep-going`, `--shrink` (minimize each finding; reproductions go to
+  `--out DIR`), `--only N` (one test), `--print`, `--jobs N`, `--timeout S`.
+  The last line is `DIFF SUMMARY {pass, diff, sqawk_err, sqlite_err,
+  both_err, crash}`; non-passing results covered by a documented difference
+  are counted separately, and any other is a finding (exit status 1).
+- **`tsq corpus FILE...`** runs hand-written query files (one test per line,
+  `O:` for an ordered comparison) the same way; `tsq/corpus/` holds them.
 
 ## Documentation
 

@@ -5,13 +5,15 @@
 //!   reads);
 //! * `tsq diff`: random SQL run through sqawk and through SQLite (rusqlite's
 //!   bundled build) holding the same values; every result set compared byte
-//!   for byte; failures shrunk to minimal reproductions.
+//!   for byte; failures shrunk to minimal reproductions;
+//! * `tsq corpus`: hand-written query files judged the same way.
 //!
 //! Everything random comes from one ChaCha8 stream per seed (`rng.rs`), so a
 //! seed reproduces the same data and queries on every OS.
 
 #![forbid(unsafe_code)]
 
+mod corpus;
 mod data;
 mod diff;
 mod gen;
@@ -32,8 +34,9 @@ use clap::{Parser, Subcommand, ValueEnum};
     about = "Test data generator and differential SQL tester for sqawk",
     long_about = "Test data generator and differential SQL tester for sqawk.\n\n\
                   gen writes deterministic multi-table CSV/TSV data; diff runs random SQL \
-                  through sqawk and SQLite and compares the answers byte for byte. The same \
-                  seed gives the same data and queries on every OS."
+                  through sqawk and SQLite and compares the answers byte for byte; corpus \
+                  runs hand-written query files the same way. The same seed gives the same \
+                  data and queries on every OS."
 )]
 struct Cli {
     /// The sqawk binary (default: $SQAWK, else sqawk next to tsq)
@@ -123,6 +126,21 @@ enum Command {
         #[arg(long)]
         print: bool,
     },
+    /// Run hand-written corpus files (one test per line)
+    Corpus {
+        /// Corpus files
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// Table set (overrides the files' `-- tsq-tables:` line)
+        #[arg(long)]
+        tables: Option<String>,
+        /// Parallel jobs (default: available cores)
+        #[arg(long, short = 'j')]
+        jobs: Option<usize>,
+        /// Per-test time limit in seconds
+        #[arg(long, default_value_t = 10)]
+        timeout: u64,
+    },
 }
 
 fn clock_seed() -> u64 {
@@ -141,11 +159,14 @@ fn cores() -> usize {
 
 fn real_main() -> Result<i32> {
     let cli = Cli::parse();
+    let uses_seed = !matches!(cli.command, Command::Corpus { .. });
     let seed = match cli.seed {
         Some(s) => s,
         None => {
             let s = clock_seed();
-            eprintln!("tsq: seed {s}");
+            if uses_seed {
+                eprintln!("tsq: seed {s}");
+            }
             s
         }
     };
@@ -217,6 +238,21 @@ fn real_main() -> Result<i32> {
                 print,
             };
             diff::run(seed, &sqawk, &opts, cli.verbose)
+        }
+        Command::Corpus {
+            files,
+            tables,
+            jobs,
+            timeout,
+        } => {
+            let opts = corpus::CorpusOptions {
+                files,
+                tables,
+                jobs: jobs.unwrap_or_else(cores),
+                timeout: Duration::from_secs(timeout),
+                keep_going: true,
+            };
+            corpus::run(&sqawk, &opts, cli.verbose)
         }
     }
 }
