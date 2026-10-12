@@ -25,39 +25,41 @@ mod join_on; // Tests for JOIN ON syntax (as opposed to WHERE for joins)
 mod like; // Tests for LIKE/ILIKE pattern matching (VM implementation)
 mod limit_offset; // Tests for LIMIT and OFFSET clauses
 
-// Phase 2: Set Operations (VM implementation)
+// Set operations
 mod except; // Tests for EXCEPT set operation
 mod intersect; // Tests for INTERSECT set operation
 mod union; // Tests for UNION/UNION ALL set operations
 
-// Phase 3: Outer Joins (VM implementation)
+// Outer joins
 mod full_join; // Tests for FULL OUTER JOIN
 mod left_join; // Tests for LEFT OUTER JOIN
 mod right_join; // Tests for RIGHT OUTER JOIN
 
-// Phase 4F: Subquery Support (VM implementation)
+// Subqueries
 mod exists; // Tests for EXISTS/NOT EXISTS subqueries
 mod in_subquery; // Tests for IN (SELECT ...) subqueries
 mod subquery; // Tests for scalar subqueries with aggregates
 
-// Phase 4B: Correlated Subquery Support (VM implementation)
+// Correlated subqueries
 mod correlated; // Tests for correlated subqueries with runtime execution
 
-// Phase 7: Advanced Expressions (VM implementation)
+// Expressions and functions
 mod arithmetic; // Tests for arithmetic operators (+, -, *, /, %)
 mod date_functions; // Tests for date/time functions (DATE, TIME, NOW)
 mod math_functions; // Tests for math functions (ABS, ROUND, CEIL, FLOOR)
 mod string_functions_ext; // Tests for extended string functions (CONCAT, LEFT, RIGHT)
 
-// Phase 8: Window Functions (VM implementation)
+// Window functions
 mod window; // Tests for window functions (ROW_NUMBER, RANK, DENSE_RANK)
 
-// Phase 10: DDL Enhancements (VM implementation)
+// DDL
 mod ddl; // Tests for DDL operations (DROP TABLE, ALTER TABLE, TRUNCATE, CREATE TABLE AS SELECT, CREATE TABLE LOCATION)
 
 // Table definition modes
-mod headerless; // Tests for headerless file auto-detection (a, b, c column naming)
+mod file_io; // File-type rules, table specs, byte-exact writeback
+mod headerless; // Tests for --no-header files (a, b, c column naming)
 mod tabledef; // Tests for --tabledef CLI option
+mod transaction; // BEGIN / COMMIT / ROLLBACK, and which tables --write writes
 
 mod output; // Tests for stdout and file output (atomic writes)
 mod repl; // Tests for interactive REPL functionality with pre-generated input

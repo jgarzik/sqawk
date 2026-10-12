@@ -19,7 +19,7 @@
 
 use sqlparser::ast::{
     Distinct, Expr, Ident, OrderByExpr, Query, Select, SelectItem, SetExpr, SetOperator,
-    SetQuantifier, Value, ValueWithSpan,
+    SetQuantifier, UnaryOperator, Value, ValueWithSpan,
 };
 
 use super::ast_compat::{
@@ -70,14 +70,11 @@ pub(crate) enum Dest {
     },
     /// A compound query's ORDER BY sorter; the payload is the row itself.
     Sorter(i64),
-    /// Insert into a keyed ephemeral table (UNION; the left side of
-    /// INTERSECT and EXCEPT).
+    /// Insert into a keyed ephemeral table (UNION; both sides of
+    /// INTERSECT; the left side of EXCEPT).
     Insert(i64),
     /// Remove from a keyed ephemeral table (the right side of EXCEPT).
     Delete(i64),
-    /// Insert into `into` if the row is in `probe` (the right side of
-    /// INTERSECT).
-    Intersect { probe: i64, into: i64 },
 }
 
 /// One ORDER BY key of a SELECT core.
@@ -134,28 +131,90 @@ fn is_distinct(select: &Select) -> SqawkResult<bool> {
     }
 }
 
-/// A positional ORDER BY key (`ORDER BY 2`) as a zero-based output index.
-///
-/// Compiled as an ordinary expression, such a key would be a constant and
-/// the sort a silent no-op.
-fn order_by_ordinal(expr: &Expr, out_columns: usize) -> SqawkResult<Option<usize>> {
-    let n = match expr {
+/// The value of an ORDER BY / GROUP BY term that SQLite reads as a
+/// result-column position (its `sqlite3ExprIsInteger`): an integer literal
+/// that fits in 32 bits, under any number of parentheses and unary `+` /
+/// `-`. `1.0`, `4294967297`, `1+0` and `'1'` are not positions.
+fn term_integer(expr: &Expr) -> Option<i64> {
+    match expr {
+        // A hex literal past 0x7fffffffffffffff reaches here as a negative
+        // number; SQLite never reads it as a position.
         Expr::Value(ValueWithSpan {
             value: Value::Number(n, _),
             ..
-        }) => n,
-        _ => return Ok(None),
+        }) if !n.starts_with('-') => n.parse::<i32>().ok().map(i64::from),
+        Expr::Nested(e) => term_integer(e),
+        Expr::UnaryOp {
+            op: UnaryOperator::Plus,
+            expr,
+        } => term_integer(expr),
+        Expr::UnaryOp {
+            op: UnaryOperator::Minus,
+            expr,
+        } => term_integer(expr).map(|v| -v),
+        _ => None,
+    }
+}
+
+/// `n` with its English ordinal suffix (`1st`, `12th`, `22nd`), as SQLite
+/// numbers ORDER BY / GROUP BY terms in its errors.
+fn ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n / 10 % 10) {
+        (_, 1) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
     };
-    let idx: usize = n
-        .parse()
-        .map_err(|_| SqawkError::InvalidSqlQuery(format!("Invalid ORDER BY position: {}", n)))?;
-    if idx == 0 || idx > out_columns {
+    format!("{}{}", n, suffix)
+}
+
+/// The zero-based output column named by a positional ORDER BY / GROUP BY
+/// term (`ORDER BY 2`, `GROUP BY +1`), or None when the term is an ordinary
+/// expression (see [`term_integer`]). `term` is the term's zero-based index
+/// in its clause; `clause` is `"ORDER"` or `"GROUP"`.
+pub(crate) fn term_position(
+    expr: &Expr,
+    term: usize,
+    clause: &str,
+    out_columns: usize,
+) -> SqawkResult<Option<usize>> {
+    let Some(v) = term_integer(expr) else {
+        return Ok(None);
+    };
+    if v < 1 || v > out_columns as i64 {
         return Err(SqawkError::InvalidSqlQuery(format!(
-            "ORDER BY position {} is out of range (1..{})",
-            idx, out_columns
+            "{} {} BY term out of range - should be between 1 and {}",
+            ordinal(term + 1),
+            clause,
+            out_columns
         )));
     }
-    Ok(Some(idx - 1))
+    Ok(Some(v as usize - 1))
+}
+
+/// The sort key of the `term`-th (zero-based) ORDER BY term of a compound
+/// SELECT whose result columns are `schema`: a column position, or the
+/// name of a result column of the leftmost SELECT.
+pub(crate) fn compound_order_key(
+    ob: &OrderByExpr,
+    term: usize,
+    schema: &ResultSchema,
+) -> SqawkResult<KeyOrder> {
+    let pos = match term_position(&ob.expr, term, "ORDER", schema.columns.len())? {
+        Some(j) => j,
+        None => schema_position(schema, &ob.expr).ok_or_else(|| {
+            SqawkError::InvalidSqlQuery(format!(
+                "{} ORDER BY term does not match any column in the result set",
+                ordinal(term + 1)
+            ))
+        })?,
+    };
+    Ok(KeyOrder::new(
+        pos,
+        order_by_is_asc(ob),
+        ob.options.nulls_first,
+    ))
 }
 
 /// The output column whose header `expr` names, if any.
@@ -271,19 +330,8 @@ impl<'a> SqlCompiler<'a> {
                 let schema = self.compile_compound(body, Dest::Sorter(sorter))?;
                 let n = schema.columns.len();
                 let mut spec = Vec::with_capacity(order_by.len());
-                for ob in order_by {
-                    let pos = match order_by_ordinal(&ob.expr, n)? {
-                        Some(i) => i,
-                        None => schema_position(&schema, &ob.expr).ok_or_else(|| {
-                            SqawkError::InvalidSqlQuery(format!(
-                                "ORDER BY term does not match any column in the result set: {}",
-                                ob.expr
-                            ))
-                        })?,
-                    };
-                    spec.push(
-                        KeyOrder::new(pos, order_by_is_asc(ob), ob.options.nulls_first).spec(),
-                    );
+                for (i, ob) in order_by.iter().enumerate() {
+                    spec.push(compound_order_key(ob, i, &schema)?.spec());
                 }
                 let inst = &mut self.program.instructions[open];
                 inst.p2 = n as i64;
@@ -413,7 +461,7 @@ impl<'a> SqlCompiler<'a> {
                 self.program.instructions[open].p2 = l.columns.len() as i64;
                 let r = self.compile_compound(right, Dest::Insert(u))?;
                 check(&l, &r)?;
-                self.emit_keyed_scan(u, l.columns.len(), dest);
+                self.emit_keyed_scan(u, l.columns.len(), dest, None);
                 Ok(l)
             }
             (SetOperator::Except | SetOperator::Minus, false) => {
@@ -422,19 +470,22 @@ impl<'a> SqlCompiler<'a> {
                 self.program.instructions[open].p2 = l.columns.len() as i64;
                 let r = self.compile_compound(right, Dest::Delete(u))?;
                 check(&l, &r)?;
-                self.emit_keyed_scan(u, l.columns.len(), dest);
+                self.emit_keyed_scan(u, l.columns.len(), dest, None);
                 Ok(l)
             }
             (SetOperator::Intersect, false) => {
-                let (probe, open_probe) = self.open_keyed("INTERSECT left");
-                let l = self.compile_compound(left, Dest::Insert(probe))?;
+                // As SQLite: both sides into keyed tables, then the left
+                // table's rows that the right one holds -- so the values
+                // come from the left (`SELECT 1 INTERSECT SELECT 1.0` is 1).
+                let (lt, open_l) = self.open_keyed("INTERSECT left");
+                let l = self.compile_compound(left, Dest::Insert(lt))?;
                 let n = l.columns.len() as i64;
-                self.program.instructions[open_probe].p2 = n;
-                let (into, open_into) = self.open_keyed("INTERSECT result");
-                self.program.instructions[open_into].p2 = n;
-                let r = self.compile_compound(right, Dest::Intersect { probe, into })?;
+                self.program.instructions[open_l].p2 = n;
+                let (rt, open_r) = self.open_keyed("INTERSECT right");
+                self.program.instructions[open_r].p2 = n;
+                let r = self.compile_compound(right, Dest::Insert(rt))?;
                 check(&l, &r)?;
-                self.emit_keyed_scan(into, l.columns.len(), dest);
+                self.emit_keyed_scan(lt, l.columns.len(), dest, Some(rt));
                 Ok(l)
             }
             (op, _) => Err(SqawkError::UnsupportedSqlFeature(format!(
@@ -454,17 +505,30 @@ impl<'a> SqlCompiler<'a> {
         (cursor, addr)
     }
 
-    /// Walk a keyed ephemeral table (in sorted order), sending each row on.
-    fn emit_keyed_scan(&mut self, cursor: i64, n: usize, dest: Dest) {
+    /// Walk a keyed ephemeral table (in sorted order), sending each row on
+    /// -- only the rows also in keyed table `only_in`, if given.
+    fn emit_keyed_scan(&mut self, cursor: i64, n: usize, dest: Dest, only_in: Option<i64>) {
         let row = self.allocate_registers(n.max(1));
         let top = self.label();
         let done = self.label();
+        let next = self.label();
         self.emit_jump_to(OpCode::Rewind, cursor, done, 0, None, "compound result");
         self.resolve(top);
         for i in 0..n {
             self.emit(OpCode::Column, cursor, i as i64, row + i as i64, None, "");
         }
+        if let Some(other) = only_in {
+            self.emit_jump_to(
+                OpCode::NotFound,
+                other,
+                next,
+                row,
+                Some(n.to_string()),
+                "INTERSECT: not on the right",
+            );
+        }
         self.emit_to_dest(row, n, dest);
+        self.resolve(next);
         self.emit_jump_to(OpCode::Next, cursor, top, 0, None, "");
         self.resolve(done);
     }
@@ -525,7 +589,7 @@ impl<'a> SqlCompiler<'a> {
         select: &Select,
         plan: &FromPlan<'a>,
     ) -> SqawkResult<Vec<OutCol>> {
-        let outs = self.expand_projection(&select.projection, plan)?;
+        let outs = self.expand_projection(select, plan)?;
         if outs.is_empty() {
             return Err(SqawkError::InvalidSqlQuery(
                 "SELECT * with no tables specified".into(),
@@ -585,7 +649,7 @@ impl<'a> SqlCompiler<'a> {
         let mut spec = Vec::with_capacity(order_by.len());
         for (i, ob) in order_by.iter().enumerate() {
             let text = NameCtx::agg_key(&ob.expr);
-            let key = if let Some(j) = order_by_ordinal(&ob.expr, n)? {
+            let key = if let Some(j) = term_position(&ob.expr, i, "ORDER", n)? {
                 SortKey::Out(j)
             } else if let Some(j) = alias_position(outs, &ob.expr) {
                 SortKey::Out(j)
@@ -677,10 +741,10 @@ impl<'a> SqlCompiler<'a> {
         if needs_scope {
             for (alias, i) in &st.aliases {
                 if ctx.resolve_unqualified(alias).is_err() {
-                    scope.agg_bindings.push((
-                        NameCtx::agg_key(&Expr::Identifier(Ident::new(alias.clone()))),
+                    scope.bind_agg(
+                        &Expr::Identifier(Ident::new(alias.clone())),
                         base + *i as i64,
-                    ));
+                    );
                 }
             }
         }
@@ -834,19 +898,6 @@ impl<'a> SqlCompiler<'a> {
             Dest::Sorter(id) => self.emit(OpCode::SorterInsert, id, start, n64, None, ""),
             Dest::Insert(c) => self.emit(OpCode::IdxInsert, c, start, n64, None, ""),
             Dest::Delete(c) => self.emit(OpCode::IdxDelete, c, start, n64, None, ""),
-            Dest::Intersect { probe, into } => {
-                let skip = self.label();
-                self.emit_jump_to(
-                    OpCode::NotFound,
-                    probe,
-                    skip,
-                    start,
-                    Some(n.to_string()),
-                    "INTERSECT: not on the left",
-                );
-                self.emit(OpCode::IdxInsert, into, start, n64, None, "");
-                self.resolve(skip);
-            }
         }
     }
 }

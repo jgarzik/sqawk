@@ -6,12 +6,17 @@
 //! into partitions, and within each partition into peer groups -- rows equal
 //! on every ORDER BY key, or the whole partition when there is no ORDER BY.
 //! Every function of the definition is then evaluated for each row and its
-//! value stored in the function's result column.
+//! value stored in the function's result column. An aggregate is evaluated
+//! as SQLite evaluates it: rows are added to and removed from one running
+//! state as the frame moves, in SQLite's order (see [`aggregate`]).
 
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 
 use super::agg::AggAccumulator;
+use super::arith::text_of;
 use super::bytecode::{FrameBound, WindowDef, WindowFrame, WindowFunc, WindowFuncKind};
+use super::bytecode::{Register, AGG_GROUP_CONCAT, AGG_MAX, AGG_MIN, AGG_TYPE_MASK};
 use super::engine::{compare_rows, compare_values};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Value;
@@ -222,30 +227,448 @@ fn evaluate(part: &[Vec<Value>], f: &WindowFunc, p: &Peers) -> SqawkResult<Vec<V
                 });
             }
         }
-        WindowFuncKind::Agg(func_type) => {
-            // The accumulator covers rows [lo, hi). A frame that keeps its
-            // start and does not shrink (the default frame, ROWS UNBOUNDED
-            // PRECEDING, the whole partition) only steps the new rows; any
-            // other frame is accumulated afresh.
-            let mut acc = AggAccumulator::new(func_type);
-            let (mut lo, mut hi) = (0, 0);
-            for i in 0..n {
-                let (s, e) = frame(&f.frame, i, n, p);
-                if s != lo || e < hi {
-                    acc = AggAccumulator::new(func_type);
-                    lo = s;
-                    hi = s;
+        WindowFuncKind::Agg(func_type) => return aggregate(part, f, func_type, p),
+    }
+    Ok(out)
+}
+
+/// An aggregate's running state over a moving frame.
+enum FrameAcc {
+    /// COUNT, SUM, AVG, TOTAL, and MIN / MAX over a frame that starts at
+    /// UNBOUNDED PRECEDING (which never removes a row).
+    Std(AggAccumulator),
+    /// MIN / MAX over a frame whose start moves: the frame's values, the
+    /// ones that can still become the result, oldest first (SQLite keeps an
+    /// ordered index of them). Of equal values the newest wins, as in
+    /// SQLite's index, whose last entry among equals is the newest.
+    MinMax {
+        min: bool,
+        live: VecDeque<(usize, Value)>,
+        next: usize,
+        removed: usize,
+    },
+    GroupConcat(GroupConcat),
+}
+
+impl FrameAcc {
+    fn new(func_type: i64, moving_start: bool) -> FrameAcc {
+        match func_type & AGG_TYPE_MASK {
+            t @ (AGG_MIN | AGG_MAX) if moving_start => FrameAcc::MinMax {
+                min: t == AGG_MIN,
+                live: VecDeque::new(),
+                next: 0,
+                removed: 0,
+            },
+            AGG_GROUP_CONCAT => FrameAcc::GroupConcat(GroupConcat::default()),
+            _ => FrameAcc::Std(AggAccumulator::new(func_type)),
+        }
+    }
+
+    fn step(&mut self, value: Option<Value>, sep: Option<Option<Value>>) -> SqawkResult<()> {
+        match self {
+            FrameAcc::Std(acc) => acc.step(value, sep.flatten()),
+            FrameAcc::MinMax {
+                min, live, next, ..
+            } => {
+                let id = *next;
+                *next += 1;
+                let Some(v) = value.filter(|v| !matches!(v, Value::Null)) else {
+                    return Ok(());
+                };
+                // A value no better than the new one can never be the
+                // result again: the new one is in every frame it is in.
+                let worse = if *min {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                };
+                while live
+                    .back()
+                    .is_some_and(|(_, b)| compare_values(b, &v) != worse)
+                {
+                    live.pop_back();
                 }
-                for row in &part[hi..e] {
-                    acc.step(
-                        f.args.first().map(|&c| row[c].clone()),
-                        f.args.get(1).map(|&c| row[c].clone()),
-                    )?;
+                live.push_back((id, v));
+                Ok(())
+            }
+            FrameAcc::GroupConcat(g) => {
+                g.step(value, sep);
+                Ok(())
+            }
+        }
+    }
+
+    /// Remove the oldest value still in the frame.
+    fn inverse(&mut self, value: Option<Value>) {
+        match self {
+            FrameAcc::Std(acc) => acc.inverse(value),
+            FrameAcc::MinMax { live, removed, .. } => {
+                if live.front().is_some_and(|(id, _)| id == removed) {
+                    live.pop_front();
                 }
-                hi = e;
-                out.push(acc.finalize());
+                *removed += 1;
+            }
+            FrameAcc::GroupConcat(g) => g.inverse(value),
+        }
+    }
+
+    fn value(&self) -> SqawkResult<Value> {
+        match self {
+            FrameAcc::Std(acc) => acc.finalize(),
+            FrameAcc::MinMax { live, .. } => {
+                Ok(live.front().map_or(Value::Null, |(_, v)| v.clone()))
+            }
+            FrameAcc::GroupConcat(g) => Ok(g.value()),
+        }
+    }
+}
+
+/// GROUP_CONCAT over a moving frame, as SQLite's `groupConcatStep` /
+/// `groupConcatInverse` / `groupConcatValue` keep it: one byte string; a
+/// row leaving the frame removes its value's bytes and the separator after
+/// it from the front (the separator's length tracked per element once the
+/// lengths vary). An emptied string starts over (the next value is a
+/// first term, with no separator) and its value is NULL.
+#[derive(Default)]
+struct GroupConcat {
+    buf: Vec<u8>,
+    /// Bytes of `buf` already removed from the front.
+    head: usize,
+    /// Values presently concatenated.
+    n_accum: i64,
+    first_sep_len: usize,
+    /// The separators' lengths, oldest first, once they have varied.
+    sep_lens: Option<VecDeque<usize>>,
+    /// Something has been accumulated since the string was last empty.
+    active: bool,
+}
+
+impl GroupConcat {
+    fn text(v: &Value) -> Vec<u8> {
+        text_of(&Register::from(v.clone())).into_bytes()
+    }
+
+    /// `sep`: `None` for GROUP_CONCAT(x), `Some(separator)` with two
+    /// arguments.
+    fn step(&mut self, value: Option<Value>, sep: Option<Option<Value>>) {
+        let Some(v) = value.filter(|v| !matches!(v, Value::Null)) else {
+            return;
+        };
+        let first = !self.active;
+        self.active = true;
+        match sep {
+            None => {
+                if first {
+                    self.first_sep_len = 1;
+                } else {
+                    self.buf.push(b',');
+                }
+            }
+            Some(sep) => {
+                let sep = sep
+                    .filter(|s| !matches!(s, Value::Null))
+                    .map(|s| Self::text(&s));
+                let n_sep = sep.as_ref().map_or(0, Vec::len);
+                if first {
+                    self.first_sep_len = n_sep;
+                } else {
+                    if let Some(s) = &sep {
+                        self.buf.extend_from_slice(s);
+                    }
+                    if n_sep != self.first_sep_len || self.sep_lens.is_some() {
+                        let in_use = usize::try_from(self.n_accum - 1).unwrap_or(0);
+                        let first_len = self.first_sep_len;
+                        let lens = self.sep_lens.get_or_insert_with(|| {
+                            std::iter::repeat_n(first_len, in_use).collect()
+                        });
+                        lens.resize(in_use, first_len);
+                        lens.push_back(n_sep);
+                    }
+                }
+            }
+        }
+        self.n_accum += 1;
+        self.buf.extend_from_slice(&Self::text(&v));
+    }
+
+    fn inverse(&mut self, value: Option<Value>) {
+        let Some(v) = value.filter(|v| !matches!(v, Value::Null)) else {
+            return;
+        };
+        let mut n = Self::text(&v).len();
+        self.n_accum -= 1;
+        match self.sep_lens.as_mut() {
+            Some(lens) => {
+                if self.n_accum > 0 {
+                    n += lens.pop_front().unwrap_or(0);
+                }
+            }
+            None => n += self.first_sep_len,
+        }
+        let len = self.buf.len() - self.head;
+        if n >= len {
+            self.buf.clear();
+            self.head = 0;
+        } else {
+            self.head += n;
+            // Drop the dead prefix once it dominates, keeping removal
+            // amortized O(1) per byte.
+            if self.head > 4096 && self.head * 2 > self.buf.len() {
+                self.buf.drain(..self.head);
+                self.head = 0;
+            }
+        }
+        if self.buf.len() == self.head {
+            self.active = false;
+            self.sep_lens = None;
+        }
+    }
+
+    fn value(&self) -> Value {
+        let bytes = &self.buf[self.head..];
+        if bytes.is_empty() {
+            Value::Null
+        } else {
+            Value::String(String::from_utf8_lossy(bytes).into_owned().into())
+        }
+    }
+}
+
+/// A frame bound's offset as SQLite's countdown registers hold it.
+fn offset(b: FrameBound) -> Option<i64> {
+    match b {
+        FrameBound::Preceding(x) | FrameBound::Following(x) => {
+            Some(i64::try_from(x).unwrap_or(i64::MAX))
+        }
+        _ => None,
+    }
+}
+
+/// SQLite's `OP_IfPos` countdown: `None` (no countdown) always runs;
+/// otherwise a positive count is decremented and the operation skipped.
+fn countdown(c: &mut Option<i64>) -> bool {
+    match c {
+        Some(x) if *x > 0 => {
+            *x -= 1;
+            false
+        }
+        _ => true,
+    }
+}
+
+/// An aggregate window function over one partition, computed as SQLite's
+/// `sqlite3WindowCodeStep` computes it: three cursors over the rows -- the
+/// next row to add to the frame (step), the next to remove from it
+/// (inverse) and the next to return -- advanced in SQLite's order for the
+/// frame's shape, so each row's value comes from the same sequence of
+/// steps and inverses as in SQLite (which decides rounding, and whether a
+/// SUM is still an integer). Every row is added and removed at most once:
+/// O(n) for any frame. A RANGE frame (bounds CURRENT ROW or UNBOUNDED)
+/// moves by peer groups.
+fn aggregate(
+    part: &[Vec<Value>],
+    f: &WindowFunc,
+    func_type: i64,
+    peers: &Peers,
+) -> SqawkResult<Vec<Value>> {
+    let n = part.len();
+    let mut out = vec![Value::Null; n];
+    if n == 0 {
+        return Ok(out);
+    }
+    let fr = &f.frame;
+    // Units: rows for ROWS, peer groups for RANGE.
+    let units: Vec<(usize, usize)> = if fr.rows {
+        (0..n).map(|i| (i, i + 1)).collect()
+    } else {
+        let mut u = Vec::new();
+        let mut i = 0;
+        while i < n {
+            u.push((i, peers.end[i]));
+            i = peers.end[i];
+        }
+        u
+    };
+    let nu = units.len();
+    let unbounded_start = fr.start == FrameBound::UnboundedPreceding;
+    let is_following = |b: FrameBound| matches!(b, FrameBound::Following(_));
+    let is_preceding = |b: FrameBound| matches!(b, FrameBound::Preceding(_));
+    let end_unbounded = fr.end == FrameBound::UnboundedFollowing;
+
+    let mut reg_start = offset(fr.start);
+    let mut reg_end = offset(fr.end);
+    // ROWS BETWEEN a FOLLOWING AND b FOLLOWING with b < a (or a PRECEDING
+    // AND b PRECEDING with b > a): every frame is empty.
+    if fr.rows {
+        if let (Some(s), Some(e)) = (reg_start, reg_end) {
+            let empty = (is_following(fr.start) && is_following(fr.end) && e < s)
+                || (is_preceding(fr.start) && is_preceding(fr.end) && e > s);
+            if empty {
+                let v = FrameAcc::new(func_type, !unbounded_start).value()?;
+                out.fill(v);
+                return Ok(out);
+            }
+        }
+    }
+    if is_following(fr.start) && is_following(fr.end) {
+        reg_start = reg_end.zip(reg_start).map(|(e, s)| e - s);
+    }
+
+    let mut sim = Sim {
+        part,
+        f,
+        units: &units,
+        acc: FrameAcc::new(func_type, !unbounded_start),
+        removes: !unbounded_start,
+        out: &mut out,
+        end_c: 0,
+        cur_c: 0,
+        start_c: 0,
+    };
+
+    // The loop over input units: unit k has just been added to the table.
+    for _k in 1..nu {
+        if is_following(fr.start) {
+            sim.step()?;
+            if !end_unbounded {
+                if countdown(&mut reg_end) {
+                    sim.ret()?;
+                }
+                if countdown(&mut reg_start) {
+                    sim.inverse();
+                }
+            }
+        } else if is_preceding(fr.end) {
+            if countdown(&mut reg_end) {
+                sim.step()?;
+            }
+            sim.ret()?;
+            if countdown(&mut reg_start) {
+                sim.inverse();
+            }
+        } else {
+            sim.step()?;
+            if !end_unbounded {
+                if matches!(reg_end, Some(x) if x > 0) {
+                    reg_end = reg_end.map(|x| x - 1);
+                } else {
+                    sim.ret()?;
+                    if countdown(&mut reg_start) {
+                        sim.inverse();
+                    }
+                }
+            }
+        }
+    }
+
+    // Flush: the partition is complete.
+    if is_preceding(fr.end) {
+        if countdown(&mut reg_end) {
+            sim.step()?;
+        }
+        sim.ret()?;
+    } else if is_following(fr.start) {
+        sim.step()?;
+        let mut tail = false;
+        loop {
+            if end_unbounded {
+                if countdown(&mut reg_start) {
+                    sim.ret()?;
+                    if sim.cur_c >= nu {
+                        break;
+                    }
+                }
+                sim.inverse();
+                if sim.start_c >= nu {
+                    tail = true;
+                    break;
+                }
+            } else {
+                if countdown(&mut reg_end) {
+                    sim.ret()?;
+                    if sim.cur_c >= nu {
+                        break;
+                    }
+                }
+                if countdown(&mut reg_start) {
+                    sim.inverse();
+                    if sim.start_c >= nu {
+                        tail = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if tail {
+            while sim.cur_c < nu {
+                sim.ret()?;
+            }
+        }
+    } else {
+        sim.step()?;
+        loop {
+            sim.ret()?;
+            if sim.cur_c >= nu {
+                break;
+            }
+            if countdown(&mut reg_start) {
+                sim.inverse();
             }
         }
     }
     Ok(out)
+}
+
+/// The three cursors of [`aggregate`] over one partition's units (rows, or
+/// peer groups).
+struct Sim<'p> {
+    part: &'p [Vec<Value>],
+    f: &'p WindowFunc,
+    units: &'p [(usize, usize)],
+    acc: FrameAcc,
+    /// The frame's start moves (it is not UNBOUNDED PRECEDING).
+    removes: bool,
+    out: &'p mut [Value],
+    /// Next unit to add to the frame, to return, to remove from it.
+    end_c: usize,
+    cur_c: usize,
+    start_c: usize,
+}
+
+impl Sim<'_> {
+    fn arg(&self, row: usize) -> Option<Value> {
+        self.f.args.first().map(|&c| self.part[row][c].clone())
+    }
+
+    fn step(&mut self) -> SqawkResult<()> {
+        if let Some(&(a, b)) = self.units.get(self.end_c) {
+            for row in a..b {
+                let sep = self.f.args.get(1).map(|&c| Some(self.part[row][c].clone()));
+                self.acc.step(self.arg(row), sep)?;
+            }
+            self.end_c += 1;
+        }
+        Ok(())
+    }
+
+    fn inverse(&mut self) {
+        if !self.removes {
+            return;
+        }
+        if let Some(&(a, b)) = self.units.get(self.start_c) {
+            for row in a..b {
+                self.acc.inverse(self.arg(row));
+            }
+            self.start_c += 1;
+        }
+    }
+
+    fn ret(&mut self) -> SqawkResult<()> {
+        if let Some(&(a, b)) = self.units.get(self.cur_c) {
+            let v = self.acc.value()?;
+            self.out[a..b].fill(v);
+            self.cur_c += 1;
+        }
+        Ok(())
+    }
 }

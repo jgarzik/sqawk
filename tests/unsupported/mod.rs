@@ -75,10 +75,12 @@ fn delete_clauses() -> R {
 #[test]
 fn query_clauses() -> R {
     assert_rejected(&[
-        "WITH h AS (SELECT * FROM emp) SELECT id FROM h",
         "SELECT id FROM emp FETCH FIRST 2 ROWS ONLY",
         "SELECT id FROM emp FOR UPDATE",
-        "SELECT id FROM emp WHERE id IN (WITH h AS (SELECT 1) SELECT * FROM h)",
+        "WITH h AS (SELECT * FROM emp) SELECT id FROM h FETCH FIRST 1 ROWS ONLY",
+        "SELECT 1 UNION (WITH h AS (SELECT 2) SELECT * FROM h)",
+        "WITH h AS (SELECT id FROM emp) DELETE FROM emp WHERE id IN (SELECT id FROM h) RETURNING id",
+        "WITH h AS (SELECT 1) UPDATE emp SET id = 2 FROM one",
     ])
 }
 
@@ -140,6 +142,52 @@ fn create_table_clauses() -> R {
         "CREATE TABLE z (id INTEGER) PARTITIONED BY (p INT)",
         "CREATE TABLE z (id INTEGER) ROW FORMAT DELIMITED FIELDS TERMINATED BY ','",
     ])
+}
+
+/// CREATE TABLE options sqawk would otherwise ignore: a storage format other
+/// than TEXTFILE, a WITH option other than DELIMITER / HEADER / COMMENTS,
+/// HEADER or COMMENTS without a LOCATION file, other option forms, a
+/// comment, and file options or a column list on CREATE TABLE ... AS (which
+/// never has a file).
+#[test]
+fn create_table_options() -> R {
+    assert_rejected(&[
+        "CREATE TABLE z (id INTEGER) LOCATION 'z.pq' STORED AS PARQUET",
+        "CREATE TABLE z (id INTEGER) STORED AS ORC",
+        "CREATE TABLE z (id INTEGER) STORED AS INPUTFORMAT 'a' OUTPUTFORMAT 'b'",
+        "CREATE TABLE z (id INTEGER) LOCATION 'z.csv' WITH (quote = '\"')",
+        "CREATE TABLE z (id INTEGER) WITH (header = 'false')",
+        "CREATE TABLE z (id INTEGER) WITH (comments = true)",
+        "CREATE TABLE z (id INTEGER) LOCATION 'emp.csv' WITH (header = false, x = 1)",
+        "CREATE TABLE z (id INTEGER) TBLPROPERTIES ('delimiter' = '|')",
+        "CREATE TABLE z (id INTEGER) COMMENT 'c'",
+        "CREATE TEMPORARY TABLE z (id INTEGER) LOCATION 'z.csv'",
+        "CREATE TABLE z LOCATION 'z.csv' AS SELECT * FROM emp",
+        "CREATE TABLE z (a INT) AS SELECT * FROM emp",
+    ])
+}
+
+/// Transaction forms with semantics sqawk does not implement. Each runs
+/// after a working BEGIN and a change, which must not be written.
+#[test]
+fn transaction_clauses() -> R {
+    let mut sqls = Vec::new();
+    for stmt in [
+        "SAVEPOINT s",
+        "RELEASE s",
+        "RELEASE SAVEPOINT s",
+        "ROLLBACK TO s",
+        "ROLLBACK TO SAVEPOINT s",
+        "COMMIT AND CHAIN",
+        "ROLLBACK AND CHAIN",
+    ] {
+        sqls.push(format!("BEGIN; UPDATE emp SET salary = 0; {stmt}; COMMIT"));
+    }
+    sqls.push("START TRANSACTION".to_string());
+    sqls.push("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE".to_string());
+    sqls.push("BEGIN TRY".to_string());
+    let refs: Vec<&str> = sqls.iter().map(String::as_str).collect();
+    assert_rejected(&refs)
 }
 
 /// The red-list case: `UPDATE ... FROM` used to update every row from

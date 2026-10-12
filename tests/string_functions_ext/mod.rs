@@ -202,6 +202,37 @@ mod sqlite_semantics {
         )
     }
 
+    /// The rest of SQLite's printf: flags `# , !`, `*` width and precision,
+    /// `%q %Q %w %c %r %u %.Nd`, real rounding to 16 digits, and NULL for a
+    /// format that produces nothing.
+    #[test]
+    fn printf_sqlite_conversions() -> R {
+        assert_query_on(
+            &[ONE],
+            "SELECT printf('%#x|%#o|%,d|%.3d|%u', 255, 8, -1234567, 7, -1) AS a, \
+             printf('%*d|%-*d|%.*f', 4, 7, 4, 7, 2, 3.14159) AS b, \
+             printf('%q|%Q|%Q|%w', 'it''s', 'x', NULL, 'a\"b') AS c, \
+             printf('%.3c|%r|%r|%r', 'ab', 1, 12, 23) AS d, \
+             printf('%.20f|%!.20f|%.0f|%g|%#g', 0.1, 0.1, 2.5, 0.00001, 1.0) AS e, \
+             printf('%-4s|%!-4s|', 'é', 'é') AS f, printf('') AS g, printf('%5') AS h, \
+             printf('a%yb') AS i FROM one",
+            "a,b,c,d,e,f,g,h,i\n\"0xff|010|-1,234,567|007|18446744073709551615\",\
+             \"   7|7   |3.14\",\"it''s|'x'|NULL|a\"\"\"\"b\",aaa|1st|12th|23rd,\
+             0.10000000000000000000|0.1000000000000000055|2|1e-05|1.00000,é  |é   |,,,a",
+        )
+    }
+
+    /// QUOTE gives the SQL literal of a value.
+    #[test]
+    fn quote_values() -> R {
+        assert_query_on(
+            &[ONE],
+            "SELECT quote('a''b') AS a, quote(12) AS b, quote(NULL) AS c, quote(1.5) AS d, \
+             quote(0.1) AS e, quote(1e999) AS f, quote(1.0/3) AS g FROM one",
+            "a,b,c,d,e,f,g\n'a''b',12,NULL,1.5,0.1,Inf,3.333333333333333148e-01",
+        )
+    }
+
     /// TYPEOF sees NULL (it must not short-circuit to NULL itself).
     #[test]
     fn typeof_values() -> R {

@@ -14,14 +14,8 @@ fn test_repl_basic_commands() {
     let test_commands = ".help\n.tables\nSELECT * FROM sample;\n.exit\n";
 
     // Start the sqawk process with sample data loaded
-    let mut process = Command::new("cargo")
-        .args([
-            "run",
-            "--bin",
-            "sqawk",
-            "tests/data/sample.csv",
-            "--interactive",
-        ])
+    let mut process = Command::new(env!("CARGO_BIN_EXE_sqawk"))
+        .args(["tests/data/sample.csv", "--interactive"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -52,14 +46,8 @@ fn test_repl_table_operations() {
     let test_commands = ".tables\nSELECT COUNT(*) FROM sample;\nUPDATE sample SET age = 31 WHERE id = 1;\nSELECT * FROM sample;\n.exit\n";
 
     // Start the sqawk process with sample data loaded
-    let mut process = Command::new("cargo")
-        .args([
-            "run",
-            "--bin",
-            "sqawk",
-            "tests/data/sample.csv",
-            "--interactive",
-        ])
+    let mut process = Command::new(env!("CARGO_BIN_EXE_sqawk"))
+        .args(["tests/data/sample.csv", "--interactive"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -98,14 +86,8 @@ fn test_repl_write_toggle() {
         ".write\nUPDATE sample SET age = 32 WHERE id = 1;\n.write\nSELECT * FROM sample;\n.exit\n";
 
     // Start the sqawk process with temp data loaded
-    let mut process = Command::new("cargo")
-        .args([
-            "run",
-            "--bin",
-            "sqawk",
-            temp_file_path.to_str().unwrap(),
-            "--interactive",
-        ])
+    let mut process = Command::new(env!("CARGO_BIN_EXE_sqawk"))
+        .args([temp_file_path.to_str().unwrap(), "--interactive"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -135,14 +117,8 @@ fn test_repl_multiline_statements() {
         "SELECT\n  id,\n  name,\n  age\nFROM\n  sample\nWHERE\n  age > 25;\n.exit\n";
 
     // Start the sqawk process with sample data loaded
-    let mut process = Command::new("cargo")
-        .args([
-            "run",
-            "--bin",
-            "sqawk",
-            "tests/data/sample.csv",
-            "--interactive",
-        ])
+    let mut process = Command::new(env!("CARGO_BIN_EXE_sqawk"))
+        .args(["tests/data/sample.csv", "--interactive"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -186,14 +162,8 @@ fn test_repl_save_command() -> Result<(), Box<dyn std::error::Error>> {
         "UPDATE sample SET age = 33 WHERE id = 1;\n.save\nUPDATE sample SET age = 34 WHERE id = 2;\n.save sample\n.exit\n";
 
     // Start the sqawk process with the temporary file
-    let mut process = Command::new("cargo")
-        .args([
-            "run",
-            "--bin",
-            "sqawk",
-            temp_file_path.to_str().unwrap(),
-            "--interactive",
-        ])
+    let mut process = Command::new(env!("CARGO_BIN_EXE_sqawk"))
+        .args([temp_file_path.to_str().unwrap(), "--interactive"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

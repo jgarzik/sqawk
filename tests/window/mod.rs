@@ -472,9 +472,9 @@ fn nth_value_percent_rank_cume_dist() -> TestResult {
     check(
         "SELECT id, NTH_VALUE(id, 2) OVER (ORDER BY id) AS n, PERCENT_RANK() OVER (ORDER BY v) AS p, \
          CUME_DIST() OVER (ORDER BY v) AS c FROM w",
-        "id,n,p,c\n1,,0.2857142857142857,0.5\n2,2,0.7142857142857143,0.875\n\
-         3,2,0.7142857142857143,0.875\n4,2,0.14285714285714285,0.25\n5,2,0,0.125\n\
-         6,2,0.5714285714285714,0.625\n7,2,1,1\n8,2,0.2857142857142857,0.5",
+        "id,n,p,c\n1,,0.285714285714286,0.5\n2,2,0.714285714285714,0.875\n\
+         3,2,0.714285714285714,0.875\n4,2,0.142857142857143,0.25\n5,2,0.0,0.125\n\
+         6,2,0.571428571428571,0.625\n7,2,1.0,1.0\n8,2,0.285714285714286,0.5",
     )
 }
 
@@ -517,14 +517,14 @@ fn window_over_join() -> TestResult {
     check(
         "SELECT w.id, cat.label, SUM(w.v) OVER (PARTITION BY cat.label) AS s \
          FROM w JOIN cat ON w.g = cat.g ORDER BY w.id",
-        "w.id,cat.label,s\n1,Alpha,60\n2,Alpha,60\n3,Alpha,60\n4,Beta,20\n5,Beta,20\n\
+        "id,label,s\n1,Alpha,60\n2,Alpha,60\n3,Alpha,60\n4,Beta,20\n5,Beta,20\n\
          6,Beta,20\n8,Alpha,60",
     )?;
     // A NULL-extended row is a row like any other.
     check(
         "SELECT cat.label, w.id, ROW_NUMBER() OVER (PARTITION BY cat.g ORDER BY w.id) AS rn \
          FROM cat LEFT JOIN w ON w.g = cat.g",
-        "cat.label,w.id,rn\nAlpha,1,1\nAlpha,2,2\nAlpha,3,3\nAlpha,8,4\nBeta,4,1\n\
+        "label,id,rn\nAlpha,1,1\nAlpha,2,2\nAlpha,3,3\nAlpha,8,4\nBeta,4,1\n\
          Beta,5,2\nBeta,6,3\nGamma,,1",
     )
 }
@@ -568,7 +568,7 @@ fn window_in_expression() -> TestResult {
     check(
         "SELECT id, v * 2 + SUM(v) OVER (PARTITION BY g) AS e, \
          ROUND(AVG(v) OVER (PARTITION BY g ORDER BY id), 1) AS r FROM w",
-        "id,e,r\n7,90,30\n1,80,10\n2,100,15\n3,100,16.7\n8,80,15\n4,30,5\n5,,5\n6,50,10",
+        "id,e,r\n7,90,30.0\n1,80,10.0\n2,100,15.0\n3,100,16.7\n8,80,15.0\n4,30,5.0\n5,,5.0\n6,50,10.0",
     )
 }
 
@@ -623,7 +623,29 @@ fn sum_over_integers_stays_integer() -> TestResult {
     )?;
     check(
         "SELECT AVG(v) OVER (PARTITION BY g) AS a FROM w WHERE g = 'b'",
-        "a\n10\n10\n10",
+        "a\n10.0\n10.0\n10.0",
+    )
+}
+
+/// Moving frames follow SQLite's step / inverse evaluation (values from
+/// SQLite 3.45): SUM stays a real once a real has been in the frame, an
+/// emptied GROUP_CONCAT is NULL, MIN / MAX and COUNT over frames that
+/// start ahead of the current row.
+#[test]
+fn moving_frames_match_sqlite() -> TestResult {
+    let dir = create_temp_dir()?;
+    let f = dir.path().join("m.csv");
+    std::fs::write(&f, "i,x,s\n1,1.5,a\n2,2,\n3,3,\n4,4,b\n5,,cc\n6,6,d\n")?;
+    assert_query(
+        &[f.to_str().unwrap()],
+        "SELECT i, SUM(x) OVER (ORDER BY i ROWS 1 PRECEDING) AS s, \
+         GROUP_CONCAT(s, '-') OVER (ORDER BY i ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS g, \
+         MIN(x) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS mn, \
+         COUNT(x) OVER (ORDER BY i ROWS BETWEEN 2 FOLLOWING AND UNBOUNDED FOLLOWING) AS c, \
+         MAX(s) OVER (ORDER BY i ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) AS mx, \
+         TOTAL(x) OVER (ORDER BY i ROWS BETWEEN 3 PRECEDING AND 2 PRECEDING) AS t FROM m",
+        "i,s,g,mn,c,mx,t\n1,1.5,a,1.5,3,,0.0\n2,3.5,a,2,2,b,0.0\n3,5.0,,3,1,cc,1.5\n\
+         4,7.0,b,4,1,d,3.5\n5,4.0,b-cc,6,0,d,5.0\n6,6.0,cc-d,6,0,,7.0",
     )
 }
 

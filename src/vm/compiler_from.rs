@@ -13,7 +13,12 @@
 //! * ON conjuncts are evaluated at their own level, before that level's
 //!   "match" point. WHERE conjuncts are evaluated after it, at the innermost
 //!   level that has every table they mention, so the NULL-extended rows an
-//!   outer join produces are filtered by WHERE like any other row.
+//!   outer join produces are filtered by WHERE like any other row. A
+//!   conjunct with a subquery is placed by the columns its compiled code
+//!   reads (a correlated subquery's references included), so `t1.k IN
+//!   (SELECT ...)` filters at t1's loop. A conjunct reading no table of the
+//!   FROM at all is tested once, before the nest: in a correlated subquery,
+//!   `t1.b < t1.c` skips the scan for an outer row that fails it.
 //! * An outer join's preserved side owns a match flag. When an inner loop
 //!   finishes without a match, its cursors are put on a NULL row (`NullRow`)
 //!   and control re-enters the loop body at the match point once, so the rest
@@ -29,16 +34,17 @@
 //! The rest of the SELECT (projection, aggregation, sorting) is a "body"
 //! callback emitted at the innermost point of the nest.
 
+use std::collections::HashSet;
+
 use sqlparser::ast::{
     BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, JoinConstraint,
     JoinOperator, ObjectName, TableFactor, TableWithJoins,
 };
 
 use super::bytecode::OpCode;
-use super::compiler::{ColumnRef, Label, NameCtx, SqlCompiler, Src, UsingCol};
+use super::compiler::{ColumnRef, Label, NameCtx, SqlCompiler, Src, UsingCol, UsingCols};
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::Table;
 
 /// The join operator between the sources before a FROM item and the item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,6 +251,17 @@ struct Group {
     end: usize,
 }
 
+/// What every level of one loop nest shares (see `emit_level`).
+#[derive(Clone, Copy)]
+struct Levels<'r> {
+    /// [`FromPlan::deferred_levels`].
+    deferred: &'r [bool],
+    /// Each outer-join group's match flag register.
+    match_regs: &'r [i64],
+    /// Where each group's NULL-extended row re-enters the nest.
+    match_labels: &'r [Label],
+}
+
 /// A planned FROM clause.
 pub(crate) struct FromPlan<'t> {
     /// Sources in FROM order. A statement-level query opens source `i` on
@@ -257,18 +274,12 @@ pub(crate) struct FromPlan<'t> {
     levels: Vec<Level>,
     groups: Vec<Group>,
     /// USING / NATURAL merged columns.
-    pub using: Vec<UsingCol>,
+    pub using: UsingCols,
     /// (source, column) pairs a USING merge hides from `*`.
-    hidden: Vec<(usize, usize)>,
+    hidden: HashSet<(usize, usize)>,
     /// The FROM clause ends in a FULL JOIN: the WHERE conjuncts, re-applied
     /// in the pass over unmatched right rows.
     full_where: Option<Vec<Expr>>,
-    /// `*` expands to bare column names rather than `table.column`.
-    ///
-    /// Joins have always labelled `*` columns `table.column`; a USING or
-    /// NATURAL join instead merges the shared columns into one, and SQL names
-    /// its columns bare (`k,a,b`), which is what this selects.
-    pub bare_star: bool,
     /// WHERE conjuncts of a SELECT without FROM: no loop to place them in,
     /// so they decide whether its single row exists.
     const_where: Vec<Expr>,
@@ -302,9 +313,7 @@ impl<'t> FromPlan<'t> {
 
     /// The USING column first appearing at `(src, col)`, if any.
     pub(crate) fn using_at(&self, src: usize, col: usize) -> Option<&UsingCol> {
-        self.using
-            .iter()
-            .find(|u| u.refs.first() == Some(&(self.cursor(src), col)))
+        self.using.first_at((self.cursor(src), col))
     }
 
     /// The level holding source `src`.
@@ -318,6 +327,23 @@ impl<'t> FromPlan<'t> {
     /// The outer-join group containing level `lvl`, if any.
     fn group_of(&self, lvl: usize) -> Option<&Group> {
         self.groups.iter().find(|g| g.start <= lvl && lvl <= g.end)
+    }
+
+    /// Per level: whether its table is opened (and its hash index built)
+    /// only when the nest first reaches the level, as SQLite builds an
+    /// automatic index there, rather than before the nest. Every level but
+    /// the outermost, except one a RIGHT JOIN may NULL-extend without
+    /// reaching (an outer-join group's levels after its first) and in a
+    /// FULL JOIN, whose pass over unmatched right rows reads its tables
+    /// after the nest.
+    fn deferred_levels(&self) -> Vec<bool> {
+        (0..self.levels.len())
+            .map(|lvl| {
+                lvl > 0
+                    && self.full_where.is_none()
+                    && !self.groups.iter().any(|g| g.start < lvl && lvl <= g.end)
+            })
+            .collect()
     }
 
     /// The deepest level among `srcs` (level 0 for none).
@@ -378,6 +404,56 @@ fn collect_sources(expr: &Expr, ctx: &NameCtx<'_>, out: &mut Vec<usize>) -> Opti
     }
 }
 
+impl<'a> SqlCompiler<'a> {
+    /// The sources of this FROM that a WHERE conjunct reads when
+    /// [`expr_sources`] cannot tell (a subquery -- whose correlated
+    /// references count -- or another node it does not analyze): found by
+    /// compiling the conjunct in a scratch compiler and collecting the
+    /// cursors its `Column` reads name. `None` when the conjunct does not
+    /// compile (the real compilation reports why).
+    fn compiled_term_sources(&self, term: &Expr, ctx: &NameCtx<'a>) -> Option<Vec<usize>> {
+        let mut scratch = self.scratch();
+        scratch.code_expr(term, ctx, None).ok()?;
+        let mut out: Vec<usize> = scratch
+            .program
+            .instructions
+            .iter()
+            .filter(|inst| inst.opcode == OpCode::Column)
+            .filter_map(|inst| ctx.srcs.iter().position(|s| s.cursor == inst.p1))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        Some(out)
+    }
+}
+
+/// Whether `exprs` read at least one column and every column they read
+/// belongs to an enclosing query. An expression that cannot be analyzed (a
+/// subquery, an unresolvable name) does not count.
+pub(crate) fn reads_only_outer(exprs: &[Expr], ctx: &NameCtx<'_>) -> bool {
+    fn walk(expr: &Expr, ctx: &NameCtx<'_>, read_any: &mut bool) -> Option<()> {
+        let name = match expr {
+            Expr::Identifier(ident) => Some((None, &ident.value)),
+            Expr::CompoundIdentifier(parts) if parts.len() >= 2 => Some((
+                Some(parts[parts.len() - 2].value.as_str()),
+                &parts[parts.len() - 1].value,
+            )),
+            _ => None,
+        };
+        if let Some((qualifier, name)) = name {
+            let (_, depth) = ctx.lookup(qualifier, name).ok()?;
+            *read_any = true;
+            return (depth > 0).then_some(());
+        }
+        for child in expr_children(expr)? {
+            walk(child, ctx, read_any)?;
+        }
+        Some(())
+    }
+    let mut read_any = false;
+    exprs.iter().all(|e| walk(e, ctx, &mut read_any).is_some()) && read_any
+}
+
 /// Whether `expr` reads a column of an enclosing query. Unanalyzable
 /// expressions (subqueries and the like) count as doing so.
 fn mentions_outer(expr: &Expr, ctx: &NameCtx<'_>) -> bool {
@@ -410,13 +486,6 @@ fn column_equality(left_ref: &str, right_ref: &str, col: &str) -> Expr {
     }
 }
 
-fn column_index_ci(table: &Table, name: &str) -> Option<usize> {
-    table
-        .column_metadata()
-        .iter()
-        .position(|c| c.name.eq_ignore_ascii_case(name))
-}
-
 impl<'a> SqlCompiler<'a> {
     /// Plan a FROM clause together with the WHERE clause filtering it.
     pub(crate) fn plan_from(
@@ -426,7 +495,7 @@ impl<'a> SqlCompiler<'a> {
     ) -> SqawkResult<FromPlan<'a>> {
         if self.verbose {
             if from.len() > 1 {
-                eprintln!("Processing multiple tables in FROM clause as CROSS JOINs");
+                diag!("Processing multiple tables in FROM clause as CROSS JOINs");
             }
             for join in from.iter().flat_map(|twj| &twj.joins) {
                 if let Ok((kind, constraint)) = classify_join(&join.join_operator) {
@@ -439,12 +508,12 @@ impl<'a> SqlCompiler<'a> {
                     };
                     let mut title = kind.to_ascii_lowercase();
                     title[..1].make_ascii_uppercase();
-                    eprintln!("Join type: {}", title);
-                    eprintln!("Processing {} JOIN with ON condition", kind);
+                    diag!("Join type: {}", title);
+                    diag!("Processing {} JOIN with ON condition", kind);
                 }
             }
             if let Some(w) = selection {
-                eprintln!("WHERE comparison: {:?}", w);
+                diag!("WHERE comparison: {:?}", w);
             }
         }
 
@@ -459,10 +528,9 @@ impl<'a> SqlCompiler<'a> {
                 table_names: Vec::new(),
                 levels: Vec::new(),
                 groups: Vec::new(),
-                using: Vec::new(),
-                hidden: Vec::new(),
+                using: UsingCols::default(),
+                hidden: HashSet::new(),
                 full_where: None,
-                bare_star: false,
                 const_where,
                 outer: self.outer_scope.clone().map(Box::new),
             });
@@ -548,10 +616,9 @@ impl<'a> SqlCompiler<'a> {
         }
 
         // ---- ON conjuncts per join, with USING / NATURAL lowered onto ON.
-        let mut using: Vec<UsingCol> = Vec::new();
-        let mut hidden: Vec<(usize, usize)> = Vec::new();
+        let mut using = UsingCols::default();
+        let mut hidden: HashSet<(usize, usize)> = HashSet::new();
         let mut join_terms: Vec<Vec<Expr>> = vec![Vec::new(); srcs.len()];
-        let mut bare_star = false;
         for (i, (_, op)) in factors.iter().enumerate() {
             let Some((_, constraint)) = op else { continue };
             let names: Vec<String> = match constraint {
@@ -573,19 +640,18 @@ impl<'a> SqlCompiler<'a> {
                     .filter(|c| {
                         srcs[..i]
                             .iter()
-                            .any(|s| column_index_ci(s.table, &c.name).is_some())
+                            .any(|s| s.table.column_index(&c.name).is_some())
                     })
                     .map(|c| c.name.clone())
                     .collect(),
             };
-            bare_star = true;
             for name in names {
-                let right_col = column_index_ci(srcs[i].table, &name);
+                let right_col = srcs[i].table.column_index(&name);
                 // The leftmost source that has the column.
                 let left = srcs[..i]
                     .iter()
                     .enumerate()
-                    .find_map(|(j, s)| column_index_ci(s.table, &name).map(|c| (j, c)));
+                    .find_map(|(j, s)| s.table.column_index(&name).map(|c| (j, c)));
                 let (Some(right_col), Some((left_src, left_col))) = (right_col, left) else {
                     return Err(SqawkError::InvalidSqlQuery(format!(
                         "Cannot join using column '{}': it must exist on both sides",
@@ -597,17 +663,11 @@ impl<'a> SqlCompiler<'a> {
                     &srcs[i].refname,
                     &name,
                 ));
-                hidden.push((i, right_col));
+                hidden.insert((i, right_col));
                 let key = name.to_ascii_lowercase();
                 let left_ref = (srcs[left_src].cursor, left_col);
                 let right_ref = (srcs[i].cursor, right_col);
-                match using.iter_mut().find(|u| u.refs.contains(&left_ref)) {
-                    Some(u) => u.refs.push(right_ref),
-                    None => using.push(UsingCol {
-                        name: key,
-                        refs: vec![left_ref, right_ref],
-                    }),
-                }
+                using.merge(key, left_ref, right_ref);
             }
         }
 
@@ -619,7 +679,6 @@ impl<'a> SqlCompiler<'a> {
             using,
             hidden,
             full_where: None,
-            bare_star,
             const_where: Vec::new(),
             outer,
         };
@@ -724,8 +783,16 @@ impl<'a> SqlCompiler<'a> {
             plan.full_where = Some(where_terms);
         } else {
             for term in where_terms {
-                match expr_sources(&term, &ctx) {
+                let sources =
+                    expr_sources(&term, &ctx).or_else(|| self.compiled_term_sources(&term, &ctx));
+                match sources {
                     None => plan.levels[last].post_terms.push(term),
+                    // A conjunct reading no table of this FROM (a constant,
+                    // a test of an enclosing query's row, an uncorrelated
+                    // subquery) is tested once, before the nest: when it is
+                    // false no row can qualify, and in a correlated
+                    // subquery the scan is skipped for that outer row.
+                    Some(s) if s.is_empty() => plan.const_where.push(term),
                     Some(s) => {
                         let at = plan.max_level(&s);
                         match plan.group_of(at).map(|g| g.end) {
@@ -795,6 +862,16 @@ impl<'a> SqlCompiler<'a> {
         body: &mut dyn FnMut(&mut Self, &NameCtx<'a>) -> SqawkResult<()>,
     ) -> SqawkResult<()> {
         let ctx = plan.ctx();
+        // WHERE terms that read no table are tested before anything else, as
+        // SQLite does: when one is false no table is opened, so a CTE or
+        // derived table read only here is never computed (see
+        // `Database::add_lazy_table`), and no hash index is built. Nothing
+        // is output then, not even a FULL JOIN's unmatched rows.
+        let skip = self.label();
+        for term in &plan.const_where {
+            let r = self.code_expr(term, &ctx, None)?;
+            self.emit_jump_to(OpCode::IfZ, r, skip, 0, None, "WHERE: before the scan");
+        }
         // A subquery's loop nest may run once per outer row. Its cursors and
         // hash indexes do not depend on the outer row, so they are set up
         // only the first time. (Not for FULL JOIN, whose per-row match marks
@@ -811,50 +888,19 @@ impl<'a> SqlCompiler<'a> {
                 "subquery cursors: open once",
             );
         }
-        for (i, name) in plan.table_names.iter().enumerate() {
-            let cursor = plan.cursor(i);
-            self.emit(
-                OpCode::OpenRead,
-                cursor,
-                0,
-                0,
-                Some(name.clone()),
-                &format!("Open {} as cursor {}", name, cursor),
-            );
-        }
-
-        // Build each hash index once, before the nest: its key expressions
-        // read only the inner table.
-        for level in &plan.levels {
-            let Some((inner, _)) = &level.hash else {
-                continue;
-            };
-            let cursor = plan.cursor(level.src);
-            let top = self.label();
-            let done = self.label();
-            self.emit_jump_to(
-                OpCode::Rewind,
-                cursor,
-                done,
-                0,
-                None,
-                "hash build: scan inner",
-            );
-            self.resolve(top);
-            let keys = self.allocate_registers(inner.len());
-            for (j, e) in inner.iter().enumerate() {
-                self.code_expr(e, &ctx, Some(keys + j as i64))?;
+        // An inner level's table is opened, and its hash index built, when
+        // the nest first reaches that level (see `deferred_levels`); every
+        // other table here, before the nest.
+        let deferred = plan.deferred_levels();
+        for (lvl, level) in plan.levels.iter().enumerate() {
+            if !deferred[lvl] {
+                self.emit_open(plan, level.src);
             }
-            self.emit(
-                OpCode::HashInsert,
-                cursor,
-                keys,
-                inner.len() as i64,
-                None,
-                "hash build: index row",
-            );
-            self.emit_jump_to(OpCode::Next, cursor, top, 0, None, "");
-            self.resolve(done);
+        }
+        for (lvl, level) in plan.levels.iter().enumerate() {
+            if !deferred[lvl] {
+                self.emit_hash_build(plan, &ctx, level)?;
+            }
         }
         if once {
             self.resolve(opened);
@@ -868,15 +914,14 @@ impl<'a> SqlCompiler<'a> {
         let match_labels: Vec<Label> = plan.groups.iter().map(|_| self.label()).collect();
         if plan.levels.is_empty() {
             // No FROM: the body runs once, if WHERE holds.
-            let skip = self.label();
-            for term in &plan.const_where {
-                let r = self.code_expr(term, &ctx, None)?;
-                self.emit_jump_to(OpCode::IfZ, r, skip, 0, None, "WHERE");
-            }
             body(self, &ctx)?;
-            self.resolve(skip);
         } else {
-            self.emit_level(plan, &ctx, 0, &match_regs, &match_labels, body)?;
+            let levels = Levels {
+                deferred: &deferred,
+                match_regs: &match_regs,
+                match_labels: &match_labels,
+            };
+            self.emit_level(plan, &ctx, 0, &levels, body)?;
         }
 
         // FULL JOIN: right rows no left row matched, with the left side NULL.
@@ -916,6 +961,7 @@ impl<'a> SqlCompiler<'a> {
             self.resolve(done);
         }
 
+        self.resolve(skip);
         if !once {
             for i in 0..plan.srcs.len() {
                 self.emit(OpCode::Close, plan.cursor(i), 0, 0, None, "");
@@ -924,19 +970,88 @@ impl<'a> SqlCompiler<'a> {
         Ok(())
     }
 
+    /// Open source `src`'s table on its cursor.
+    fn emit_open(&mut self, plan: &FromPlan<'a>, src: usize) {
+        let cursor = plan.cursor(src);
+        let name = &plan.table_names[src];
+        self.emit(
+            OpCode::OpenRead,
+            cursor,
+            0,
+            0,
+            Some(name.clone()),
+            &format!("Open {} as cursor {}", name, cursor),
+        );
+    }
+
+    /// Build `level`'s hash index, if it is a hash join: its key
+    /// expressions read only the level's own table.
+    fn emit_hash_build(
+        &mut self,
+        plan: &FromPlan<'a>,
+        ctx: &NameCtx<'a>,
+        level: &Level,
+    ) -> SqawkResult<()> {
+        let Some((inner, _)) = &level.hash else {
+            return Ok(());
+        };
+        let cursor = plan.cursor(level.src);
+        let top = self.label();
+        let done = self.label();
+        self.emit_jump_to(
+            OpCode::Rewind,
+            cursor,
+            done,
+            0,
+            None,
+            "hash build: scan inner",
+        );
+        self.resolve(top);
+        let keys = self.allocate_registers(inner.len());
+        for (j, e) in inner.iter().enumerate() {
+            self.code_expr(e, ctx, Some(keys + j as i64))?;
+        }
+        self.emit(
+            OpCode::HashInsert,
+            cursor,
+            keys,
+            inner.len() as i64,
+            None,
+            "hash build: index row",
+        );
+        self.emit_jump_to(OpCode::Next, cursor, top, 0, None, "");
+        self.resolve(done);
+        Ok(())
+    }
+
     fn emit_level(
         &mut self,
         plan: &FromPlan<'a>,
         ctx: &NameCtx<'a>,
         lvl: usize,
-        match_regs: &[i64],
-        match_labels: &[Label],
+        levels: &Levels<'_>,
         body: &mut dyn FnMut(&mut Self, &NameCtx<'a>) -> SqawkResult<()>,
     ) -> SqawkResult<()> {
+        let Levels {
+            deferred,
+            match_regs,
+            match_labels,
+        } = *levels;
         let level = &plan.levels[lvl];
         let cursor = plan.cursor(level.src);
         let starts = plan.groups.iter().position(|g| g.start == lvl);
         let ends = plan.groups.iter().position(|g| g.end == lvl);
+
+        if deferred[lvl] {
+            // First time here: open the table and build its hash index. A
+            // table no outer row reaches is never opened, so a CTE or
+            // derived table there is never computed.
+            let ready = self.label();
+            self.emit_jump_to(OpCode::Once, 0, ready, 0, None, "open on first use");
+            self.emit_open(plan, level.src);
+            self.emit_hash_build(plan, ctx, level)?;
+            self.resolve(ready);
+        }
 
         if let Some(g) = starts {
             self.emit(
@@ -1009,7 +1124,7 @@ impl<'a> SqlCompiler<'a> {
         }
 
         if lvl + 1 < plan.levels.len() {
-            self.emit_level(plan, ctx, lvl + 1, match_regs, match_labels, body)?;
+            self.emit_level(plan, ctx, lvl + 1, levels, body)?;
         } else {
             body(self, ctx)?;
         }

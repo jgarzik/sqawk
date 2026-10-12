@@ -1,19 +1,16 @@
-//! Tests for headerless file auto-detection
+//! Tests for headerless files (`--no-header`)
 //!
-//! This file contains tests for automatic detection of files without headers
-//! and the automatic generation of column names (a, b, c, ...).
-//!
-//! The guess applies only to non-.csv files: a `.csv` file's first line is
-//! always its header, unless `--no-header` says the file has none.
+//! The first line of every file is its header unless `--no-header` says the
+//! file has none (or `--tabledef` names the columns); there is no guessing.
+//! Headerless columns are named a, b, c, ...
 
 use crate::helpers::{create_custom_csv, create_temp_dir};
 
 #[test]
 fn test_headerless_auto_detect_numeric_first_row() -> Result<(), Box<dyn std::error::Error>> {
-    // Test auto-detection when first row contains numeric values
+    // A numeric first row is data under --no-header
     let temp_dir = create_temp_dir()?;
 
-    // First row has numbers - should be detected as data, not headers
     let data_file = create_custom_csv(
         temp_dir.path(),
         "numbers.txt",
@@ -22,6 +19,7 @@ fn test_headerless_auto_detect_numeric_first_row() -> Result<(), Box<dyn std::er
 
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-F,")
+        .arg("--no-header")
         .arg("-s")
         .arg("SELECT a, b, c FROM numbers")
         .arg(data_file.to_str().unwrap());
@@ -36,10 +34,9 @@ fn test_headerless_auto_detect_numeric_first_row() -> Result<(), Box<dyn std::er
 
 #[test]
 fn test_headerless_passwd_style() -> Result<(), Box<dyn std::error::Error>> {
-    // Test auto-detection for /etc/passwd style files
+    // /etc/passwd style files: -F: --no-header
     let temp_dir = create_temp_dir()?;
 
-    // passwd-style: starts with "root" which triggers headerless detection
     let data_file = create_custom_csv(
         temp_dir.path(),
         "passwd",
@@ -48,6 +45,7 @@ fn test_headerless_passwd_style() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-F:")
+        .arg("--no-header")
         .arg("-s")
         .arg("SELECT a, c, f FROM passwd")
         .arg(data_file.to_str().unwrap());
@@ -62,10 +60,9 @@ fn test_headerless_passwd_style() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_headerless_path_in_first_row() -> Result<(), Box<dyn std::error::Error>> {
-    // Test auto-detection when first row contains a path
+    // A first row holding a path is data under --no-header
     let temp_dir = create_temp_dir()?;
 
-    // First field starts with "/" - should be detected as data
     let data_file = create_custom_csv(
         temp_dir.path(),
         "paths.txt",
@@ -74,6 +71,7 @@ fn test_headerless_path_in_first_row() -> Result<(), Box<dyn std::error::Error>>
 
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-F,")
+        .arg("--no-header")
         .arg("-s")
         .arg("SELECT a, b FROM paths")
         .arg(data_file.to_str().unwrap());
@@ -95,6 +93,7 @@ fn test_headerless_alphabetic_columns() -> Result<(), Box<dyn std::error::Error>
 
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-F,")
+        .arg("--no-header")
         .arg("-s")
         .arg("SELECT a, b, c, d, e FROM data")
         .arg(data_file.to_str().unwrap());
@@ -120,6 +119,7 @@ fn test_headerless_filter_query() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-F,")
+        .arg("--no-header")
         .arg("-s")
         .arg("SELECT b FROM data WHERE c > 75")
         .arg(data_file.to_str().unwrap());
@@ -145,6 +145,7 @@ fn test_headerless_aggregate() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-F,")
+        .arg("--no-header")
         .arg("-s")
         .arg("SELECT b, SUM(c) FROM data GROUP BY b")
         .arg(data_file.to_str().unwrap());
@@ -159,7 +160,7 @@ fn test_headerless_aggregate() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_headerless_with_comments() -> Result<(), Box<dyn std::error::Error>> {
-    // Test headerless file with comment lines
+    // Headerless file with comment lines (--comments)
     let temp_dir = create_temp_dir()?;
 
     let data_file = create_custom_csv(
@@ -170,6 +171,8 @@ fn test_headerless_with_comments() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-F,")
+        .arg("--no-header")
+        .arg("--comments")
         .arg("-s")
         .arg("SELECT * FROM data")
         .arg(data_file.to_str().unwrap());
@@ -184,13 +187,14 @@ fn test_headerless_with_comments() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_headerless_asterisk_field() -> Result<(), Box<dyn std::error::Error>> {
-    // Test auto-detection when field contains asterisk (like passwd x field)
+    // A field holding an asterisk (like the passwd x field)
     let temp_dir = create_temp_dir()?;
 
     let data_file = create_custom_csv(temp_dir.path(), "data.txt", "user1,*,1001\nuser2,*,1002\n")?;
 
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-F,")
+        .arg("--no-header")
         .arg("-s")
         .arg("SELECT a, c FROM data")
         .arg(data_file.to_str().unwrap());
@@ -232,7 +236,7 @@ fn test_no_header_writeback_adds_no_header() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn test_guessed_headerless_writeback_adds_no_header() -> Result<(), Box<dyn std::error::Error>> {
+fn test_colon_no_header_writeback_adds_no_header() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = create_temp_dir()?;
     let data_file = create_custom_csv(
         temp_dir.path(),
@@ -242,7 +246,7 @@ fn test_guessed_headerless_writeback_adds_no_header() -> Result<(), Box<dyn std:
     let (_stdout, stderr, ok) = crate::helpers::run_sql(
         "UPDATE passwd SET g = '/bin/bash' WHERE a = 'user'",
         &[data_file.to_str().unwrap()],
-        &["-F:", "--write"],
+        &["-F:", "--no-header", "--write"],
     )?;
     assert!(ok, "{stderr}");
     assert_eq!(

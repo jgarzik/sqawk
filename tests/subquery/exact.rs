@@ -378,6 +378,6 @@ fn in_subquery_with_two_columns_is_error() -> TestResult {
 fn row_value_in_subquery_is_unsupported() -> TestResult {
     check_fails(
         "SELECT id FROM emp WHERE (id, name) IN (SELECT id, name FROM emp)",
-        "Unsupported",
+        "not supported",
     )
 }

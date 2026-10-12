@@ -166,7 +166,7 @@ mod sqlite_semantics {
             &[ONE],
             "SELECT CAST('12abc' AS REAL) AS a, CAST('abc' AS REAL) AS b, \
              CAST('1e3x' AS REAL) AS c, typeof(CAST(5 AS REAL)) AS d FROM one",
-            "a,b,c,d\n12,0,1000,real",
+            "a,b,c,d\n12.0,0.0,1000.0,real",
         )
     }
 

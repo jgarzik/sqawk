@@ -12,20 +12,99 @@ use crate::capacity::DEFAULT_TABLE_CAPACITY;
 use crate::config::AppConfig;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
-use std::collections::HashMap;
+use crate::vm::bytecode::Program;
+use std::cell::OnceCell;
+use std::collections::{HashMap, HashSet};
 
 /// Represents the central database that holds all tables
 pub struct Database {
     /// In-memory tables indexed by their names
     tables: HashMap<String, Table>,
+
+    /// The tables of `tables` whose rows a program computes when a cursor
+    /// first opens them (see [`Database::add_lazy_table`]).
+    lazy: HashMap<String, LazyTable>,
+
+    /// Names of the tables whose contents or schema changed since they were
+    /// loaded or created: the tables `--write` writes back. DROP TABLE takes
+    /// a name out again.
+    modified: HashSet<String>,
+
+    /// The open transaction, if any (BEGIN ... COMMIT / ROLLBACK).
+    transaction: Option<Transaction>,
+}
+
+/// What ROLLBACK needs to put the database back as it was at BEGIN.
+///
+/// Copy-on-write: a table is copied the first time the transaction is about
+/// to change it (`get_table_mut`), moved here when the transaction drops it,
+/// and recorded as absent when the transaction creates it. BEGIN itself
+/// copies nothing, and a table the transaction only reads is never copied.
+struct Transaction {
+    /// Each table the transaction touched, as it was at BEGIN (`None`: it
+    /// did not exist).
+    originals: HashMap<String, Option<Table>>,
+    /// The modified-table set at BEGIN.
+    modified: HashSet<String>,
+}
+
+/// A CTE's or derived table's rows, computed on first use: SQLite codes such
+/// a subquery behind OP_Once (or as a co-routine) where the query first
+/// reads it, so a subquery that is never read is never run.
+pub struct LazyTable {
+    /// The query; its result columns are the table's.
+    program: Program,
+    /// The table with its rows, once computed.
+    filled: OnceCell<Table>,
+}
+
+impl LazyTable {
+    /// The program that computes the rows.
+    pub fn program(&self) -> &Program {
+        &self.program
+    }
+
+    /// The computed table, or `None` before it is computed.
+    pub fn filled(&self) -> Option<&Table> {
+        self.filled.get()
+    }
+
+    /// Record the computed table and return it. A table already recorded
+    /// is kept: its rows are the same.
+    pub fn fill(&self, table: Table) -> &Table {
+        self.filled.get_or_init(|| table)
+    }
 }
 
 /// Methods for direct table manipulation - used only in special cases
 impl Database {
+    /// Add `table`, which has columns and no rows, as a table whose rows
+    /// `program` computes when a cursor first opens it ([`LazyTable`]). The
+    /// program runs over the database as it is then; nothing it reads
+    /// changes within a statement, and the table lives only for one.
+    pub fn add_lazy_table(
+        &mut self,
+        name: String,
+        table: Table,
+        program: Program,
+    ) -> SqawkResult<()> {
+        self.add_table(name.clone(), table)?;
+        self.lazy.insert(
+            name,
+            LazyTable {
+                program,
+                filled: OnceCell::new(),
+            },
+        );
+        Ok(())
+    }
+
+    /// The lazy table named `name`, if it is one.
+    pub fn lazy_table(&self, name: &str) -> Option<&LazyTable> {
+        self.lazy.get(name)
+    }
+
     /// Remove a table from the database by name
-    ///
-    /// This is a specialized method intended for use when replacing tables
-    /// that were loaded with different schemas.
     ///
     /// # Arguments
     /// * `name` - The name of the table to remove
@@ -33,7 +112,79 @@ impl Database {
     /// # Returns
     /// * `true` if the table was found and removed, `false` otherwise
     pub fn remove_table(&mut self, name: &str) -> bool {
-        self.tables.remove(name).is_some()
+        let Some(table) = self.tables.remove(name) else {
+            return false;
+        };
+        self.lazy.remove(name);
+        self.modified.remove(name);
+        if let Some(txn) = &mut self.transaction {
+            txn.originals.entry(name.to_string()).or_insert(Some(table));
+        }
+        true
+    }
+}
+
+/// Transactions and the modified-table set.
+impl Database {
+    /// BEGIN: open a transaction.
+    pub fn begin(&mut self) -> SqawkResult<()> {
+        if self.transaction.is_some() {
+            return Err(SqawkError::InvalidSqlQuery(
+                "cannot start a transaction within a transaction".to_string(),
+            ));
+        }
+        self.transaction = Some(Transaction {
+            originals: HashMap::new(),
+            modified: self.modified.clone(),
+        });
+        Ok(())
+    }
+
+    /// COMMIT / END: keep the transaction's changes.
+    pub fn commit(&mut self) -> SqawkResult<()> {
+        self.transaction.take().map(drop).ok_or_else(|| {
+            SqawkError::InvalidSqlQuery("cannot commit - no transaction is active".to_string())
+        })
+    }
+
+    /// ROLLBACK: put every table, and the modified-table set, back as they
+    /// were at BEGIN.
+    pub fn rollback(&mut self) -> SqawkResult<()> {
+        let txn = self.transaction.take().ok_or_else(|| {
+            SqawkError::InvalidSqlQuery("cannot rollback - no transaction is active".to_string())
+        })?;
+        for (name, original) in txn.originals {
+            self.tables.remove(&name);
+            if let Some(table) = original {
+                self.tables.insert(name, table);
+            }
+        }
+        self.modified = txn.modified;
+        Ok(())
+    }
+
+    /// Whether a transaction is open.
+    pub fn in_transaction(&self) -> bool {
+        self.transaction.is_some()
+    }
+
+    /// Record that `name` changed and must be written back by `--write`.
+    pub fn mark_modified(&mut self, name: &str) {
+        if !self.modified.contains(name) {
+            self.modified.insert(name.to_string());
+        }
+    }
+
+    /// Whether `name` changed since it was loaded or created.
+    pub fn is_modified(&self, name: &str) -> bool {
+        self.modified.contains(name)
+    }
+
+    /// The modified tables, in ascending name order.
+    pub fn modified_tables(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.modified.iter().cloned().collect();
+        names.sort();
+        names
     }
 }
 
@@ -48,6 +199,9 @@ impl Database {
     pub fn new() -> Self {
         Database {
             tables: HashMap::with_capacity(DEFAULT_TABLE_CAPACITY),
+            lazy: HashMap::new(),
+            modified: HashSet::new(),
+            transaction: None,
         }
     }
 
@@ -65,6 +219,9 @@ impl Database {
             return Err(SqawkError::TableAlreadyExists(name));
         }
 
+        if let Some(txn) = &mut self.transaction {
+            txn.originals.entry(name.clone()).or_insert(None);
+        }
         self.tables.insert(name, table);
         Ok(())
     }
@@ -91,7 +248,17 @@ impl Database {
     /// # Returns
     /// * `Ok(&mut Table)` mutable reference to the requested table
     /// * `Err` if the table doesn't exist
+    ///
+    /// Inside a transaction, the first call for a table saves a copy of it
+    /// for ROLLBACK.
     pub fn get_table_mut(&mut self, name: &str) -> SqawkResult<&mut Table> {
+        if let Some(txn) = &mut self.transaction {
+            if !txn.originals.contains_key(name) {
+                if let Some(table) = self.tables.get(name) {
+                    txn.originals.insert(name.to_string(), Some(table.clone()));
+                }
+            }
+        }
         self.tables
             .get_mut(name)
             .ok_or_else(|| SqawkError::TableNotFound(name.to_string()))
@@ -141,49 +308,73 @@ impl Database {
     /// # Arguments
     /// * `config` - The application configuration containing table definitions
     ///
+    /// Each definition is `NAME:COL1,COL2,...` and becomes a placeholder
+    /// table that the input file loaded as NAME fills in (see
+    /// [`Database::check_table_definitions_used`]).
+    ///
     /// # Returns
     /// * `Ok(())` if all table definitions were compiled successfully
-    /// * `Err` if there was an issue with any table definition
+    /// * `Err` for a definition without `:`, an empty table or column name,
+    ///   a column named twice, or a table defined twice
     pub fn compile_table_definitions(&mut self, config: &AppConfig) -> SqawkResult<()> {
-        // Process each table definition string (format: "table_name:col1,col2,...")
         for tabledef in config.table_definitions() {
-            if let Some((table_name, columns_str)) = tabledef.split_once(':') {
-                let columns = columns_str
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect::<Vec<String>>();
-
-                if !columns.is_empty() {
-                    // Create a new table with the specified columns
-                    // Note: No file_path is assigned here as this is a table definition only
-                    let columns_len = columns.len(); // Store the length before we move columns
-                    let mut table = Table::new(table_name, columns, None);
-                    table.set_placeholder(true);
-
-                    // Add the table to the database, overwriting any existing definition with the same name
-                    // This ensures CLI definitions take precedence
-                    if self.has_table(table_name) {
-                        // Remove the existing table first to avoid conflict errors
-                        // Use direct replacement via insert/remove to avoid errors with private fields
-                        self.tables.remove(table_name);
-                    }
-
-                    self.add_table(table_name.to_string(), table)?;
-
-                    if config.verbose() {
-                        eprintln!(
-                            "Compiled table definition for '{}' with {} columns",
-                            table_name, columns_len
-                        );
-                    }
+            let bad = |why: &str| {
+                SqawkError::InvalidFileSpec(format!("invalid --tabledef '{}': {}", tabledef, why))
+            };
+            let (table_name, columns_str) = tabledef
+                .split_once(':')
+                .ok_or_else(|| bad("expected NAME:COL1,COL2,..."))?;
+            let table_name = table_name.trim();
+            if table_name.is_empty() {
+                return Err(bad("empty table name"));
+            }
+            let columns: Vec<String> = columns_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+            for (i, col) in columns.iter().enumerate() {
+                if col.is_empty() {
+                    return Err(bad("empty column name"));
                 }
-            } else if config.verbose() {
-                eprintln!("Invalid table definition format: {}", tabledef);
-                eprintln!("Expected format: table_name:col1,col2,...");
+                if columns[..i].iter().any(|c| c.eq_ignore_ascii_case(col)) {
+                    return Err(bad(&format!("duplicate column name: {}", col)));
+                }
+            }
+            if self.has_table(table_name) {
+                return Err(bad(&format!("table {} is defined twice", table_name)));
+            }
+
+            let columns_len = columns.len();
+            let mut table = Table::new(table_name, columns, None);
+            table.set_placeholder(true);
+            self.add_table(table_name.to_string(), table)?;
+
+            if config.verbose() {
+                diag!(
+                    "Compiled table definition for '{}' with {} columns",
+                    table_name,
+                    columns_len
+                );
             }
         }
 
         Ok(())
+    }
+
+    /// Fail if a `--tabledef` names a table that no input file loaded: its
+    /// placeholder is still in the database once every file is loaded.
+    pub fn check_table_definitions_used(&self) -> SqawkResult<()> {
+        match self
+            .table_names()
+            .into_iter()
+            .find(|name| self.tables[name].is_placeholder())
+        {
+            Some(name) => Err(SqawkError::InvalidFileSpec(format!(
+                "--tabledef names table '{}', which no input file loads",
+                name
+            ))),
+            None => Ok(()),
+        }
     }
 }
 
@@ -228,7 +419,7 @@ mod tests {
         assert!(db.has_table("table2"));
 
         // Remove a table manually
-        db.tables.remove("table1");
+        db.remove_table("table1");
         assert_eq!(db.table_count(), 1);
         assert!(!db.has_table("table1"));
         assert!(db.has_table("table2"));

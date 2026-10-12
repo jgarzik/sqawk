@@ -6,14 +6,14 @@
 
 use super::agg::AggAccumulator;
 use super::arith::{self, ArithOp, Num};
-use super::bytecode::{Instruction, KeyOrder, OpCode, Program, Register, AGG_SEP};
+use super::bytecode::{spec_unescape, Instruction, KeyOrder, OpCode, Program, Register, AGG_SEP};
 use super::{func, like};
 use crate::capacity::{
     DEFAULT_ACCUMULATOR_CAPACITY, DEFAULT_CURSOR_CAPACITY, DEFAULT_MODIFICATIONS_CAPACITY,
     DEFAULT_REGISTER_CAPACITY, DEFAULT_RESULT_CAPACITY, DEFAULT_SORTER_CAPACITY,
-    DEFAULT_SORTER_ROWS_CAPACITY, DEFAULT_SORT_KEYS_CAPACITY,
+    DEFAULT_SORTER_ROWS_CAPACITY,
 };
-use crate::database::Database;
+use crate::database::{Database, LazyTable};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{numeric_text, ColumnDefinition, Table, Value};
 use std::collections::HashMap;
@@ -27,16 +27,23 @@ enum CursorData<'a> {
     Ephemeral {
         rows: Vec<Vec<Value>>,
         col_count: usize,
-        sort_keys: Vec<KeyOrder>,
-        sorted: bool,
-        sequence: i64,
         name: Option<String>, // Optional name for pending tables
-        /// A KEYED ephemeral table (OpenEphemeral P3 = 1): each distinct
-        /// row once, by its [`RowKey`]. `rows` is filled from it, sorted, on
-        /// Rewind.
-        set: Option<HashMap<Vec<RowKey>, Vec<Value>>>,
+        /// A KEYED ephemeral table (OpenEphemeral P3 = 1 or 2): each
+        /// distinct row once, by its [`RowKey`]. `rows` is filled from it,
+        /// sorted, on Rewind.
+        set: Option<KeyedRows>,
+        /// How a keyed table keys a column: [`row_key`] (P3 = 1; DISTINCT
+        /// and the compound operators) or [`value_cmp_key`] (P3 = 2; an IN
+        /// subquery's set, which must agree with `=`).
+        key_of: KeyFn,
     },
 }
+
+/// The rows of a keyed ephemeral table, by key.
+type KeyedRows = HashMap<Vec<RowKey>, Vec<Value>>;
+
+/// How a keyed ephemeral table keys one column.
+type KeyFn = fn(&Value) -> RowKey;
 
 /// One column of a keyed ephemeral row, normalized so that rows SQL calls
 /// equal for DISTINCT and the compound operators hash alike: NULL equals
@@ -56,20 +63,53 @@ pub(super) fn row_key(v: &Value) -> RowKey {
         Value::Null => RowKey::Null,
         Value::Integer(i) => RowKey::Int(*i),
         Value::Boolean(b) => RowKey::Int(*b as i64),
-        Value::Float(f) => {
-            // Every integral real in [-2^63, 2^63) is exactly an i64.
-            if f.fract() == 0.0
-                && *f >= -9_223_372_036_854_775_808.0
-                && *f < 9_223_372_036_854_775_808.0
-            {
-                RowKey::Int(*f as i64)
-            } else if f.is_nan() {
-                RowKey::Null
-            } else {
-                RowKey::Real(f.to_bits())
-            }
-        }
+        Value::Float(f) => real_key(*f),
         Value::String(s) => RowKey::Text(s.to_string()),
+    }
+}
+
+/// A real's key: an integral real in the i64 range is that integer, NaN is
+/// NULL, any other real its bit pattern (negative zero is integral, so it
+/// keys as 0).
+fn real_key(f: f64) -> RowKey {
+    // Every integral real in [-2^63, 2^63) is exactly an i64.
+    if f.fract() == 0.0 && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&f)
+    {
+        RowKey::Int(f as i64)
+    } else if f.is_nan() {
+        RowKey::Null
+    } else {
+        RowKey::Real(f.to_bits())
+    }
+}
+
+/// The key under which values that `=` calls equal hash alike (IN
+/// subqueries, hash joins): a number, and text with a numeric reading (see
+/// [`numeric_text`]), key as that number -- exactly, so two keys are equal
+/// precisely when [`VmEngine::sql_compare`] says Equal -- and other text by
+/// its bytes. Unlike [`row_key`], text `'1'` and integer 1 share a key.
+fn cmp_key(r: &Register) -> RowKey {
+    match r {
+        Register::Null => RowKey::Null,
+        Register::Integer(i) => RowKey::Int(*i),
+        Register::Boolean(b) => RowKey::Int(*b as i64),
+        Register::Float(f) => real_key(*f),
+        Register::String(s) => match numeric_text(s) {
+            Some(Value::Integer(i)) => RowKey::Int(i),
+            Some(Value::Float(f)) => real_key(f),
+            _ => RowKey::Text(s.clone()),
+        },
+    }
+}
+
+/// [`cmp_key`] of a stored value.
+fn value_cmp_key(v: &Value) -> RowKey {
+    match v {
+        Value::String(s) => match numeric_text(s) {
+            Some(n) => row_key(&n),
+            None => RowKey::Text(s.to_string()),
+        },
+        other => row_key(other),
     }
 }
 
@@ -93,48 +133,18 @@ struct Cursor<'a> {
     matched: Vec<bool>,
 }
 
-/// One component of a hash-join key.
-///
-/// Normalized so that values the `Eq` opcode treats as equal hash alike:
-/// every number, and every string that parses as one, becomes its f64 bit
-/// pattern. Two values in one bucket are not necessarily equal (`'1'` and
-/// `'1.0'` are distinct strings), which is fine because the join condition
-/// is re-evaluated on every candidate row.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum HashKeyPart {
-    Num(u64),
-    Str(String),
-}
-
 /// How one key register participates in a hash join.
 enum KeyClass {
     /// NULL (or NaN): equal to nothing, so the row is never inserted/matched.
     Never,
-    /// A value whose equality the bucketing cannot express (a boolean, which
-    /// `Eq` compares numerically against numbers but textually against
-    /// strings). Such rows are kept apart and checked against every probe.
-    Wild,
-    Key(HashKeyPart),
+    /// The register's [`cmp_key`]: rows match exactly when keys are equal.
+    Key(RowKey),
 }
 
 fn hash_key_class(reg: &Register) -> KeyClass {
-    fn num(f: f64) -> KeyClass {
-        if f.is_nan() {
-            KeyClass::Never
-        } else {
-            // 0.0 and -0.0 compare equal.
-            KeyClass::Key(HashKeyPart::Num(if f == 0.0 { 0 } else { f.to_bits() }))
-        }
-    }
-    match reg {
-        Register::Null => KeyClass::Never,
-        Register::Integer(i) => num(*i as f64),
-        Register::Float(f) => num(*f),
-        Register::Boolean(_) => KeyClass::Wild,
-        Register::String(s) => match s.trim().parse::<f64>() {
-            Ok(f) if !f.is_nan() => num(f),
-            _ => KeyClass::Key(HashKeyPart::Str(s.clone())),
-        },
+    match cmp_key(reg) {
+        RowKey::Null => KeyClass::Never,
+        key => KeyClass::Key(key),
     }
 }
 
@@ -142,11 +152,9 @@ fn hash_key_class(reg: &Register) -> KeyClass {
 #[derive(Default)]
 struct HashIndex {
     /// Key -> index into `buckets`.
-    map: HashMap<Vec<HashKeyPart>, usize>,
+    map: HashMap<Vec<RowKey>, usize>,
     /// Row positions per distinct key, in insertion (scan) order.
     buckets: Vec<Vec<usize>>,
-    /// Rows with a `Wild` key component, candidates for every probe.
-    wild: Vec<usize>,
 }
 
 /// Where HashProbe/HashNext are in the candidate list.
@@ -154,8 +162,6 @@ struct HashIndex {
 struct ProbeState {
     /// Bucket of the probe key, if any row had it.
     bucket: Option<usize>,
-    /// The probe key had a `Wild` component: every row is a candidate.
-    all: bool,
     /// Next candidate to return.
     pos: usize,
 }
@@ -174,17 +180,16 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Create ephemeral cursor; `keyed` makes it a set of distinct rows.
-    fn ephemeral(col_count: usize, sort_keys: Vec<KeyOrder>, keyed: bool) -> Self {
+    /// Create ephemeral cursor. `keyed` (OpenEphemeral P3) 1 makes it a set
+    /// of distinct rows keyed by [`row_key`], 2 by [`value_cmp_key`].
+    fn ephemeral(col_count: usize, keyed: i64) -> Self {
         Self {
             data: CursorData::Ephemeral {
                 rows: Vec::with_capacity(DEFAULT_SORTER_ROWS_CAPACITY),
                 col_count,
-                sort_keys,
-                sorted: false,
-                sequence: 0,
                 name: None,
-                set: keyed.then(HashMap::new),
+                set: (keyed != 0).then(HashMap::new),
+                key_of: if keyed == 2 { value_cmp_key } else { row_key },
             },
             position: 0,
             valid: false,
@@ -201,11 +206,9 @@ impl<'a> Cursor<'a> {
             data: CursorData::Ephemeral {
                 rows: Vec::with_capacity(DEFAULT_SORTER_ROWS_CAPACITY),
                 col_count,
-                sort_keys: Vec::with_capacity(DEFAULT_SORT_KEYS_CAPACITY),
-                sorted: false,
-                sequence: 0,
                 name: Some(table_name),
                 set: None,
+                key_of: row_key,
             },
             position: 0,
             valid: false,
@@ -264,17 +267,7 @@ impl<'a> Cursor<'a> {
     /// The `i`-th candidate row of the current hash probe.
     fn probe_candidate(&self, i: usize) -> Option<usize> {
         let index = self.hash.as_ref()?;
-        if self.probe.all {
-            return (i < self.rows().len()).then_some(i);
-        }
-        let bucket: &[usize] = match self.probe.bucket {
-            Some(b) => &index.buckets[b],
-            None => &[],
-        };
-        match bucket.get(i) {
-            Some(&row) => Some(row),
-            None => index.wild.get(i - bucket.len()).copied(),
-        }
+        index.buckets[self.probe.bucket?].get(i).copied()
     }
 
     /// Step to the next hash-probe candidate. False when there is none, in
@@ -354,15 +347,18 @@ impl<'a> Cursor<'a> {
     /// Insert row into ephemeral cursor (IdxInsert opcode)
     fn insert_row(&mut self, row: Vec<Value>) -> Result<(), SqawkError> {
         match &mut self.data {
-            CursorData::Ephemeral { set: Some(set), .. } => {
+            CursorData::Ephemeral {
+                set: Some(set),
+                key_of,
+                ..
+            } => {
                 // A row already present is replaced, as SQLite's IdxInsert
                 // does: `SELECT 1 UNION SELECT 1.0` yields 1.0.
-                set.insert(row.iter().map(row_key).collect(), row);
+                set.insert(row.iter().map(*key_of).collect(), row);
                 Ok(())
             }
-            CursorData::Ephemeral { rows, sorted, .. } => {
+            CursorData::Ephemeral { rows, .. } => {
                 rows.push(row);
-                *sorted = false;
                 Ok(())
             }
             CursorData::Table { .. } => Err(SqawkError::VmError(
@@ -371,68 +367,19 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// The keyed-set of a keyed ephemeral cursor (Found, NotFound, IdxDelete).
-    fn key_set(&mut self) -> Result<&mut HashMap<Vec<RowKey>, Vec<Value>>, SqawkError> {
+    /// The keyed-set of a keyed ephemeral cursor (Found, NotFound,
+    /// IdxDelete), and how it keys a value.
+    fn key_set(&mut self) -> Result<(&mut KeyedRows, KeyFn), SqawkError> {
         match &mut self.data {
-            CursorData::Ephemeral { set: Some(set), .. } => Ok(set),
+            CursorData::Ephemeral {
+                set: Some(set),
+                key_of,
+                ..
+            } => Ok((set, *key_of)),
             _ => Err(SqawkError::VmError(
                 "Cursor is not a keyed ephemeral table".into(),
             )),
         }
-    }
-
-    /// Sort ephemeral cursor (Sort opcode)
-    /// Returns true if has rows (continue), false if empty (should jump)
-    fn sort(&mut self) -> Result<bool, SqawkError> {
-        match &mut self.data {
-            CursorData::Ephemeral {
-                rows,
-                sort_keys,
-                sorted,
-                ..
-            } => {
-                if rows.is_empty() {
-                    return Ok(false); // Empty - caller should jump
-                }
-                if !*sorted {
-                    let keys = sort_keys.clone();
-                    rows.sort_by(|a, b| compare_rows(&keys, a, b));
-                    *sorted = true;
-                }
-                self.position = 0;
-                self.valid = true;
-                Ok(true) // Has rows - caller continues
-            }
-            CursorData::Table { .. } => Err(SqawkError::VmError("Cannot sort table cursor".into())),
-        }
-    }
-
-    /// Generate next sequence number (Sequence opcode)
-    fn next_sequence(&mut self) -> Result<i64, SqawkError> {
-        match &mut self.data {
-            CursorData::Ephemeral { sequence, .. } => {
-                let seq = *sequence;
-                *sequence += 1;
-                Ok(seq)
-            }
-            CursorData::Table { .. } => Err(SqawkError::VmError(
-                "Cannot generate sequence from table cursor".into(),
-            )),
-        }
-    }
-
-    /// Number of rows in the cursor.
-    fn row_count(&self) -> usize {
-        match &self.data {
-            CursorData::Table { table } => table.row_count(),
-            CursorData::Ephemeral { rows, .. } => rows.len(),
-        }
-    }
-
-    /// Check if this is an ephemeral cursor
-    #[allow(dead_code)]
-    fn is_ephemeral(&self) -> bool {
-        matches!(self.data, CursorData::Ephemeral { .. })
     }
 
     /// Get column count
@@ -450,6 +397,30 @@ impl<'a> Cursor<'a> {
             CursorData::Ephemeral { rows, .. } => rows,
         }
     }
+}
+
+/// A LIMIT / OFFSET operand as SQLite's OP_MustBeInt reads it: an integer,
+/// an integral REAL, or text spelling an integer; anything else is the error
+/// "datatype mismatch: `what` must be an integer".
+pub(super) fn must_be_int(v: Register, what: &str) -> SqawkResult<i64> {
+    let i = match v {
+        Register::Integer(i) => Some(i),
+        Register::Boolean(b) => Some(b as i64),
+        Register::Float(f) if f.fract() == 0.0 && f.abs() < 9.0e18 => Some(f as i64),
+        Register::String(s) => match s.trim().parse::<i64>() {
+            Ok(i) => Some(i),
+            Err(_) => s
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|f| f.fract() == 0.0 && f.abs() < 9.0e18)
+                .map(|f| f as i64),
+        },
+        _ => None,
+    };
+    i.ok_or_else(|| {
+        SqawkError::InvalidSqlQuery(format!("datatype mismatch: {} must be an integer", what))
+    })
 }
 
 /// Compare two rows on `keys`, honouring direction and NULL placement.
@@ -499,22 +470,30 @@ pub(super) fn compare_key(k: &KeyOrder, a: &Value, b: &Value) -> std::cmp::Order
 
 /// Compare two Values for ordering (ORDER BY, GROUP BY, MIN/MAX).
 ///
-/// A total order: NULL first, then booleans, then numbers, then other text.
-/// Text that spells a number (`007`, `1.50`, `1e3` -- loaded as text so it
-/// keeps its spelling) sorts among the numbers by value, so a column mixing
-/// such text with inferred numbers still sorts numerically. Numbers equal in
-/// value but spelled differently (`7` and `007`) are ordered by their text,
-/// which keeps them in distinct groups.
+/// A total order consistent with [`VmEngine::sql_compare`]: NULL first,
+/// then numbers -- with text that has a numeric reading (`007`, `1.50`,
+/// `1e3`, loaded as text so it keeps its spelling) among them by value --
+/// then other text by bytes. Where `=` calls two values equal but they are
+/// not the same value (text `007` and integer 7, text `1` and `1.0`), the
+/// number comes first and texts are ordered by spelling, which keeps them
+/// in distinct groups, as DISTINCT keeps them apart.
 pub(super) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
     fn rank(v: &Value) -> u8 {
         match v {
             Value::Null => 0,
-            Value::Boolean(_) => 1,
-            Value::Integer(_) | Value::Float(_) => 2,
+            Value::Boolean(_) | Value::Integer(_) | Value::Float(_) => 2,
             Value::String(_) => 3,
         }
+    }
+
+    // A boolean is the integer 1 or 0, as `=` reads it.
+    if let Value::Boolean(x) = a {
+        return compare_values(&Value::Integer(*x as i64), b);
+    }
+    if let Value::Boolean(y) = b {
+        return compare_values(a, &Value::Integer(*y as i64));
     }
 
     match (a, b) {
@@ -527,7 +506,7 @@ pub(super) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
             // cannot start a number compares as text.
             fn may_be_number(s: &str) -> bool {
                 s.bytes().next().is_some_and(|c| {
-                    c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.' | b' ' | b'\t')
+                    c.is_ascii_digit() || c.is_ascii_whitespace() || matches!(c, b'-' | b'+' | b'.')
                 })
             }
             if !may_be_number(x) && !may_be_number(y) {
@@ -560,14 +539,11 @@ pub(super) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
             by_value.then_with(|| match (a, b) {
                 // Integer 1 and Float 1.0 are the same value. Text that
                 // spells a number sorts among the numbers by value, but is
-                // never the same value as one: by spelling, then (text `1`
-                // vs integer 1) the number first, as SQLite orders them --
-                // so GROUP BY agrees with DISTINCT.
-                (Value::String(_), _) | (_, Value::String(_)) => {
-                    a.field_str().cmp(&b.field_str()).then_with(|| {
-                        matches!(a, Value::String(_)).cmp(&matches!(b, Value::String(_)))
-                    })
-                }
+                // never the same value as one: the number first, as SQLite
+                // orders them -- so GROUP BY agrees with DISTINCT. (Texts of
+                // equal value are ordered by spelling on the path above.)
+                (Value::String(_), _) => Ordering::Greater,
+                (_, Value::String(_)) => Ordering::Less,
                 _ => Ordering::Equal,
             })
         }
@@ -576,13 +552,7 @@ pub(super) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
                 if na.is_some() { 2 } else { rank(a) },
                 if nb.is_some() { 2 } else { rank(b) },
             );
-            match ra.cmp(&rb) {
-                Ordering::Equal => match (a, b) {
-                    (Value::Boolean(x), Value::Boolean(y)) => x.cmp(y),
-                    _ => Ordering::Equal,
-                },
-                other => other,
-            }
+            ra.cmp(&rb)
         }
     }
 }
@@ -634,22 +604,11 @@ impl Sorter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum TransactionState {
-    /// No active transaction - the default state when no transaction has been started
-    None,
-    /// Transaction in progress - changes are being tracked but not yet permanent
-    Active,
-    /// Transaction has been committed - changes have been permanently applied
-    Committed,
-    /// Transaction has been rolled back - changes have been discarded
-    RolledBack,
-}
-
 /// Column definition for CREATE TABLE
 #[derive(Debug, Clone)]
 pub struct ColumnDef {
     pub name: String,
+    /// The declared type name, as written
     pub data_type: String,
 }
 
@@ -679,6 +638,10 @@ pub enum TableModification {
         columns: Vec<ColumnDef>,
         file_path: Option<String>,
         delimiter: Option<String>,
+        /// The LOCATION file's first line is a header
+        header: bool,
+        /// `#` lines in the LOCATION file are comments
+        comments: bool,
     },
     DropTable {
         table_name: String,
@@ -709,10 +672,6 @@ pub struct VmEngine<'a> {
     /// Mirrors SQLite, where OP_Compare leaves its verdict for a following
     /// OP_Jump rather than materializing it into a register.
     compare_flag: std::cmp::Ordering,
-
-    /// Current transaction state (None, Active, Committed, or RolledBack)
-    /// Tracks the lifecycle of a transaction and enforces proper operation sequencing
-    transaction_state: TransactionState,
 
     /// Pending modifications to be applied after execution
     pending_modifications: Vec<TableModification>,
@@ -746,7 +705,6 @@ impl<'a> VmEngine<'a> {
             sorters: HashMap::with_capacity(DEFAULT_SORTER_CAPACITY),
             accumulators: HashMap::with_capacity(DEFAULT_ACCUMULATOR_CAPACITY),
             results: Vec::with_capacity(DEFAULT_RESULT_CAPACITY),
-            transaction_state: TransactionState::None,
             pending_modifications: Vec::with_capacity(DEFAULT_MODIFICATIONS_CAPACITY),
             verbose,
             once_flags: HashMap::with_capacity(DEFAULT_CURSOR_CAPACITY),
@@ -807,11 +765,8 @@ impl<'a> VmEngine<'a> {
         };
         self.registers = vec![Register::Null; (reg_count + 5) as usize];
 
-        // Reset transaction state
-        self.transaction_state = TransactionState::None;
-
         if self.verbose {
-            eprintln!("VM initialized with program:\n{}", self.program);
+            diag!("VM initialized with program:\n{}", self.program);
         }
     }
 
@@ -841,7 +796,7 @@ impl<'a> VmEngine<'a> {
                 .clone(); // Clone the instruction to avoid borrowing issues
 
             if self.verbose {
-                eprintln!("Executing [{}]: {}", self.pc, inst_clone);
+                diag!("Executing [{}]: {}", self.pc, inst_clone);
             }
 
             // Execute the instruction
@@ -892,9 +847,11 @@ impl<'a> VmEngine<'a> {
                     return Err(SqawkError::TableNotFound(table_name.to_string()));
                 }
 
-                // Get the table from the database (safe to unwrap since we checked it exists)
-                // Note: We now borrow the table instead of cloning it (Phase 4B optimization)
-                let table = self.database.get_table(table_name).unwrap();
+                let table = match self.database.lazy_table(table_name) {
+                    Some(lazy) => self.fill_lazy(table_name, lazy)?,
+                    // Borrow the table from the database (safe to unwrap since we checked it exists)
+                    None => self.database.get_table(table_name).unwrap(),
+                };
 
                 // Create a cursor for the table (borrows, no clone)
                 let cursor = Cursor::from_table(table);
@@ -1050,9 +1007,10 @@ impl<'a> VmEngine<'a> {
                     .push(TableModification::Insert { table_name, row });
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "InsertRow: queued insert of {} columns into cursor {}",
-                        col_count, cursor_idx
+                        col_count,
+                        cursor_idx
                     );
                 }
 
@@ -1118,9 +1076,10 @@ impl<'a> VmEngine<'a> {
                     });
 
                     if self.verbose {
-                        eprintln!(
+                        diag!(
                             "DeleteRow: queued delete of row {} from cursor {}",
-                            idx, cursor_idx
+                            idx,
+                            cursor_idx
                         );
                     }
                 }
@@ -1130,13 +1089,12 @@ impl<'a> VmEngine<'a> {
 
             OpCode::CreateTable => {
                 // Create a new table from P4 specification
-                // P4 format: "table_name:col1:type1,col2:type2,...|filepath|delimiter"
+                // P4 format:
+                // "table_name:col1:type1:col2:type2...|filepath|delimiter|header|comments"
+                // Every field is spec_escape'd, so a '|' in a delimiter or
+                // path cannot split it.
                 let spec = inst.p4.clone().unwrap_or_default();
-                // splitn, not split: the delimiter is the LAST field and may
-                // itself be '|'. Splitting on every '|' turned
-                // `WITH (delimiter = '|')` into an extra empty field and left
-                // the table with the default comma instead.
-                let parts: Vec<&str> = spec.splitn(3, '|').collect();
+                let parts: Vec<&str> = spec.split('|').collect();
 
                 if parts.is_empty() {
                     return Err(SqawkError::VmError(
@@ -1152,7 +1110,7 @@ impl<'a> VmEngine<'a> {
                     ));
                 }
 
-                let table_name = name_and_cols[0].to_string();
+                let table_name = spec_unescape(name_and_cols[0]);
 
                 // Parse columns (pairs of name:type)
                 let col_count = (name_and_cols.len() - 1) / 2;
@@ -1160,8 +1118,8 @@ impl<'a> VmEngine<'a> {
                 let mut i = 1;
                 while i + 1 < name_and_cols.len() {
                     columns.push(ColumnDef {
-                        name: name_and_cols[i].to_string(),
-                        data_type: name_and_cols[i + 1].to_string(),
+                        name: spec_unescape(name_and_cols[i]),
+                        data_type: spec_unescape(name_and_cols[i + 1]),
                     });
                     i += 2;
                 }
@@ -1170,11 +1128,13 @@ impl<'a> VmEngine<'a> {
                 let file_path = parts
                     .get(1)
                     .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string());
+                    .map(|s| spec_unescape(s));
                 let delimiter = parts
                     .get(2)
                     .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string());
+                    .map(|s| spec_unescape(s));
+                let header = parts.get(3) != Some(&"0");
+                let comments = parts.get(4) == Some(&"1");
 
                 // Add to pending modifications
                 self.pending_modifications
@@ -1183,10 +1143,12 @@ impl<'a> VmEngine<'a> {
                         columns,
                         file_path,
                         delimiter,
+                        header,
+                        comments,
                     });
 
                 if self.verbose {
-                    eprintln!("CreateTable: queued creation of table '{}'", table_name);
+                    diag!("CreateTable: queued creation of table '{}'", table_name);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1220,10 +1182,10 @@ impl<'a> VmEngine<'a> {
                         });
 
                     if self.verbose {
-                        eprintln!("DropTable: queued drop of table '{}'", table_name);
+                        diag!("DropTable: queued drop of table '{}'", table_name);
                     }
                 } else if self.verbose {
-                    eprintln!(
+                    diag!(
                         "DropTable: table '{}' does not exist (IF EXISTS)",
                         table_name
                     );
@@ -1245,9 +1207,9 @@ impl<'a> VmEngine<'a> {
                     ));
                 }
 
-                let table_name = parts[0].to_string();
-                let column_name = parts[1].to_string();
-                let column_type = parts[2].to_string();
+                let table_name = spec_unescape(parts[0]);
+                let column_name = spec_unescape(parts[1]);
+                let column_type = spec_unescape(parts[2]);
 
                 // Add to pending modifications
                 self.pending_modifications
@@ -1258,9 +1220,11 @@ impl<'a> VmEngine<'a> {
                     });
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "AlterTableAdd: queued add column '{}' ({}) to table '{}'",
-                        column_name, column_type, table_name
+                        column_name,
+                        column_type,
+                        table_name
                     );
                 }
 
@@ -1285,7 +1249,7 @@ impl<'a> VmEngine<'a> {
                     });
 
                 if self.verbose {
-                    eprintln!("Truncate: queued truncate of table '{}'", table_name);
+                    diag!("Truncate: queued truncate of table '{}'", table_name);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1323,7 +1287,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result)?;
 
                 if self.verbose {
-                    eprintln!("Add: r[{}] + r[{}] -> r[{}]", left_reg, right_reg, dest_reg);
+                    diag!("Add: r[{}] + r[{}] -> r[{}]", left_reg, right_reg, dest_reg);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1339,9 +1303,11 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result)?;
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "Subtract: r[{}] - r[{}] -> r[{}]",
-                        left_reg, right_reg, dest_reg
+                        left_reg,
+                        right_reg,
+                        dest_reg
                     );
                 }
 
@@ -1358,9 +1324,11 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result)?;
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "Multiply: r[{}] * r[{}] -> r[{}]",
-                        left_reg, right_reg, dest_reg
+                        left_reg,
+                        right_reg,
+                        dest_reg
                     );
                 }
 
@@ -1377,9 +1345,11 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result)?;
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "Divide: r[{}] / r[{}] -> r[{}]",
-                        left_reg, right_reg, dest_reg
+                        left_reg,
+                        right_reg,
+                        dest_reg
                     );
                 }
 
@@ -1396,9 +1366,11 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, result)?;
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "Remainder: r[{}] %% r[{}] -> r[{}]",
-                        left_reg, right_reg, dest_reg
+                        left_reg,
+                        right_reg,
+                        dest_reg
                     );
                 }
 
@@ -1416,8 +1388,7 @@ impl<'a> VmEngine<'a> {
                     .clone();
                 let cursor = self.cursor_mut(inst.p1)?;
                 match &mut cursor.data {
-                    CursorData::Ephemeral { rows, sorted, .. } => {
-                        *sorted = false;
+                    CursorData::Ephemeral { rows, .. } => {
                         super::window::compute(rows, &def)?;
                     }
                     CursorData::Table { .. } => {
@@ -1438,7 +1409,7 @@ impl<'a> VmEngine<'a> {
                 self.set_register(dest_reg, value)?;
 
                 if self.verbose {
-                    eprintln!("Copy: r[{}] -> r[{}]", src_reg, dest_reg);
+                    diag!("Copy: r[{}] -> r[{}]", src_reg, dest_reg);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -1517,121 +1488,6 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Continue)
             }
 
-            OpCode::Begin => {
-                // Begin a transaction - initiates a new atomic unit of work
-                // All operations performed between BEGIN and COMMIT/ROLLBACK are treated as a single
-                // logical operation from the perspective of database consistency
-                if self.transaction_state == TransactionState::Active {
-                    return Err(SqawkError::VmError(
-                        "Transaction already in progress".to_string(),
-                    ));
-                }
-
-                // Initialize transaction state to track changes
-                self.transaction_state = TransactionState::Active;
-
-                if self.verbose {
-                    eprintln!("BEGIN TRANSACTION");
-                }
-
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::Commit => {
-                // Commit a transaction - makes all changes permanent
-                // Finalizes the changes made during the transaction and ensures they
-                // become permanent, durable parts of the database state
-                if self.transaction_state != TransactionState::Active {
-                    return Err(SqawkError::VmError(
-                        "No transaction in progress to commit".to_string(),
-                    ));
-                }
-
-                // Finalize transaction
-                self.transaction_state = TransactionState::Committed;
-
-                if self.verbose {
-                    eprintln!("COMMIT TRANSACTION");
-                }
-
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::Rollback => {
-                // Rollback a transaction - abandons all changes made during the transaction
-                // Undoes all operations since BEGIN, returning the database to its prior state
-                if self.transaction_state != TransactionState::Active {
-                    return Err(SqawkError::VmError(
-                        "No transaction in progress to rollback".to_string(),
-                    ));
-                }
-
-                // Update transaction state to reflect rollback completion
-                self.transaction_state = TransactionState::RolledBack;
-
-                if self.verbose {
-                    eprintln!("ROLLBACK TRANSACTION");
-                }
-
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::SavePoint => {
-                // Create a savepoint within the current transaction
-                // A savepoint marks a point within a transaction to which you can later roll back
-                // without rolling back the entire transaction
-                if self.transaction_state != TransactionState::Active {
-                    return Err(SqawkError::VmError(
-                        "No active transaction for savepoint".to_string(),
-                    ));
-                }
-
-                // In a full implementation, we would:
-                // 1. Create a marker in the transaction log to identify this position
-                // 2. Allow for multiple savepoints with different names
-                // 3. Support rolling back to any specific savepoint
-                // 4. Properly handle nested savepoints in a hierarchical manner
-                let savepoint_name = inst
-                    .p4
-                    .as_deref()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("sp_{}", inst.p1));
-
-                if self.verbose {
-                    eprintln!("SAVEPOINT {}", savepoint_name);
-                }
-
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::Release => {
-                // Release a savepoint (commit changes up to the savepoint)
-                // This permanently applies all changes made since the savepoint was created
-                // while keeping the transaction active for further operations
-                if self.transaction_state != TransactionState::Active {
-                    return Err(SqawkError::VmError(
-                        "No active transaction for savepoint release".to_string(),
-                    ));
-                }
-
-                // In a complete implementation, we would:
-                // 1. Find the specified savepoint in our transaction log
-                // 2. Make all changes permanent up to that point
-                // 3. Remove this savepoint and any subsequent nested savepoints
-                // 4. Maintain the active transaction state for further operations
-                let savepoint_name = inst
-                    .p4
-                    .as_deref()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("sp_{}", inst.p1));
-
-                if self.verbose {
-                    eprintln!("RELEASE SAVEPOINT {}", savepoint_name);
-                }
-
-                Ok(ExecuteResult::Continue)
-            }
-
             OpCode::Lt | OpCode::Le | OpCode::Gt | OpCode::Ge | OpCode::Eq | OpCode::Ne => {
                 // Unified comparison operations
                 self.execute_comparison(inst)
@@ -1679,33 +1535,6 @@ impl<'a> VmEngine<'a> {
 
                 // If the register is positive, jump to P2
                 if is_positive {
-                    return Ok(ExecuteResult::Jump(inst.p2 as usize));
-                }
-
-                // Otherwise, continue to the next instruction
-                Ok(ExecuteResult::Continue)
-            }
-
-            OpCode::IfNeg => {
-                // Jump if register P1 contains a negative value (< 0)
-                // P1: Register to test
-                // P2: Jump destination (instruction index)
-
-                // Get the register value to test
-                let reg = self.get_register(inst.p1 as usize)?;
-
-                // Check if the register contains a negative value
-                let is_negative = match reg {
-                    Register::Integer(val) => val < 0,
-                    Register::Float(val) => val < 0.0,
-                    // Boolean values aren't treated as negative
-                    Register::Boolean(_) => false,
-                    // String and null aren't treated as negative
-                    Register::String(_) | Register::Null => false,
-                };
-
-                // If the register is negative, jump to P2
-                if is_negative {
                     return Ok(ExecuteResult::Jump(inst.p2 as usize));
                 }
 
@@ -1887,10 +1716,6 @@ impl<'a> VmEngine<'a> {
                 Ok(ExecuteResult::Jump(target as usize))
             }
 
-            // JumpIfTrue and JumpIfFalse have been replaced by SQLite-style opcodes:
-            // - IfZ (jump if zero/false)
-            // - IfPos (jump if positive)
-            // - IfNeg (jump if negative)
             OpCode::Noop => {
                 // No operation
                 Ok(ExecuteResult::Continue)
@@ -1912,28 +1737,22 @@ impl<'a> VmEngine<'a> {
                 let key_start = inst.p2 as usize;
                 let key_len = inst.p3 as usize;
                 let mut key = Vec::with_capacity(key_len);
-                let mut wild = false;
                 for i in 0..key_len {
-                    match hash_key_class(&self.get_register(key_start + i)?) {
+                    match hash_key_class(self.reg_ref(key_start + i)?) {
                         // A NULL key equals nothing: the row can never match.
                         KeyClass::Never => return Ok(ExecuteResult::Continue),
-                        KeyClass::Wild => wild = true,
                         KeyClass::Key(part) => key.push(part),
                     }
                 }
                 let cursor = self.cursor_mut(inst.p1)?;
                 let row = cursor.position;
                 let index = cursor.hash.get_or_insert_with(HashIndex::default);
-                if wild {
-                    index.wild.push(row);
-                } else {
-                    let next_id = index.buckets.len();
-                    let id = *index.map.entry(key).or_insert(next_id);
-                    if id == next_id {
-                        index.buckets.push(Vec::new());
-                    }
-                    index.buckets[id].push(row);
+                let next_id = index.buckets.len();
+                let id = *index.map.entry(key).or_insert(next_id);
+                if id == next_id {
+                    index.buckets.push(Vec::new());
                 }
+                index.buckets[id].push(row);
                 Ok(ExecuteResult::Continue)
             }
 
@@ -1947,26 +1766,20 @@ impl<'a> VmEngine<'a> {
                     .and_then(|n| n.parse().ok())
                     .ok_or_else(|| SqawkError::VmError("HashProbe needs a key width".into()))?;
                 let mut key = Vec::with_capacity(key_len);
-                let mut all = false;
                 let mut never = false;
                 for i in 0..key_len {
-                    match hash_key_class(&self.get_register(key_start + i)?) {
+                    match hash_key_class(self.reg_ref(key_start + i)?) {
                         KeyClass::Never => never = true,
-                        KeyClass::Wild => all = true,
                         KeyClass::Key(part) => key.push(part),
                     }
                 }
                 let cursor = self.cursor_mut(inst.p1)?;
                 cursor.null_row = false;
-                let bucket = match (&cursor.hash, never || all) {
+                let bucket = match (&cursor.hash, never) {
                     (Some(index), false) => index.map.get(&key).copied(),
                     _ => None,
                 };
-                cursor.probe = ProbeState {
-                    bucket,
-                    all: all && !never,
-                    pos: 0,
-                };
+                cursor.probe = ProbeState { bucket, pos: 0 };
                 if never {
                     cursor.valid = false;
                     return Ok(ExecuteResult::Jump(inst.p2 as usize));
@@ -2038,9 +1851,12 @@ impl<'a> VmEngine<'a> {
                 self.set_register(reg, Register::Integer(new_val))?;
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "DecrJumpZero: r[{}] = {} -> {}, jump if zero to {}",
-                        reg, current, new_val, jump_addr
+                        reg,
+                        current,
+                        new_val,
+                        jump_addr
                     );
                 }
 
@@ -2055,31 +1871,12 @@ impl<'a> VmEngine<'a> {
                 // LIMIT / OFFSET operands, as SQLite's OP_MustBeInt: an
                 // integer, an integral REAL, or text spelling an integer.
                 let reg = inst.p1 as usize;
-                let v = match self.get_register(reg)? {
-                    Register::Integer(i) => Some(i),
-                    Register::Boolean(b) => Some(b as i64),
-                    Register::Float(f) if f.fract() == 0.0 && f.abs() < 9.0e18 => Some(f as i64),
-                    Register::String(s) => match s.trim().parse::<i64>() {
-                        Ok(i) => Some(i),
-                        Err(_) => s
-                            .trim()
-                            .parse::<f64>()
-                            .ok()
-                            .filter(|f| f.fract() == 0.0 && f.abs() < 9.0e18)
-                            .map(|f| f as i64),
-                    },
-                    _ => None,
-                };
-                match v {
-                    Some(i) => {
-                        self.set_register(reg, Register::Integer(i))?;
-                        Ok(ExecuteResult::Continue)
-                    }
-                    None => Err(SqawkError::InvalidSqlQuery(format!(
-                        "datatype mismatch: {} must be an integer",
-                        inst.p4.as_deref().unwrap_or("value")
-                    ))),
-                }
+                let i = must_be_int(
+                    self.get_register(reg)?,
+                    inst.p4.as_deref().unwrap_or("value"),
+                )?;
+                self.set_register(reg, Register::Integer(i))?;
+                Ok(ExecuteResult::Continue)
             }
 
             OpCode::SorterOpen => {
@@ -2094,9 +1891,11 @@ impl<'a> VmEngine<'a> {
                 self.sorters.insert(sorter_id, sorter);
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "SorterOpen: Created sorter {} with {} columns, spec: {}",
-                        sorter_id, col_count, sort_spec
+                        sorter_id,
+                        col_count,
+                        sort_spec
                     );
                 }
 
@@ -2120,7 +1919,7 @@ impl<'a> VmEngine<'a> {
                 if let Some(sorter) = self.sorters.get_mut(&sorter_id) {
                     sorter.insert(row);
                     if self.verbose {
-                        eprintln!("SorterInsert: Added row to sorter {}", sorter_id);
+                        diag!("SorterInsert: Added row to sorter {}", sorter_id);
                     }
                 } else {
                     return Err(SqawkError::VmError(format!(
@@ -2144,7 +1943,7 @@ impl<'a> VmEngine<'a> {
                         return Ok(ExecuteResult::Jump(inst.p2 as usize));
                     }
                     if self.verbose {
-                        eprintln!(
+                        diag!(
                             "SorterSort: Sorted {} rows in sorter {}",
                             sorter.rows.len(),
                             sorter_id
@@ -2181,7 +1980,7 @@ impl<'a> VmEngine<'a> {
                 }
 
                 if self.verbose {
-                    eprintln!(
+                    diag!(
                         "SorterData: Copied row {} from sorter {} to r[{}..{}]",
                         position,
                         sorter_id,
@@ -2201,15 +2000,17 @@ impl<'a> VmEngine<'a> {
                 if let Some(sorter) = self.sorters.get_mut(&sorter_id) {
                     if sorter.next() {
                         if self.verbose {
-                            eprintln!(
+                            diag!(
                                 "SorterNext: Advanced to row {} in sorter {}, jumping to {}",
-                                sorter.position, sorter_id, jump_addr
+                                sorter.position,
+                                sorter_id,
+                                jump_addr
                             );
                         }
                         Ok(ExecuteResult::Jump(jump_addr))
                     } else {
                         if self.verbose {
-                            eprintln!(
+                            diag!(
                                 "SorterNext: No more rows in sorter {}, continuing",
                                 sorter_id
                             );
@@ -2225,22 +2026,21 @@ impl<'a> VmEngine<'a> {
             }
 
             OpCode::OpenEphemeral => {
-                // Open ephemeral cursor P1 with P2 columns. P4 = sort key spec.
+                // Open ephemeral cursor P1 with P2 columns; P3 = 1/2: keyed.
                 // Uses unified cursor model - Column/Next/Rewind work for ephemeral cursors.
                 let cursor_id = inst.p1 as usize;
                 let col_count = inst.p2 as usize;
-                let sort_spec = inst.p4.clone().unwrap_or_default();
-
-                let sort_keys = KeyOrder::parse_spec(&sort_spec);
 
                 // Create ephemeral cursor in the unified cursors map
-                let cursor = Cursor::ephemeral(col_count, sort_keys, inst.p3 == 1);
+                let cursor = Cursor::ephemeral(col_count, inst.p3);
                 self.cursors.insert(cursor_id, cursor);
 
                 if self.verbose {
-                    eprintln!(
-                        "OpenEphemeral: Created ephemeral cursor {} with {} columns, spec: {}",
-                        cursor_id, col_count, sort_spec
+                    diag!(
+                        "OpenEphemeral: Created ephemeral cursor {} with {} columns, keyed: {}",
+                        cursor_id,
+                        col_count,
+                        inst.p3
                     );
                 }
 
@@ -2264,7 +2064,7 @@ impl<'a> VmEngine<'a> {
                 if let Some(cursor) = self.cursors.get_mut(&cursor_id) {
                     cursor.insert_row(row)?;
                     if self.verbose {
-                        eprintln!("IdxInsert: Added row to cursor {}", cursor_id);
+                        diag!("IdxInsert: Added row to cursor {}", cursor_id);
                     }
                 } else {
                     return Err(SqawkError::VmError(format!(
@@ -2286,16 +2086,17 @@ impl<'a> VmEngine<'a> {
                     let n = inst.p4.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
                     (inst.p3 as usize, n)
                 };
-                let mut key = Vec::with_capacity(count);
+                let mut values = Vec::with_capacity(count);
                 for i in 0..count {
-                    key.push(row_key(&Value::from(self.get_register(start + i)?)));
+                    values.push(Value::from(self.get_register(start + i)?));
                 }
                 let cursor_id = inst.p1 as usize;
-                let set = self
+                let (set, key_of) = self
                     .cursors
                     .get_mut(&cursor_id)
                     .ok_or_else(|| SqawkError::VmError(format!("Cursor {} not found", cursor_id)))?
                     .key_set()?;
+                let key: Vec<RowKey> = values.iter().map(key_of).collect();
                 let jump = match inst.opcode {
                     OpCode::IdxDelete => {
                         set.remove(&key);
@@ -2309,63 +2110,6 @@ impl<'a> VmEngine<'a> {
                 } else {
                     ExecuteResult::Continue
                 })
-            }
-
-            OpCode::Sort => {
-                // Sort ephemeral cursor P1. Jump to P2 if empty, else continue.
-                let cursor_id = inst.p1 as usize;
-                let jump_if_empty = inst.p2 as usize;
-
-                if let Some(cursor) = self.cursors.get_mut(&cursor_id) {
-                    let has_rows = cursor.sort()?;
-                    if has_rows {
-                        if self.verbose {
-                            eprintln!(
-                                "Sort: Sorted {} rows in cursor {}",
-                                cursor.row_count(),
-                                cursor_id
-                            );
-                        }
-                        Ok(ExecuteResult::Continue)
-                    } else {
-                        if self.verbose {
-                            eprintln!(
-                                "Sort: Cursor {} is empty, jumping to {}",
-                                cursor_id, jump_if_empty
-                            );
-                        }
-                        Ok(ExecuteResult::Jump(jump_if_empty))
-                    }
-                } else {
-                    Err(SqawkError::VmError(format!(
-                        "Cursor {} not found",
-                        cursor_id
-                    )))
-                }
-            }
-
-            OpCode::Sequence => {
-                // P1 = ephemeral cursor, P2 = dest register. Generate next sequence number.
-                let cursor_id = inst.p1 as usize;
-                let dest_reg = inst.p2 as usize;
-
-                if let Some(cursor) = self.cursors.get_mut(&cursor_id) {
-                    let seq = cursor.next_sequence()?;
-                    self.set_register(dest_reg, Register::Integer(seq))?;
-                    if self.verbose {
-                        eprintln!(
-                            "Sequence: Generated sequence {} from cursor {} into r[{}]",
-                            seq, cursor_id, dest_reg
-                        );
-                    }
-                } else {
-                    return Err(SqawkError::VmError(format!(
-                        "Cursor {} not found",
-                        cursor_id
-                    )));
-                }
-
-                Ok(ExecuteResult::Continue)
             }
 
             OpCode::AggStep => {
@@ -2404,8 +2148,8 @@ impl<'a> VmEngine<'a> {
                 let acc_reg = inst.p1 as usize;
                 let stepped = !matches!(self.get_register(acc_reg)?, Register::Null);
                 let result = match self.accumulators.get(&acc_reg) {
-                    Some(acc) if stepped => acc.finalize(),
-                    _ => AggAccumulator::new(inst.p3).finalize(),
+                    Some(acc) if stepped => acc.finalize()?,
+                    _ => AggAccumulator::new(inst.p3).finalize()?,
                 };
                 self.set_register(inst.p2 as usize, Register::from(result))?;
                 Ok(ExecuteResult::Continue)
@@ -2419,7 +2163,7 @@ impl<'a> VmEngine<'a> {
                 self.accumulators.remove(&acc_reg);
 
                 if self.verbose {
-                    eprintln!("AggReset: cleared accumulator at reg {}", acc_reg);
+                    diag!("AggReset: cleared accumulator at reg {}", acc_reg);
                 }
 
                 Ok(ExecuteResult::Continue)
@@ -2441,21 +2185,13 @@ impl<'a> VmEngine<'a> {
                     Ok(ExecuteResult::Continue)
                 }
             }
-
-            #[allow(unreachable_patterns)]
-            _ => {
-                // This code is unreachable since all opcodes are handled above,
-                // but we keep it for future-proofing and to silence compiler warnings
-                Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "Unsupported VM opcode: {:?}",
-                    inst.opcode
-                )))
-            }
         }
     }
 
-    // Removed unused methods get_results, has_results, get_column_names,
-    // get_affected_rows, and get_modified_tables
+    /// Take the result rows out of the engine.
+    pub(crate) fn take_results(&mut self) -> Vec<Vec<Value>> {
+        std::mem::take(&mut self.results)
+    }
 
     /// Create a table from the results using the result schema
     pub fn create_result_table(&self) -> SqawkResult<Option<Table>> {
@@ -2472,6 +2208,7 @@ impl<'a> VmEngine<'a> {
                     .map(|col| ColumnDefinition {
                         name: col.name.clone(),
                         data_type: col.data_type,
+                        decl_type: None,
                     })
                     .collect();
                 let table = Table::new_with_schema("result", col_defs, None, None);
@@ -2488,11 +2225,13 @@ impl<'a> VmEngine<'a> {
                     ColumnDefinition {
                         name: schema.columns[i].name.clone(),
                         data_type: schema.columns[i].data_type,
+                        decl_type: None,
                     }
                 } else {
                     ColumnDefinition {
                         name: format!("col{}", i),
                         data_type: crate::table::DataType::Text,
+                        decl_type: None,
                     }
                 }
             })
@@ -2506,6 +2245,25 @@ impl<'a> VmEngine<'a> {
         }
 
         Ok(Some(table))
+    }
+
+    /// The rows of the lazy table `name` (a CTE or derived table), computed
+    /// now if this is the first time any cursor opens it.
+    fn fill_lazy(&self, name: &str, lazy: &'a LazyTable) -> SqawkResult<&'a Table> {
+        if let Some(table) = lazy.filled() {
+            return Ok(table);
+        }
+        if self.verbose {
+            diag!("Computing {} on first use", name);
+        }
+        let mut vm = VmEngine::new(self.database, self.verbose);
+        vm.init(lazy.program().clone());
+        vm.execute()?;
+        let mut table = self.database.get_table(name)?.clone();
+        for row in vm.take_results() {
+            table.add_row(row)?;
+        }
+        Ok(lazy.fill(table))
     }
 
     /// The cursor numbered `idx`, for opcodes that modify it.
@@ -2531,14 +2289,14 @@ impl<'a> VmEngine<'a> {
     }
 
     fn get_register(&self, idx: usize) -> SqawkResult<Register> {
-        if idx < self.registers.len() {
-            Ok(self.registers[idx].clone())
-        } else {
-            Err(SqawkError::VmError(format!(
-                "Register index out of bounds: {}",
-                idx
-            )))
-        }
+        self.reg_ref(idx).cloned()
+    }
+
+    /// A register by reference, for readers that need no copy.
+    fn reg_ref(&self, idx: usize) -> SqawkResult<&Register> {
+        self.registers
+            .get(idx)
+            .ok_or_else(|| SqawkError::VmError(format!("Register index out of bounds: {}", idx)))
     }
 
     /// Set a register value by index
@@ -2605,25 +2363,25 @@ impl<'a> VmEngine<'a> {
         Ok(ExecuteResult::Continue)
     }
 
-    /// SQL comparison of two registers.
+    /// SQL comparison of two registers: the one comparison rule.
     ///
     /// `None` means UNKNOWN, which is the result whenever either operand is
     /// NULL -- including NULL against NULL. (Grouping and sorting need the
     /// opposite, NULL equal to NULL, which is why the Compare opcode has its
-    /// own internal ordering rather than sharing this.)
+    /// own internal ordering, [`compare_values`], which agrees with this one
+    /// on every non-NULL pair this calls unequal.)
     ///
-    /// Mixed string/number operands are coerced when the string parses as a
-    /// number, and compared as text otherwise. This is the awk-shaped choice
-    /// rather than the SQLite one, for two reasons: a CSV column is untyped
-    /// text that sqawk guesses a type for PER CELL, so a single column can
-    /// hold both; and arithmetic already coerces this way, so `x + '1'` and
-    /// `x > '1'` agree instead of disagreeing.
+    /// A value's numeric reading is the number itself, or for text the
+    /// number [`numeric_text`] reads from it (`'007'`, `' 1.5 '`, `'1e3'`).
+    /// Two values that both have one compare as numbers, whatever their
+    /// types -- text against text included, so `'9' < '10'`. A number is
+    /// less than text with no numeric reading. Two texts without one compare
+    /// by bytes (BINARY). This deliberately differs from SQLite, whose
+    /// column affinities sqawk does not have: a CSV column is untyped text
+    /// typed PER CELL, so `=`, `<`, IN, joins, ORDER BY and MIN/MAX all
+    /// compare numeric-looking text by value.
     pub(super) fn sql_compare(a: &Register, b: &Register) -> Option<std::cmp::Ordering> {
-        // Any NULL operand yields UNKNOWN.
-        if matches!(a, Register::Null) || matches!(b, Register::Null) {
-            return None;
-        }
-
+        use std::cmp::Ordering;
         fn as_number(reg: &Register) -> Option<Num> {
             match reg {
                 Register::Integer(i) => Some(Num::Int(*i)),
@@ -2639,21 +2397,19 @@ impl<'a> VmEngine<'a> {
         }
 
         match (a, b) {
+            (Register::Null, _) | (_, Register::Null) => None,
             // Integer against integer compares as i64, not through f64, so
             // values above 2^53 stay exact.
             (Register::Integer(x), Register::Integer(y)) => Some(x.cmp(y)),
-            (Register::String(x), Register::String(y)) => Some(x.cmp(y)),
-            (Register::Boolean(x), Register::Boolean(y)) => Some(x.cmp(y)),
-            _ => match (as_number(a), as_number(b)) {
-                (Some(x), Some(y)) => Some(arith::cmp_num(x, y)),
-                // A string that does not parse as a number falls back to a
-                // textual comparison against the other side's rendering.
-                _ => {
-                    let x: Value = a.clone().into();
-                    let y: Value = b.clone().into();
-                    Some(x.to_string().cmp(&y.to_string()))
-                }
-            },
+            _ => Some(match (as_number(a), as_number(b)) {
+                (Some(x), Some(y)) => arith::cmp_num(x, y),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => match (a, b) {
+                    (Register::String(x), Register::String(y)) => x.as_bytes().cmp(y.as_bytes()),
+                    _ => Ordering::Equal,
+                },
+            }),
         }
     }
 

@@ -235,7 +235,7 @@ mod sqlite_semantics {
         assert_query(
             &[employees_csv()],
             "SELECT EMPLOYEES.NAME FROM EMPLOYEES WHERE ID = 2",
-            "NAME\nBob",
+            "name\nBob",
         )
     }
 }

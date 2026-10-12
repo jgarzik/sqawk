@@ -26,6 +26,15 @@ pub struct AppConfig {
 
     /// Treat the first line of every input file as data (`--no-header`)
     no_header: bool,
+
+    /// Skip lines starting with `#` in input files (`--comments`)
+    comments: bool,
+
+    /// Delimiter between fields of query results (`--output-delimiter`)
+    output_delimiter: Option<String>,
+
+    /// Omit the header line of every result set (`--no-output-header`)
+    no_output_header: bool,
 }
 
 impl AppConfig {
@@ -48,7 +57,36 @@ impl AppConfig {
             table_definitions,
             write_changes,
             no_header: false,
+            comments: false,
+            output_delimiter: None,
+            no_output_header: false,
         }
+    }
+
+    /// Set the delimiter for query results (`None`: follow -F, else comma)
+    pub fn with_output_delimiter(mut self, delimiter: Option<String>) -> Self {
+        self.output_delimiter = delimiter;
+        self
+    }
+
+    /// The delimiter for query results: `--output-delimiter`, else the -F
+    /// separator, else a comma.
+    pub fn output_delimiter(&self) -> String {
+        self.output_delimiter
+            .clone()
+            .or_else(|| self.field_separator.clone())
+            .unwrap_or_else(|| ",".to_string())
+    }
+
+    /// Set whether result sets are printed without their header line
+    pub fn with_no_output_header(mut self, no_output_header: bool) -> Self {
+        self.no_output_header = no_output_header;
+        self
+    }
+
+    /// Whether result sets are printed without their header line
+    pub fn no_output_header(&self) -> bool {
+        self.no_output_header
     }
 
     /// Set whether input files have no header row
@@ -60,6 +98,17 @@ impl AppConfig {
     /// Whether input files have no header row
     pub fn no_header(&self) -> bool {
         self.no_header
+    }
+
+    /// Set whether lines starting with `#` are comments
+    pub fn with_comments(mut self, comments: bool) -> Self {
+        self.comments = comments;
+        self
+    }
+
+    /// Whether lines starting with `#` are comments
+    pub fn comments(&self) -> bool {
+        self.comments
     }
 
     /// Get the verbose flag

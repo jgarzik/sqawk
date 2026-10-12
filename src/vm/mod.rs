@@ -14,7 +14,7 @@
 pub const SQLPARSER_VERSION: &str = "0.62";
 
 mod agg;
-mod arith;
+pub(crate) mod arith;
 pub mod ast_compat;
 pub mod bytecode;
 pub mod compiler;
@@ -27,9 +27,13 @@ mod compiler_select;
 mod compiler_subquery;
 mod compiler_window;
 mod datetime;
+pub mod dialect;
 pub mod engine;
 mod func;
-mod like;
+pub(crate) mod like;
+pub mod parse;
+mod prepass;
+mod printf;
 mod window;
 
 #[cfg(test)]
@@ -38,11 +42,16 @@ mod compiler_tests;
 mod tests;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use crate::capacity::DEFAULT_TABLE_CAPACITY;
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Table;
+
+/// The names of the built-in scalar functions (upper case).
+pub(crate) fn scalar_function_names() -> impl Iterator<Item = &'static str> {
+    func::names()
+}
 
 /// Result of VM execution including both the result table and modified table names
 pub struct VmExecutionResult {
@@ -52,8 +61,6 @@ pub struct VmExecutionResult {
     /// them into a single table would print every statement's rows under one
     /// header.
     pub tables: Vec<Table>,
-    /// Names of tables that were modified (INSERT, UPDATE, DELETE, CREATE TABLE)
-    pub modified_tables: HashSet<String>,
     /// Number of rows affected by the last DML statement (INSERT, UPDATE, DELETE)
     pub affected_rows: usize,
     /// Whether any statement in this script was a row-counting DML.
@@ -78,23 +85,23 @@ pub fn execute_vm(
     verbose: bool,
 ) -> SqawkResult<VmExecutionResult> {
     if verbose {
-        eprintln!("VM Engine: Executing SQL via bytecode: {}", sql);
+        diag!("VM Engine: Executing SQL via bytecode: {}", sql);
 
         let sql_upper = sql.to_uppercase();
         if sql_upper.contains("DISTINCT") {
-            eprintln!("Applying DISTINCT");
+            diag!("Applying DISTINCT");
         }
         if sql_upper.contains("ORDER BY") {
-            eprintln!("Applying ORDER BY");
+            diag!("Applying ORDER BY");
         }
         if sql_upper.contains("LIMIT") || sql_upper.contains("OFFSET") {
-            eprintln!("Applying LIMIT/OFFSET");
+            diag!("Applying LIMIT/OFFSET");
         }
         if sql_upper.contains("GROUP BY") {
-            eprintln!("Applying GROUP BY");
+            diag!("Applying GROUP BY");
         }
         if sql_upper.contains("HAVING") {
-            eprintln!("Applying HAVING");
+            diag!("Applying HAVING");
         }
     }
 
@@ -113,9 +120,7 @@ pub fn execute_vm(
     // Executing per statement gives each its own result set and makes each
     // statement observe the database as the previous one left it, which is
     // also what `CREATE TABLE t; INSERT INTO t ...` requires.
-    let dialect = sqlparser::dialect::HiveDialect {};
-    let statements =
-        sqlparser::parser::Parser::parse_sql(&dialect, sql).map_err(SqawkError::SqlParseError)?;
+    let statements = parse::parse_sql(sql)?;
 
     if statements.is_empty() {
         return Err(SqawkError::InvalidSqlQuery(
@@ -123,38 +128,75 @@ pub fn execute_vm(
         ));
     }
 
+    let source = Arc::new(parse::SqlSource::new(sql));
+    execute_statements(
+        statements,
+        database,
+        verbose,
+        &source,
+        false,
+        &Arc::default(),
+    )
+}
+
+/// Compile and execute parsed statements one at a time (see `execute_vm`).
+///
+/// `source` is the text the statements were parsed from; it names unaliased
+/// result columns. `in_derived`: the statement is a derived table's or CTE's
+/// query, whose column references are named as written (see `SqlCompiler`).
+/// `cte_names`: for such a query, the CTE names of the enclosing statement
+/// (see `prepass::Prepared::cte_names`); empty at top level.
+fn execute_statements(
+    statements: Vec<sqlparser::ast::Statement>,
+    database: &mut Database,
+    verbose: bool,
+    source: &Arc<parse::SqlSource>,
+    in_derived: bool,
+    cte_names: &Arc<HashSet<String>>,
+) -> SqawkResult<VmExecutionResult> {
     let mut tables: Vec<Table> = Vec::new();
-    let mut modified_tables = HashSet::with_capacity(DEFAULT_TABLE_CAPACITY);
     let mut affected_rows: usize = 0;
     let mut dml_executed = false;
 
-    for statement in &statements {
-        // PHASE 0: MATERIALIZE DERIVED TABLES.
+    for mut statement in statements {
+        // BEGIN / COMMIT / ROLLBACK act on the database directly; they have
+        // no bytecode.
+        if let Some(control) = compiler_check::transaction_control(&statement)? {
+            match control {
+                compiler_check::TransactionControl::Begin => database.begin()?,
+                compiler_check::TransactionControl::Commit => database.commit()?,
+                compiler_check::TransactionControl::Rollback => database.rollback()?,
+            }
+            continue;
+        }
+
+        // PHASE 0: MATERIALIZE DERIVED TABLES AND CTEs.
         //
-        // `FROM (SELECT ...) t` has no representation in the compiler, which
-        // only knows how to open a cursor on a named table. Rather than teach
-        // every FROM site about subqueries, each derived table is executed
-        // first and registered under its alias, and the statement is rewritten
-        // to reference that name. The compiler then sees an ordinary table.
-        let mut statement = statement.clone();
-        let derived = materialize_derived_tables(&mut statement, database, verbose)?;
+        // `FROM (SELECT ...) t` and a CTE reference have no representation in
+        // the compiler, which only knows how to open a cursor on a named
+        // table. Each is computed first and registered under an internal
+        // name, and the statement is rewritten to reference that name (see
+        // `prepass.rs`). The compiler then sees ordinary tables.
+        let prepared = prepass::run(&mut statement, database, verbose, source, cte_names)?;
 
         // Phases 1-3 run inside a closure so a failure anywhere still drops
-        // the derived tables registered above. Leaving them behind made the
-        // alias unusable for the rest of the session: a failed
+        // the tables registered above. Leaving them behind made the alias
+        // unusable for the rest of the session: a failed
         // `SELECT bad FROM (SELECT ...) x` left `x` registered, so the next
         // statement using the same alias failed with "shadows an existing
         // table", and `.tables` listed a phantom table.
         let outcome = (|| -> SqawkResult<(Option<Table>, AppliedModifications)> {
             // PHASE 1: SQL -> BYTECODE, against the CURRENT database state.
             let program = {
-                let mut compiler = compiler::SqlCompiler::new(database, verbose);
+                let mut compiler = compiler::SqlCompiler::new(database, verbose)
+                    .with_source(Some(Arc::clone(source)), in_derived)
+                    .with_cte_names(Arc::clone(&prepared.cte_names));
                 compiler.compile_statement_program(&statement)?
             };
 
             if verbose {
-                eprintln!("Generated bytecode:");
-                eprintln!("{}", program);
+                diag!("Generated bytecode:");
+                diag!("{}", program);
             }
 
             // PHASE 2: EXECUTE
@@ -171,14 +213,13 @@ pub fn execute_vm(
             Ok((result_table, applied))
         })();
 
-        // Derived tables live only for the statement that declared them, and
-        // must be dropped whether or not it succeeded.
-        for name in &derived {
+        // Derived tables and CTEs live only for the statement that declared
+        // them, and must be dropped whether or not it succeeded.
+        for name in &prepared.registered {
             database.remove_table(name);
         }
 
         let (result_table, applied) = outcome?;
-        modified_tables.extend(applied.modified_tables);
 
         // A DML statement reports its own count, INCLUDING zero.
         //
@@ -202,270 +243,9 @@ pub fn execute_vm(
 
     Ok(VmExecutionResult {
         tables,
-        modified_tables,
         affected_rows,
         dml_executed,
     })
-}
-
-/// Execute every derived table in `statement` -- in the FROM of the query,
-/// of a compound's arms, of subqueries in any expression, of an INSERT ...
-/// SELECT or CREATE TABLE ... AS -- register each under an internal name,
-/// and rewrite the FROM item to reference that name, keeping the derived
-/// table's alias as the item's alias.
-///
-/// Returns the names registered, so the caller can drop them once the
-/// statement finishes -- a derived table is scoped to the statement that
-/// declares it.
-///
-/// A derived table that refers to a column of an enclosing query (inside a
-/// correlated subquery) cannot be computed up front; it fails to resolve.
-fn materialize_derived_tables(
-    statement: &mut sqlparser::ast::Statement,
-    database: &mut Database,
-    verbose: bool,
-) -> SqawkResult<Vec<String>> {
-    let mut registered = Vec::new();
-    let result = materialize_statement(statement, database, verbose, &mut registered);
-    if result.is_err() {
-        for name in &registered {
-            database.remove_table(name);
-        }
-    }
-    result.map(|_| registered)
-}
-
-fn materialize_statement(
-    statement: &mut sqlparser::ast::Statement,
-    database: &mut Database,
-    verbose: bool,
-    registered: &mut Registered,
-) -> SqawkResult<()> {
-    use sqlparser::ast::Statement;
-    match statement {
-        Statement::Query(query) => {
-            materialize_in_query(query, database, verbose, registered)?;
-        }
-        Statement::Insert(insert) => {
-            if let Some(source) = insert.source.as_mut() {
-                materialize_in_query(source, database, verbose, registered)?;
-            }
-        }
-        Statement::CreateTable(create) => {
-            if let Some(query) = create.query.as_mut() {
-                materialize_in_query(query, database, verbose, registered)?;
-            }
-        }
-        Statement::Update(update) => {
-            for a in &mut update.assignments {
-                materialize_in_expr(&mut a.value, database, verbose, registered)?;
-            }
-            if let Some(e) = update.selection.as_mut() {
-                materialize_in_expr(e, database, verbose, registered)?;
-            }
-        }
-        Statement::Delete(delete) => {
-            if let Some(e) = delete.selection.as_mut() {
-                materialize_in_expr(e, database, verbose, registered)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-type Registered = Vec<String>;
-
-fn materialize_in_query(
-    query: &mut sqlparser::ast::Query,
-    database: &mut Database,
-    verbose: bool,
-    registered: &mut Registered,
-) -> SqawkResult<()> {
-    materialize_in_set_expr(&mut query.body, database, verbose, registered)?;
-    if let Some(sqlparser::ast::OrderBy {
-        kind: sqlparser::ast::OrderByKind::Expressions(obs),
-        ..
-    }) = query.order_by.as_mut()
-    {
-        for ob in obs {
-            materialize_in_expr(&mut ob.expr, database, verbose, registered)?;
-        }
-    }
-    Ok(())
-}
-
-fn materialize_in_set_expr(
-    body: &mut sqlparser::ast::SetExpr,
-    database: &mut Database,
-    verbose: bool,
-    registered: &mut Registered,
-) -> SqawkResult<()> {
-    use sqlparser::ast::{SelectItem, SetExpr};
-    match body {
-        SetExpr::Select(select) => {
-            for twj in &mut select.from {
-                materialize_in_factor(&mut twj.relation, database, verbose, registered)?;
-                for join in &mut twj.joins {
-                    materialize_in_factor(&mut join.relation, database, verbose, registered)?;
-                }
-            }
-            for item in &mut select.projection {
-                if let SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } = item
-                {
-                    materialize_in_expr(e, database, verbose, registered)?;
-                }
-            }
-            for e in select.selection.iter_mut().chain(select.having.iter_mut()) {
-                materialize_in_expr(e, database, verbose, registered)?;
-            }
-            Ok(())
-        }
-        SetExpr::SetOperation { left, right, .. } => {
-            materialize_in_set_expr(left, database, verbose, registered)?;
-            materialize_in_set_expr(right, database, verbose, registered)
-        }
-        SetExpr::Query(q) => materialize_in_query(q, database, verbose, registered),
-        _ => Ok(()),
-    }
-}
-
-/// Find the subqueries within an expression and materialize the derived
-/// tables in their FROM clauses.
-fn materialize_in_expr(
-    expr: &mut sqlparser::ast::Expr,
-    database: &mut Database,
-    verbose: bool,
-    registered: &mut Registered,
-) -> SqawkResult<()> {
-    use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments};
-    let mut go = |e: &mut Expr| materialize_in_expr(e, database, verbose, registered);
-    match expr {
-        Expr::Subquery(q) | Expr::Exists { subquery: q, .. } => {
-            materialize_in_query(q, database, verbose, registered)
-        }
-        Expr::InSubquery { expr, subquery, .. } => {
-            go(expr)?;
-            materialize_in_query(subquery, database, verbose, registered)
-        }
-        Expr::BinaryOp { left, right, .. }
-        | Expr::IsDistinctFrom(left, right)
-        | Expr::IsNotDistinctFrom(left, right) => {
-            go(left)?;
-            go(right)
-        }
-        Expr::Nested(e)
-        | Expr::UnaryOp { expr: e, .. }
-        | Expr::Cast { expr: e, .. }
-        | Expr::IsNull(e)
-        | Expr::IsNotNull(e) => go(e),
-        Expr::Between {
-            expr, low, high, ..
-        } => {
-            go(expr)?;
-            go(low)?;
-            go(high)
-        }
-        Expr::InList { expr, list, .. } => {
-            go(expr)?;
-            list.iter_mut().try_for_each(go)
-        }
-        Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
-            go(expr)?;
-            go(pattern)
-        }
-        Expr::Case {
-            operand,
-            conditions,
-            else_result,
-            ..
-        } => {
-            if let Some(o) = operand {
-                go(o)?;
-            }
-            for w in conditions {
-                go(&mut w.condition)?;
-                go(&mut w.result)?;
-            }
-            if let Some(e) = else_result {
-                go(e)?;
-            }
-            Ok(())
-        }
-        Expr::Function(f) => {
-            if let FunctionArguments::List(list) = &mut f.args {
-                for arg in &mut list.args {
-                    if let FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) = arg {
-                        go(e)?;
-                    }
-                }
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-fn materialize_in_factor(
-    factor: &mut sqlparser::ast::TableFactor,
-    database: &mut Database,
-    verbose: bool,
-    registered: &mut Registered,
-) -> SqawkResult<()> {
-    let (subquery, alias) = match factor {
-        sqlparser::ast::TableFactor::Derived { lateral: true, .. } => {
-            return Err(SqawkError::UnsupportedSqlFeature(
-                "LATERAL subqueries are not supported".into(),
-            ))
-        }
-        sqlparser::ast::TableFactor::Derived {
-            subquery, alias, ..
-        } => (subquery.clone(), alias.clone()),
-        _ => return Ok(()),
-    };
-    if alias.as_ref().is_some_and(|a| !a.columns.is_empty()) {
-        return Err(SqawkError::UnsupportedSqlFeature(
-            "Column aliases on a FROM item are not supported".into(),
-        ));
-    }
-
-    // Nested derived tables are materialized innermost-first.
-    let mut inner = *subquery;
-    materialize_in_query(&mut inner, database, verbose, registered)?;
-
-    // Registered under an internal name, so that an alias may repeat
-    // across subqueries and may shadow a real table, as in SQL. (The name
-    // must survive being rendered back to SQL for an enclosing derived
-    // table, so it is a plain identifier.)
-    let name = (1..)
-        .map(|i| format!("sqawk_derived_{}", i))
-        .find(|n| !database.has_table(n))
-        .expect("an unused name");
-
-    let inner_sql = inner.to_string();
-    let result = execute_vm(&inner_sql, database, verbose)?;
-    let mut table = result.tables.into_iter().next_back().ok_or_else(|| {
-        SqawkError::InvalidSqlQuery("Subquery in FROM produced no result".to_string())
-    })?;
-    table.set_name(name.clone());
-    database.add_table(name.clone(), table)?;
-    registered.push(name.clone());
-
-    *factor = sqlparser::ast::TableFactor::Table {
-        name: sqlparser::ast::ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
-            sqlparser::ast::Ident::new(name),
-        )]),
-        alias,
-        args: None,
-        with_hints: Vec::new(),
-        version: None,
-        partitions: Vec::new(),
-        with_ordinality: false,
-        json_path: None,
-        sample: None,
-        index_hints: Vec::new(),
-    };
-    Ok(())
 }
 
 /// Whether a statement's affected-row count is meaningful to report.
@@ -491,22 +271,20 @@ fn is_row_counting_dml(statement: &sqlparser::ast::Statement) -> bool {
     )
 }
 
-/// Tables touched and rows affected by one statement's modifications.
+/// Rows affected by one statement's modifications.
 struct AppliedModifications {
-    modified_tables: HashSet<String>,
     affected_rows: usize,
 }
 
-/// Apply a statement's pending modifications to the database.
+/// Apply a statement's pending modifications to the database, marking each
+/// table they change as modified (DROP TABLE takes the mark away with the
+/// table).
 fn apply_modifications(
     database: &mut Database,
     modifications: Vec<engine::TableModification>,
     verbose: bool,
 ) -> SqawkResult<AppliedModifications> {
     // PHASE 3: APPLY MODIFICATIONS TO DATABASE
-
-    // Track which tables were modified
-    let mut modified_tables = HashSet::with_capacity(DEFAULT_TABLE_CAPACITY);
 
     // Track affected rows count for DML operations
     let mut affected_rows: usize = 0;
@@ -532,7 +310,7 @@ fn apply_modifications(
                 *insert_counts_by_table
                     .entry(table_name.clone())
                     .or_insert(0) += 1;
-                modified_tables.insert(table_name);
+                database.mark_modified(&table_name);
             }
             engine::TableModification::Replace {
                 table_name,
@@ -545,7 +323,7 @@ fn apply_modifications(
                 *replace_counts_by_table
                     .entry(table_name.clone())
                     .or_insert(0) += 1;
-                modified_tables.insert(table_name);
+                database.mark_modified(&table_name);
             }
             engine::TableModification::Delete {
                 table_name,
@@ -562,40 +340,58 @@ fn apply_modifications(
                 columns,
                 file_path,
                 delimiter,
+                header,
+                comments,
             } => {
-                // Convert engine ColumnDef to table ColumnDefinition
+                // Each column keeps its declared type name; its affinity
+                // follows SQLite's rules.
                 let schema: Vec<crate::table::ColumnDefinition> = columns
                     .into_iter()
                     .map(|col| crate::table::ColumnDefinition {
                         name: col.name,
-                        data_type: match col.data_type.as_str() {
-                            "INTEGER" => crate::table::DataType::Integer,
-                            "REAL" => crate::table::DataType::Float,
-                            "BOOLEAN" => crate::table::DataType::Boolean,
-                            _ => crate::table::DataType::Text,
-                        },
+                        data_type: crate::table::DataType::from_declared(&col.data_type),
+                        decl_type: Some(col.data_type),
                     })
                     .collect();
 
-                // Create the table with schema
-                let file_path_buf = file_path.map(std::path::PathBuf::from);
-                let table = crate::table::Table::new_with_schema(
-                    &table_name,
-                    schema,
-                    file_path_buf,
+                let Some(path) = file_path else {
+                    // No LOCATION: a scratch table, never written.
+                    let table =
+                        crate::table::Table::new_with_schema(&table_name, schema, None, delimiter);
+                    database.add_table(table_name.clone(), table)?;
+                    database.mark_modified(&table_name);
+                    continue;
+                };
+                // The declared columns are the schema of the LOCATION file:
+                // an existing file is loaded under them (and is not modified
+                // by loading); a new one is created on --write.
+                if database.has_table(&table_name) {
+                    return Err(crate::error::SqawkError::TableAlreadyExists(table_name));
+                }
+                let options = crate::file_handler::LocationOptions {
                     delimiter,
-                );
-
-                // Add to database
+                    header,
+                    comments,
+                };
+                let (table, existed) = crate::file_handler::load_location(
+                    database,
+                    &table_name,
+                    &path,
+                    schema,
+                    &options,
+                )?;
                 database.add_table(table_name.clone(), table)?;
-                modified_tables.insert(table_name);
+                if !existed {
+                    database.mark_modified(&table_name);
+                }
             }
             engine::TableModification::DropTable { table_name } => {
                 // Remove table from database
                 if !database.remove_table(&table_name) {
                     return Err(crate::error::SqawkError::TableNotFound(table_name));
                 }
-                // Note: we don't add to modified_tables since the table is gone
+                // remove_table also drops the table from the modified set:
+                // a dropped table is not written back.
             }
             engine::TableModification::AlterTableAddColumn {
                 table_name,
@@ -603,21 +399,19 @@ fn apply_modifications(
                 column_type,
             } => {
                 let table = database.get_table_mut(&table_name)?;
-                let data_type = match column_type.as_str() {
-                    "INTEGER" => crate::table::DataType::Integer,
-                    "REAL" => crate::table::DataType::Float,
-                    "BOOLEAN" => crate::table::DataType::Boolean,
-                    _ => crate::table::DataType::Text,
-                };
-                table.add_column_with_default(column_name, data_type, crate::table::Value::Null)?;
-                modified_tables.insert(table_name);
+                table.add_column_with_default(
+                    column_name,
+                    column_type,
+                    crate::table::Value::Null,
+                )?;
+                database.mark_modified(&table_name);
             }
             engine::TableModification::Truncate { table_name } => {
                 let table = database.get_table_mut(&table_name)?;
                 let row_count = table.row_count();
                 table.clear_rows()?;
                 affected_rows += row_count;
-                modified_tables.insert(table_name);
+                database.mark_modified(&table_name);
             }
         }
     }
@@ -642,7 +436,7 @@ fn apply_modifications(
 
         // Keep the rows not being deleted (and their comment lines in place)
         table.retain_rows(|idx| !indices_to_delete.contains(&idx));
-        modified_tables.insert(table_name.clone());
+        database.mark_modified(&table_name);
 
         // If we have equal deletes and inserts for this table, it's an UPDATE
         // Otherwise it's a DELETE
@@ -654,13 +448,13 @@ fn apply_modifications(
             // UPDATE: count the number of rows updated
             affected_rows += delete_count;
             if verbose {
-                eprintln!("Updated {} rows", delete_count);
+                diag!("Updated {} rows", delete_count);
             }
         } else {
             // DELETE: count the number of rows deleted
             affected_rows += delete_count;
             if verbose {
-                eprintln!("Deleted {} rows", delete_count);
+                diag!("Deleted {} rows", delete_count);
             }
         }
     }
@@ -668,12 +462,9 @@ fn apply_modifications(
     for (_table, count) in replace_counts_by_table {
         affected_rows += count;
         if verbose {
-            eprintln!("Updated {} rows", count);
+            diag!("Updated {} rows", count);
         }
     }
 
-    Ok(AppliedModifications {
-        modified_tables,
-        affected_rows,
-    })
+    Ok(AppliedModifications { affected_rows })
 }

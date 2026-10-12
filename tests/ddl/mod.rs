@@ -43,7 +43,7 @@ fn test_drop_table_nonexistent() -> Result<(), Box<dyn std::error::Error>> {
 
     cmd.assert()
         .failure()
-        .stderr(predicates::str::contains("not found"));
+        .stderr(predicates::str::contains("no such table: nonexistent"));
 
     Ok(())
 }

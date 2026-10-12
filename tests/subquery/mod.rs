@@ -1,7 +1,6 @@
 //! Scalar subquery tests for sqawk VM
 //!
 //! This file contains tests for scalar subqueries with aggregate functions.
-//! Phase 4F: Subquery support
 
 mod exact;
 

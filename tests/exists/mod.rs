@@ -1,7 +1,6 @@
 //! EXISTS/NOT EXISTS subquery tests for sqawk VM
 //!
 //! This file contains tests for EXISTS subqueries.
-//! Phase 4F: Subquery support
 
 use crate::helpers::{create_custom_csv, create_temp_dir};
 

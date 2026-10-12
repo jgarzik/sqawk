@@ -13,6 +13,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use crate::error::{SqawkError, SqawkResult};
 
@@ -155,7 +156,7 @@ impl fmt::Display for Value {
         match self {
             Value::Null => write!(f, "NULL"),
             Value::Integer(i) => write!(f, "{}", i),
-            Value::Float(float) => write!(f, "{}", float),
+            Value::Float(float) => f.write_str(&crate::vm::arith::real_text(*float)),
             Value::String(s) => write!(f, "{}", s),
             Value::Boolean(b) => write!(f, "{}", b),
         }
@@ -182,61 +183,81 @@ fn canonical_integer(s: &str) -> Option<i64> {
     s.parse::<i64>().ok()
 }
 
-/// Parse `s` as a float only if formatting the float back (the same `{}`
-/// formatting `Value`'s Display uses) reproduces `s` exactly.
+/// Parse `s` as a float only if rendering the float back (the rendering
+/// `Value`'s Display uses, SQLite's `CAST(x AS TEXT)`) reproduces `s`
+/// exactly.
 ///
-/// So `1.5` is a float but `1.50`, `1e3`, `2.0`, `.5`, `NaN` and `inf` are
+/// So `1.5`, `2.0` and `1.0e+20` are floats but `1.50`, `2`, `1e3`, `.5`,
+/// `0.30000000000000004` (17 digits; rendered `0.3`), `NaN` and `Inf` are
 /// not: loading them as numbers would change their spelling on output and on
-/// writeback. Display never emits an exponent, so only `-`, digits and `.`
-/// can possibly round-trip; anything else is rejected before formatting.
+/// writeback. Every rendering contains a point and only digits, `-`, `+`,
+/// `.` and `e`; anything else is rejected before parsing.
 fn canonical_float(s: &str) -> Option<f64> {
-    if s.is_empty()
+    if !s.contains('.')
         || !s
             .bytes()
-            .all(|c| c.is_ascii_digit() || c == b'-' || c == b'.')
+            .all(|c| c.is_ascii_digit() || matches!(c, b'-' | b'.' | b'e' | b'+'))
     {
         return None;
     }
-    let f = s.parse::<f64>().ok()?;
+    s.parse::<f64>().ok()?;
+    let f = crate::vm::arith::atof(s);
     if !f.is_finite() {
         return None;
     }
     if let Some(canonical) = short_decimal_is_canonical(s) {
         return canonical.then_some(f);
     }
-    thread_local! {
-        static BUF: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
-    }
-    BUF.with(|buf| {
-        use std::fmt::Write;
-        let mut buf = buf.borrow_mut();
-        buf.clear();
-        let _ = write!(buf, "{}", f);
-        (*buf == s).then_some(f)
-    })
+    (crate::vm::arith::real_text(f) == s).then_some(f)
 }
 
-/// Decide canonicity of a plain decimal without formatting, when possible.
+/// Decide canonicity of a plain decimal without rendering, when possible.
 ///
-/// Display prints the shortest digit string that round-trips, in positional
-/// notation. A decimal of at most 15 significant digits round-trips through
-/// f64 exactly, and no other decimal that short maps to the same double, so
-/// such a string is canonical iff it is in Display's shape:
-/// `-?(0|[1-9][0-9]*)\.[0-9]*[1-9]`. Returns None when the fast rule does not
-/// apply (more digits, or no point), leaving the caller to format and compare.
+/// The rendering is `%.15g` with `.0` kept on integral values: positional
+/// when the leading digit's exponent is in [-4, 15), trailing zeros dropped
+/// except the one in `.0`. A decimal of at most 15 significant digits comes
+/// back unchanged from 15-digit rounding of its nearest double, so such a
+/// string is canonical iff it has the rendering's shape. Returns None when
+/// the fast rule does not apply (more digits, or exponent notation), leaving
+/// the caller to render and compare.
 fn short_decimal_is_canonical(s: &str) -> Option<bool> {
-    let body = s.strip_prefix('-').unwrap_or(s);
+    let (neg, body) = match s.strip_prefix('-') {
+        Some(b) => (true, b),
+        None => (false, s),
+    };
+    if body.contains('e') {
+        return None;
+    }
     let (int, frac) = body.split_once('.')?;
-    if int.is_empty() || frac.is_empty() || frac.contains(['.', '-']) || int.contains('-') {
+    let all_digits = |t: &str| !t.is_empty() && t.bytes().all(|c| c.is_ascii_digit());
+    if !all_digits(int) || !all_digits(frac) {
         return Some(false);
     }
-    let digits = || int.bytes().chain(frac.bytes());
-    let significant = digits().skip_while(|&c| c == b'0').count();
+    if int.len() > 1 && int.starts_with('0') {
+        return Some(false);
+    }
+    let lead_zeros = frac.bytes().take_while(|&c| c == b'0').count();
+    if int == "0" && lead_zeros == frac.len() {
+        // Zero renders `0.0`, negative zero included.
+        return Some(!neg && frac == "0");
+    }
+    let significant = if int == "0" {
+        frac.len() - lead_zeros
+    } else {
+        int.len() + frac.len()
+    };
     if significant > 15 {
         return None;
     }
-    let shape_ok = (int == "0" || !int.starts_with('0')) && !frac.ends_with('0');
-    Some(shape_ok)
+    let exponent = if int == "0" {
+        -(lead_zeros as i64) - 1
+    } else {
+        int.len() as i64 - 1
+    };
+    if !(-4..15).contains(&exponent) {
+        return Some(false);
+    }
+    Some(frac == "0" || !frac.ends_with('0'))
 }
 
 /// Infer the type of a field read from an input file.
@@ -246,9 +267,9 @@ fn short_decimal_is_canonical(s: &str) -> Option<bool> {
 ///
 /// - empty field: NULL (rendered back as an empty field)
 /// - canonical integer (`42`, `-7`): Integer
-/// - canonical float (`1.5`, `-0.25`): Float
+/// - canonical float (`1.5`, `-0.25`, `2.0`, `1.0e+20`): Float
 /// - anything else, verbatim and untrimmed: String. That includes `007`,
-///   `1.50`, `1e3`, ` 42`, `true`, `NaN`.
+///   `1.50`, `1e3`, `0.30000000000000004`, ` 42`, `true`, `NaN`.
 ///
 /// Numeric-looking strings still behave as numbers where a number is needed
 /// (arithmetic, SUM/AVG, comparison with a number, ordering); see the VM.
@@ -302,9 +323,35 @@ impl Value {
     }
 }
 
+/// Make `names` unique, case-insensitively, the way SQLite names the
+/// columns of a subquery in FROM or a CREATE TABLE ... AS: a name equal to
+/// an earlier one gets `:1`, `:2`, ... in place of any `:N` suffix it had,
+/// the first that is free (`id, id, id` becomes `id, id:1, id:2`).
+pub fn unique_column_names(names: &mut [String]) {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for name in names.iter_mut() {
+        let mut cnt = 0u32;
+        while seen.contains(&name.to_lowercase()) {
+            let digits = name.len() - name.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+            let mut base = name.len();
+            if digits > 0 && digits < name.len() && name.as_bytes()[name.len() - digits - 1] == b':'
+            {
+                base = name.len() - digits - 1;
+            }
+            cnt += 1;
+            *name = format!("{}:{}", &name[..base], cnt);
+        }
+        seen.insert(name.to_lowercase());
+    }
+}
+
 /// Interpret text as a number: an i64 if it parses as one, else a finite f64.
+///
+/// This is the single "numeric reading" of text, used by every comparison
+/// (see the VM's `sql_compare`), by SUM/AVG and by ordering. Surrounding
+/// ASCII whitespace is allowed.
 pub fn numeric_text(s: &str) -> Option<Value> {
-    let t = s.trim();
+    let t = s.trim_matches(|c: char| c.is_ascii_whitespace());
     // Cheap rejection first: this runs inside sort comparators. A finite
     // number starts with a digit, a sign or a point.
     if !t
@@ -317,423 +364,28 @@ pub fn numeric_text(s: &str) -> Option<Value> {
     if let Ok(i) = t.parse::<i64>() {
         return Some(Value::Integer(i));
     }
-    // `inf` and `NaN` parse but are not finite, so they stay text.
-    match t.parse::<f64>() {
-        Ok(f) if f.is_finite() => Some(Value::Float(f)),
-        _ => None,
-    }
+    // `inf` and `NaN` parse but are not finite, so they stay text. The
+    // value is SQLite's reading of the text.
+    t.parse::<f64>().ok()?;
+    Some(crate::vm::arith::atof(t))
+        .filter(|f| f.is_finite())
+        .map(Value::Float)
 }
 
 /// Represents a row in a table
 pub type Row = Vec<Value>;
 
-// =============================================================================
-// Index-Based Result Types (Phase 4A)
-// =============================================================================
-// These types enable efficient query processing by storing row indices instead
-// of cloning entire rows. Materialization only happens at output time.
-//
-// Note: These types are defined in Phase 4A and will be integrated in Phases 4B-4F.
-// The #[allow(dead_code)] attributes will be removed as each type is adopted.
-
-/// Reference to a row within a specific table
-///
-/// This lightweight struct (16 bytes) replaces cloning entire rows (~100+ bytes).
-/// Used for tracking which rows match query conditions.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RowRef {
-    /// Index of the table in the source table list (for JOINs)
-    pub table_idx: usize,
-    /// Index of the row within that table
-    pub row_idx: usize,
-}
-
-#[allow(dead_code)]
-impl RowRef {
-    /// Create a new row reference
-    pub fn new(table_idx: usize, row_idx: usize) -> Self {
-        Self { table_idx, row_idx }
-    }
-
-    /// Create a row reference for single-table operations (table_idx = 0)
-    pub fn single(row_idx: usize) -> Self {
-        Self {
-            table_idx: 0,
-            row_idx,
-        }
-    }
-}
-
-/// Set of row references for single-table operations
-///
-/// Instead of `Vec<Vec<Value>>` (clones all row data), this stores only
-/// indices into the original table. Memory usage: O(n * 8 bytes) vs O(n * row_size).
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct RowSet<'a> {
-    /// Reference to the source table (borrowed, not owned)
-    source: &'a Table,
-    /// Indices of selected rows (into source.rows)
-    indices: Vec<usize>,
-}
-
-#[allow(dead_code)]
-impl<'a> RowSet<'a> {
-    /// Create a new empty RowSet referencing the given table
-    pub fn new(source: &'a Table) -> Self {
-        Self {
-            source,
-            indices: Vec::new(),
-        }
-    }
-
-    /// Create a RowSet with pre-allocated capacity
-    pub fn with_capacity(source: &'a Table, capacity: usize) -> Self {
-        Self {
-            source,
-            indices: Vec::with_capacity(capacity),
-        }
-    }
-
-    /// Add a row index to the set
-    pub fn push(&mut self, row_idx: usize) {
-        self.indices.push(row_idx);
-    }
-
-    /// Get the number of rows in this set
-    pub fn len(&self) -> usize {
-        self.indices.len()
-    }
-
-    /// Check if the set is empty
-    pub fn is_empty(&self) -> bool {
-        self.indices.is_empty()
-    }
-
-    /// Get the source table
-    pub fn source(&self) -> &'a Table {
-        self.source
-    }
-
-    /// Get the row indices
-    pub fn indices(&self) -> &[usize] {
-        &self.indices
-    }
-
-    /// Get a value from a specific row and column (no clone)
-    pub fn get_value(&self, row_idx: usize, col_idx: usize) -> Option<&Value> {
-        let actual_row = *self.indices.get(row_idx)?;
-        self.source.rows().get(actual_row)?.get(col_idx)
-    }
-
-    /// Materialize a single row (clones values - use sparingly)
-    pub fn materialize_row(&self, row_idx: usize) -> Option<Vec<Value>> {
-        let actual_row = *self.indices.get(row_idx)?;
-        self.source.rows().get(actual_row).cloned()
-    }
-
-    /// Iterate over row indices
-    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
-        self.indices.iter().copied()
-    }
-}
-
-/// Row references for multi-table operations (JOINs)
-///
-/// For JOIN operations, we need to track which rows from each table
-/// form a result row. Option<usize> handles NULL rows in outer joins.
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct JoinedRowSet<'a> {
-    /// References to source tables (borrowed)
-    sources: Vec<&'a Table>,
-    /// Each entry is row indices from each source table
-    /// Option<usize> allows NULL rows for outer joins
-    row_pairs: Vec<Vec<Option<usize>>>,
-}
-
-#[allow(dead_code)]
-impl<'a> JoinedRowSet<'a> {
-    /// Create a new JoinedRowSet for two tables
-    pub fn new(left: &'a Table, right: &'a Table) -> Self {
-        Self {
-            sources: vec![left, right],
-            row_pairs: Vec::new(),
-        }
-    }
-
-    /// Create with pre-allocated capacity
-    pub fn with_capacity(left: &'a Table, right: &'a Table, capacity: usize) -> Self {
-        Self {
-            sources: vec![left, right],
-            row_pairs: Vec::with_capacity(capacity),
-        }
-    }
-
-    /// Add a matched row pair (INNER JOIN)
-    pub fn add_match(&mut self, left_idx: usize, right_idx: usize) {
-        self.row_pairs.push(vec![Some(left_idx), Some(right_idx)]);
-    }
-
-    /// Add unmatched left row with NULL right (LEFT JOIN)
-    pub fn add_left_only(&mut self, left_idx: usize) {
-        self.row_pairs.push(vec![Some(left_idx), None]);
-    }
-
-    /// Add unmatched right row with NULL left (RIGHT JOIN)
-    pub fn add_right_only(&mut self, right_idx: usize) {
-        self.row_pairs.push(vec![None, Some(right_idx)]);
-    }
-
-    /// Get the number of result rows
-    pub fn len(&self) -> usize {
-        self.row_pairs.len()
-    }
-
-    /// Check if empty
-    pub fn is_empty(&self) -> bool {
-        self.row_pairs.is_empty()
-    }
-
-    /// Get value from a joined row (returns &Value or NULL for outer join misses)
-    pub fn get_value(&self, row_idx: usize, table_idx: usize, col_idx: usize) -> &Value {
-        // Static NULL for outer join misses
-        static NULL_VALUE: Value = Value::Null;
-
-        if let Some(row_pair) = self.row_pairs.get(row_idx) {
-            if let Some(Some(actual_row)) = row_pair.get(table_idx) {
-                if let Some(table) = self.sources.get(table_idx) {
-                    if let Some(row) = table.rows().get(*actual_row) {
-                        if let Some(value) = row.get(col_idx) {
-                            return value;
-                        }
-                    }
-                }
-            }
-        }
-        &NULL_VALUE
-    }
-
-    /// Get the source tables
-    pub fn sources(&self) -> &[&'a Table] {
-        &self.sources
-    }
-
-    /// Materialize a single result row (clones values)
-    pub fn materialize_row(
-        &self,
-        row_idx: usize,
-        left_cols: usize,
-        right_cols: usize,
-    ) -> Option<Vec<Value>> {
-        // Verify row exists
-        let _ = self.row_pairs.get(row_idx)?;
-        let mut result = Vec::with_capacity(left_cols + right_cols);
-
-        // Left table columns
-        for col_idx in 0..left_cols {
-            result.push(self.get_value(row_idx, 0, col_idx).clone());
-        }
-
-        // Right table columns
-        for col_idx in 0..right_cols {
-            result.push(self.get_value(row_idx, 1, col_idx).clone());
-        }
-
-        Some(result)
-    }
-}
-
-/// Unified VM result type - either single-table indices, joined indices, or materialized
-///
-/// This enum allows the VM to work with index-based results throughout query
-/// processing, only materializing to actual values when necessary.
-#[allow(dead_code)]
-#[derive(Debug)]
-pub enum IndexedResult<'a> {
-    /// Result from single table scan/filter
-    Single(RowSet<'a>),
-    /// Result from JOIN operations
-    Joined(JoinedRowSet<'a>),
-    /// Materialized result (for complex expressions, aggregates, or final output)
-    Materialized(Vec<Vec<Value>>),
-}
-
-#[allow(dead_code)]
-impl<'a> IndexedResult<'a> {
-    /// Get the number of result rows
-    pub fn len(&self) -> usize {
-        match self {
-            IndexedResult::Single(rs) => rs.len(),
-            IndexedResult::Joined(js) => js.len(),
-            IndexedResult::Materialized(rows) => rows.len(),
-        }
-    }
-
-    /// Check if empty
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Check if this result is already materialized
-    pub fn is_materialized(&self) -> bool {
-        matches!(self, IndexedResult::Materialized(_))
-    }
-}
-
-/// Lazy row view - provides access to row values without immediate cloning
-///
-/// This struct allows iteration over result rows while deferring value
-/// cloning until actually needed (e.g., for output).
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct LazyRow<'a, 'b> {
-    /// Reference to the indexed result
-    result: &'b IndexedResult<'a>,
-    /// Index within the result
-    row_idx: usize,
-}
-
-#[allow(dead_code)]
-impl<'a, 'b> LazyRow<'a, 'b> {
-    /// Create a new lazy row view
-    pub fn new(result: &'b IndexedResult<'a>, row_idx: usize) -> Self {
-        Self { result, row_idx }
-    }
-
-    /// Get the row index
-    pub fn index(&self) -> usize {
-        self.row_idx
-    }
-
-    /// Materialize this row to owned values (clones - use when needed for output)
-    pub fn materialize(&self) -> Option<Vec<Value>> {
-        match self.result {
-            IndexedResult::Single(rs) => rs.materialize_row(self.row_idx),
-            IndexedResult::Joined(js) => {
-                // For joined rows, we need column counts
-                let left_cols = js.sources().first().map(|t| t.column_count()).unwrap_or(0);
-                let right_cols = js.sources().get(1).map(|t| t.column_count()).unwrap_or(0);
-                js.materialize_row(self.row_idx, left_cols, right_cols)
-            }
-            IndexedResult::Materialized(rows) => rows.get(self.row_idx).cloned(),
-        }
-    }
-}
-
-/// Builder for constructing IndexedResult during VM execution
-///
-/// This builder accumulates row indices during query processing and
-/// produces an IndexedResult at the end.
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct IndexedResultBuilder<'a> {
-    /// Source tables being queried
-    sources: Vec<&'a Table>,
-    /// Accumulated row indices (single table: one index per row)
-    single_indices: Vec<usize>,
-    /// Accumulated row pairs (joins: multiple indices per row)
-    join_indices: Vec<Vec<Option<usize>>>,
-    /// Whether this is a join operation
-    is_join: bool,
-}
-
-#[allow(dead_code)]
-impl<'a> IndexedResultBuilder<'a> {
-    /// Create a new builder
-    pub fn new() -> Self {
-        Self {
-            sources: Vec::new(),
-            single_indices: Vec::new(),
-            join_indices: Vec::new(),
-            is_join: false,
-        }
-    }
-
-    /// Add a source table
-    pub fn add_source(&mut self, table: &'a Table) {
-        self.sources.push(table);
-        if self.sources.len() > 1 {
-            self.is_join = true;
-        }
-    }
-
-    /// Add a single row index (for single-table operations)
-    pub fn add_row_single(&mut self, row_idx: usize) {
-        self.single_indices.push(row_idx);
-    }
-
-    /// Add a joined row (for multi-table operations)
-    pub fn add_row_joined(&mut self, indices: Vec<Option<usize>>) {
-        self.join_indices.push(indices);
-    }
-
-    /// Check if any rows have been added
-    pub fn is_empty(&self) -> bool {
-        self.single_indices.is_empty() && self.join_indices.is_empty()
-    }
-
-    /// Get the number of result rows
-    pub fn len(&self) -> usize {
-        if self.is_join {
-            self.join_indices.len()
-        } else {
-            self.single_indices.len()
-        }
-    }
-
-    /// Clear accumulated results (for reuse)
-    pub fn clear(&mut self) {
-        self.single_indices.clear();
-        self.join_indices.clear();
-    }
-
-    /// Build the final IndexedResult
-    pub fn build(self) -> Option<IndexedResult<'a>> {
-        if self.sources.is_empty() {
-            return None;
-        }
-
-        if self.is_join && self.sources.len() >= 2 {
-            let joined = JoinedRowSet {
-                sources: self.sources,
-                row_pairs: self.join_indices,
-            };
-            Some(IndexedResult::Joined(joined))
-        } else if let Some(source) = self.sources.into_iter().next() {
-            let row_set = RowSet {
-                source,
-                indices: self.single_indices,
-            };
-            Some(IndexedResult::Single(row_set))
-        } else {
-            None
-        }
-    }
-}
-
-impl<'a> Default for IndexedResultBuilder<'a> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// =============================================================================
-// End Index-Based Result Types
-// =============================================================================
-
 /// Represents an in-memory table
-#[derive(Debug)]
+///
+/// `Clone` is a deep copy (rows, source bytes and layout); a transaction
+/// keeps one of each table it changes, for ROLLBACK.
+#[derive(Debug, Clone)]
 pub struct Table {
     /// Name of the table
     name: String,
 
     /// Complete column metadata including name and type
     cols: Vec<Column>,
-
-    /// Map of column names to their indices
-    column_map: HashMap<String, usize>,
 
     /// Row data
     rows: Vec<Row>,
@@ -755,15 +407,78 @@ pub struct Table {
 
     /// A `--tabledef` schema with no data yet, waiting for its file
     placeholder: bool,
+
+    /// The source bytes of the header and of each loaded row, so writeback
+    /// reproduces untouched rows byte-for-byte (see [`RawRows`]).
+    raw: Option<Box<RawRows>>,
+
+    /// Lower-cased column name -> index, built on the first
+    /// [`Table::column_index`] of a wide table so that resolving every
+    /// column of a wide table costs linear, not quadratic, time. Reset
+    /// whenever the columns change.
+    name_index: OnceLock<HashMap<String, usize>>,
+}
+
+/// The bytes each record of a table's source file was read from.
+///
+/// The whole file is kept in one buffer and every row points into it by
+/// [`RawSpan`], parallel to `Table::rows`. A row whose span is
+/// [`RawSpan::NONE`] (inserted, or changed by UPDATE) is written by the
+/// [`RecordWriter`]; every other row is written as the exact bytes it was read
+/// from, line ending included -- quoting, padding, invalid UTF-8 and all.
+#[derive(Debug, Clone)]
+pub struct RawRows {
+    /// The file contents as read (byte order mark included).
+    pub buf: Vec<u8>,
+    /// The header record's bytes, if the file has a header.
+    pub header: RawSpan,
+    /// One span per row of the table.
+    pub rows: Vec<RawSpan>,
+}
+
+/// A byte range `start..end` of [`RawRows::buf`]; `NONE` when there is none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawSpan {
+    /// First byte of the record
+    pub start: usize,
+    /// One past the last byte (the line ending, when there is one)
+    pub end: usize,
+}
+
+impl RawSpan {
+    /// No source bytes: the record is written from its values.
+    pub const NONE: RawSpan = RawSpan {
+        start: usize::MAX,
+        end: usize::MAX,
+    };
+
+    fn get(self, buf: &[u8]) -> Option<&[u8]> {
+        buf.get(self.start..self.end)
+    }
+}
+
+/// Whether two values are the same value of the same type, so a row that
+/// UPDATE rewrote with them is unchanged and keeps its source bytes. Stricter
+/// than `==`, which equates 1 and 1.0.
+fn identical(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::Integer(x), Value::Integer(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => x.to_bits() == y.to_bits(),
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::Boolean(x), Value::Boolean(y)) => x == y,
+        _ => false,
+    }
 }
 
 /// Layout details of a table's source file that writeback must reproduce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileLayout {
-    /// Whether the file has a header line. Headerless files (`--no-header`,
-    /// `--tabledef`, or a guessed headerless non-.csv file) are written back
-    /// without one.
+    /// Whether the file has a header line. Headerless files (`--no-header`
+    /// or `--tabledef`) are written back without one.
     pub has_header: bool,
+    /// Whether the file starts with a UTF-8 byte order mark.
+    pub bom: bool,
     /// Whether records end in CRLF rather than LF.
     pub crlf: bool,
     /// Whether `#` lines are comments when the file is read. If so, a data
@@ -772,15 +487,16 @@ pub struct FileLayout {
     pub comments: bool,
 }
 
-/// The `#` comment lines of a source file read with comment skipping, each
-/// kept verbatim (with its own line ending) and anchored to the data around
-/// it, so that writeback puts it back where it was.
+/// The lines of a source file between its records -- blank lines, and the
+/// `#` comment lines of a file read with `--comments` -- each kept verbatim
+/// (with its own line ending) and anchored to the data around it, so that
+/// writeback puts it back where it was.
 ///
-/// A comment line is anchored to the row that follows it. Rows keep their
-/// identity through UPDATE, so their comments stay with them; a deleted row
-/// leaves its comments in place, in front of the next surviving row (or of
-/// the trailing comments); rows appended by INSERT go after the last row and
-/// before the trailing comments. Blank lines are not kept.
+/// A line is anchored to the row that follows it. Rows keep their identity
+/// through UPDATE, so their lines stay with them; a deleted row leaves its
+/// lines in place, in front of the next surviving row (or of the trailing
+/// lines); rows appended by INSERT go after the last row and before the
+/// trailing lines.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommentLines {
     /// Lines before the first record (the header, or the first row).
@@ -809,6 +525,7 @@ impl Default for FileLayout {
     fn default() -> Self {
         FileLayout {
             has_header: true,
+            bom: false,
             crlf: false,
             comments: false,
         }
@@ -826,6 +543,32 @@ pub enum DataType {
     Text,
     /// Boolean
     Boolean,
+    /// NUMERIC affinity (a declared type matching no other rule)
+    Numeric,
+    /// BLOB affinity (a declared type containing `BLOB`)
+    Blob,
+}
+
+impl DataType {
+    /// The affinity of a declared column type, by SQLite's rules (in order):
+    /// `INT` anywhere gives INTEGER; `CHAR`, `CLOB` or `TEXT` gives TEXT;
+    /// `BLOB` or no type gives BLOB; `REAL`, `FLOA` or `DOUB` gives REAL;
+    /// anything else gives NUMERIC. Case-insensitive.
+    pub fn from_declared(decl: &str) -> DataType {
+        let t = decl.to_ascii_uppercase();
+        let has = |s: &str| t.contains(s);
+        if has("INT") {
+            DataType::Integer
+        } else if has("CHAR") || has("CLOB") || has("TEXT") {
+            DataType::Text
+        } else if has("BLOB") || t.trim().is_empty() {
+            DataType::Blob
+        } else if has("REAL") || has("FLOA") || has("DOUB") {
+            DataType::Float
+        } else {
+            DataType::Numeric
+        }
+    }
 }
 
 impl fmt::Display for DataType {
@@ -835,6 +578,8 @@ impl fmt::Display for DataType {
             DataType::Float => write!(f, "REAL"),
             DataType::Text => write!(f, "TEXT"),
             DataType::Boolean => write!(f, "BOOLEAN"),
+            DataType::Numeric => write!(f, "NUMERIC"),
+            DataType::Blob => write!(f, "BLOB"),
         }
     }
 }
@@ -844,13 +589,27 @@ impl fmt::Display for DataType {
 pub struct Column {
     /// Name of the column
     pub name: String,
-    /// Data type of the column
+    /// Data type of the column (for a declared column, its affinity)
     pub data_type: DataType,
+    /// The type name as declared by CREATE TABLE / ALTER TABLE ADD COLUMN;
+    /// `None` for a loaded or result column
+    pub decl_type: Option<String>,
+}
+
+impl Column {
+    /// The type name `.schema` shows: the declared name when there is one,
+    /// else the data type's name.
+    pub fn type_name(&self) -> String {
+        match &self.decl_type {
+            Some(decl) => decl.clone(),
+            None => self.data_type.to_string(),
+        }
+    }
 }
 
 impl fmt::Display for Column {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({})", self.name, self.data_type)
+        write!(f, "{} ({})", self.name, self.type_name())
     }
 }
 
@@ -861,6 +620,8 @@ pub struct ColumnDefinition {
     pub name: String,
     /// Data type of the column
     pub data_type: DataType,
+    /// The declared type name, if the column was declared
+    pub decl_type: Option<String>,
 }
 
 impl Table {
@@ -868,26 +629,19 @@ impl Table {
     ///
     /// This constructor defaults all columns to Text type
     pub fn new(name: &str, column_names: Vec<String>, file_path: Option<PathBuf>) -> Self {
-        // Create column_map from column names
-        let column_map = column_names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), i))
-            .collect();
-
         // Create full column metadata objects
         let cols = column_names
             .iter()
             .map(|name| Column {
                 name: name.clone(),
                 data_type: DataType::Text,
+                decl_type: None,
             })
             .collect();
 
         Table {
             name: name.to_string(),
             cols,
-            column_map,
             rows: Vec::new(),
             file_path,
             modified: false,
@@ -895,6 +649,8 @@ impl Table {
             format: FileLayout::default(),
             comments: CommentLines::default(),
             placeholder: false,
+            raw: None,
+            name_index: OnceLock::new(),
         }
     }
 
@@ -917,29 +673,19 @@ impl Table {
         file_path: Option<PathBuf>,
         delimiter: Option<String>,
     ) -> Self {
-        // Extract column names from the schema
-        let columns: Vec<String> = schema.iter().map(|col_def| col_def.name.clone()).collect();
-
         // Create full column metadata objects
         let cols = schema
             .iter()
             .map(|col_def| Column {
                 name: col_def.name.clone(),
                 data_type: col_def.data_type,
+                decl_type: col_def.decl_type.clone(),
             })
-            .collect();
-
-        // Create column_map from column names
-        let column_map = columns
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), i))
             .collect();
 
         Table {
             name: name.to_string(),
             cols,
-            column_map,
             rows: Vec::new(),
             file_path,
             modified: true, // Tables created with schema are considered modified
@@ -947,7 +693,24 @@ impl Table {
             format: FileLayout::default(),
             comments: CommentLines::default(),
             placeholder: false,
+            raw: None,
+            name_index: OnceLock::new(),
         }
+    }
+
+    /// Give the columns declared names and types (CREATE TABLE ... LOCATION
+    /// over an existing file). `schema` has one entry per column.
+    pub fn set_declared_columns(&mut self, schema: Vec<ColumnDefinition>) {
+        debug_assert_eq!(schema.len(), self.cols.len());
+        self.name_index = OnceLock::new();
+        self.cols = schema
+            .into_iter()
+            .map(|c| Column {
+                name: c.name,
+                data_type: c.data_type,
+                decl_type: c.decl_type,
+            })
+            .collect();
     }
 
     /// Get the columns of the table
@@ -956,8 +719,6 @@ impl Table {
     /// The column names maintain their original order as specified when
     /// the table was created or loaded from a file.
     pub fn columns(&self) -> Vec<String> {
-        // Get column names from Column objects
-        // This prepares for future removal of the columns field
         self.cols.iter().map(|col| col.name.clone()).collect()
     }
 
@@ -974,7 +735,7 @@ impl Table {
     /// validation when adding rows or performing operations that need to
     /// check column bounds.
     pub fn column_count(&self) -> usize {
-        self.columns().len()
+        self.cols.len()
     }
 
     /// Get the rows of the table
@@ -1035,6 +796,9 @@ impl Table {
         }
 
         self.rows.push(row);
+        if let Some(raw) = &mut self.raw {
+            raw.rows.push(RawSpan::NONE);
+        }
         self.modified = true;
         Ok(())
     }
@@ -1104,32 +868,63 @@ impl Table {
         self.comments.flush_from(self.rows.len());
     }
 
-    /// Get the index of a column by name
+    /// The index of the column called `name`.
     ///
-    /// Looks up a column by name and returns its index in the table.
-    /// This is essential for implementing SQL operations that reference
-    /// columns by name rather than position.
-    ///
-    /// # Arguments
-    /// * `name` - The name of the column to look up
-    ///
-    /// # Returns
-    /// * `Some(usize)` with the column index if found
-    /// * `None` if no column with that name exists
+    /// Column names are case-insensitive (ASCII), as in SQLite; this is the
+    /// one lookup every statement uses, so a name resolves the same way in a
+    /// SELECT, an INSERT column list and an UPDATE SET. A loaded or created
+    /// table cannot have two columns that match the same name.
     pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.column_map.get(name).copied()
+        // A short list is scanned; a wide one is looked up in a map.
+        if self.cols.len() <= 16 {
+            return self
+                .cols
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(name));
+        }
+        let index = self.name_index.get_or_init(|| {
+            let mut map = HashMap::with_capacity(self.cols.len());
+            for (i, c) in self.cols.iter().enumerate() {
+                map.entry(c.name.to_ascii_lowercase()).or_insert(i);
+            }
+            map
+        });
+        index.get(&name.to_ascii_lowercase()).copied()
+    }
+
+    /// Rename the columns in order, as a CTE's column list does. `names`
+    /// has one entry per column.
+    pub fn rename_columns(&mut self, names: &[String]) {
+        debug_assert_eq!(names.len(), self.cols.len());
+        self.name_index = OnceLock::new();
+        for (col, name) in self.cols.iter_mut().zip(names) {
+            col.name = name.clone();
+        }
+        self.raw = None;
+    }
+
+    /// Make the column names unique as SQLite names the columns of a
+    /// derived table or CREATE TABLE ... AS (see [`unique_column_names`]).
+    pub fn dedup_column_names(&mut self) {
+        let mut names: Vec<String> = self.cols.iter().map(|c| c.name.clone()).collect();
+        unique_column_names(&mut names);
+        self.name_index = OnceLock::new();
+        for (col, name) in self.cols.iter_mut().zip(names) {
+            col.name = name;
+        }
+        self.raw = None;
     }
 
     /// Print the table to stdout as a delimited file
     ///
-    /// Header line, then one record per row, using this table's delimiter
-    /// with RFC 4180 quoting where a field needs it. NULL prints as an empty
-    /// field. Returns the raw io::Error so the caller can recognise a closed
-    /// pipe (`sqawk ... | head`) and stop quietly.
-    pub fn print_to_stdout(&self) -> std::io::Result<()> {
+    /// Header line (when `header`), then one record per row, using this
+    /// table's delimiter with RFC 4180 quoting where a field needs it. NULL
+    /// prints as an empty field. Returns the raw io::Error so the caller can
+    /// recognise a closed pipe (`sqawk ... | head`) and stop quietly.
+    pub fn print_to_stdout(&self, header: bool) -> std::io::Result<()> {
         let stdout = std::io::stdout();
         let mut out = std::io::BufWriter::new(stdout.lock());
-        self.write_delimited(&mut out, true, false, false, None)?;
+        self.write_delimited(&mut out, header, false, false, None)?;
         std::io::Write::flush(&mut out)
     }
 
@@ -1148,23 +943,69 @@ impl Table {
         comments: bool,
         lines: Option<&CommentLines>,
     ) -> std::io::Result<()> {
+        self.write_records(out, header, crlf, comments, lines, None)
+    }
+
+    /// `write_delimited`, writing each record that has source bytes in
+    /// `raw` as those bytes.
+    fn write_records<W: std::io::Write>(
+        &self,
+        out: &mut W,
+        header: bool,
+        crlf: bool,
+        comments: bool,
+        lines: Option<&CommentLines>,
+        raw: Option<&RawRows>,
+    ) -> std::io::Result<()> {
         let delim = delimiter_byte(&self.delimiter);
+        let terminator: &'static [u8] = if crlf { b"\r\n" } else { b"\n" };
         let w = RecordWriter {
             delimiter: delim,
-            terminator: if crlf { b"\r\n" } else { b"\n" },
+            terminator,
             comments,
         };
         let empty = CommentLines::default();
         let lines = lines.unwrap_or(&empty);
-        out.write_all(&lines.head)?;
+        let source = |span: RawSpan| raw.and_then(|r| span.get(&r.buf));
+        // The last record of a file may have no line ending. Its bytes are
+        // written as they were, so anything written after it must first end
+        // its line.
+        let mut open_line = false;
+        let put = |out: &mut W, bytes: &[u8], open: &mut bool| -> std::io::Result<()> {
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            if *open {
+                out.write_all(terminator)?;
+            }
+            out.write_all(bytes)?;
+            *open = !matches!(bytes.last(), Some(b'\n' | b'\r'));
+            Ok(())
+        };
+        put(out, &lines.head, &mut open_line)?;
         if header {
-            let names = self.columns();
-            w.write(out, names.iter().map(String::as_str))?;
+            match source(raw.map_or(RawSpan::NONE, |r| r.header)) {
+                Some(bytes) => put(out, bytes, &mut open_line)?,
+                None => {
+                    let names = self.columns();
+                    let mut rec = Vec::new();
+                    w.write(&mut rec, names.iter().map(String::as_str))?;
+                    put(out, &rec, &mut open_line)?;
+                }
+            }
         }
         let mut fields: Vec<std::borrow::Cow<'_, str>> = Vec::with_capacity(self.cols.len());
         for (i, row) in self.rows.iter().enumerate() {
             if let Some(before) = lines.before.get(&i) {
-                out.write_all(before)?;
+                put(out, before, &mut open_line)?;
+            }
+            if let Some(bytes) = source(raw.map_or(RawSpan::NONE, |r| r.rows[i])) {
+                put(out, bytes, &mut open_line)?;
+                continue;
+            }
+            if open_line {
+                out.write_all(terminator)?;
+                open_line = false;
             }
             fields.clear();
             fields.extend(row.iter().map(Value::field_str));
@@ -1173,22 +1014,34 @@ impl Table {
         // A comment line anchored past the last row (none should be) is
         // still written rather than lost.
         for (_, before) in lines.before.range(self.rows.len()..) {
-            out.write_all(before)?;
+            put(out, before, &mut open_line)?;
         }
-        out.write_all(&lines.tail)
+        put(out, &lines.tail, &mut open_line)
     }
 
-    /// Write the table back to its file format: `write_delimited` with the
-    /// recorded layout and comment lines.
+    /// Write the table back to its file format: the recorded layout (byte
+    /// order mark, header, line endings) and comment lines, with every row
+    /// that still has its source bytes written as those bytes.
     pub fn write_source_layout<W: std::io::Write>(&self, out: &mut W) -> std::io::Result<()> {
         let layout = self.file_layout();
-        self.write_delimited(
+        if layout.bom {
+            out.write_all(b"\xef\xbb\xbf")?;
+        }
+        self.write_records(
             out,
             layout.has_header,
             layout.crlf,
             layout.comments,
             Some(&self.comments),
+            self.raw.as_deref(),
         )
+    }
+
+    /// Record the source bytes of the header and rows (see [`RawRows`]).
+    /// `raw.rows` must have one span per row.
+    pub fn set_raw(&mut self, raw: RawRows) {
+        debug_assert_eq!(raw.rows.len(), self.rows.len());
+        self.raw = Some(Box::new(raw));
     }
 
     /// Replace all rows with a new set
@@ -1200,6 +1053,7 @@ impl Table {
     /// * `new_rows` - The new set of rows to replace the existing ones
     pub fn replace_rows(&mut self, new_rows: Vec<Row>) {
         self.rows = new_rows;
+        self.raw = None;
         self.comments.flush_from(self.rows.len());
         self.modified = true;
     }
@@ -1210,6 +1064,13 @@ impl Table {
     /// move to the next surviving row, or to the tail.
     pub fn retain_rows(&mut self, keep: impl Fn(usize) -> bool) {
         let old = std::mem::take(&mut self.rows);
+        if let Some(raw) = &mut self.raw {
+            let mut i = 0;
+            raw.rows.retain(|_| {
+                i += 1;
+                keep(i - 1)
+            });
+        }
         let mut before = std::mem::take(&mut self.comments.before);
         let mut pending: Vec<u8> = Vec::new();
         for (i, row) in old.into_iter().enumerate() {
@@ -1245,6 +1106,16 @@ impl Table {
                 row_index, self.name
             )));
         }
+        if let Some(raw) = &mut self.raw {
+            let same = rows[row_index].len() == row.len()
+                && rows[row_index]
+                    .iter()
+                    .zip(&row)
+                    .all(|(a, b)| identical(a, b));
+            if !same {
+                raw.rows[row_index] = RawSpan::NONE;
+            }
+        }
         rows[row_index] = row;
         self.modified = true;
         Ok(())
@@ -1260,29 +1131,33 @@ impl Table {
             _ => DataType::Text,
         };
         let column = Column {
-            name: name.clone(),
+            name,
             data_type,
+            decl_type: None,
         };
+        self.name_index = OnceLock::new();
         self.cols.push(column);
-        let new_index = self.cols.len() - 1;
-        self.column_map.insert(name, new_index);
+        self.raw = None;
         self.modified = true;
     }
 
-    /// Add a new column with a default value for all existing rows
+    /// Add a new column, declared as `decl_type`, with a default value for
+    /// all existing rows
     pub fn add_column_with_default(
         &mut self,
         name: String,
-        data_type: DataType,
+        decl_type: String,
         default_value: Value,
     ) -> crate::error::SqawkResult<()> {
         let column = Column {
-            name: name.clone(),
-            data_type,
+            name,
+            data_type: DataType::from_declared(&decl_type),
+            decl_type: Some(decl_type),
         };
+        self.name_index = OnceLock::new();
         self.cols.push(column);
-        let new_index = self.cols.len() - 1;
-        self.column_map.insert(name, new_index);
+        // Every line of the file gains a field.
+        self.raw = None;
 
         // Add default value to all existing rows
         for row in &mut self.rows {
@@ -1296,27 +1171,13 @@ impl Table {
     /// Clear all rows from the table (TRUNCATE TABLE)
     pub fn clear_rows(&mut self) -> crate::error::SqawkResult<()> {
         self.rows.clear();
+        // The header line is still written back as it was read.
+        if let Some(raw) = &mut self.raw {
+            raw.rows.clear();
+        }
         self.comments.flush_from(0);
         self.modified = true;
         Ok(())
-    }
-
-    /// Convert all rows to string representation
-    ///
-    /// This method converts all table rows to a vector of string vectors,
-    /// useful for displaying in the REPL interface.
-    ///
-    /// # Returns
-    /// * Vec<Vec<String>> - All rows converted to strings
-    pub fn rows_as_strings(&self) -> Vec<Vec<String>> {
-        self.rows()
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|value| value.field_str().into_owned())
-                    .collect()
-            })
-            .collect()
     }
 }
 
@@ -1395,5 +1256,23 @@ impl RecordWriter {
             out.write_all(b"\"\"")?;
         }
         out.write_all(self.terminator)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unique_column_names;
+
+    #[test]
+    fn unique_column_names_like_sqlite() {
+        let mut names: Vec<String> = ["Id", "id", "id+1", "ID", "id+1", "a:1", "a:1", "x:"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        unique_column_names(&mut names);
+        assert_eq!(
+            names,
+            ["Id", "id:1", "id+1", "ID:2", "id+1:1", "a:1", "a:2", "x:"]
+        );
     }
 }

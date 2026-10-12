@@ -17,11 +17,13 @@ fn test_basic_aggregate_functions() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-v");
 
     // employees.csv has 8 rows:
-    // COUNT(*) = 8, SUM(age) = 257, AVG(salary) = 67500, MIN(age) = 22, MAX(salary) = 90000
+    // COUNT(*) = 8, SUM(age) = 257, AVG(salary) = 67500.0, MIN(age) = 22, MAX(salary) = 90000
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("COUNT,SUM,AVG,MIN,MAX"))
-        .stdout(predicate::str::contains("8,257,67500,22,90000"));
+        .stdout(predicate::str::contains(
+            "COUNT(*),SUM(age),AVG(salary),MIN(age),MAX(salary)",
+        ))
+        .stdout(predicate::str::contains("8,257,67500.0,22,90000"));
 
     Ok(())
 }
@@ -60,11 +62,13 @@ fn test_aggregate_functions_with_filter() -> Result<(), Box<dyn std::error::Erro
         .arg("-v");
 
     // Rows with age > 25: Alice(30), Charlie(35), David(40), Eve(28), Frank(32), Grace(45) = 6 rows
-    // COUNT = 6, SUM(salary) = 440000, AVG(age) = 35, MIN(salary) = 60000, MAX(age) = 45
+    // COUNT = 6, SUM(salary) = 440000, AVG(age) = 35.0, MIN(salary) = 60000, MAX(age) = 45
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("COUNT,SUM,AVG,MIN,MAX"))
-        .stdout(predicate::str::contains("6,440000,35,60000,45"));
+        .stdout(predicate::str::contains(
+            "COUNT(*),SUM(salary),AVG(age),MIN(salary),MAX(age)",
+        ))
+        .stdout(predicate::str::contains("6,440000,35.0,60000,45"));
 
     Ok(())
 }
@@ -152,12 +156,12 @@ mod sqlite_semantics {
         assert_query_on(
             &[EMP],
             "SELECT TOTAL(salary) AS t, TOTAL(NULL) AS n, typeof(TOTAL(salary)) AS ty FROM emp",
-            "t,n,ty\n300,0,real",
+            "t,n,ty\n300.0,0.0,real",
         )?;
         assert_query_on(
             &[EMP],
             "SELECT TOTAL(salary) AS t FROM emp WHERE id > 100",
-            "t\n0",
+            "t\n0.0",
         )
     }
 
@@ -196,7 +200,7 @@ mod sqlite_semantics {
         assert_query_on(
             &[ONE],
             &format!("SELECT AVG(x) AS a, TOTAL(x) AS t FROM {} z", BIG),
-            "a,t\n4611686018427388000,9223372036854776000",
+            "a,t\n4.61168601842739e+18,9.22337203685478e+18",
         )
     }
 }

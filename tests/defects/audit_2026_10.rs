@@ -337,9 +337,8 @@ fn non_canonical_numbers_display_verbatim() -> TestResult {
     )
 }
 
-/// The headerless auto-detection (file_handler.rs) guesses that a numeric
-/// first line is data and names columns a,b. For .csv files the first line is
-/// always the header.
+/// A numeric first line is the header like any other: sqawk never guesses
+/// that a file has no header row.
 #[test]
 fn csv_first_line_is_always_header() -> TestResult {
     assert_query_on(
@@ -952,7 +951,7 @@ fn delete_with_join_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv(), orders_csv()],
         "DELETE users FROM users JOIN orders ON users.id = orders.user_id",
-        "Unsupported",
+        "not supported",
     )
 }
 
@@ -1021,7 +1020,7 @@ fn insert_returning_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv()],
         "INSERT INTO users VALUES (3, 'Zed', 'z@x') RETURNING id",
-        "Unsupported",
+        "not supported",
     )
 }
 
@@ -1031,7 +1030,7 @@ fn insert_on_conflict_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv()],
         "INSERT INTO users VALUES (1, 'Zed', 'z@x') ON CONFLICT DO NOTHING",
-        "Unsupported",
+        "not supported",
     )
 }
 
@@ -1042,7 +1041,7 @@ fn insert_or_replace_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv()],
         "INSERT OR REPLACE INTO users VALUES (1, 'Zed', 'z@x')",
-        "Unsupported",
+        "not supported",
     )
 }
 
@@ -1052,7 +1051,7 @@ fn update_from_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv(), orders_csv()],
         "UPDATE users SET name = 'X' FROM orders WHERE users.id = 1",
-        "Unsupported",
+        "not supported",
     )
 }
 
@@ -1062,7 +1061,7 @@ fn delete_using_is_error() -> TestResult {
     assert_query_fails(
         &[users_csv(), orders_csv()],
         "DELETE FROM users USING orders WHERE users.id = 1",
-        "Unsupported",
+        "not supported",
     )
 }
 
@@ -1108,8 +1107,8 @@ fn percent_rank_function() -> TestResult {
     assert_query(
         &[employees_csv()],
         "SELECT id, PERCENT_RANK() OVER (ORDER BY department) AS f FROM employees",
-        "id,f\n1,0\n3,0\n6,0\n8,0.42857142857142855\n2,0.5714285714285714\n\
-         5,0.5714285714285714\n4,0.8571428571428571\n7,0.8571428571428571",
+        "id,f\n1,0.0\n3,0.0\n6,0.0\n8,0.428571428571429\n2,0.571428571428571\n\
+         5,0.571428571428571\n4,0.857142857142857\n7,0.857142857142857",
     )
 }
 
@@ -1331,14 +1330,14 @@ fn outer_join_aggregate_group_by() -> TestResult {
 }
 
 /// A scalar function over an aggregate (`ROUND(AVG(x), 1)`) is rejected with
-/// GROUP BY ("must appear in GROUP BY"). Values follow sqawk's float
-/// formatting (SQLite prints 70000.0).
+/// GROUP BY ("must appear in GROUP BY"). Integral reals print as SQLite
+/// prints them (70000.0).
 #[test]
 fn round_of_avg_with_group_by() -> TestResult {
     assert_query(
         &[employees_csv()],
         "SELECT department, ROUND(AVG(salary), 1) AS a FROM employees GROUP BY department",
-        "department,a\nEngineering,70000\nHR,45000\nMarketing,57500\nSales,85000",
+        "department,a\nEngineering,70000.0\nHR,45000.0\nMarketing,57500.0\nSales,85000.0",
     )
 }
 

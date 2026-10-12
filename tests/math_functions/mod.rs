@@ -98,7 +98,7 @@ fn test_round_precision() -> Result<(), Box<dyn std::error::Error>> {
         &["tests/data/employees.csv"],
         "SELECT ROUND(3.14159, 2) AS a, ROUND(2.71828, 3) AS b, ROUND(1.005, 0) AS c \
          FROM employees LIMIT 1",
-        concat!("a,b,c", "\n3.14,2.718,1"),
+        concat!("a,b,c", "\n3.14,2.718,1.0"),
     )
 }
 
@@ -108,17 +108,17 @@ fn test_round_precision_zero_matches_one_arg() -> Result<(), Box<dyn std::error:
     crate::helpers::assert_query(
         &["tests/data/employees.csv"],
         "SELECT ROUND(3.7) AS a, ROUND(3.7, 0) AS b FROM employees LIMIT 1",
-        concat!("a,b", "\n4,4"),
+        concat!("a,b", "\n4.0,4.0"),
     )
 }
 
-/// Negative precision rounds to the left of the decimal point.
+/// Negative precision is 0, as in SQLite.
 #[test]
 fn test_round_negative_precision() -> Result<(), Box<dyn std::error::Error>> {
     crate::helpers::assert_query(
         &["tests/data/employees.csv"],
         "SELECT ROUND(1234.5, -2) AS a FROM employees LIMIT 1",
-        concat!("a", "\n1200"),
+        concat!("a", "\n1235.0"),
     )
 }
 
@@ -130,7 +130,7 @@ fn test_round_precision_on_column() -> Result<(), Box<dyn std::error::Error>> {
         "SELECT name, ROUND(salary / 7.0, 2) AS share FROM employees LIMIT 3",
         concat!(
             "name,share",
-            "\nAlice,10000",
+            "\nAlice,10000.0",
             "\nBob,7857.14",
             "\nCharlie,9285.71",
         ),
@@ -177,7 +177,7 @@ fn test_round_precision_without_from() -> Result<(), Box<dyn std::error::Error>>
     crate::helpers::assert_query(
         &["tests/data/employees.csv"],
         "SELECT ROUND(3.14159, 2) AS a, ROUND(1234.5, -2) AS b",
-        concat!("a,b", "\n3.14,1200"),
+        concat!("a,b", "\n3.14,1235.0"),
     )
 }
 
@@ -219,7 +219,7 @@ fn test_round_precision_distinguishes_column_names() -> Result<(), Box<dyn std::
         &["tests/data/employees.csv"],
         "SELECT ROUND(3.14159, 1), ROUND(3.14159, 3) FROM employees LIMIT 1",
         // The names contain the delimiter, so the CSV header quotes them.
-        concat!("\"ROUND(expr, 1)\",\"ROUND(expr, 3)\"", "\n3.1,3.142"),
+        concat!("\"ROUND(3.14159, 1)\",\"ROUND(3.14159, 3)\"", "\n3.1,3.142"),
     )
 }
 
@@ -241,7 +241,7 @@ mod sqlite_semantics {
             "SELECT round(2.675, 2) AS a, round(0.125, 2) AS b, round(1.005, 2) AS c, \
              round(2.5) AS d, round(-2.5) AS e, round(-2.25, 1) AS f, typeof(round(5)) AS g \
              FROM one",
-            "a,b,c,d,e,f,g\n2.67,0.13,1,3,-3,-2.3,real",
+            "a,b,c,d,e,f,g\n2.67,0.13,1.0,3.0,-3.0,-2.3,real",
         )
     }
 
@@ -254,7 +254,7 @@ mod sqlite_semantics {
             "SELECT abs(-5) AS a, typeof(abs(-5)) AS b, abs(-2.5) AS c, abs('-3') AS d, \
              typeof(abs('-3')) AS e, ceil(1.2) AS f, typeof(ceil(1.2)) AS g, \
              typeof(ceil(3)) AS h, floor(-1.5) AS i FROM one",
-            "a,b,c,d,e,f,g,h,i\n5,integer,2.5,3,real,2,real,integer,-2",
+            "a,b,c,d,e,f,g,h,i\n5,integer,2.5,3.0,real,2.0,real,integer,-2.0",
         )
     }
 }

@@ -14,6 +14,7 @@ use super::arith::{self, text_of, text_to_num, to_num, Num};
 use super::bytecode::Register;
 use super::datetime;
 use super::engine::{compare_values, VmEngine};
+use super::printf;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Value;
 
@@ -58,6 +59,11 @@ static FUNCS: &[FuncDef] = &[
     f!("CONCAT", 1, VARIADIC, concat),
     f!("CONCAT_WS", 2, VARIADIC, concat_ws),
     f!("||", 2, 2, concat_op),
+    f!("&", 2, 2, bit_and),
+    f!("|", 2, 2, bit_or),
+    f!("<<", 2, 2, shift_left),
+    f!(">>", 2, 2, shift_right),
+    f!("~", 1, 1, bit_not),
     // `a IS NOT DISTINCT FROM b`: NULL-safe equality.
     f!("IS", 2, 2, is_same),
     f!("LEFT", 2, 2, left),
@@ -69,6 +75,7 @@ static FUNCS: &[FuncDef] = &[
     f!("UNICODE", 1, 1, unicode),
     f!("PRINTF", 1, VARIADIC, printf),
     f!("FORMAT", 1, VARIADIC, printf),
+    f!("QUOTE", 1, 1, quote),
     // Numbers
     f!("ABS", 1, 1, abs),
     f!("ROUND", 1, 2, round),
@@ -88,11 +95,21 @@ static FUNCS: &[FuncDef] = &[
     f!("JULIANDAY", 0, VARIADIC, datetime::julianday),
     f!("UNIXEPOCH", 0, VARIADIC, datetime::unixepoch),
     f!("STRFTIME", 1, VARIADIC, datetime::strftime),
+    f!("TIMEDIFF", 2, 2, datetime::timediff),
     f!("CURRENT_DATE", 0, 0, datetime::current_date),
     f!("CURRENT_TIME", 0, 0, datetime::current_time),
     f!("CURRENT_TIMESTAMP", 0, 0, datetime::current_timestamp),
     f!("NOW", 0, 0, datetime::current_timestamp),
 ];
+
+/// The names of the built-in scalar functions callable by name (upper case;
+/// operator entries such as `||` are left out).
+pub(crate) fn names() -> impl Iterator<Item = &'static str> {
+    FUNCS
+        .iter()
+        .map(|f| f.name)
+        .filter(|n| n.chars().all(|c| c.is_ascii_alphabetic() || c == '_'))
+}
 
 /// The built-in scalar function named `name` (upper case).
 pub(crate) fn lookup(name: &str) -> Option<&'static FuncDef> {
@@ -336,6 +353,30 @@ fn concat_op(a: &[Register]) -> SqawkResult<Register> {
     text(s)
 }
 
+/// `a & b`, `a | b`, `a << b`, `a >> b`, `~a`: see [`arith::bitwise`].
+fn bit_and(a: &[Register]) -> SqawkResult<Register> {
+    Ok(arith::bitwise(arith::BitOp::And, &a[0], &a[1]))
+}
+
+fn bit_or(a: &[Register]) -> SqawkResult<Register> {
+    Ok(arith::bitwise(arith::BitOp::Or, &a[0], &a[1]))
+}
+
+fn shift_left(a: &[Register]) -> SqawkResult<Register> {
+    Ok(arith::bitwise(arith::BitOp::ShiftLeft, &a[0], &a[1]))
+}
+
+fn shift_right(a: &[Register]) -> SqawkResult<Register> {
+    Ok(arith::bitwise(arith::BitOp::ShiftRight, &a[0], &a[1]))
+}
+
+fn bit_not(a: &[Register]) -> SqawkResult<Register> {
+    Ok(match &a[0] {
+        Register::Null => Register::Null,
+        r => Register::Integer(!arith::int_value(r)),
+    })
+}
+
 /// `a IS NOT DISTINCT FROM b`: 1 when both are NULL or they are equal (as
 /// `=` decides), else 0. Never NULL.
 fn is_same(a: &[Register]) -> SqawkResult<Register> {
@@ -440,207 +481,37 @@ fn unicode(a: &[Register]) -> SqawkResult<Register> {
         .map_or(Register::Null, |c| Register::Integer(c as i64)))
 }
 
-/// PRINTF(format, ...) / FORMAT: the conversions `d i u f F e E g G s c x X
-/// o %` with flags `-+ 0`, width and precision. A missing argument is NULL;
-/// NULL prints as 0 for numeric conversions and '' for `%s`.
+/// PRINTF(format, ...) / FORMAT: SQLite's printf (see `printf.rs`). A NULL
+/// format gives NULL.
 fn printf(a: &[Register]) -> SqawkResult<Register> {
     if matches!(a[0], Register::Null) {
         return Ok(Register::Null);
     }
-    let fmt = text_of(&a[0]);
-    let mut args = a[1..].iter();
-    let mut out = String::new();
-    let mut chars = fmt.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '%' {
-            out.push(c);
-            continue;
-        }
-        let (mut left, mut plus, mut space, mut zero) = (false, false, false, false);
-        while let Some(&f) = chars.peek() {
-            match f {
-                '-' => left = true,
-                '+' => plus = true,
-                ' ' => space = true,
-                '0' => zero = true,
-                _ => break,
-            }
-            chars.next();
-        }
-        // Width and precision saturate while parsed; either one past the
-        // length limit could only build a string that is too big.
-        let number = |chars: &mut std::iter::Peekable<std::str::Chars>| {
-            let mut n = 0usize;
-            while let Some(d) = chars.peek().and_then(|c| c.to_digit(10)) {
-                n = n.saturating_mul(10).saturating_add(d as usize);
-                chars.next();
-            }
-            n
-        };
-        let width = number(&mut chars);
-        let mut precision: Option<usize> = None;
-        if chars.peek() == Some(&'.') {
-            chars.next();
-            precision = Some(number(&mut chars));
-        }
-        if width > MAX_LENGTH || precision.is_some_and(|p| p > MAX_LENGTH) {
-            return Err(too_big());
-        }
-        let conv = match chars.next() {
-            Some(c) => c,
-            None => break,
-        };
-        let null = Register::Null;
-        let mut next = || args.next().unwrap_or(&null);
-        let sign = |neg: bool| {
-            if neg {
-                "-"
-            } else if plus {
-                "+"
-            } else if space {
-                " "
+    Ok(printf::format_str(&text_of(&a[0]), &a[1..])?.map_or(Register::Null, Register::String))
+}
+
+/// QUOTE(x): the SQL literal for x. Text is single-quoted with quotes
+/// doubled, NULL is `NULL`, an integer its digits, and a real its `%!.15g`
+/// form, or `%!.20e` when that does not read back as the same value (so
+/// infinities are `Inf` / `-Inf`).
+fn quote(a: &[Register]) -> SqawkResult<Register> {
+    text(match &a[0] {
+        Register::Null => "NULL".to_string(),
+        Register::Integer(i) => i.to_string(),
+        Register::Boolean(b) => (*b as i64).to_string(),
+        Register::Float(f) => {
+            let s = printf::real_str("%!.15g", *f);
+            if f.is_finite() && arith::atof(&s) == *f {
+                s
             } else {
-                ""
+                printf::real_str("%!.20e", *f)
             }
-        };
-        let (body, numeric) = match conv {
-            '%' => ("%".to_string(), false),
-            'd' | 'i' | 'u' => {
-                let v = int_arg(next());
-                let digits = v.unsigned_abs().to_string();
-                (format!("{}{}", sign(v < 0), digits), true)
-            }
-            'f' | 'F' | 'e' | 'E' | 'g' | 'G' => {
-                let v = to_num(next()).map_or(0.0, Num::as_f64);
-                let p = precision.unwrap_or(6);
-                let mag = v.abs();
-                let digits = match conv {
-                    _ if mag.is_infinite() => "Inf".to_string(),
-                    // Round half away from zero first, as SQLite does
-                    // (Rust's formatting rounds half to even).
-                    'f' | 'F' => c_fixed(round_decimal(mag, p as i64), p),
-                    'e' => c_exp(mag, p, false),
-                    'E' => c_exp(mag, p, true),
-                    _ => c_general(mag, p.max(1), conv == 'G'),
-                };
-                (format!("{}{}", sign(v < 0.0), digits), true)
-            }
-            'x' | 'X' | 'o' => {
-                let v = int_arg(next()) as u64;
-                let s = match conv {
-                    'x' => format!("{:x}", v),
-                    'X' => format!("{:X}", v),
-                    _ => format!("{:o}", v),
-                };
-                (s, true)
-            }
-            's' => {
-                let r = next();
-                let mut s = if matches!(r, Register::Null) {
-                    String::new()
-                } else {
-                    text_of(r)
-                };
-                if let Some(p) = precision {
-                    s = s.chars().take(p).collect();
-                }
-                (s, false)
-            }
-            'c' => {
-                let r = next();
-                let s = if matches!(r, Register::Null) {
-                    String::new()
-                } else {
-                    text_of(r).chars().take(1).collect()
-                };
-                (s, false)
-            }
-            other => {
-                return Err(SqawkError::UnsupportedSqlFeature(format!(
-                    "printf conversion %{} is not supported",
-                    other
-                )))
-            }
-        };
-        let len = body.chars().count();
-        check_len(out.len().saturating_add(body.len().max(width)))?;
-        if len >= width {
-            out.push_str(&body);
-        } else if left {
-            out.push_str(&body);
-            out.extend(std::iter::repeat_n(' ', width - len));
-        } else if zero && numeric {
-            let (sgn, digits) = match body.chars().next() {
-                Some(c @ ('-' | '+' | ' ')) => (c.to_string(), body[1..].to_string()),
-                _ => (String::new(), body.clone()),
-            };
-            out.push_str(&sgn);
-            out.extend(std::iter::repeat_n('0', width - len));
-            out.push_str(&digits);
-        } else {
-            out.extend(std::iter::repeat_n(' ', width - len));
-            out.push_str(&body);
         }
-    }
-    text(out)
-}
-
-/// Fractional digits beyond which a finite f64's exact decimal expansion
-/// has only zeros (it needs at most 1074), and below Rust's formatting limit
-/// on precision (u16::MAX).
-const EXACT_DIGITS: usize = 1100;
-
-/// `v` with `p` digits after the point. Rust's formatting cannot take a
-/// precision above u16::MAX, so digits past [`EXACT_DIGITS`], which are all
-/// zeros, are appended rather than formatted.
-fn c_fixed(v: f64, p: usize) -> String {
-    let mut s = format!("{:.*}", p.min(EXACT_DIGITS), v);
-    s.extend(std::iter::repeat_n('0', p.saturating_sub(EXACT_DIGITS)));
-    s
-}
-
-/// C's `%e`: one digit, point, `p` digits, `e`, sign, at least two exponent digits.
-fn c_exp(v: f64, p: usize, upper: bool) -> String {
-    let s = format!("{:.*e}", p.min(EXACT_DIGITS), v);
-    let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
-    let e: i32 = exp.parse().unwrap_or(0);
-    let zeros = p.saturating_sub(EXACT_DIGITS);
-    let mut out = String::with_capacity(mant.len() + zeros + 5);
-    out.push_str(mant);
-    out.extend(std::iter::repeat_n('0', zeros));
-    out.push(if upper { 'E' } else { 'e' });
-    out.push(if e < 0 { '-' } else { '+' });
-    out.push_str(&format!("{:02}", e.unsigned_abs()));
-    out
-}
-
-/// C's `%g` with precision `p` (significant digits), trailing zeros removed.
-/// As in C, the exponent that decides between fixed and exponent form is the
-/// one AFTER rounding to `p` digits: 999999.5 is `1e+06`, not `1000000`.
-fn c_general(v: f64, p: usize, upper: bool) -> String {
-    if v == 0.0 {
-        return "0".into();
-    }
-    // Digits past the exact expansion are zeros, which `%g` strips anyway.
-    let p = p.min(EXACT_DIGITS);
-    let strip = |s: &str| {
-        if s.contains('.') {
-            s.trim_end_matches('0').trim_end_matches('.').to_string()
-        } else {
-            s.to_string()
+        Register::String(s) => {
+            check_len(s.len().saturating_mul(2).saturating_add(2))?;
+            format!("'{}'", s.replace('\'', "''"))
         }
-    };
-    let e_form = c_exp(v, p - 1, upper);
-    let at = e_form.find(['e', 'E']).unwrap_or(e_form.len());
-    let x: i32 = e_form[at..]
-        .get(1..)
-        .and_then(|e| e.parse().ok())
-        .unwrap_or(0);
-    if x < -4 || x >= p as i32 {
-        format!("{}{}", strip(&e_form[..at]), &e_form[at..])
-    } else {
-        strip(&format!("{:.*}", (p as i32 - 1 - x) as usize, v))
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -659,10 +530,10 @@ fn abs(a: &[Register]) -> SqawkResult<Register> {
     })
 }
 
-/// ROUND(x[, d]): always a real. Rounds half away from zero on the decimal
-/// digits of x (so 2.675, stored as 2.67499..., rounds to 2.67 as in
-/// SQLite). Unlike SQLite, a negative `d` rounds to the left of the decimal
-/// point: ROUND(1234.5, -2) is 1200.
+/// ROUND(x[, d]): always a real, SQLite's `roundFunc`. Halves are judged
+/// on the value actually stored (2.675 is 2.67499..., so it rounds to
+/// 2.67 as in SQLite). A negative `d` is 0 and one above 30 is 30, as in
+/// SQLite: ROUND(1234.5, -2) is 1235.0.
 fn round(a: &[Register]) -> SqawkResult<Register> {
     if matches!(a[0], Register::Null) {
         return Ok(Register::Null);
@@ -686,74 +557,22 @@ fn round(a: &[Register]) -> SqawkResult<Register> {
     Ok(Register::Float(round_decimal(x, digits)))
 }
 
-/// Round `x` to `digits` decimal places, half away from zero, deciding the
-/// tie on x's shortest 17-significant-digit decimal expansion.
+/// Round `x` to `digits` decimal places as SQLite's `roundFunc` does: a
+/// magnitude above 2^52 has no fraction and is returned as is; to 0
+/// places, `x + 0.5` (`- 0.5` when negative) truncated toward zero; else
+/// `%!.*f` of x (digits from SQLite's decimal expansion, rounded half up)
+/// read back as a real.
 pub(crate) fn round_decimal(x: f64, digits: i64) -> f64 {
-    if !x.is_finite() {
-        return x;
+    const TWO_52: f64 = 4_503_599_627_370_496.0;
+    let n = digits.clamp(0, 30);
+    if !(-TWO_52..=TWO_52).contains(&x) {
+        // Also NaN, which SQLite passes through the same way.
+        x
+    } else if n == 0 {
+        (x + if x < 0.0 { -0.5 } else { 0.5 }) as i64 as f64
+    } else {
+        arith::atof(&printf::real_str(&format!("%!.{n}f"), x))
     }
-    if digits <= 0 {
-        if digits == 0 {
-            return x.round();
-        }
-        if digits < -308 {
-            return x;
-        }
-        let factor = 10f64.powi((-digits) as i32);
-        let scaled = x / factor;
-        return if scaled.is_finite() {
-            scaled.round() * factor
-        } else {
-            x
-        };
-    }
-    if digits > 30 {
-        return x;
-    }
-    // d.dddddddddddddddde[+-]X: 17 significant digits.
-    let s = format!("{:.16e}", x.abs());
-    let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
-    let exp: i64 = exp.parse().unwrap_or(0);
-    let mut ds: Vec<u8> = mant
-        .bytes()
-        .filter(u8::is_ascii_digit)
-        .map(|b| b - b'0')
-        .collect();
-    // Digits kept: those before the point plus `digits` after it.
-    let keep = exp + 1 + digits;
-    if keep < 0 {
-        return 0.0f64.copysign(x);
-    }
-    let keep = keep as usize;
-    if keep >= ds.len() {
-        return x;
-    }
-    let round_up = ds[keep] >= 5;
-    ds.truncate(keep);
-    let mut exp = exp;
-    if round_up {
-        let mut i = ds.len();
-        loop {
-            if i == 0 {
-                ds.insert(0, 1);
-                exp += 1;
-                break;
-            }
-            i -= 1;
-            if ds[i] == 9 {
-                ds[i] = 0;
-            } else {
-                ds[i] += 1;
-                break;
-            }
-        }
-    }
-    if ds.is_empty() {
-        return 0.0f64.copysign(x);
-    }
-    let mant: String = ds.iter().map(|d| (b'0' + d) as char).collect();
-    let v: f64 = format!("0.{}e{}", mant, exp + 1).parse().unwrap_or(x);
-    v.copysign(x)
 }
 
 /// CEIL / FLOOR: an integer is returned as is; a real stays a real.
@@ -885,7 +704,12 @@ mod tests {
         assert_eq!(round_decimal(9.995, 2), 9.99);
         assert_eq!(round_decimal(99.5, 0), 100.0);
         assert_eq!(round_decimal(0.0004, 2), 0.0);
-        assert_eq!(round_decimal(1234.5, -2), 1200.0);
+        assert_eq!(round_decimal(1234.5, -2), 1235.0);
+        assert_eq!(round_decimal(1058.05, 1), 1058.0);
+        assert_eq!(round_decimal(-1058.05, 1), -1058.0);
+        assert_eq!(round_decimal(0.49999999999999994, 0), 1.0);
+        assert_eq!(round_decimal(1e300, 2), 1e300);
+        assert_eq!(round_decimal(f64::INFINITY, 2), f64::INFINITY);
     }
 
     #[test]

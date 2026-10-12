@@ -1,0 +1,5 @@
+# Test fixtures are byte-exact: tests compare their bytes, writeback output
+# and load-error line numbers. Never convert their line endings on checkout
+# (core.autocrlf=true on Windows would make them CRLF).
+tests/data/** -text
+tests/*.csv -text

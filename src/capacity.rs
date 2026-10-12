@@ -60,28 +60,9 @@ pub const DEFAULT_TABLE_CAPACITY: usize = 8;
 /// Grows dynamically, but start with reasonable size.
 pub const DEFAULT_SORTER_ROWS_CAPACITY: usize = 256;
 
-/// Default capacity for sort key vectors.
-pub const DEFAULT_SORT_KEYS_CAPACITY: usize = 4;
-
 // =============================================================================
-// Headerless File Detection
+// Headerless files
 // =============================================================================
-
-/// Check if a field looks like data rather than a header name.
-/// Used to auto-detect headerless files like /etc/passwd.
-#[inline]
-pub fn is_data_field(field: &str) -> bool {
-    field.starts_with('/') ||      // Path
-    field == "*" ||                // Password placeholder
-    field == "root" ||             // Common username
-    field == "nobody" ||           // Common username
-    field.parse::<i32>().is_ok() // Numeric ID
-}
-
-/// Check if a row of fields looks like data rather than headers.
-pub fn is_likely_data_row<S: AsRef<str>>(fields: &[S]) -> bool {
-    fields.iter().any(|f| is_data_field(f.as_ref()))
-}
 
 /// Generate alphabetical column names (a, b, c, ..., z, aa, ab, ...).
 pub fn generate_alpha_columns(count: usize) -> Vec<String> {

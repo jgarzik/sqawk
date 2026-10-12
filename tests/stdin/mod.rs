@@ -44,7 +44,7 @@ fn named_stdin_table() {
     let (stdout, stderr, ok) =
         run_with_stdin(&["-s", "SELECT COUNT(*) FROM emp", "emp=-"], EMPLOYEES);
     assert!(ok, "sqawk failed: {stderr}");
-    assert_eq!(stdout, "COUNT\n3");
+    assert_eq!(stdout, "COUNT(*)\n3");
 }
 
 /// Piped input is comma-separated by default, so sqawk's own output can be
@@ -81,7 +81,7 @@ fn stdin_joins_with_a_file() {
         EMPLOYEES,
     );
     assert!(ok, "sqawk failed: {stderr}");
-    assert_eq!(stdout, "s.name\nAlice\nBob");
+    assert_eq!(stdout, "name\nAlice\nBob");
 }
 
 /// --tabledef supplies column names for headerless piped input.

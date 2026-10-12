@@ -5,11 +5,18 @@
 //! it wrong, and un-ignored as it was fixed.
 //!
 //! Every 2026-08 test here now passes, and so does every test of the
-//! `audit_2026_10` submodule (defects from the 2026-10 audit) and of the
+//! `audit_2026_10` submodule (defects from the 2026-10 audit), of the
 //! `code_review_2026_10` submodule (defects from the 2026-10 code review of
-//! the `updates` branch): the red list is EMPTY. All serve as regression
-//! cover rather than as a to-do list. Add a new `#[ignore]`d test when a
-//! defect is found, and remove the attribute when it is fixed.
+//! the `updates` branch), of the `v1_review_2026_10` submodule (findings of
+//! the 2026-10 v1-readiness review) and of the `doc_review_2026_10`
+//! submodule (code defects found by the 2026-10 documentation review). All
+//! serve as regression cover. The `schema_2026_10` submodule holds the
+//! `CREATE TABLE ... LOCATION` over an existing file defect, and the
+//! `cte_2026_10` submodule the common table expression (`WITH`) rules. The
+//! `tsq_2026_10` submodule holds the defects found by `tsq diff`, the
+//! differential tester against SQLite (still red). Add a
+//! new `#[ignore]`d test when a defect is found, and remove the attribute
+//! when it is fixed.
 //!
 //! Run the red list with:
 //!     cargo test --test mod defects -- --ignored
@@ -22,6 +29,11 @@
 
 mod audit_2026_10;
 mod code_review_2026_10;
+mod cte_2026_10;
+mod doc_review_2026_10;
+mod schema_2026_10;
+mod tsq_2026_10;
+mod v1_review_2026_10;
 
 use crate::helpers::{
     assert_after_write, assert_query, departments_csv, employees_csv, nullable_csv, orders_csv,
@@ -40,7 +52,7 @@ fn where_is_applied_to_group_by() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
         "SELECT department, COUNT(*) FROM employees WHERE salary > 60000 GROUP BY department",
-        "department,COUNT\n\
+        "department,COUNT(*)\n\
          Engineering,3\n\
          Sales,2",
     )
@@ -55,7 +67,7 @@ fn group_by_uses_all_key_columns() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
         "SELECT department, role, COUNT(*) FROM employees GROUP BY department, role",
-        "department,role,COUNT\n\
+        "department,role,COUNT(*)\n\
          Engineering,Developer,2\n\
          Engineering,Manager,1\n\
          HR,Intern,1\n\
@@ -72,7 +84,7 @@ fn order_by_applies_to_group_by() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
         "SELECT department, COUNT(*) FROM employees GROUP BY department ORDER BY department DESC",
-        "department,COUNT\n\
+        "department,COUNT(*)\n\
          Sales,2\n\
          Marketing,2\n\
          HR,1\n\
@@ -86,7 +98,7 @@ fn limit_applies_to_group_by() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
         "SELECT department, COUNT(*) FROM employees GROUP BY department LIMIT 1",
-        "department,COUNT\n\
+        "department,COUNT(*)\n\
          Engineering,3",
     )
 }
@@ -100,7 +112,7 @@ fn having_binds_to_the_named_aggregate() -> Result<(), Box<dyn std::error::Error
         &[employees_csv()],
         "SELECT department, SUM(salary), SUM(age) FROM employees \
          GROUP BY department HAVING SUM(age) > 60",
-        "department,SUM,SUM\n\
+        "department,SUM(salary),SUM(age)\n\
          Engineering,210000,97\n\
          Sales,170000,85",
     )
@@ -112,7 +124,7 @@ fn count_distinct_deduplicates() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
         "SELECT COUNT(DISTINCT department) FROM employees",
-        "COUNT\n4",
+        "COUNT(DISTINCT department)\n4",
     )
 }
 
@@ -125,7 +137,7 @@ fn group_by_respects_projection_order() -> Result<(), Box<dyn std::error::Error>
     assert_query(
         &[employees_csv()],
         "SELECT COUNT(*), department FROM employees GROUP BY department",
-        "COUNT,department\n\
+        "COUNT(*),department\n\
          3,Engineering\n\
          1,HR\n\
          2,Marketing\n\
@@ -140,7 +152,7 @@ fn group_by_emits_only_projected_columns() -> Result<(), Box<dyn std::error::Err
     assert_query(
         &[employees_csv()],
         "SELECT COUNT(*) FROM employees GROUP BY department",
-        "COUNT\n3\n1\n2\n2",
+        "COUNT(*)\n3\n1\n2\n2",
     )
 }
 
@@ -156,7 +168,7 @@ fn join_respects_projection_order() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[users_csv(), orders_csv()],
         "SELECT orders.id, users.name FROM users JOIN orders ON users.id = orders.user_id",
-        "orders.id,users.name\n\
+        "id,name\n\
          101,John\n\
          103,John\n\
          105,John\n\
@@ -165,15 +177,14 @@ fn join_respects_projection_order() -> Result<(), Box<dyn std::error::Error>> {
     )
 }
 
-/// Defect 4: ORDER BY is deliberately skipped on explicit JOINs
-/// (compiler.rs:729-737 -- "isn't fully implemented. For now [...] skip").
+/// Defect 4: ORDER BY was skipped on explicit JOINs.
 #[test]
 fn order_by_applies_to_join() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[users_csv(), orders_csv()],
         "SELECT users.name, orders.id FROM users JOIN orders ON users.id = orders.user_id \
          ORDER BY orders.id DESC",
-        "users.name,orders.id\n\
+        "name,id\n\
          John,105\n\
          Jane,104\n\
          John,103\n\
@@ -195,7 +206,7 @@ fn arithmetic_projection_survives_limit() -> Result<(), Box<dyn std::error::Erro
     assert_query(
         &[employees_csv()],
         "SELECT name, salary*2 FROM employees LIMIT 3",
-        "name,expr\n\
+        "name,salary*2\n\
          Alice,140000\n\
          Bob,110000\n\
          Charlie,130000",
@@ -209,7 +220,7 @@ fn case_works_in_projection() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
         "SELECT name, CASE WHEN age > 30 THEN 'old' ELSE 'young' END FROM employees LIMIT 3",
-        "name,expr\n\
+        "name,CASE WHEN age > 30 THEN 'old' ELSE 'young' END\n\
          Alice,young\n\
          Bob,young\n\
          Charlie,old",
@@ -223,7 +234,7 @@ fn string_concat_operator_works() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
         "SELECT name || '!' FROM employees LIMIT 2",
-        "expr\n\
+        "name || '!'\n\
          Alice!\n\
          Bob!",
     )
@@ -235,7 +246,7 @@ fn comparison_works_in_projection() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[employees_csv()],
         "SELECT name, salary > 60000 FROM employees LIMIT 3",
-        "name,expr\n\
+        "name,salary > 60000\n\
          Alice,1\n\
          Bob,0\n\
          Charlie,1",
@@ -249,7 +260,7 @@ fn aggregate_accepts_expression_argument() -> Result<(), Box<dyn std::error::Err
     assert_query(
         &[employees_csv()],
         "SELECT SUM(salary + age) FROM employees",
-        "SUM\n540257",
+        "SUM(salary + age)\n540257",
     )
 }
 
@@ -261,7 +272,7 @@ fn aggregate_nested_in_expression_works() -> Result<(), Box<dyn std::error::Erro
     assert_query(
         &[employees_csv()],
         "SELECT SUM(salary) + 1 FROM employees",
-        "expr\n540001",
+        "SUM(salary) + 1\n540001",
     )
 }
 
@@ -472,7 +483,7 @@ fn partition_aggregate_returns_partition_total() -> Result<(), Box<dyn std::erro
     assert_query(
         &[employees_csv()],
         "SELECT name, SUM(salary) OVER (PARTITION BY department) FROM employees",
-        "name,SUM\n\
+        "name,SUM(salary) OVER (PARTITION BY department)\n\
          Alice,210000\n\
          Charlie,210000\n\
          Frank,210000\n\
@@ -498,7 +509,7 @@ fn group_by_order_by_avg_is_not_coincidental() -> Result<(), Box<dyn std::error:
         &[departments_csv()],
         "SELECT department, COUNT(*) FROM departments GROUP BY department \
          ORDER BY COUNT(*) ASC, department DESC",
-        "department,COUNT\n\
+        "department,COUNT(*)\n\
          Sales,2\n\
          Marketing,2\n\
          Engineering,3",
@@ -522,7 +533,7 @@ fn multi_statement_output_has_per_statement_headers() -> Result<(), Box<dyn std:
         "name\n\
          Alice\n\
          Charlie\n\
-         COUNT\n\
+         COUNT(*)\n\
          3",
     )
 }
@@ -538,6 +549,6 @@ fn aggregate_over_join() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &[users_csv(), orders_csv()],
         "SELECT COUNT(*) FROM users JOIN orders ON users.id = orders.user_id",
-        "COUNT\n5",
+        "COUNT(*)\n5",
     )
 }

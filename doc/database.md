@@ -9,8 +9,10 @@ Sqawk implements a lightweight in-memory database engine that supports SQL opera
 1. [Data Model](#data-model)
 2. [Architecture](#architecture)
 3. [File I/O Patterns](#file-io-patterns)
-4. [Storage Backend Architecture](#storage-backend-architecture)
+4. [Storage](#storage)
 5. [Performance Considerations](#performance-considerations)
+6. [Join Implementation](#join-implementation)
+7. [Current System Limitations](#current-system-limitations)
 
 ## Data Model
 
@@ -19,39 +21,105 @@ Sqawk implements a lightweight in-memory database engine that supports SQL opera
 Tables in Sqawk are in-memory representations of delimiter-separated files. Each table has:
 
 - A unique name (derived from the file's filename or explicitly provided)
-- A set of columns with names (derived from the file's header row)
+- A set of named columns (see [Where Columns Come From](#where-columns-come-from))
 - Zero or more rows of data
 - Optional metadata including the source file path and delimiter information
 
-Tables maintain an internal mapping of column names to their indices for efficient access.
+Column names are looked up case-insensitively (`Table::column_index`), the
+one lookup used by SELECT, INSERT column lists and UPDATE SET.
 
 ### Rows and Columns
 
 - **Rows**: Represented as vectors of values with one element per column
 - **Columns**: Identified by name, with automatic type inference based on content
-- **Schema**: Dynamically determined from the file's header row
-- **Column Types**: Not declared; inferred at runtime **per value**, so a single
-  column may hold integers, floats and text
+- **Schema**: The column names come from one of the sources listed under
+  [Where Columns Come From](#where-columns-come-from)
+- **Column Types**: A loaded column has no declared type; a column created by
+  CREATE TABLE or ALTER TABLE ADD COLUMN records its declared type name and
+  that name's SQLite affinity (`Column::decl_type`, `Column::data_type`), but
+  never converts a value. Types live **per value**, so a single column may
+  hold integers, floats and text
 - **NULL**: An empty field reads as NULL. Comparisons follow SQL three-valued
   logic, so a comparison involving NULL is UNKNOWN and its row is filtered out
   rather than raising an error. Sorting and grouping treat NULL as equal to
   NULL, which SQL comparison must not — the two use separate paths deliberately
-- **Coercion**: A comparison mixing a number and a string converts the string
-  when it parses as a number, and compares textually otherwise. See
-  [SQL Reference](sql_reference.md) for the exact rules
+- **Comparison**: One rule everywhere (`=`, `<`, IN lists and subqueries,
+  joins, ORDER BY, MIN/MAX): two values that both read as numbers -- numbers,
+  or text spelling a number such as `'007'` or `'1e3'` -- compare as numbers,
+  text against text included (`'10' > '9'`); numbers sort before other text;
+  other text compares byte by byte. DISTINCT, GROUP BY and the compound
+  operators still keep text `'1'` and integer `1` apart. See
+  [SQL Reference](sql_reference.md#type-coercion) for the exact rules
+
+### Where Columns Come From
+
+A table's columns are defined in exactly one of these ways:
+
+1. **The file's header line** (the default for an input file): the first
+   line names the columns and is not data. On `--write` it is written back
+   as it was read.
+2. **`--no-header`**: every line of every input file is data and the
+   columns are named `a`, `b`, `c`, ...; writeback emits no header line.
+3. **`--tabledef=table:col1,col2,...`**: the names are declared before the
+   file loads, and that file's first line is data (as with `--no-header`).
+   `--tabledef` takes names only, never types.
+4. **`CREATE TABLE t (col TYPE, ...) LOCATION 'path'`**: the declared names
+   and types are the schema of the file, as for a Hive external table.
+   - When the file exists it is loaded under the declared names. Its first
+     line is a header by default: it is skipped as data, must have exactly
+     one field per declared column (else an error naming the file and both
+     counts), and is written back verbatim -- the declared names do not
+     replace its text. With `WITH (HEADER=false)` the first line is data and
+     writeback emits no header.
+   - When the file does not exist the table starts empty and `--write`
+     creates the file, with a header line of the declared names (none under
+     `HEADER=false`).
+5. **`CREATE TABLE t AS SELECT ...`**: the query's result columns. The
+   table has no file and is never written.
+
+`CREATE TABLE t (col TYPE, ...)` without `LOCATION` declares the columns of
+a scratch table, which has no file and is never written. Declared types are
+recorded (`.schema` shows them) but not enforced: every value keeps its own
+type.
 
 ### Table Lifecycle
 
 Tables are loaded from delimiter-separated files at startup and can be modified through SQL operations. Sqawk uses a safe, sed-like writeback model:
 
 1. **Default Behavior**: All modifications remain in memory only
-2. **Tracking Changes**: The system tracks which tables have been modified by any operation
+2. **Tracking Changes**: The database keeps the set of modified tables
+   (`Database::modified`, set by `Database::mark_modified`): INSERT, UPDATE,
+   DELETE, ALTER TABLE and TRUNCATE mark a table, CREATE TABLE marks the new
+   one unless its `LOCATION` file already exists (so a new `CREATE TABLE ...
+   LOCATION` file is written even with no rows, while loading an existing
+   one is not a modification), and DROP TABLE removes the mark with the
+   table
 3. **Write on Exit**: Modified tables are only written back to their source files if:
    - The `--write` (or `-w`) flag is explicitly provided
-   - The table was actually modified by an SQL operation (INSERT, UPDATE, DELETE)
+   - The table was actually modified by one of those statements
+   - The table has a file: a scratch table (CREATE TABLE without LOCATION,
+     CREATE TABLE ... AS) is skipped. A table read from standard input is an
+     error instead
 4. **Safe Execution**: Without the `--write` flag, source files remain untouched regardless of operations performed
 5. **Write Only Modified**: Only tables that were changed are written; unmodified tables are not rewritten
-6. **Format Preservation**: Original file formats and delimiters are preserved during writeback
+6. **Check First**: Every target is checked before any file is written; a
+   read-only file, or a directory that cannot take the temp file, fails the
+   run with no file written
+7. **Format Preservation**: Original file formats and delimiters are preserved during writeback
+
+### Transactions
+
+`BEGIN` / `COMMIT` (`END`) / `ROLLBACK` are handled in `vm/mod.rs` before
+compilation and act on the `Database` directly. The undo state is
+copy-on-write: `BEGIN` records only the modified-table set; the first
+`get_table_mut` of a table inside the transaction stores a deep copy of it
+(rows, source bytes, layout), `remove_table` moves the dropped table into
+the undo state, and `add_table` records that the name did not exist.
+`ROLLBACK` puts every recorded table back and restores the modified set;
+`COMMIT` discards the undo state. A transaction that only reads copies
+nothing, and one that changes a table copies it once. A transaction still
+open at the end of the run (or REPL session) is rolled back before writeback.
+Savepoints are not supported.
 
 This design ensures that users can experiment with data manipulations while maintaining the integrity of source files. The verbose mode (`-v`) provides additional confirmation about whether changes were saved or not.
 
@@ -65,20 +133,26 @@ The `Table` struct represents an in-memory table with:
 - Column metadata
 - Row data
 - Methods for accessing and manipulating rows
-- Projection capabilities (selecting subsets of columns)
+- The source file's bytes and layout, for verbatim writeback (see Storage)
 
 ### SQL Execution: a bytecode VM
 
 SQL is not interpreted against the tables directly. It is compiled to bytecode
 and run on a register virtual machine, following SQLite's architecture:
 
-1. **Parse** — the `sqlparser` crate produces an AST
+1. **Parse** — `vm::parse::parse_sql` produces an AST (the `sqlparser` crate
+   with `SqawkDialect`)
 2. **Compile** — `vm::compiler` lowers the AST to a bytecode program
 3. **Execute** — `vm::engine` runs that program against table cursors
 
-`SqlExecutor` is a thin wrapper over this pipeline: it forwards to the VM,
-tracks which tables were modified, and provides `save_modified_tables()`, which
-writes back only tables that actually changed.
+Modification tracking belongs to `Database`: `vm::execute_vm` applies each
+statement's changes and calls `database.mark_modified(name)` for every table
+it changed, and `Database::is_modified` / `modified_tables` report the set.
+Code that changes a table outside that path must call
+`database.mark_modified` itself, or `--write` will not save the table.
+`SqlExecutor` is a thin facade over the pipeline: it forwards SQL to
+`vm::execute_vm`, and its `save_modified_tables()` writes back the tables in
+`Database::modified_tables()` that have a file.
 
 The compiler has one recursive expression compiler, `code_expr` (the analogue
 of SQLite's `sqlite3ExprCode`), used from every position an expression can
@@ -151,7 +225,12 @@ false even for a NULL operand).
   only; a correlated one reruns on every evaluation, i.e. per outer row.
 - **Correlated execution**: a subquery's cursors and hash indexes do not
   depend on the outer row, so they are set up once (`Once` around the
-  `OpenRead`s and hash builds). An equality between an inner column and an
+  `OpenRead`s and hash builds). In any loop nest, an inner level's table is
+  opened and its hash index built when the nest first reaches that level
+  (a `Once` there), so a join whose outer loop has no rows never reads its
+  inner tables -- a CTE or derived table there is never computed. (Not in a
+  FULL JOIN, nor for a RIGHT JOIN group's inner levels, which can be
+  NULL-extended unreached.) An equality between an inner column and an
   outer column -- `WHERE d.k = f.k` -- becomes a hash probe, so a correlated
   `EXISTS`/`IN`/scalar lookup costs one probe per outer row instead of a
   rescan. Aggregate accumulators, sorters and DISTINCT tables are reset at
@@ -170,22 +249,83 @@ consequences follow:
 - A statement observes the database as the previous one left it, which is what
   `CREATE TABLE t; INSERT INTO t ...; SELECT * FROM t` requires.
 
-A subquery in `FROM` (a derived table) is materialized before its enclosing
-statement compiles: the subquery runs, its result is registered under the
-alias, and the statement is rewritten to reference that name. The registration
-lasts only for that statement.
+### Derived Tables and CTEs: the pre-pass
+
+The compiler only opens cursors on named tables. Before a statement compiles,
+a pre-pass (`src/vm/prepass.rs`) turns every derived table and CTE reference
+into one. It walks the statement with `parse::for_each_child` -- the same
+enumeration of queries, FROM items and expressions the parser's limit check
+uses (CTE bodies, the statement inside `WITH ... INSERT`, JOIN ON, GROUP BY,
+window specs, function arguments, LIMIT, UPDATE SET, ...) -- and for each FROM
+item that is:
+
+- a **derived table** `(SELECT ...) d`: walks its query (innermost first),
+  compiles it, registers the result as `sqawk_derived_N` and rewrites the
+  item to that table with alias `d`;
+- a **one-part name of a CTE in scope**: compiles the CTE on its first
+  reference (every other reference reuses the table) as `sqawk_cte_N`, and rewrites
+  the item to it, aliased as written or else by the CTE's name -- so `c.col`
+  resolves and the internal name never appears in output or errors;
+- **any other one-part name that a CTE of the statement declares**: rewrites
+  it to `main.name`, the loaded table.
+
+A registered derived table or (non-recursive) CTE is a *lazy table*
+(`Database::add_lazy_table`): its columns come from the compiled query and
+its rows from running that program the first time an `OpenRead` opens it
+(`VmEngine::fill_lazy`), as SQLite runs a FROM subquery behind `OP_Once`
+where it is first read. Since the FROM planner tests WHERE terms that read
+no table before opening any cursor, a CTE read only under a false WHERE --
+or only in a CASE branch not taken -- is never run. A recursive CTE is
+computed in the pre-pass.
+
+CTE scopes are a stack of WITH lists. A CTE is Pending, InProgress (being
+computed: a reference now is `circular reference`) or Done. Its body is
+walked with the stack cut back to its own WITH list, so it sees its siblings
+and itself but not the scopes around the reference. The WITH is removed from
+the query; an unused CTE's body is never walked or run; `WITH ... DML`
+becomes the DML statement.
+
+**Guard**: the compiler receives the set of CTE names declared in the
+statement (`SqlCompiler::cte_names`). Since the pre-pass rewrote every
+reference it reached -- to an internal name or to `main.name` -- a one-part
+table name from that set reaching `get_table_name` is a reference the walk
+missed, and is the error `internal error: unresolved CTE c` instead of a
+silent read of the loaded table of that name.
+
+**Recursive CTEs** run in Rust, as SQLite does: the setup arms run as one
+query whose rows seed a queue; recursive arms are compiled once, with their
+self-reference rewritten to a registered working table; each row taken from
+the queue is output (OFFSET / LIMIT) and becomes the working table's content
+for a run of each arm's program, whose rows join the queue (UNION: only rows
+not seen before, by the compound row key). The queue is FIFO, or a stable
+heap ordered by the CTE body's ORDER BY. A FIFO queue is breadth-first, so
+when no arm has DISTINCT or a wildcard, a whole generation is loaded into
+the working table at once with a position column, and the children are put
+back in queue order by (position, arm): the same rows in the same order, one
+run per generation instead of per row.
+
+Everything registered lasts until the statement ends, success or failure.
+A derived table or CTE body is computed up front, so one that reads a column
+of an enclosing query fails to resolve (`no such column`).
 
 ### File Handlers
 
-- `FileHandler` (`file_handler.rs`) resolves `[table_name=]path` operands,
-  chooses the delimiter (`-F`, else comma for `.csv`, no extension and stdin,
-  tab otherwise) and the header policy (`.csv` and stdin: header always;
-  other files: headerless guess and `#` comments; `--no-header`/`--tabledef`:
-  no header), and routes writeback.
+- `FileHandler` (`file_handler.rs`) resolves `[table_name=]path` operands
+  (`parse_table_spec`: the prefix names the table only when it is
+  identifier-like), records each file's canonical absolute path (so the same
+  file cannot be loaded twice, and REPL `.cd` does not change what `.save`
+  writes), chooses the delimiter (`-F`, else tab for `.tsv`/`.tab`, comma for
+  everything else and stdin) and the header policy (the first line is the
+  header unless `--no-header`/`--tabledef`; `#` lines are comments only
+  under `--comments`), and routes writeback. `load_location` loads the file
+  of `CREATE TABLE ... LOCATION` the same way, under the declared columns,
+  with the `WITH` options in place of the command-line flags.
 - `csv_handler.rs` does all parsing and writing. Every format is read by the
   `csv` crate with one configuration (RFC 4180 quoting, multi-line quoted
-  fields, no trimming, BOM stripped, ragged rows padded), and written back by
-  a small RFC 4180 record writer that also quotes fields with leading or
+  fields, no trimming, ragged rows padded, an unclosed quote is an error,
+  header names must be non-empty and unique ignoring case). Untouched rows
+  are written back as their source bytes; changed and inserted rows by a
+  small RFC 4180 record writer that also quotes fields with leading or
   trailing whitespace.
 
 ## File I/O Patterns
@@ -205,7 +345,9 @@ This pattern provides several safety guarantees:
 - **Disk Full Protection**: If the disk runs out of space, the original file is preserved
 - **All-or-Nothing Semantics**: Either the complete new file exists, or the original file is unchanged
 
-The temporary file is created in the same directory as the target file to ensure the rename operation is atomic (same filesystem requirement on POSIX systems). A symlinked path is resolved first, so the link's target is rewritten and the link itself is left in place.
+The temporary file is created in the same directory as the target file to ensure the rename operation is atomic (same filesystem requirement on POSIX systems). A symlinked path is resolved first, so the link's target is rewritten and the link itself is left in place. The rename replaces the directory entry, so a file with several hard links is split from them: the other links keep the old contents.
+
+Because the rename would replace even a read-only file, `csv_handler::check_writable` runs for every target before anything is written: a file whose mode is read-only, or that cannot be opened for appending, is refused (`cannot write 'x.csv': file is read-only`), and a temp file is created and removed in its directory to prove the rename can happen.
 
 ### Delimiter Consistency
 
@@ -221,19 +363,29 @@ This ensures that TSV files remain TSV, colon-separated files remain colon-separ
 Sqawk supports two primary output modes:
 
 1. **Stdout Output**: Query results (SELECT) are written to standard output using
-   the `-F` delimiter, or comma when `-F` was not given. This is independent of
-   the delimiter a source table was parsed with
-2. **File Writeback**: Modified tables (via INSERT, UPDATE, DELETE) are written back to their source files when `--write` is specified, preserving that file's delimiter
+   the `--output-delimiter` delimiter, else the `-F` delimiter, else comma.
+   This is independent of the delimiter a source table was parsed with
+2. **File Writeback**: Modified tables (via INSERT, UPDATE, DELETE, ALTER TABLE, TRUNCATE) are written back to their source files when `--write` is specified, preserving that file's delimiter
 
-For stdout output, the data is streamed directly without buffering concerns. For file writeback, the atomic write pattern described above is used.
+A statement's result set is built in memory as a table and then printed. For
+file writeback, the atomic write pattern described above is used.
 
 ## Storage
 
 Every table holds its rows in memory as owned values (`Vec<Row>`). Files are
 read whole and parsed by the `csv` crate -- RFC 4180 quoting, quoted fields
-spanning lines, no trimming, UTF-8 byte order mark stripped -- and each cell's
-type is inferred with a rule that round-trips (see "Type inference" below), so
-an unmodified cell is written back byte for byte.
+spanning lines, no trimming, UTF-8 byte order mark set aside -- and each
+cell's type is inferred with a rule that round-trips (see "Type inference"
+below), so an unmodified cell of a changed row keeps its text.
+
+A loaded table also keeps the file's bytes (`RawRows` in `table.rs`): the
+whole file in one buffer plus a start/end offset per row, parallel to the
+rows. That costs the file's size plus 16 bytes per row. A row keeps its
+offsets while no statement changes it -- an UPDATE that sets every column to
+an identical value (same type, same value) counts as no change -- and is
+written back as exactly those bytes. INSERT adds rows without source bytes;
+DELETE drops a row's offsets with it; ALTER TABLE ADD COLUMN and TRUNCATE
+discard the source bytes of every row (every line changes).
 
 Standard input (the `-` operand) is read the same way, directly from the pipe.
 The resulting table has no file path, so `--write` reports it as unwritable
@@ -244,26 +396,30 @@ rather than writing anywhere.
 - empty field: NULL
 - canonical integer (`42`, `-7`, where formatting the number back gives the
   same text): INTEGER
-- canonical float (`1.5`, `-0.25`): REAL
-- anything else, verbatim: TEXT -- including `007`, `1.50`, `1e3`, ` 42`,
-  `true`, `NaN`
+- canonical float (`1.5`, `-0.25`, `2.0`, `1.0e+20`, where printing the real
+  the way SQLite's `CAST(x AS TEXT)` does gives the same text): REAL
+- anything else, verbatim: TEXT -- including `007`, `1.50`, `1e3`, `-0.0`,
+  `0.30000000000000004`, ` 42`, `true`, `NaN`
 
 Text that spells a number still acts as one where a number is needed:
-arithmetic, `SUM`/`AVG`, comparison against a number, and sort order.
+arithmetic, `SUM`/`AVG`, every comparison (against a number or against other
+numeric text), and sort order.
 
 ### Source layout
 
 Each table records how its file was laid out -- whether it had a header line,
-whether records ended in CRLF, and whether `#` lines were comments -- and
-writeback reproduces it. Writeback also keeps the file's permissions and, for
-a symlink, rewrites the link's target and leaves the link in place.
+a UTF-8 byte order mark, whether records ended in CRLF, and whether `#` lines
+were comments -- and writeback reproduces it. Writeback also keeps the file's
+permissions and, for a symlink, rewrites the link's target and leaves the
+link in place. When the file's last line had no line ending and a row is
+written after it, the file's line ending is inserted first.
 
-In a file read with comment skipping (any delimited file that is not `.csv`),
-each `#` comment line is kept verbatim, with its own line ending, and
-anchored to the data that follows it: comments before the header (or, in a
-headerless file, before the first row) stay at the top, comments before a
-row stay with that row, and comments after the last row stay at the end. So
-a no-op UPDATE writes such a file back byte for byte. When rows change:
+The lines between records -- blank lines, and under `--comments` each `#`
+comment line -- are kept verbatim, with their own line endings, and anchored
+to the data that follows: lines before the header (or, in a headerless file,
+before the first row) stay at the top, lines before a row stay with that
+row, and lines after the last row stay at the end. So a no-op UPDATE writes
+any file back byte for byte. When rows change:
 
 - UPDATE replaces rows in place, so every comment stays where it was.
 - DELETE leaves a deleted row's comments where they were: in front of the
@@ -271,8 +427,7 @@ a no-op UPDATE writes such a file back byte for byte. When rows change:
   TRUNCATE) keeps all comments, in order.
 - INSERT appends rows after the last row and before the trailing comments.
 
-Blank lines are not kept (the reader skips them), and `#` lines in a `.csv`
-file are data, not comments.
+Without `--comments`, `#` lines are data, not comments.
 
 ### Row Identity Across Updates
 
@@ -286,12 +441,15 @@ Sqawk's in-memory database is optimized for:
 - **Fast Loading**: Delimiter-separated files are parsed directly into memory
 - **Format Flexibility**: Support for CSV, TSV, and custom-delimited files
 - **Efficient Filtering**: WHERE clauses are applied in a single pass
-- **Low Memory Overhead**: Simple data structures minimize memory usage
 - **Zero Configuration**: No setup required, works directly with files in various formats
 
-For larger datasets, consider:
-- The entire dataset must fit in memory
-- Complex queries may require multiple passes over the data
+Memory: every table is resident for the whole run. A loaded table takes
+roughly six to seven times its file's size -- each cell is a `Value` (with a
+heap string for text), and the file's bytes are kept as well for verbatim
+writeback. An 83 MB, one-million-row, 10-column CSV peaks at about 530 MB for
+`SELECT COUNT(*)`. A statement's result set is materialized on top of that
+before it prints (1.4 GB peak for `SELECT *` of the same file, 1.9 GB with
+`ORDER BY`, which also holds the sorter's copy).
 
 ## Join Implementation
 
@@ -341,15 +499,13 @@ The database engine has several architectural limitations:
 
 - **No Index Structure**: Tables are scanned in full; the only index is the
   temporary hash index an equi-join builds for its inner table
-- **No Transaction Support**: A statement's modifications are applied once it
-  completes; there is no BEGIN/COMMIT and no rollback across statements
+- **Transactions without savepoints**: BEGIN / COMMIT / ROLLBACK are
+  supported (see "Transactions" above); SAVEPOINT, RELEASE and ROLLBACK TO
+  are not
 - **Schema Flexibility**: Types are inferred per value rather than enforced
 - **No Constraints System**: Referential integrity not enforced
 - **Whole-dataset residency**: A table must fit in memory
 
-Unsupported SQL of note: CTEs (`WITH`), parenthesized joins, and RANGE
-frames with an offset, GROUPS frames and FILTER on window functions.
-
----
-
-*This documentation describes the current state of the Sqawk in-memory database as of the project's current version. Future versions may add additional capabilities.*
+Unsupported SQL of note: correlated derived tables and CTE bodies,
+parenthesized joins, and RANGE frames with an offset, GROUPS frames and
+FILTER on window functions.

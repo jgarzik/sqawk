@@ -10,25 +10,16 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::AppConfig;
-use crate::csv_handler::{self, HeaderMode, ReadOptions};
+use crate::csv_handler::{self, ReadOptions};
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::{delimiter_byte, Table};
+use crate::table::{delimiter_byte, ColumnDefinition, FileLayout, Table};
 
 /// File operand that names standard input rather than a path on disk.
 pub const STDIN_SPEC: &str = "-";
 
 /// Table name given to a bare `-` operand.
 pub const STDIN_TABLE: &str = "stdin";
-
-/// Enum representing different file formats supported by sqawk
-#[derive(Debug, Clone, Copy)]
-pub enum FileFormat {
-    /// CSV (comma-separated values)
-    Csv,
-    /// Delimiter-separated values
-    Delimited,
-}
 
 /// Unified file handler that delegates to specific format handlers
 ///
@@ -39,13 +30,11 @@ pub enum FileFormat {
 /// Key responsibilities:
 /// - Determining the appropriate handler based on file format
 /// - Managing the relationship between tables and their source files
-/// - Providing access to the database for table operations
 /// - Handling table loading and saving with proper format detection
+///
+/// It holds no tables: the [`Database`] it loads into or saves from is
+/// passed to each call.
 pub struct FileHandler {
-    /// Reference to a database object which is the source of truth for tables
-    /// Stored as a raw pointer to avoid borrowing limitations
-    database: *mut Database,
-
     /// Application configuration for global settings like verbosity and field separators
     config: AppConfig,
 
@@ -62,23 +51,16 @@ pub struct FileHandler {
     stdin_available: bool,
 }
 
-// Add safety implementation for the raw pointer to Database
-unsafe impl Send for FileHandler {}
-unsafe impl Sync for FileHandler {}
-
 impl FileHandler {
-    /// Create a new FileHandler with application config and database
+    /// Create a new FileHandler with application config
     ///
     /// # Arguments
     /// * `config` - Application configuration with global settings
-    /// * `database` - Mutable reference to the database to use as source of truth
     ///
     /// # Returns
     /// A new FileHandler instance ready to load and manage tables
-    pub fn new(config: &AppConfig, database: &mut Database) -> Self {
+    pub fn new(config: &AppConfig) -> Self {
         FileHandler {
-            // SAFETY: The caller must ensure that the database outlives this FileHandler
-            database: database as *mut Database,
             config: config.clone(),
             stdin_consumed: false,
             stdin_table: None,
@@ -112,129 +94,99 @@ impl FileHandler {
         }
         self.stdin_consumed = true;
         let mut data = Vec::new();
-        std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut data)?;
+        std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut data)
+            .map_err(|e| SqawkError::open("standard input", e))?;
         Ok(data)
     }
 
-    /// Get a mutable reference to the database
+    /// Load a file into an in-memory table and add it to `db`
     ///
-    /// Provides safe access to the database reference stored as a raw pointer.
-    /// This design allows the FileHandler to maintain a reference to the Database
-    /// while avoiding Rust's borrowing conflicts in complex operations.
+    /// * `file_spec` - `[table_name=]file_path` (see [`parse_table_spec`]);
+    ///   `-` is standard input
     ///
-    /// # Safety
-    /// Safety is guaranteed because:
-    /// - The database pointer is initialized in the constructor and never changes
-    /// - The FileHandler's lifetime is tied to the Database through the constructor's contract
-    /// - All access to the database happens through this controlled interface
+    /// The delimiter is -F if given, else tab for `.tsv`/`.tab` files and
+    /// comma for everything else. The first line is the header unless
+    /// `--no-header` or `--tabledef` supplies the column names. `#` lines
+    /// are comments only under `--comments`.
     ///
-    /// # Returns
-    /// * `&mut Database` - Mutable reference to the database
-    fn database_mut(&mut self) -> &mut Database {
-        // SAFETY: The caller of `new` ensures the database outlives this FileHandler,
-        // and we have exclusive access through `&mut self`
-        unsafe { &mut *self.database }
-    }
-
-    /// Load a file into an in-memory table and add it to the database
-    ///
-    /// This method handles the complete file loading process:
-    /// 1. Parses the file specification to extract table name and file path
-    /// 2. Checks if the table already exists in the database
-    /// 3. Automatically detects file format (CSV or delimiter-separated)
-    /// 4. Delegates to the appropriate handler based on format
-    /// 5. Adds the loaded table to the database
-    ///
-    /// If a table with the same name already exists in the database, it will be
-    /// replaced with the newly loaded table.
-    ///
-    /// # Arguments
-    /// * `file_spec` - File specification in format [table_name=]file_path
+    /// The table records the file's canonical absolute path, so a later
+    /// `.cd` in the REPL does not change which file `.save` writes, and the
+    /// same file cannot be loaded twice under different names (writeback
+    /// would make one copy overwrite the other).
     ///
     /// # Returns
-    /// * `SqawkResult<Option<(String, String)>>` - Tuple of (table_name, file_path) if successful
-    pub fn load_file(&mut self, file_spec: &str) -> SqawkResult<Option<(String, String)>> {
-        let (table_name, file_path) = self.parse_file_spec(file_spec)?;
+    /// * `(table_name, file_path)` as given
+    pub fn load_file(
+        &mut self,
+        db: &mut Database,
+        file_spec: &str,
+    ) -> SqawkResult<Option<(String, String)>> {
+        let (table_name, file_path) = parse_table_spec(file_spec)?;
 
         // A "-" operand reads standard input. It is parsed as CSV (comma,
         // header row) unless -F says otherwise, which matches what sqawk
         // itself writes to stdout, so `sqawk ... | sqawk ... -` round-trips.
         // It has no writeback target: --write must never touch it.
         let from_stdin = file_path == Path::new(STDIN_SPEC);
-        let file_path_str = if from_stdin {
-            STDIN_SPEC.to_string()
+        let file_path_str = file_path.to_string_lossy().to_string();
+
+        let canonical = if from_stdin {
+            None
         } else {
-            file_path.to_string_lossy().to_string()
+            let real =
+                std::fs::canonicalize(&file_path).map_err(|e| SqawkError::open(&file_path, e))?;
+            if real.is_dir() {
+                return Err(SqawkError::open(
+                    &file_path,
+                    std::io::Error::new(std::io::ErrorKind::IsADirectory, "Is a directory"),
+                ));
+            }
+            Some(real)
         };
 
         // A table that already exists is either a --tabledef placeholder,
         // whose column names this file supplies the data for, or a genuine
         // table, in which case two inputs resolve to the same name.
-        let predefined_columns: Option<Vec<String>> = {
-            let db = self.database_mut();
-            match db.get_table(&table_name) {
-                Ok(t) if t.is_placeholder() => Some(t.columns().to_vec()),
-                Ok(_) => return Err(SqawkError::TableAlreadyExists(table_name)),
-                Err(_) => None,
-            }
+        let predefined_columns: Option<Vec<String>> = match db.get_table(&table_name) {
+            Ok(t) if t.is_placeholder() => Some(t.columns().to_vec()),
+            Ok(_) => return Err(SqawkError::TableAlreadyExists(table_name)),
+            Err(_) => None,
         };
+        if let Some(real) = &canonical {
+            check_not_loaded(db, real, &file_path_str)?;
+        }
 
         let verbose = self.config.verbose();
         if predefined_columns.is_some() && verbose {
-            eprintln!(
+            diag!(
                 "Table '{}' has predefined schema, using those column names",
                 table_name
             );
         }
 
-        // Delimiter: -F if given, else comma for .csv (and stdin and files
-        // without an extension), tab for anything else.
-        let format = if from_stdin {
-            FileFormat::Csv
-        } else {
-            self.detect_format(&file_path)
-        };
-        let delimiter_str = self
-            .config
-            .field_separator()
-            .unwrap_or_else(|| match format {
-                FileFormat::Csv => ",".to_string(),
-                FileFormat::Delimited => "\t".to_string(),
-            });
-
-        // Header policy: a .csv file (or stdin) always has a header row, and
-        // its '#' lines are data. Other delimited files get the headerless
-        // guess (for files like /etc/passwd) and '#' comment lines.
-        let csv_rules = from_stdin || Self::has_csv_extension(&file_path);
-        let header = if self.config.no_header() {
-            HeaderMode::Absent
-        } else if csv_rules {
-            HeaderMode::Present
-        } else {
-            HeaderMode::Guess
-        };
+        let delimiter_str = self.config.field_separator().unwrap_or_else(|| {
+            if !from_stdin && has_tab_extension(&file_path) {
+                "\t".to_string()
+            } else {
+                ",".to_string()
+            }
+        });
         let opts = ReadOptions {
             delimiter: delimiter_byte(&delimiter_str),
-            header,
-            comments: !csv_rules,
+            // --tabledef names the columns; the first line is data.
+            header: !self.config.no_header() && predefined_columns.is_none(),
+            comments: self.config.comments(),
             columns: predefined_columns.clone(),
-            recover_errors: false,
         };
 
-        let data = if from_stdin {
-            self.read_stdin()?
-        } else {
-            std::fs::read(&file_path)?
-        };
-        let target = if from_stdin {
-            None
-        } else {
-            Some(file_path.clone())
+        let data = match &canonical {
+            None => self.read_stdin()?,
+            Some(real) => std::fs::read(real).map_err(|e| SqawkError::open(&file_path, e))?,
         };
         let table = csv_handler::read_table(
             &table_name,
-            &data,
-            target,
+            data,
+            canonical,
             delimiter_str,
             &opts,
             &file_path_str,
@@ -254,11 +206,10 @@ impl FileHandler {
             self.stdin_table = Some(table_name.clone());
         }
 
-        let db = self.database_mut();
         if predefined_columns.is_some() {
             // Replace the --tabledef placeholder with the loaded table.
             if verbose {
-                eprintln!(
+                diag!(
                     "Replacing predefined schema for '{}' with loaded data",
                     table_name
                 );
@@ -268,96 +219,6 @@ impl FileHandler {
         db.add_table(table_name.clone(), table)?;
 
         Ok(Some((table_name, file_path_str)))
-    }
-
-    /// Whether `path` has a `.csv` extension (any case).
-    fn has_csv_extension(path: &Path) -> bool {
-        path.extension()
-            .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("csv"))
-    }
-
-    /// Parse a file specification into a table name and path
-    ///
-    /// # Arguments
-    /// * `file_spec` - File specification in format [table_name=]file_path
-    ///
-    /// # Returns
-    /// * `SqawkResult<(String, PathBuf)>` - Tuple of (table_name, file_path)
-    pub fn parse_file_spec(&self, file_spec: &str) -> SqawkResult<(String, PathBuf)> {
-        // Check for explicit table name in format "table_name=file_path"
-        if let Some(pos) = file_spec.find('=') {
-            let (table_name, file_path) = file_spec.split_at(pos);
-
-            // Strip the '=' from the file path
-            let file_path = &file_path[1..];
-
-            // "-" names standard input, which has nothing on disk to check for.
-            let path = PathBuf::from(file_path);
-            if file_path != STDIN_SPEC && !path.exists() {
-                return Err(SqawkError::FileNotFound(file_path.to_string()));
-            }
-
-            Ok((table_name.to_string(), path))
-        } else if file_spec == STDIN_SPEC {
-            // A bare "-" reads standard input into a table called "stdin".
-            Ok((STDIN_TABLE.to_string(), PathBuf::from(STDIN_SPEC)))
-        } else {
-            // No explicit table name, use the file name without extension
-            let path = PathBuf::from(file_spec);
-
-            // Validate that the file exists
-            if !path.exists() {
-                return Err(SqawkError::FileNotFound(file_spec.to_string()));
-            }
-
-            // Get file name without extension as table name
-            let file_name = path
-                .file_name()
-                .ok_or_else(|| SqawkError::InvalidFileSpec(file_spec.to_string()))?
-                .to_string_lossy();
-
-            // Extract name without extension
-            let table_name = if let Some(pos) = file_name.rfind('.') {
-                file_name[..pos].to_string()
-            } else {
-                file_name.to_string()
-            };
-
-            Ok((table_name, path))
-        }
-    }
-
-    /// Get a reference to a table by name
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table to retrieve
-    ///
-    /// # Returns
-    /// * `SqawkResult<&Table>` - Reference to the requested table
-    pub fn get_table(&self, table_name: &str) -> SqawkResult<&Table> {
-        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
-        let db = unsafe { &*self.database };
-        db.get_table(table_name)
-    }
-
-    /// Get all table names
-    ///
-    /// # Returns
-    /// * `Vec<String>` - Vector of table names
-    pub fn table_names(&self) -> Vec<String> {
-        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
-        let db = unsafe { &*self.database };
-        db.table_names()
-    }
-
-    /// Get the number of tables
-    ///
-    /// # Returns
-    /// * `usize` - Number of tables
-    pub fn table_count(&self) -> usize {
-        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
-        let db = unsafe { &*self.database };
-        db.table_count()
     }
 
     /// Explain why `table_name` has no writeback target.
@@ -374,74 +235,62 @@ impl FileHandler {
         SqawkError::NoFilePath(table_name.to_string())
     }
 
-    /// Report whether `table_name` could be written back, without writing it.
+    /// Report whether `table_name` can be written back, without writing it.
     ///
     /// Lets a caller reject the whole writeback up front instead of failing
     /// part-way through and leaving some source files rewritten and others not.
-    pub fn check_table_writable(&self, table_name: &str) -> SqawkResult<()> {
-        let table = self.get_table(table_name)?;
-        if table.file_path().is_none() {
-            return Err(self.unwritable_table_error(table_name));
-        }
-        Ok(())
-    }
-
-    /// Check if a table exists
-    ///
-    /// # Arguments
-    /// * `table_name` - Name of the table to check
     ///
     /// # Returns
-    /// * `bool` - True if the table exists
-    pub fn has_table(&self, table_name: &str) -> bool {
-        // SAFETY: The caller of `new` ensures the database outlives this FileHandler
-        let db = unsafe { &*self.database };
-        db.has_table(table_name)
+    /// * `Ok(true)` - the table has a file and that file can be written
+    /// * `Ok(false)` - a scratch table (CREATE TABLE without LOCATION, or
+    ///   CREATE TABLE ... AS): it has no file, and writeback skips it
+    /// * `Err` - a table read from standard input, or a file that is
+    ///   read-only or in a directory that cannot be written
+    pub fn check_table_writable(&self, db: &Database, table_name: &str) -> SqawkResult<bool> {
+        let table = db.get_table(table_name)?;
+        match table.file_path() {
+            Some(path) => {
+                csv_handler::check_writable(path)?;
+                Ok(true)
+            }
+            None if self.stdin_table.as_deref() == Some(table_name) => {
+                Err(self.unwritable_table_error(table_name))
+            }
+            None => Ok(false),
+        }
     }
 
-    /// Save a modified table back to its original file
+    /// Save a modified table of `db` back to its original file
     ///
     /// # Arguments
     /// * `table_name` - Name of the table to save
     ///
     /// # Returns
     /// * `SqawkResult<()>` - Result of the operation
-    pub fn save_table(&self, table_name: &str) -> SqawkResult<()> {
-        // Get a reference to the table
-        let table = self.get_table(table_name)?;
+    pub fn save_table(&self, db: &Database, table_name: &str) -> SqawkResult<()> {
+        let table = db.get_table(table_name)?;
 
         if self.config.verbose() {
-            eprintln!("In FileHandler::save_table for table '{}'", table_name);
-
-            // Access database directly to check if the table exists there
-            let db = unsafe { &*self.database };
-            if let Ok(db_table) = db.get_table(table_name) {
-                if let Some(path) = db_table.file_path() {
-                    eprintln!(
-                        "Database has table '{}' with file_path '{:?}'",
-                        table_name, path
-                    );
-                } else {
-                    eprintln!("Database has table '{}' but NO file_path", table_name);
-                }
-            } else {
-                eprintln!("Table '{}' not found in database", table_name);
-            }
+            diag!("In FileHandler::save_table for table '{}'", table_name);
         }
 
         // Check if the table has an associated file path
         let file_path = match table.file_path() {
             Some(path) => {
                 if self.config.verbose() {
-                    eprintln!("Table '{}' has file_path '{:?}'", table_name, path);
+                    diag!(
+                        "Table '{}' has file_path '{}'",
+                        table_name,
+                        crate::error::display_path(path)
+                    );
                 }
                 path
             }
             None => {
                 // Log debugging information
                 if self.config.verbose() {
-                    eprintln!("Table '{}' has NO file_path", table_name);
-                    eprintln!(
+                    diag!("Table '{}' has NO file_path", table_name);
+                    diag!(
                         "  Table details - Name: {}, Columns: {}, Delimiter: '{}'",
                         table.name(),
                         table.columns().join(","),
@@ -457,34 +306,192 @@ impl FileHandler {
         // Make sure parent directories exist
         if let Some(parent) = file_path.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(SqawkError::IoError)?;
+                std::fs::create_dir_all(parent).map_err(|e| SqawkError::write(file_path, e))?;
             }
         }
 
+        // The rename in save_table would replace even a read-only file.
+        csv_handler::check_writable(file_path)?;
         csv_handler::save_table(table, file_path)
     }
+}
 
-    /// Detect file format based on file extension
-    ///
-    /// This method examines the file extension to determine the appropriate handler:
-    /// - `.csv` files are treated as CSV (comma-separated values)
-    /// - All other extensions are treated as delimiter-separated files
-    /// - Files without extensions default to CSV format
-    ///
-    /// # Arguments
-    /// * `path` - File path to analyze
-    ///
-    /// # Returns
-    /// * `FileFormat` - Detected format (Csv or Delimited) based on file extension
-    fn detect_format(&self, path: &Path) -> FileFormat {
-        if let Some(ext) = path.extension() {
-            match ext.to_string_lossy().to_lowercase().as_str() {
-                "csv" => FileFormat::Csv,
-                _ => FileFormat::Delimited,
-            }
-        } else {
-            // Default to CSV if no extension
-            FileFormat::Csv
+/// Fail if `real` (a canonical path) is already some table's file: writeback
+/// would make one table's copy overwrite the other's. `shown` names the file
+/// in the error.
+fn check_not_loaded(db: &Database, real: &Path, shown: &str) -> SqawkResult<()> {
+    for name in db.table_names() {
+        let table = db.get_table(&name)?;
+        if table.file_path().map(PathBuf::as_path) == Some(real) && !table.is_placeholder() {
+            return Err(SqawkError::InvalidFileSpec(format!(
+                "file {} is already loaded as table {}",
+                shown, name
+            )));
         }
     }
+    Ok(())
+}
+
+/// How `CREATE TABLE ... LOCATION` reads its file (the `WITH` options).
+#[derive(Debug, Clone)]
+pub struct LocationOptions {
+    /// `WITH (DELIMITER=...)`; else tab for `.tsv` / `.tab`, comma otherwise
+    pub delimiter: Option<String>,
+    /// The file's first line is a header (`WITH (HEADER=false)` clears it)
+    pub header: bool,
+    /// `#` lines are comments (`WITH (COMMENTS=true)`)
+    pub comments: bool,
+}
+
+/// The table `CREATE TABLE name (schema) LOCATION 'path'` creates.
+///
+/// The declared columns are the schema of the file, as for a Hive external
+/// table. When the file exists it is loaded through the normal loader under
+/// the declared names and types: its first line is a header unless
+/// `options.header` is false, and a header must have one field per declared
+/// column; it is skipped as data and written back as read. When it does not
+/// exist the table starts empty, and `--write` creates the file (with a
+/// header line of the declared names unless `options.header` is false).
+///
+/// A relative path resolves against the current directory; the table
+/// records the absolute path (canonical when the file exists), so a later
+/// `.cd` in the REPL does not change which file is written. A file already
+/// loaded as another table is an error, as is a directory.
+///
+/// # Returns
+/// * The table, and whether its file already existed (loading it is not a
+///   modification; a new file is created on `--write`)
+pub fn load_location(
+    db: &Database,
+    table_name: &str,
+    path: &str,
+    schema: Vec<ColumnDefinition>,
+    options: &LocationOptions,
+) -> SqawkResult<(Table, bool)> {
+    let given = Path::new(path);
+    let delimiter = options.delimiter.clone().unwrap_or_else(|| {
+        if has_tab_extension(given) {
+            "\t".to_string()
+        } else {
+            ",".to_string()
+        }
+    });
+    let existing = match std::fs::metadata(given) {
+        Ok(meta) if meta.is_dir() => {
+            return Err(SqawkError::open(
+                given,
+                std::io::Error::new(std::io::ErrorKind::IsADirectory, "Is a directory"),
+            ))
+        }
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(SqawkError::open(given, e)),
+    };
+    let real = if existing {
+        std::fs::canonicalize(given).map_err(|e| SqawkError::open(given, e))?
+    } else {
+        absolute_path(given).map_err(|e| SqawkError::open(given, e))?
+    };
+    check_not_loaded(db, &real, path)?;
+
+    if !existing {
+        let mut table = Table::new_with_schema(table_name, schema, Some(real), Some(delimiter));
+        table.set_file_layout(FileLayout {
+            has_header: options.header,
+            ..FileLayout::default()
+        });
+        return Ok((table, false));
+    }
+
+    let opts = ReadOptions {
+        delimiter: delimiter_byte(&delimiter),
+        header: options.header,
+        comments: options.comments,
+        columns: Some(schema.iter().map(|c| c.name.clone()).collect()),
+    };
+    let data = std::fs::read(&real).map_err(|e| SqawkError::open(given, e))?;
+    let mut table = csv_handler::read_table(table_name, data, Some(real), delimiter, &opts, path)?;
+    table.set_declared_columns(schema);
+    Ok((table, true))
+}
+
+/// `path` made absolute against the current directory, without resolving
+/// symlinks in the file name (the file need not exist). An existing parent
+/// directory is canonicalized, so two spellings of one new file compare
+/// equal.
+fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
+    let abs = std::path::absolute(path)?;
+    if let (Some(parent), Some(name)) = (abs.parent(), abs.file_name()) {
+        if let Ok(real_parent) = std::fs::canonicalize(parent) {
+            return Ok(real_parent.join(name));
+        }
+    }
+    Ok(abs)
+}
+
+/// Whether `path` names a tab-separated file: extension `.tsv` or `.tab`
+/// (any case).
+pub(crate) fn has_tab_extension(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| {
+        let ext = ext.to_string_lossy();
+        ext.eq_ignore_ascii_case("tsv") || ext.eq_ignore_ascii_case("tab")
+    })
+}
+
+/// Whether `name` can be the table-name prefix of `NAME=PATH`: non-empty,
+/// letters, digits and `_` only (so never a path).
+fn is_table_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Split a file operand `[table_name=]file_path` into a table name and path.
+///
+/// `NAME=PATH` names the table only when NAME is identifier-like (letters,
+/// digits, `_`); otherwise the whole operand is the path, so a file in a
+/// directory such as `k=v/` loads as expected. When NAME is identifier-like
+/// but PATH does not exist and the whole operand does, the operand is a
+/// path too. Without a name, the table is named after the file without its
+/// extension; `-` is standard input, as the table `stdin`.
+///
+/// Errors: an empty name (`=file.csv`), or a file name that leaves an empty
+/// table name (`.csv`).
+pub fn parse_table_spec(file_spec: &str) -> SqawkResult<(String, PathBuf)> {
+    if let Some((name, path)) = file_spec.split_once('=') {
+        if name.is_empty() {
+            return Err(SqawkError::InvalidFileSpec(format!(
+                "'{}': empty table name before '='",
+                file_spec
+            )));
+        }
+        if is_table_name(name)
+            && (path == STDIN_SPEC || Path::new(path).exists() || !Path::new(file_spec).exists())
+        {
+            if path.is_empty() {
+                return Err(SqawkError::InvalidFileSpec(format!(
+                    "'{}': empty file path after '='",
+                    file_spec
+                )));
+            }
+            return Ok((name.to_string(), PathBuf::from(path)));
+        }
+    }
+    if file_spec == STDIN_SPEC {
+        return Ok((STDIN_TABLE.to_string(), PathBuf::from(STDIN_SPEC)));
+    }
+    let path = PathBuf::from(file_spec);
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let table_name = match file_name.rfind('.') {
+        Some(pos) => file_name[..pos].to_string(),
+        None => file_name,
+    };
+    if table_name.is_empty() {
+        return Err(SqawkError::InvalidFileSpec(format!(
+            "'{}': cannot derive a table name from the file name; use NAME={}",
+            file_spec, file_spec
+        )));
+    }
+    Ok((table_name, path))
 }

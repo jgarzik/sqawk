@@ -10,14 +10,8 @@ fn test_repl_basic_dot_commands() {
     let test_commands = ".help\n.version\n.tables\n.cd .\n.changes on\n.changes off\n.exit\n";
 
     // Start the sqawk process with sample data loaded
-    let mut process = Command::new("cargo")
-        .args([
-            "run",
-            "--bin",
-            "sqawk",
-            "tests/data/sample.csv",
-            "--interactive",
-        ])
+    let mut process = Command::new(env!("CARGO_BIN_EXE_sqawk"))
+        .args(["tests/data/sample.csv", "--interactive"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -49,14 +43,8 @@ fn test_repl_show_command() {
     let test_commands = ".show\n.show tables\n.exit\n";
 
     // Start the sqawk process with sample data loaded
-    let mut process = Command::new("cargo")
-        .args([
-            "run",
-            "--bin",
-            "sqawk",
-            "tests/data/sample.csv",
-            "--interactive",
-        ])
+    let mut process = Command::new(env!("CARGO_BIN_EXE_sqawk"))
+        .args(["tests/data/sample.csv", "--interactive"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -89,14 +77,8 @@ fn test_repl_stats_command() {
         ".stats on\nSELECT * FROM sample;\n.stats off\nSELECT * FROM sample;\n.exit\n";
 
     // Start the sqawk process with sample data loaded
-    let mut process = Command::new("cargo")
-        .args([
-            "run",
-            "--bin",
-            "sqawk",
-            "tests/data/sample.csv",
-            "--interactive",
-        ])
+    let mut process = Command::new(env!("CARGO_BIN_EXE_sqawk"))
+        .args(["tests/data/sample.csv", "--interactive"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -256,9 +238,11 @@ fn test_repl_reports_changes_for_trailing_dml() {
         ["1 rows affected"],
         "the DELETE must report once and the SELECTs not at all, got:\n{stdout}"
     );
-    assert!(
-        stdout.contains("Query returned 3 rows") && stdout.contains("Query returned 2 rows"),
-        "both SELECT result sets should print, got:\n{stdout}"
+    // Both SELECT result sets print; a piped session's stdout carries
+    // nothing else.
+    assert_eq!(
+        stdout,
+        "id,name,age\n1,Alice,32\n2,Bob,25\n3,Charlie,35\n1 rows affected\nid\n2\n3\n"
     );
 }
 
