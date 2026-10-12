@@ -250,7 +250,12 @@ pub(crate) fn check_query(query: &Query) -> SqawkResult<()> {
         format_clause,
         pipe_operators,
     } = query;
-    reject(with.is_some(), "WITH (common table expressions)")?;
+    // The pre-pass (`prepass.rs`) resolves every WITH and removes it.
+    if with.is_some() {
+        return Err(SqawkError::VmError(
+            "internal error: unresolved WITH".to_string(),
+        ));
+    }
     reject(fetch.is_some(), "FETCH FIRST")?;
     reject(!locks.is_empty(), "FOR UPDATE / FOR SHARE")?;
     reject(for_clause.is_some(), "FOR XML / FOR JSON")?;

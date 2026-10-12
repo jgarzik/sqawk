@@ -42,6 +42,7 @@ pub fn parse_sql(sql: &str) -> SqawkResult<Vec<Statement>> {
         .tokenize_with_location()
         .map_err(|e| SqawkError::SqlParseError(e.into()))?;
     rewrite_hex_literals(sql, &mut tokens)?;
+    drop_materialized_hints(&mut tokens);
     let mut statements = Parser::new(&SqawkDialect)
         .with_tokens_with_locations(tokens)
         .parse_statements()
@@ -168,6 +169,79 @@ fn rewrite_hex_literals(sql: &str, tokens: &mut Vec<TokenWithSpan>) -> SqawkResu
     Ok(())
 }
 
+/// SQLite's CTE hints `name AS MATERIALIZED (...)` and
+/// `name AS NOT MATERIALIZED (...)` only choose a query plan, and the
+/// dialect does not parse them, so they are dropped from the token stream.
+///
+/// Only an `AS` directly inside a WITH list counts: from `WITH` until the
+/// list ends at its statement keyword (SELECT, VALUES, INSERT, UPDATE,
+/// DELETE), at `;` or at the parenthesis enclosing the WITH, at the WITH's
+/// own parenthesis depth. `CAST(x AS materialized)` is untouched.
+fn drop_materialized_hints(tokens: &mut Vec<TokenWithSpan>) {
+    let is_kw = |t: &Token, kw: Keyword| matches!(t, Token::Word(w) if w.keyword == kw && w.quote_style.is_none());
+    if !tokens
+        .iter()
+        .any(|t| is_kw(&t.token, Keyword::MATERIALIZED))
+    {
+        return;
+    }
+    let significant: Vec<usize> = (0..tokens.len())
+        .filter(|&i| !matches!(tokens[i].token, Token::Whitespace(_)))
+        .collect();
+    let mut drop = vec![false; tokens.len()];
+    // The parenthesis depth of each WITH list being read.
+    let mut lists: Vec<usize> = Vec::new();
+    let mut depth = 0usize;
+    for (k, &i) in significant.iter().enumerate() {
+        let t = &tokens[i].token;
+        match t {
+            Token::LParen => depth += 1,
+            Token::RParen => {
+                if lists.last() == Some(&depth) {
+                    lists.pop();
+                }
+                depth = depth.saturating_sub(1);
+            }
+            Token::SemiColon => lists.clear(),
+            _ if is_kw(t, Keyword::WITH) => lists.push(depth),
+            _ if lists.last() == Some(&depth) => {
+                let ends = [
+                    Keyword::SELECT,
+                    Keyword::VALUES,
+                    Keyword::INSERT,
+                    Keyword::UPDATE,
+                    Keyword::DELETE,
+                ]
+                .iter()
+                .any(|&kw| is_kw(t, kw));
+                if ends {
+                    lists.pop();
+                } else if is_kw(t, Keyword::AS) {
+                    let next = |n: usize| significant.get(k + n).map(|&j| &tokens[j].token);
+                    let skip = match (next(1), next(2), next(3)) {
+                        (Some(m), Some(Token::LParen), _) if is_kw(m, Keyword::MATERIALIZED) => 1,
+                        (Some(n), Some(m), Some(Token::LParen))
+                            if is_kw(n, Keyword::NOT) && is_kw(m, Keyword::MATERIALIZED) =>
+                        {
+                            2
+                        }
+                        _ => 0,
+                    };
+                    for n in 1..=skip {
+                        drop[significant[k + n]] = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut i = 0;
+    tokens.retain(|_| {
+        i += 1;
+        !drop[i - 1]
+    });
+}
+
 /// The byte range of the token after the `k`-th, if any.
 fn tokens_after(offsets: &[(usize, usize)], k: usize) -> Option<(usize, usize)> {
     offsets.get(k + 1).copied()
@@ -180,175 +254,237 @@ fn too_deep() -> SqawkError {
     ))
 }
 
-/// A node still to be visited. The `usize` is the depth of an `Expr` node
-/// (1 for the root of an expression), or for the other kinds the depth of
-/// the expression that contains them (0 at statement level).
-enum Node<'a> {
-    Expr(&'a mut Expr, usize),
-    Query(&'a mut Query, usize),
-    SetExpr(&'a mut SetExpr, usize),
-    Select(&'a mut Select, usize),
-    Table(&'a mut TableWithJoins, usize),
-    Factor(&'a mut TableFactor, usize),
+/// One node of a statement's tree: the unit of the walks that must reach
+/// every query, FROM item and expression of a statement -- the limit and
+/// compound walk here, and the derived-table / CTE pre-pass (`prepass.rs`).
+/// Both enumerate children through [`for_each_child`], so they reach the
+/// same places.
+pub(crate) enum Node<'a> {
+    Statement(&'a mut Statement),
+    Query(&'a mut Query),
+    SetExpr(&'a mut SetExpr),
+    Select(&'a mut Select),
+    Table(&'a mut TableWithJoins),
+    Factor(&'a mut TableFactor),
+    Expr(&'a mut Expr),
 }
 
 /// Rewrite compounds and check limits over one statement, iteratively.
+///
+/// Each stack entry carries a depth: for an `Expr` its depth (1 for the root
+/// of an expression), for the other kinds the depth of the expression that
+/// contains them (0 at statement level). After `rewrite_compound` a compound
+/// is left-deep, so walking it with the stack (not recursion) keeps 500
+/// terms cheap.
 fn normalize(statement: &mut Statement) -> SqawkResult<()> {
-    let mut stack: Vec<Node> = Vec::new();
+    let mut stack: Vec<(Node, usize)> = vec![(Node::Statement(statement), 0)];
+    while let Some((node, d)) = stack.pop() {
+        match node {
+            Node::Expr(e) => {
+                if d > MAX_EXPR_DEPTH {
+                    return Err(too_deep());
+                }
+                strip_main_schema(e)?;
+                // Parentheses are not a node in SQLite's tree: `-(x)` is as
+                // deep as `-x`.
+                let child = if matches!(e, Expr::Nested(_)) {
+                    d
+                } else {
+                    d + 1
+                };
+                for_each_child(Node::Expr(e), &mut |c| stack.push((c, child)));
+            }
+            Node::Query(q) => {
+                rewrite_compound(&mut q.body)?;
+                push_children(Node::Query(q), d, &mut stack);
+            }
+            other => push_children(other, d, &mut stack),
+        }
+    }
+    Ok(())
+}
+
+/// Push the children of a node that is not an expression: an expression
+/// child starts one level below `d`, anything else stays at `d`.
+fn push_children<'a>(node: Node<'a>, d: usize, stack: &mut Vec<(Node<'a>, usize)>) {
+    for_each_child(node, &mut |c| {
+        let depth = if matches!(c, Node::Expr(_)) { d + 1 } else { d };
+        stack.push((c, depth));
+    });
+}
+
+/// Call `f` on each child of `node`: the queries, FROM items and
+/// expressions it contains, including a query's CTE bodies and the
+/// statement inside `WITH ... INSERT / UPDATE / DELETE`. FROM items come
+/// before the expressions of a SELECT, so a walk resolves them first.
+///
+/// Expressions are enumerated exhaustively (a new `Expr` variant fails to
+/// compile in [`expr_children`]); query clauses sqawk rejects (TOP, SORT BY,
+/// LATERAL VIEW, ...) are not visited.
+pub(crate) fn for_each_child<'a>(node: Node<'a>, f: &mut dyn FnMut(Node<'a>)) {
+    match node {
+        Node::Statement(s) => statement_children(s, f),
+        Node::Query(q) => {
+            if let Some(with) = q.with.as_mut() {
+                for cte in &mut with.cte_tables {
+                    f(Node::Query(&mut cte.query));
+                }
+            }
+            f(Node::SetExpr(&mut q.body));
+            if let Some(ob) = q.order_by.as_mut() {
+                if let OrderByKind::Expressions(exprs) = &mut ob.kind {
+                    order_by_children(exprs, f);
+                }
+            }
+            match q.limit_clause.as_mut() {
+                Some(LimitClause::LimitOffset {
+                    limit,
+                    offset,
+                    limit_by,
+                }) => {
+                    if let Some(l) = limit {
+                        f(Node::Expr(l));
+                    }
+                    if let Some(o) = offset {
+                        f(Node::Expr(&mut o.value));
+                    }
+                    for e in limit_by {
+                        f(Node::Expr(e));
+                    }
+                }
+                Some(LimitClause::OffsetCommaLimit { offset, limit }) => {
+                    f(Node::Expr(offset));
+                    f(Node::Expr(limit));
+                }
+                None => {}
+            }
+        }
+        Node::SetExpr(s) => match s {
+            SetExpr::Select(sel) => f(Node::Select(sel)),
+            SetExpr::Query(q) => f(Node::Query(q)),
+            SetExpr::SetOperation { left, right, .. } => {
+                f(Node::SetExpr(left));
+                f(Node::SetExpr(right));
+            }
+            SetExpr::Values(Values { rows, .. }) => {
+                for row in rows {
+                    for e in &mut row.content {
+                        f(Node::Expr(e));
+                    }
+                }
+            }
+            SetExpr::Insert(stmt) | SetExpr::Update(stmt) | SetExpr::Delete(stmt) => {
+                f(Node::Statement(stmt))
+            }
+            SetExpr::Table(_) | SetExpr::Merge(_) => {}
+        },
+        Node::Select(sel) => {
+            for t in &mut sel.from {
+                f(Node::Table(t));
+            }
+            for item in &mut sel.projection {
+                match item {
+                    SelectItem::UnnamedExpr(e)
+                    | SelectItem::ExprWithAlias { expr: e, .. }
+                    | SelectItem::ExprWithAliases { expr: e, .. } => f(Node::Expr(e)),
+                    SelectItem::QualifiedWildcard(..) | SelectItem::Wildcard(_) => {}
+                }
+            }
+            if let Some(e) = sel.selection.as_mut() {
+                f(Node::Expr(e));
+            }
+            if let GroupByExpr::Expressions(exprs, _) = &mut sel.group_by {
+                for e in exprs {
+                    f(Node::Expr(e));
+                }
+            }
+            if let Some(e) = sel.having.as_mut() {
+                f(Node::Expr(e));
+            }
+            if let Some(sqlparser::ast::Distinct::On(exprs)) = sel.distinct.as_mut() {
+                for e in exprs {
+                    f(Node::Expr(e));
+                }
+            }
+            for w in &mut sel.named_window {
+                if let NamedWindowExpr::WindowSpec(spec) = &mut w.1 {
+                    window_spec_children(spec, f);
+                }
+            }
+            if let Some(e) = sel.qualify.as_mut() {
+                f(Node::Expr(e));
+            }
+        }
+        Node::Table(t) => {
+            f(Node::Factor(&mut t.relation));
+            for join in &mut t.joins {
+                f(Node::Factor(&mut join.relation));
+                if let Some(JoinConstraint::On(e)) = join_constraint(&mut join.join_operator) {
+                    f(Node::Expr(e));
+                }
+            }
+        }
+        Node::Factor(fac) => match fac {
+            TableFactor::Derived { subquery, .. } => f(Node::Query(subquery)),
+            TableFactor::NestedJoin {
+                table_with_joins, ..
+            } => f(Node::Table(table_with_joins)),
+            _ => {}
+        },
+        Node::Expr(e) => expr_children(e, f),
+    }
+}
+
+/// The children of a statement: its query, its FROM items and expressions.
+fn statement_children<'a>(statement: &'a mut Statement, f: &mut dyn FnMut(Node<'a>)) {
     match statement {
-        Statement::Query(q) => stack.push(Node::Query(q, 0)),
+        Statement::Query(q) => f(Node::Query(q)),
         Statement::Insert(insert) => {
             if let Some(source) = insert.source.as_deref_mut() {
-                stack.push(Node::Query(source, 0));
+                f(Node::Query(source));
             }
         }
         Statement::Update(update) => {
-            stack.push(Node::Table(&mut update.table, 0));
+            f(Node::Table(&mut update.table));
+            if let Some(
+                sqlparser::ast::UpdateTableFromKind::BeforeSet(from)
+                | sqlparser::ast::UpdateTableFromKind::AfterSet(from),
+            ) = update.from.as_mut()
+            {
+                for t in from {
+                    f(Node::Table(t));
+                }
+            }
             for a in &mut update.assignments {
-                stack.push(Node::Expr(&mut a.value, 1));
+                f(Node::Expr(&mut a.value));
             }
             if let Some(e) = update.selection.as_mut() {
-                stack.push(Node::Expr(e, 1));
+                f(Node::Expr(e));
             }
         }
         Statement::Delete(delete) => {
             let (FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from)) =
                 &mut delete.from;
             for t in from {
-                stack.push(Node::Table(t, 0));
+                f(Node::Table(t));
+            }
+            for t in delete.using.iter_mut().flatten() {
+                f(Node::Table(t));
             }
             if let Some(e) = delete.selection.as_mut() {
-                stack.push(Node::Expr(e, 1));
+                f(Node::Expr(e));
             }
         }
         Statement::CreateTable(create) => {
             if let Some(q) = create.query.as_deref_mut() {
-                stack.push(Node::Query(q, 0));
+                f(Node::Query(q));
             }
         }
         _ => {}
     }
-
-    while let Some(node) = stack.pop() {
-        match node {
-            Node::Expr(e, d) => {
-                if d > MAX_EXPR_DEPTH {
-                    return Err(too_deep());
-                }
-                strip_main_schema(e)?;
-                push_expr_children(e, d + 1, &mut stack);
-            }
-            Node::Query(q, d) => {
-                rewrite_compound(&mut q.body)?;
-                stack.push(Node::SetExpr(&mut q.body, d));
-                if let Some(ob) = q.order_by.as_mut() {
-                    if let OrderByKind::Expressions(exprs) = &mut ob.kind {
-                        push_order_by(exprs, d + 1, &mut stack);
-                    }
-                }
-                match q.limit_clause.as_mut() {
-                    Some(LimitClause::LimitOffset {
-                        limit,
-                        offset,
-                        limit_by,
-                    }) => {
-                        if let Some(l) = limit {
-                            stack.push(Node::Expr(l, d + 1));
-                        }
-                        if let Some(o) = offset {
-                            stack.push(Node::Expr(&mut o.value, d + 1));
-                        }
-                        for e in limit_by {
-                            stack.push(Node::Expr(e, d + 1));
-                        }
-                    }
-                    Some(LimitClause::OffsetCommaLimit { offset, limit }) => {
-                        stack.push(Node::Expr(offset, d + 1));
-                        stack.push(Node::Expr(limit, d + 1));
-                    }
-                    None => {}
-                }
-            }
-            // After `rewrite_compound` a compound is left-deep, so walking it
-            // with the stack (not recursion) keeps 500 terms cheap.
-            Node::SetExpr(s, d) => match s {
-                SetExpr::Select(sel) => stack.push(Node::Select(sel, d)),
-                SetExpr::Query(q) => stack.push(Node::Query(q, d)),
-                SetExpr::SetOperation { left, right, .. } => {
-                    stack.push(Node::SetExpr(left, d));
-                    stack.push(Node::SetExpr(right, d));
-                }
-                SetExpr::Values(Values { rows, .. }) => {
-                    for row in rows {
-                        for e in &mut row.content {
-                            stack.push(Node::Expr(e, d + 1));
-                        }
-                    }
-                }
-                _ => {}
-            },
-            Node::Select(sel, d) => {
-                let d1 = d + 1;
-                for item in &mut sel.projection {
-                    match item {
-                        SelectItem::UnnamedExpr(e)
-                        | SelectItem::ExprWithAlias { expr: e, .. }
-                        | SelectItem::ExprWithAliases { expr: e, .. } => {
-                            stack.push(Node::Expr(e, d1))
-                        }
-                        SelectItem::QualifiedWildcard(..) | SelectItem::Wildcard(_) => {}
-                    }
-                }
-                for t in &mut sel.from {
-                    stack.push(Node::Table(t, d));
-                }
-                if let Some(e) = sel.selection.as_mut() {
-                    stack.push(Node::Expr(e, d1));
-                }
-                if let GroupByExpr::Expressions(exprs, _) = &mut sel.group_by {
-                    for e in exprs {
-                        stack.push(Node::Expr(e, d1));
-                    }
-                }
-                if let Some(e) = sel.having.as_mut() {
-                    stack.push(Node::Expr(e, d1));
-                }
-                if let Some(sqlparser::ast::Distinct::On(exprs)) = sel.distinct.as_mut() {
-                    for e in exprs {
-                        stack.push(Node::Expr(e, d1));
-                    }
-                }
-                for w in &mut sel.named_window {
-                    if let NamedWindowExpr::WindowSpec(spec) = &mut w.1 {
-                        push_window_spec(spec, d1, &mut stack);
-                    }
-                }
-                if let Some(e) = sel.qualify.as_mut() {
-                    stack.push(Node::Expr(e, d1));
-                }
-            }
-            Node::Table(t, d) => {
-                stack.push(Node::Factor(&mut t.relation, d));
-                for join in &mut t.joins {
-                    stack.push(Node::Factor(&mut join.relation, d));
-                    if let Some(JoinConstraint::On(e)) = join_constraint(&mut join.join_operator) {
-                        stack.push(Node::Expr(e, d + 1));
-                    }
-                }
-            }
-            Node::Factor(f, d) => match f {
-                TableFactor::Derived { subquery, .. } => stack.push(Node::Query(subquery, d)),
-                TableFactor::NestedJoin {
-                    table_with_joins, ..
-                } => stack.push(Node::Table(table_with_joins, d)),
-                _ => {}
-            },
-        }
-    }
-    Ok(())
 }
 
-fn join_constraint(op: &mut JoinOperator) -> Option<&mut JoinConstraint> {
+pub(crate) fn join_constraint(op: &mut JoinOperator) -> Option<&mut JoinConstraint> {
     match op {
         JoinOperator::Join(c)
         | JoinOperator::Inner(c)
@@ -374,45 +510,45 @@ fn join_constraint(op: &mut JoinOperator) -> Option<&mut JoinConstraint> {
     }
 }
 
-fn push_order_by<'a>(exprs: &'a mut [OrderByExpr], d: usize, stack: &mut Vec<Node<'a>>) {
+fn order_by_children<'a>(exprs: &'a mut [OrderByExpr], f: &mut dyn FnMut(Node<'a>)) {
     for ob in exprs {
-        stack.push(Node::Expr(&mut ob.expr, d));
+        f(Node::Expr(&mut ob.expr));
     }
 }
 
-fn push_window_spec<'a>(spec: &'a mut WindowSpec, d: usize, stack: &mut Vec<Node<'a>>) {
+fn window_spec_children<'a>(spec: &'a mut WindowSpec, f: &mut dyn FnMut(Node<'a>)) {
     for e in &mut spec.partition_by {
-        stack.push(Node::Expr(e, d));
+        f(Node::Expr(e));
     }
-    push_order_by(&mut spec.order_by, d, stack);
+    order_by_children(&mut spec.order_by, f);
     if let Some(frame) = spec.window_frame.as_mut() {
         for bound in std::iter::once(&mut frame.start_bound).chain(frame.end_bound.as_mut()) {
             if let WindowFrameBound::Preceding(Some(e)) | WindowFrameBound::Following(Some(e)) =
                 bound
             {
-                stack.push(Node::Expr(e, d));
+                f(Node::Expr(e));
             }
         }
     }
 }
 
-fn push_function_args<'a>(args: &'a mut FunctionArguments, d: usize, stack: &mut Vec<Node<'a>>) {
+fn function_arg_children<'a>(args: &'a mut FunctionArguments, f: &mut dyn FnMut(Node<'a>)) {
     match args {
         FunctionArguments::None => {}
-        FunctionArguments::Subquery(q) => stack.push(Node::Query(q, d)),
+        FunctionArguments::Subquery(q) => f(Node::Query(q)),
         FunctionArguments::List(list) => {
             for arg in &mut list.args {
                 let (FunctionArg::Named { arg, .. }
                 | FunctionArg::ExprNamed { arg, .. }
                 | FunctionArg::Unnamed(arg)) = arg;
                 if let FunctionArgExpr::Expr(e) = arg {
-                    stack.push(Node::Expr(e, d));
+                    f(Node::Expr(e));
                 }
             }
             for clause in &mut list.clauses {
                 match clause {
-                    FunctionArgumentClause::OrderBy(obs) => push_order_by(obs, d, stack),
-                    FunctionArgumentClause::Limit(e) => stack.push(Node::Expr(e, d)),
+                    FunctionArgumentClause::OrderBy(obs) => order_by_children(obs, f),
+                    FunctionArgumentClause::Limit(e) => f(Node::Expr(e)),
                     _ => {}
                 }
             }
@@ -420,8 +556,6 @@ fn push_function_args<'a>(args: &'a mut FunctionArguments, d: usize, stack: &mut
     }
 }
 
-/// Push the children of `e`, each at depth `d`. A subquery's expressions
-/// continue from `d`, so nesting through subqueries counts too.
 /// `main.t.c` is `t.c`: every table lives in SQLite's `main` schema. Any
 /// other three-part name, or a longer one, names no column.
 fn strip_main_schema(e: &mut Expr) -> SqawkResult<()> {
@@ -439,13 +573,12 @@ fn strip_main_schema(e: &mut Expr) -> SqawkResult<()> {
     Err(SqawkError::ColumnNotFound(name.join(".")))
 }
 
-fn push_expr_children<'a>(e: &'a mut Expr, d: usize, stack: &mut Vec<Node<'a>>) {
-    let push = |stack: &mut Vec<Node<'a>>, e: &'a mut Expr| stack.push(Node::Expr(e, d));
+/// The children of an expression: its operand expressions and subqueries.
+fn expr_children<'a>(e: &'a mut Expr, stack: &mut dyn FnMut(Node<'a>)) {
+    let push = |stack: &mut dyn FnMut(Node<'a>), e: &'a mut Expr| stack(Node::Expr(e));
     match e {
-        // Parentheses are not a node in SQLite's tree: `-(x)` is as deep as
-        // `-x`.
-        Expr::Nested(a) => stack.push(Node::Expr(a, d - 1)),
-        Expr::IsFalse(a)
+        Expr::Nested(a)
+        | Expr::IsFalse(a)
         | Expr::IsNotFalse(a)
         | Expr::IsTrue(a)
         | Expr::IsNotTrue(a)
@@ -518,7 +651,7 @@ fn push_expr_children<'a>(e: &'a mut Expr, d: usize, stack: &mut Vec<Node<'a>>) 
         }
         Expr::InSubquery { expr, subquery, .. } => {
             push(stack, expr);
-            stack.push(Node::Query(subquery, d));
+            stack(Node::Query(subquery));
         }
         Expr::Between {
             expr, low, high, ..
@@ -572,15 +705,15 @@ fn push_expr_children<'a>(e: &'a mut Expr, d: usize, stack: &mut Vec<Node<'a>>) 
             }
         }
         Expr::Function(f) => {
-            push_function_args(&mut f.parameters, d, stack);
-            push_function_args(&mut f.args, d, stack);
+            function_arg_children(&mut f.parameters, stack);
+            function_arg_children(&mut f.args, stack);
             if let Some(filter) = f.filter.as_mut() {
                 push(stack, filter);
             }
             if let Some(WindowType::WindowSpec(spec)) = f.over.as_mut() {
-                push_window_spec(spec, d, stack);
+                window_spec_children(spec, stack);
             }
-            push_order_by(&mut f.within_group, d, stack);
+            order_by_children(&mut f.within_group, stack);
         }
         Expr::Case {
             operand,
@@ -599,9 +732,7 @@ fn push_expr_children<'a>(e: &'a mut Expr, d: usize, stack: &mut Vec<Node<'a>>) 
                 push(stack, e);
             }
         }
-        Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => {
-            stack.push(Node::Query(subquery, d))
-        }
+        Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => stack(Node::Query(subquery)),
         Expr::GroupingSets(sets) | Expr::Cube(sets) | Expr::Rollup(sets) => {
             for e in sets.iter_mut().flatten() {
                 push(stack, e);
@@ -994,6 +1125,33 @@ mod tests {
             SelectItem::UnnamedExpr(e) => e,
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn materialized_hints_are_dropped_only_in_a_with_list() {
+        let s = one("WITH a AS MATERIALIZED (SELECT 1), b AS NOT MATERIALIZED (SELECT 2) SELECT 1");
+        let Statement::Query(q) = s else { panic!() };
+        assert_eq!(q.with.expect("a WITH").cte_tables.len(), 2);
+        // A type name spelled MATERIALIZED is not a hint.
+        let s = one("SELECT CAST(1 AS materialized), (WITH c AS (SELECT 1) SELECT * FROM c)");
+        assert_eq!(
+            s.to_string(),
+            "SELECT CAST(1 AS materialized), (WITH c AS (SELECT 1) SELECT * FROM c)"
+        );
+    }
+
+    #[test]
+    fn limits_reach_cte_bodies() {
+        let deep = format!(
+            "WITH c AS (SELECT {}) SELECT * FROM c",
+            vec!["1"; 1001].join("+")
+        );
+        assert!(parse_sql(&deep).is_err());
+        let compound = format!(
+            "WITH c AS ({}) SELECT * FROM c",
+            vec!["SELECT 1"; 501].join(" UNION ALL ")
+        );
+        assert!(parse_sql(&compound).is_err());
     }
 
     #[test]

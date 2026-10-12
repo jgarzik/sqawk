@@ -32,6 +32,7 @@ pub mod engine;
 mod func;
 pub(crate) mod like;
 pub mod parse;
+mod prepass;
 mod printf;
 mod window;
 
@@ -128,20 +129,30 @@ pub fn execute_vm(
     }
 
     let source = Arc::new(parse::SqlSource::new(sql));
-    execute_statements(statements, database, verbose, &source, false)
+    execute_statements(
+        statements,
+        database,
+        verbose,
+        &source,
+        false,
+        &Arc::default(),
+    )
 }
 
 /// Compile and execute parsed statements one at a time (see `execute_vm`).
 ///
 /// `source` is the text the statements were parsed from; it names unaliased
-/// result columns. `in_derived`: the statement is a derived table's query,
-/// whose column references are named as written (see `SqlCompiler`).
+/// result columns. `in_derived`: the statement is a derived table's or CTE's
+/// query, whose column references are named as written (see `SqlCompiler`).
+/// `cte_names`: for such a query, the CTE names of the enclosing statement
+/// (see `prepass::Prepared::cte_names`); empty at top level.
 fn execute_statements(
     statements: Vec<sqlparser::ast::Statement>,
     database: &mut Database,
     verbose: bool,
     source: &Arc<parse::SqlSource>,
     in_derived: bool,
+    cte_names: &Arc<HashSet<String>>,
 ) -> SqawkResult<VmExecutionResult> {
     let mut tables: Vec<Table> = Vec::new();
     let mut affected_rows: usize = 0;
@@ -159,18 +170,18 @@ fn execute_statements(
             continue;
         }
 
-        // PHASE 0: MATERIALIZE DERIVED TABLES.
+        // PHASE 0: MATERIALIZE DERIVED TABLES AND CTEs.
         //
-        // `FROM (SELECT ...) t` has no representation in the compiler, which
-        // only knows how to open a cursor on a named table. Rather than teach
-        // every FROM site about subqueries, each derived table is executed
-        // first and registered under its alias, and the statement is rewritten
-        // to reference that name. The compiler then sees an ordinary table.
-        let derived = materialize_derived_tables(&mut statement, database, verbose, source)?;
+        // `FROM (SELECT ...) t` and a CTE reference have no representation in
+        // the compiler, which only knows how to open a cursor on a named
+        // table. Each is computed first and registered under an internal
+        // name, and the statement is rewritten to reference that name (see
+        // `prepass.rs`). The compiler then sees ordinary tables.
+        let prepared = prepass::run(&mut statement, database, verbose, source, cte_names)?;
 
         // Phases 1-3 run inside a closure so a failure anywhere still drops
-        // the derived tables registered above. Leaving them behind made the
-        // alias unusable for the rest of the session: a failed
+        // the tables registered above. Leaving them behind made the alias
+        // unusable for the rest of the session: a failed
         // `SELECT bad FROM (SELECT ...) x` left `x` registered, so the next
         // statement using the same alias failed with "shadows an existing
         // table", and `.tables` listed a phantom table.
@@ -178,7 +189,8 @@ fn execute_statements(
             // PHASE 1: SQL -> BYTECODE, against the CURRENT database state.
             let program = {
                 let mut compiler = compiler::SqlCompiler::new(database, verbose)
-                    .with_source(Some(Arc::clone(source)), in_derived);
+                    .with_source(Some(Arc::clone(source)), in_derived)
+                    .with_cte_names(Arc::clone(&prepared.cte_names));
                 compiler.compile_statement_program(&statement)?
             };
 
@@ -201,9 +213,9 @@ fn execute_statements(
             Ok((result_table, applied))
         })();
 
-        // Derived tables live only for the statement that declared them, and
-        // must be dropped whether or not it succeeded.
-        for name in &derived {
+        // Derived tables and CTEs live only for the statement that declared
+        // them, and must be dropped whether or not it succeeded.
+        for name in &prepared.registered {
             database.remove_table(name);
         }
 
@@ -234,280 +246,6 @@ fn execute_statements(
         affected_rows,
         dml_executed,
     })
-}
-
-/// Execute every derived table in `statement` -- in the FROM of the query,
-/// of a compound's arms, of subqueries in any expression, of an INSERT ...
-/// SELECT or CREATE TABLE ... AS -- register each under an internal name,
-/// and rewrite the FROM item to reference that name, keeping the derived
-/// table's alias as the item's alias.
-///
-/// Returns the names registered, so the caller can drop them once the
-/// statement finishes -- a derived table is scoped to the statement that
-/// declares it.
-///
-/// A derived table that refers to a column of an enclosing query (inside a
-/// correlated subquery) cannot be computed up front; it fails to resolve.
-fn materialize_derived_tables(
-    statement: &mut sqlparser::ast::Statement,
-    database: &mut Database,
-    verbose: bool,
-    source: &Arc<parse::SqlSource>,
-) -> SqawkResult<Vec<String>> {
-    let mut registered = Registered {
-        names: Vec::new(),
-        source: Arc::clone(source),
-    };
-    let result = materialize_statement(statement, database, verbose, &mut registered);
-    if result.is_err() {
-        for name in &registered.names {
-            database.remove_table(name);
-        }
-    }
-    result.map(|_| registered.names)
-}
-
-fn materialize_statement(
-    statement: &mut sqlparser::ast::Statement,
-    database: &mut Database,
-    verbose: bool,
-    registered: &mut Registered,
-) -> SqawkResult<()> {
-    use sqlparser::ast::Statement;
-    match statement {
-        Statement::Query(query) => {
-            materialize_in_query(query, database, verbose, registered)?;
-        }
-        Statement::Insert(insert) => {
-            if let Some(source) = insert.source.as_mut() {
-                materialize_in_query(source, database, verbose, registered)?;
-            }
-        }
-        Statement::CreateTable(create) => {
-            if let Some(query) = create.query.as_mut() {
-                materialize_in_query(query, database, verbose, registered)?;
-            }
-        }
-        Statement::Update(update) => {
-            for a in &mut update.assignments {
-                materialize_in_expr(&mut a.value, database, verbose, registered)?;
-            }
-            if let Some(e) = update.selection.as_mut() {
-                materialize_in_expr(e, database, verbose, registered)?;
-            }
-        }
-        Statement::Delete(delete) => {
-            if let Some(e) = delete.selection.as_mut() {
-                materialize_in_expr(e, database, verbose, registered)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-/// The derived tables registered so far for one statement, and the text the
-/// statement was parsed from.
-struct Registered {
-    names: Vec<String>,
-    source: Arc<parse::SqlSource>,
-}
-
-fn materialize_in_query(
-    query: &mut sqlparser::ast::Query,
-    database: &mut Database,
-    verbose: bool,
-    registered: &mut Registered,
-) -> SqawkResult<()> {
-    materialize_in_set_expr(&mut query.body, database, verbose, registered)?;
-    if let Some(sqlparser::ast::OrderBy {
-        kind: sqlparser::ast::OrderByKind::Expressions(obs),
-        ..
-    }) = query.order_by.as_mut()
-    {
-        for ob in obs {
-            materialize_in_expr(&mut ob.expr, database, verbose, registered)?;
-        }
-    }
-    Ok(())
-}
-
-fn materialize_in_set_expr(
-    body: &mut sqlparser::ast::SetExpr,
-    database: &mut Database,
-    verbose: bool,
-    registered: &mut Registered,
-) -> SqawkResult<()> {
-    use sqlparser::ast::{SelectItem, SetExpr};
-    match body {
-        SetExpr::Select(select) => {
-            for twj in &mut select.from {
-                materialize_in_factor(&mut twj.relation, database, verbose, registered)?;
-                for join in &mut twj.joins {
-                    materialize_in_factor(&mut join.relation, database, verbose, registered)?;
-                }
-            }
-            for item in &mut select.projection {
-                if let SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } = item
-                {
-                    materialize_in_expr(e, database, verbose, registered)?;
-                }
-            }
-            for e in select.selection.iter_mut().chain(select.having.iter_mut()) {
-                materialize_in_expr(e, database, verbose, registered)?;
-            }
-            Ok(())
-        }
-        SetExpr::SetOperation { left, right, .. } => {
-            materialize_in_set_expr(left, database, verbose, registered)?;
-            materialize_in_set_expr(right, database, verbose, registered)
-        }
-        SetExpr::Query(q) => materialize_in_query(q, database, verbose, registered),
-        _ => Ok(()),
-    }
-}
-
-/// Find the subqueries within an expression and materialize the derived
-/// tables in their FROM clauses.
-fn materialize_in_expr(
-    expr: &mut sqlparser::ast::Expr,
-    database: &mut Database,
-    verbose: bool,
-    registered: &mut Registered,
-) -> SqawkResult<()> {
-    use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments};
-    let mut go = |e: &mut Expr| materialize_in_expr(e, database, verbose, registered);
-    match expr {
-        Expr::Subquery(q) | Expr::Exists { subquery: q, .. } => {
-            materialize_in_query(q, database, verbose, registered)
-        }
-        Expr::InSubquery { expr, subquery, .. } => {
-            go(expr)?;
-            materialize_in_query(subquery, database, verbose, registered)
-        }
-        Expr::BinaryOp { left, right, .. }
-        | Expr::IsDistinctFrom(left, right)
-        | Expr::IsNotDistinctFrom(left, right) => {
-            go(left)?;
-            go(right)
-        }
-        Expr::Nested(e)
-        | Expr::UnaryOp { expr: e, .. }
-        | Expr::Cast { expr: e, .. }
-        | Expr::IsNull(e)
-        | Expr::IsNotNull(e) => go(e),
-        Expr::Between {
-            expr, low, high, ..
-        } => {
-            go(expr)?;
-            go(low)?;
-            go(high)
-        }
-        Expr::InList { expr, list, .. } => {
-            go(expr)?;
-            list.iter_mut().try_for_each(go)
-        }
-        Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
-            go(expr)?;
-            go(pattern)
-        }
-        Expr::Case {
-            operand,
-            conditions,
-            else_result,
-            ..
-        } => {
-            if let Some(o) = operand {
-                go(o)?;
-            }
-            for w in conditions {
-                go(&mut w.condition)?;
-                go(&mut w.result)?;
-            }
-            if let Some(e) = else_result {
-                go(e)?;
-            }
-            Ok(())
-        }
-        Expr::Function(f) => {
-            if let FunctionArguments::List(list) = &mut f.args {
-                for arg in &mut list.args {
-                    if let FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) = arg {
-                        go(e)?;
-                    }
-                }
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-fn materialize_in_factor(
-    factor: &mut sqlparser::ast::TableFactor,
-    database: &mut Database,
-    verbose: bool,
-    registered: &mut Registered,
-) -> SqawkResult<()> {
-    let (subquery, alias) = match factor {
-        sqlparser::ast::TableFactor::Derived { lateral: true, .. } => {
-            return Err(SqawkError::UnsupportedSqlFeature(
-                "LATERAL subqueries are not supported".into(),
-            ))
-        }
-        sqlparser::ast::TableFactor::Derived {
-            subquery, alias, ..
-        } => (subquery.clone(), alias.clone()),
-        _ => return Ok(()),
-    };
-    if alias.as_ref().is_some_and(|a| !a.columns.is_empty()) {
-        return Err(SqawkError::UnsupportedSqlFeature(
-            "Column aliases on a FROM item are not supported".into(),
-        ));
-    }
-
-    // Nested derived tables are materialized innermost-first.
-    let mut inner = *subquery;
-    materialize_in_query(&mut inner, database, verbose, registered)?;
-
-    // Registered under an internal name, so that an alias may repeat
-    // across subqueries and may shadow a real table, as in SQL.
-    let name = (1..)
-        .map(|i| format!("sqawk_derived_{}", i))
-        .find(|n| !database.has_table(n))
-        .expect("an unused name");
-
-    let source = Arc::clone(&registered.source);
-    let result = execute_statements(
-        vec![sqlparser::ast::Statement::Query(Box::new(inner))],
-        database,
-        verbose,
-        &source,
-        true,
-    )?;
-    let mut table = result.tables.into_iter().next_back().ok_or_else(|| {
-        SqawkError::InvalidSqlQuery("Subquery in FROM produced no result".to_string())
-    })?;
-    table.set_name(name.clone());
-    table.dedup_column_names();
-    database.add_table(name.clone(), table)?;
-    registered.names.push(name.clone());
-
-    *factor = sqlparser::ast::TableFactor::Table {
-        name: sqlparser::ast::ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
-            sqlparser::ast::Ident::new(name),
-        )]),
-        alias,
-        args: None,
-        with_hints: Vec::new(),
-        version: None,
-        partitions: Vec::new(),
-        with_ordinality: false,
-        json_path: None,
-        sample: None,
-        index_hints: Vec::new(),
-    };
-    Ok(())
 }
 
 /// Whether a statement's affected-row count is meaningful to report.

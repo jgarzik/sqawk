@@ -14,7 +14,7 @@ use sqlparser::ast::{
     SelectItemQualifiedWildcardKind, Statement, TrimWhereField, UnaryOperator, Value,
     ValueWithSpan,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::bytecode::{Instruction, OpCode, Program, AGG_COUNT, AGG_DISTINCT};
@@ -442,6 +442,15 @@ pub struct SqlCompiler<'a> {
     /// whose column references SQLite names as written (`id` for a column
     /// declared `Id`) rather than by the declared name.
     pub(crate) derived: bool,
+
+    /// The names (lower case) of every CTE declared in the statement being
+    /// run. The derived-table / CTE pre-pass (`prepass.rs`) rewrites each
+    /// CTE reference to the CTE's materialized table and spells every other
+    /// table reference with one of these names `main.name`, so a one-part
+    /// name from this set reaching [`SqlCompiler::get_table_name`] is a
+    /// reference the pre-pass missed. It is an error rather than a silent
+    /// read of the loaded table of that name.
+    pub(crate) cte_names: Arc<HashSet<String>>,
 }
 
 /// The table an INSERT ... SELECT or CREATE TABLE ... AS writes into.
@@ -476,7 +485,14 @@ impl<'a> SqlCompiler<'a> {
             insert_target: None,
             source: None,
             derived: false,
+            cte_names: Arc::default(),
         }
+    }
+
+    /// The CTE names declared in the statement (see `cte_names`).
+    pub fn with_cte_names(mut self, names: Arc<HashSet<String>>) -> Self {
+        self.cte_names = names;
+        self
     }
 
     /// Name unaliased result columns by their text in `source`; `derived`
@@ -2073,6 +2089,16 @@ impl<'a> SqlCompiler<'a> {
     pub(crate) fn get_table_name(&self, name: &ObjectName) -> SqawkResult<String> {
         if name.0.is_empty() {
             return Err(SqawkError::InvalidSqlQuery("Empty table name".to_string()));
+        }
+        if let [part] = name.0.as_slice() {
+            if let Some(ident) = part.as_ident() {
+                if self.cte_names.contains(&ident.value.to_ascii_lowercase()) {
+                    return Err(SqawkError::VmError(format!(
+                        "internal error: unresolved CTE {}",
+                        ident.value
+                    )));
+                }
+            }
         }
 
         // `t` or `main.t` (see `main_table_name`). Table names match

@@ -868,6 +868,16 @@ impl Table {
             .position(|c| c.name.eq_ignore_ascii_case(name))
     }
 
+    /// Rename the columns in order, as a CTE's column list does. `names`
+    /// has one entry per column.
+    pub fn rename_columns(&mut self, names: &[String]) {
+        debug_assert_eq!(names.len(), self.cols.len());
+        for (col, name) in self.cols.iter_mut().zip(names) {
+            col.name = name.clone();
+        }
+        self.raw = None;
+    }
+
     /// Make the column names unique as SQLite names the columns of a
     /// derived table or CREATE TABLE ... AS (see [`unique_column_names`]).
     pub fn dedup_column_names(&mut self) {

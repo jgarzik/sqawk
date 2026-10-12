@@ -193,6 +193,30 @@ pub(crate) fn term_position(
     Ok(Some(v as usize - 1))
 }
 
+/// The sort key of the `term`-th (zero-based) ORDER BY term of a compound
+/// SELECT whose result columns are `schema`: a column position, or the
+/// name of a result column of the leftmost SELECT.
+pub(crate) fn compound_order_key(
+    ob: &OrderByExpr,
+    term: usize,
+    schema: &ResultSchema,
+) -> SqawkResult<KeyOrder> {
+    let pos = match term_position(&ob.expr, term, "ORDER", schema.columns.len())? {
+        Some(j) => j,
+        None => schema_position(schema, &ob.expr).ok_or_else(|| {
+            SqawkError::InvalidSqlQuery(format!(
+                "{} ORDER BY term does not match any column in the result set",
+                ordinal(term + 1)
+            ))
+        })?,
+    };
+    Ok(KeyOrder::new(
+        pos,
+        order_by_is_asc(ob),
+        ob.options.nulls_first,
+    ))
+}
+
 /// The output column whose header `expr` names, if any.
 ///
 /// Matches a qualified name exactly first, then by the bare column name, so
@@ -307,18 +331,7 @@ impl<'a> SqlCompiler<'a> {
                 let n = schema.columns.len();
                 let mut spec = Vec::with_capacity(order_by.len());
                 for (i, ob) in order_by.iter().enumerate() {
-                    let pos = match term_position(&ob.expr, i, "ORDER", n)? {
-                        Some(j) => j,
-                        None => schema_position(&schema, &ob.expr).ok_or_else(|| {
-                            SqawkError::InvalidSqlQuery(format!(
-                                "{} ORDER BY term does not match any column in the result set",
-                                ordinal(i + 1)
-                            ))
-                        })?,
-                    };
-                    spec.push(
-                        KeyOrder::new(pos, order_by_is_asc(ob), ob.options.nulls_first).spec(),
-                    );
+                    spec.push(compound_order_key(ob, i, &schema)?.spec());
                 }
                 let inst = &mut self.program.instructions[open];
                 inst.p2 = n as i64;

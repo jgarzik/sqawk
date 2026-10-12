@@ -399,6 +399,30 @@ impl<'a> Cursor<'a> {
     }
 }
 
+/// A LIMIT / OFFSET operand as SQLite's OP_MustBeInt reads it: an integer,
+/// an integral REAL, or text spelling an integer; anything else is the error
+/// "datatype mismatch: `what` must be an integer".
+pub(super) fn must_be_int(v: Register, what: &str) -> SqawkResult<i64> {
+    let i = match v {
+        Register::Integer(i) => Some(i),
+        Register::Boolean(b) => Some(b as i64),
+        Register::Float(f) if f.fract() == 0.0 && f.abs() < 9.0e18 => Some(f as i64),
+        Register::String(s) => match s.trim().parse::<i64>() {
+            Ok(i) => Some(i),
+            Err(_) => s
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|f| f.fract() == 0.0 && f.abs() < 9.0e18)
+                .map(|f| f as i64),
+        },
+        _ => None,
+    };
+    i.ok_or_else(|| {
+        SqawkError::InvalidSqlQuery(format!("datatype mismatch: {} must be an integer", what))
+    })
+}
+
 /// Compare two rows on `keys`, honouring direction and NULL placement.
 pub(super) fn compare_rows(keys: &[KeyOrder], a: &[Value], b: &[Value]) -> std::cmp::Ordering {
     for k in keys {
@@ -1844,31 +1868,12 @@ impl<'a> VmEngine<'a> {
                 // LIMIT / OFFSET operands, as SQLite's OP_MustBeInt: an
                 // integer, an integral REAL, or text spelling an integer.
                 let reg = inst.p1 as usize;
-                let v = match self.get_register(reg)? {
-                    Register::Integer(i) => Some(i),
-                    Register::Boolean(b) => Some(b as i64),
-                    Register::Float(f) if f.fract() == 0.0 && f.abs() < 9.0e18 => Some(f as i64),
-                    Register::String(s) => match s.trim().parse::<i64>() {
-                        Ok(i) => Some(i),
-                        Err(_) => s
-                            .trim()
-                            .parse::<f64>()
-                            .ok()
-                            .filter(|f| f.fract() == 0.0 && f.abs() < 9.0e18)
-                            .map(|f| f as i64),
-                    },
-                    _ => None,
-                };
-                match v {
-                    Some(i) => {
-                        self.set_register(reg, Register::Integer(i))?;
-                        Ok(ExecuteResult::Continue)
-                    }
-                    None => Err(SqawkError::InvalidSqlQuery(format!(
-                        "datatype mismatch: {} must be an integer",
-                        inst.p4.as_deref().unwrap_or("value")
-                    ))),
-                }
+                let i = must_be_int(
+                    self.get_register(reg)?,
+                    inst.p4.as_deref().unwrap_or("value"),
+                )?;
+                self.set_register(reg, Register::Integer(i))?;
+                Ok(ExecuteResult::Continue)
             }
 
             OpCode::SorterOpen => {
@@ -2178,6 +2183,11 @@ impl<'a> VmEngine<'a> {
                 }
             }
         }
+    }
+
+    /// Take the result rows out of the engine.
+    pub(crate) fn take_results(&mut self) -> Vec<Vec<Value>> {
+        std::mem::take(&mut self.results)
     }
 
     /// Create a table from the results using the result schema

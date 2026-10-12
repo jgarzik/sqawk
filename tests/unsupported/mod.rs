@@ -75,10 +75,12 @@ fn delete_clauses() -> R {
 #[test]
 fn query_clauses() -> R {
     assert_rejected(&[
-        "WITH h AS (SELECT * FROM emp) SELECT id FROM h",
         "SELECT id FROM emp FETCH FIRST 2 ROWS ONLY",
         "SELECT id FROM emp FOR UPDATE",
-        "SELECT id FROM emp WHERE id IN (WITH h AS (SELECT 1) SELECT * FROM h)",
+        "WITH h AS (SELECT * FROM emp) SELECT id FROM h FETCH FIRST 1 ROWS ONLY",
+        "SELECT 1 UNION (WITH h AS (SELECT 2) SELECT * FROM h)",
+        "WITH h AS (SELECT id FROM emp) DELETE FROM emp WHERE id IN (SELECT id FROM h) RETURNING id",
+        "WITH h AS (SELECT 1) UPDATE emp SET id = 2 FROM one",
     ])
 }
 

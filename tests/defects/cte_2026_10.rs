@@ -15,8 +15,9 @@
 //! loaded table is read from EVERY clause position (never the loaded table);
 //! and `WITH RECURSIVE` follows SQLite's queue semantics, checks and errors.
 //!
-//! Each test was `#[ignore]`d when written; remove the attribute when it
-//! passes. Run the red list with:
+//! Each test was `#[ignore]`d when written and un-ignored when WITH was
+//! implemented (`src/vm/prepass.rs`); all of them now pass and guard
+//! against regressions. Run the red list with:
 //!     cargo test --test mod defects -- --ignored
 
 use std::io::Write;
@@ -59,7 +60,6 @@ fn repl(script: &str) -> Result<String, Box<dyn std::error::Error>> {
 /// expression in it is too deep. (sqawk's own limit, SQLite's
 /// `SQLITE_MAX_EXPR_DEPTH`.)
 #[test]
-#[ignore]
 fn cte_body_depth_limit() -> TestResult {
     let chain = vec!["1"; 1001].join("+");
     assert_query_on_fails(
@@ -73,10 +73,10 @@ fn cte_body_depth_limit() -> TestResult {
 /// leaves nothing registered: `.tables` lists only the loaded table, and the
 /// CTE name is free for the next statement. (sqawk REPL behaviour.)
 #[test]
-#[ignore]
 fn with_dml_counts_rows_and_leaks_nothing() -> TestResult {
     let stdout = repl(
-        "WITH r AS (SELECT id FROM people WHERE age > 30) \
+        ".changes on\n\
+         WITH r AS (SELECT id FROM people WHERE age > 30) \
          DELETE FROM people WHERE id IN (SELECT id FROM r);\n\
          WITH r AS (SELECT 1 AS id) SELECT id FROM r;\n\
          .tables\n\
@@ -100,7 +100,6 @@ fn with_dml_counts_rows_and_leaks_nothing() -> TestResult {
 /// A statement whose CTE fails leaves nothing registered either.
 /// (sqawk REPL behaviour.)
 #[test]
-#[ignore]
 fn failed_cte_statement_leaks_nothing() -> TestResult {
     let stdout = repl(
         "WITH a AS (SELECT 1 AS v), b AS (SELECT nosuch FROM a) SELECT * FROM a, b;\n\
@@ -122,7 +121,6 @@ fn failed_cte_statement_leaks_nothing() -> TestResult {
 /// A recursive counter to 1000 terminates through its WHERE.
 /// (Expected computed: 1000 rows summing to 500500.)
 #[test]
-#[ignore]
 fn recursive_counter_to_1000() -> TestResult {
     assert_query_on(
         FILES,
@@ -134,7 +132,6 @@ fn recursive_counter_to_1000() -> TestResult {
 
 /// A CTE named like a loaded table, read from a plain FROM.
 #[test]
-#[ignore]
 fn shadow_in_from() -> TestResult {
     assert_query_on(
         FILES,
@@ -145,7 +142,6 @@ fn shadow_in_from() -> TestResult {
 
 /// A CTE reference inside a recursive CTE's setup arm reads the sibling.
 #[test]
-#[ignore]
 fn recursive_setup_reads_sibling() -> TestResult {
     assert_query_on(
         FILES,
@@ -162,7 +158,6 @@ fn recursive_setup_reads_sibling() -> TestResult {
 
 /// A CTE is a named query in scope for the statement.
 #[test]
-#[ignore]
 fn plain_cte() -> TestResult {
     assert_query_on(
         FILES,
@@ -176,7 +171,6 @@ fn plain_cte() -> TestResult {
 
 /// A column list renames the CTE's columns.
 #[test]
-#[ignore]
 fn column_list_renames() -> TestResult {
     assert_query_on(
         FILES,
@@ -189,7 +183,6 @@ fn column_list_renames() -> TestResult {
 
 /// `SELECT *` from a CTE with a column list uses those names.
 #[test]
-#[ignore]
 fn star_uses_cte_column_names() -> TestResult {
     assert_query_on(
         FILES,
@@ -201,7 +194,6 @@ fn star_uses_cte_column_names() -> TestResult {
 
 /// A later CTE reads an earlier one.
 #[test]
-#[ignore]
 fn chained_ctes() -> TestResult {
     assert_query_on(
         FILES,
@@ -213,7 +205,6 @@ fn chained_ctes() -> TestResult {
 
 /// Every CTE of a WITH list sees all its siblings, including later ones.
 #[test]
-#[ignore]
 fn forward_reference_to_sibling() -> TestResult {
     assert_query_on(
         FILES,
@@ -225,7 +216,6 @@ fn forward_reference_to_sibling() -> TestResult {
 
 /// An unused CTE is never evaluated, even when its body would fail.
 #[test]
-#[ignore]
 fn unused_cte_is_never_evaluated() -> TestResult {
     assert_query_on(
         FILES,
@@ -237,7 +227,6 @@ fn unused_cte_is_never_evaluated() -> TestResult {
 
 /// An inner WITH shadows an outer CTE of the same name.
 #[test]
-#[ignore]
 fn inner_with_shadows_outer() -> TestResult {
     assert_query_on(
         FILES,
@@ -249,7 +238,6 @@ fn inner_with_shadows_outer() -> TestResult {
 
 /// A CTE body resolves names where it is defined, not where it is referenced.
 #[test]
-#[ignore]
 fn cte_body_resolves_in_its_own_scope() -> TestResult {
     assert_query_on(
         FILES,
@@ -261,7 +249,6 @@ fn cte_body_resolves_in_its_own_scope() -> TestResult {
 
 /// One CTE may be referenced twice in a statement.
 #[test]
-#[ignore]
 fn cte_referenced_twice() -> TestResult {
     assert_query_on(
         FILES,
@@ -275,7 +262,6 @@ fn cte_referenced_twice() -> TestResult {
 
 /// An unaliased CTE reference is qualified by the CTE's name.
 #[test]
-#[ignore]
 fn cte_name_qualifies_columns() -> TestResult {
     assert_query_on(
         FILES,
@@ -287,7 +273,6 @@ fn cte_name_qualifies_columns() -> TestResult {
 
 /// An aliased CTE reference is qualified by its alias.
 #[test]
-#[ignore]
 fn cte_alias_qualifies_columns() -> TestResult {
     assert_query_on(
         FILES,
@@ -299,7 +284,6 @@ fn cte_alias_qualifies_columns() -> TestResult {
 
 /// Once aliased, the CTE's own name no longer qualifies its columns.
 #[test]
-#[ignore]
 fn cte_alias_hides_cte_name() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -310,7 +294,6 @@ fn cte_alias_hides_cte_name() -> TestResult {
 
 /// Errors name the CTE as written, never an internal table.
 #[test]
-#[ignore]
 fn unknown_column_names_the_cte() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -321,7 +304,6 @@ fn unknown_column_names_the_cte() -> TestResult {
 
 /// A CTE shadows a loaded table of the same name.
 #[test]
-#[ignore]
 fn cte_shadows_loaded_table() -> TestResult {
     assert_query_on(
         FILES,
@@ -333,7 +315,6 @@ fn cte_shadows_loaded_table() -> TestResult {
 
 /// `main.emp` names the loaded table, never a CTE.
 #[test]
-#[ignore]
 fn main_schema_reads_the_real_table() -> TestResult {
     assert_query_on(
         FILES,
@@ -349,7 +330,6 @@ fn main_schema_reads_the_real_table() -> TestResult {
 
 /// CTE names match case-insensitively.
 #[test]
-#[ignore]
 fn cte_names_match_case_insensitively() -> TestResult {
     assert_query_on(
         FILES,
@@ -362,7 +342,6 @@ fn cte_names_match_case_insensitively() -> TestResult {
 /// Duplicate column names in a CTE are made unique as in a derived table.
 /// (sqawk's derived-table naming; SQLite's own `a:1` is internal.)
 #[test]
-#[ignore]
 fn duplicate_result_columns_are_deduplicated() -> TestResult {
     assert_query_on(
         FILES,
@@ -374,7 +353,6 @@ fn duplicate_result_columns_are_deduplicated() -> TestResult {
 
 /// A compound inside a CTE body evaluates left to right like any compound.
 #[test]
-#[ignore]
 fn cte_body_compound_is_left_associative() -> TestResult {
     assert_query_on(
         FILES,
@@ -386,7 +364,6 @@ fn cte_body_compound_is_left_associative() -> TestResult {
 
 /// `main.t.c` inside a CTE body is `t.c`.
 #[test]
-#[ignore]
 fn cte_body_strips_main_schema() -> TestResult {
     assert_query_on(
         FILES,
@@ -398,7 +375,6 @@ fn cte_body_strips_main_schema() -> TestResult {
 
 /// `AS MATERIALIZED` and `AS NOT MATERIALIZED` are accepted hints.
 #[test]
-#[ignore]
 fn materialized_hint_is_accepted() -> TestResult {
     assert_query_on(
         FILES,
@@ -410,7 +386,6 @@ fn materialized_hint_is_accepted() -> TestResult {
 
 /// WITH inside a scalar subquery.
 #[test]
-#[ignore]
 fn cte_in_scalar_subquery() -> TestResult {
     assert_query_on(
         FILES,
@@ -422,7 +397,6 @@ fn cte_in_scalar_subquery() -> TestResult {
 
 /// WITH inside a derived table.
 #[test]
-#[ignore]
 fn cte_in_derived_table() -> TestResult {
     assert_query_on(
         FILES,
@@ -434,7 +408,6 @@ fn cte_in_derived_table() -> TestResult {
 
 /// WITH inside an IN subquery.
 #[test]
-#[ignore]
 fn cte_in_in_subquery() -> TestResult {
     assert_query_on(
         FILES,
@@ -447,11 +420,10 @@ fn cte_in_in_subquery() -> TestResult {
 
 /// A CTE referenced from a correlated subquery of the main query.
 #[test]
-#[ignore]
 fn cte_in_correlated_subquery() -> TestResult {
     assert_query_on(
         FILES,
-        "WITH m AS (SELECT dept, MAX(salary) AS top FROM emp GROUP BY dept) SELECT name FROM emp WHERE salary = (SELECT top FROM m WHERE m.dept = emp.dept) ORDER BY name",
+        "WITH m AS (SELECT dept, MAX(salary) AS mx FROM emp GROUP BY dept) SELECT name FROM emp WHERE salary = (SELECT mx FROM m WHERE m.dept = emp.dept) ORDER BY name",
         "name\n\
          Ann\n\
          Cid",
@@ -462,7 +434,6 @@ fn cte_in_correlated_subquery() -> TestResult {
 /// front; like a correlated derived table it is a clean error. (SQLite
 /// evaluates it per outer row; a documented difference.)
 #[test]
-#[ignore]
 fn correlated_cte_body_is_an_error() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -477,7 +448,6 @@ fn correlated_cte_body_is_an_error() -> TestResult {
 
 /// A non-recursive CTE that reads its own name is a circular reference.
 #[test]
-#[ignore]
 fn self_reference_is_circular() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -488,7 +458,6 @@ fn self_reference_is_circular() -> TestResult {
 
 /// Two CTEs that read each other are a circular reference.
 #[test]
-#[ignore]
 fn mutual_reference_is_circular() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -499,7 +468,6 @@ fn mutual_reference_is_circular() -> TestResult {
 
 /// Two CTEs of one WITH may not share a name.
 #[test]
-#[ignore]
 fn duplicate_cte_name() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -510,7 +478,6 @@ fn duplicate_cte_name() -> TestResult {
 
 /// A column list must match the body's column count.
 #[test]
-#[ignore]
 fn column_list_count_mismatch() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -522,7 +489,6 @@ fn column_list_count_mismatch() -> TestResult {
 /// WITH on a parenthesized compound operand stays rejected (a syntax error
 /// in SQLite).
 #[test]
-#[ignore]
 fn compound_operand_with_is_rejected() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -537,7 +503,6 @@ fn compound_operand_with_is_rejected() -> TestResult {
 
 /// `WITH ... INSERT`.
 #[test]
-#[ignore]
 fn with_insert() -> TestResult {
     assert_query_on(
         FILES,
@@ -550,7 +515,6 @@ fn with_insert() -> TestResult {
 
 /// `INSERT INTO t WITH ... SELECT`.
 #[test]
-#[ignore]
 fn insert_with_select() -> TestResult {
     assert_query_on(
         FILES,
@@ -563,7 +527,6 @@ fn insert_with_select() -> TestResult {
 
 /// `WITH ... UPDATE`.
 #[test]
-#[ignore]
 fn with_update() -> TestResult {
     assert_query_on(
         FILES,
@@ -579,7 +542,6 @@ fn with_update() -> TestResult {
 
 /// `WITH ... DELETE`.
 #[test]
-#[ignore]
 fn with_delete() -> TestResult {
     assert_query_on(
         FILES,
@@ -593,7 +555,6 @@ fn with_delete() -> TestResult {
 
 /// `CREATE TABLE ... AS WITH ...`.
 #[test]
-#[ignore]
 fn create_table_as_with() -> TestResult {
     assert_query_on(
         FILES,
@@ -606,7 +567,6 @@ fn create_table_as_with() -> TestResult {
 
 /// A DML target names a loaded table even when a CTE shares its name.
 #[test]
-#[ignore]
 fn dml_target_is_always_a_real_table() -> TestResult {
     assert_query_on(
         FILES,
@@ -621,7 +581,6 @@ fn dml_target_is_always_a_real_table() -> TestResult {
 
 /// A DML target that only a CTE defines is no such table.
 #[test]
-#[ignore]
 fn dml_target_never_a_cte() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -636,7 +595,6 @@ fn dml_target_never_a_cte() -> TestResult {
 
 /// A CTE named like a loaded table, read from a JOIN.
 #[test]
-#[ignore]
 fn shadow_in_join() -> TestResult {
     assert_query_on(
         FILES,
@@ -648,7 +606,6 @@ fn shadow_in_join() -> TestResult {
 
 /// ... from a subquery in JOIN ON.
 #[test]
-#[ignore]
 fn shadow_in_join_on_subquery() -> TestResult {
     assert_query_on(
         FILES,
@@ -660,7 +617,6 @@ fn shadow_in_join_on_subquery() -> TestResult {
 
 /// ... from a subquery in WHERE.
 #[test]
-#[ignore]
 fn shadow_in_where_subquery() -> TestResult {
     assert_query_on(
         FILES,
@@ -672,7 +628,6 @@ fn shadow_in_where_subquery() -> TestResult {
 
 /// ... from a subquery in GROUP BY.
 #[test]
-#[ignore]
 fn shadow_in_group_by_subquery() -> TestResult {
     assert_query_on(
         FILES,
@@ -685,7 +640,6 @@ fn shadow_in_group_by_subquery() -> TestResult {
 
 /// ... from a subquery in HAVING.
 #[test]
-#[ignore]
 fn shadow_in_having_subquery() -> TestResult {
     assert_query_on(
         FILES,
@@ -696,7 +650,6 @@ fn shadow_in_having_subquery() -> TestResult {
 
 /// ... from a subquery in ORDER BY.
 #[test]
-#[ignore]
 fn shadow_in_order_by_subquery() -> TestResult {
     assert_query_on(
         FILES,
@@ -710,7 +663,6 @@ fn shadow_in_order_by_subquery() -> TestResult {
 
 /// ... from a subquery in a window's PARTITION BY.
 #[test]
-#[ignore]
 fn shadow_in_window_partition() -> TestResult {
     assert_query_on(
         FILES,
@@ -728,7 +680,6 @@ fn shadow_in_window_partition() -> TestResult {
 
 /// ... from a subquery in a window's ORDER BY.
 #[test]
-#[ignore]
 fn shadow_in_window_order() -> TestResult {
     assert_query_on(
         FILES,
@@ -746,7 +697,6 @@ fn shadow_in_window_order() -> TestResult {
 
 /// ... from a subquery as a function argument.
 #[test]
-#[ignore]
 fn shadow_in_function_argument() -> TestResult {
     assert_query_on(
         FILES,
@@ -758,7 +708,6 @@ fn shadow_in_function_argument() -> TestResult {
 
 /// ... from a subquery in an aggregate's FILTER.
 #[test]
-#[ignore]
 fn shadow_in_aggregate_filter() -> TestResult {
     assert_query_on(
         FILES,
@@ -770,7 +719,6 @@ fn shadow_in_aggregate_filter() -> TestResult {
 
 /// ... from a subquery in CASE.
 #[test]
-#[ignore]
 fn shadow_in_case() -> TestResult {
     assert_query_on(
         FILES,
@@ -782,7 +730,6 @@ fn shadow_in_case() -> TestResult {
 
 /// ... from a subquery in LIMIT.
 #[test]
-#[ignore]
 fn shadow_in_limit() -> TestResult {
     assert_query_on(
         FILES,
@@ -795,7 +742,6 @@ fn shadow_in_limit() -> TestResult {
 
 /// ... from subqueries in BETWEEN and an IN list.
 #[test]
-#[ignore]
 fn shadow_in_between_and_in_list() -> TestResult {
     assert_query_on(
         FILES,
@@ -810,7 +756,6 @@ fn shadow_in_between_and_in_list() -> TestResult {
 
 /// ... from EXISTS.
 #[test]
-#[ignore]
 fn shadow_in_exists() -> TestResult {
     assert_query_on(
         FILES,
@@ -822,7 +767,6 @@ fn shadow_in_exists() -> TestResult {
 
 /// ... from a compound's second arm.
 #[test]
-#[ignore]
 fn shadow_in_compound_arm() -> TestResult {
     assert_query_on(
         FILES,
@@ -835,7 +779,6 @@ fn shadow_in_compound_arm() -> TestResult {
 
 /// ... from a derived table.
 #[test]
-#[ignore]
 fn shadow_in_derived_table() -> TestResult {
     assert_query_on(
         FILES,
@@ -847,7 +790,6 @@ fn shadow_in_derived_table() -> TestResult {
 
 /// ... from a sibling CTE's body.
 #[test]
-#[ignore]
 fn shadow_in_sibling_cte() -> TestResult {
     assert_query_on(
         FILES,
@@ -859,7 +801,6 @@ fn shadow_in_sibling_cte() -> TestResult {
 
 /// ... from a subquery in UPDATE SET.
 #[test]
-#[ignore]
 fn shadow_in_update_set() -> TestResult {
     assert_query_on(
         FILES,
@@ -871,7 +812,6 @@ fn shadow_in_update_set() -> TestResult {
 
 /// ... from an INSERT's source.
 #[test]
-#[ignore]
 fn shadow_in_insert_source() -> TestResult {
     assert_query_on(
         FILES,
@@ -883,7 +823,6 @@ fn shadow_in_insert_source() -> TestResult {
 
 /// ... from CREATE TABLE AS.
 #[test]
-#[ignore]
 fn shadow_in_ctas() -> TestResult {
     assert_query_on(
         FILES,
@@ -895,7 +834,6 @@ fn shadow_in_ctas() -> TestResult {
 
 /// Outside the CTE's scope the same name is the loaded table.
 #[test]
-#[ignore]
 fn loaded_table_outside_cte_scope() -> TestResult {
     assert_query_on(
         FILES,
@@ -907,7 +845,6 @@ fn loaded_table_outside_cte_scope() -> TestResult {
 
 /// A reference outside an inner WITH reads the loaded table.
 #[test]
-#[ignore]
 fn loaded_table_before_inner_with() -> TestResult {
     assert_query_on(
         FILES,
@@ -923,7 +860,6 @@ fn loaded_table_before_inner_with() -> TestResult {
 
 /// `WITH RECURSIVE` counter.
 #[test]
-#[ignore]
 fn recursive_counter() -> TestResult {
     assert_query_on(
         FILES,
@@ -939,7 +875,6 @@ fn recursive_counter() -> TestResult {
 
 /// A self-referencing CTE is recursive without the keyword.
 #[test]
-#[ignore]
 fn self_reference_without_keyword_is_recursive() -> TestResult {
     assert_query_on(
         FILES,
@@ -955,7 +890,6 @@ fn self_reference_without_keyword_is_recursive() -> TestResult {
 
 /// Without a column list, the setup arm names the columns.
 #[test]
-#[ignore]
 fn recursive_names_from_setup() -> TestResult {
     assert_query_on(
         FILES,
@@ -969,7 +903,6 @@ fn recursive_names_from_setup() -> TestResult {
 
 /// Breadth-first tree walk (FIFO queue).
 #[test]
-#[ignore]
 fn recursive_tree_walk() -> TestResult {
     assert_query_on(
         FILES,
@@ -987,7 +920,6 @@ fn recursive_tree_walk() -> TestResult {
 
 /// `ORDER BY 2 DESC` in the body makes the queue depth-first.
 #[test]
-#[ignore]
 fn recursive_depth_first() -> TestResult {
     assert_query_on(
         FILES,
@@ -1005,7 +937,6 @@ fn recursive_depth_first() -> TestResult {
 
 /// A body ORDER BY may name a setup column.
 #[test]
-#[ignore]
 fn recursive_order_by_name() -> TestResult {
     assert_query_on(
         FILES,
@@ -1023,7 +954,6 @@ fn recursive_order_by_name() -> TestResult {
 
 /// Paths built by concatenation.
 #[test]
-#[ignore]
 fn recursive_paths() -> TestResult {
     assert_query_on(
         FILES,
@@ -1041,7 +971,6 @@ fn recursive_paths() -> TestResult {
 
 /// UNION discards rows already produced, so a cycle terminates.
 #[test]
-#[ignore]
 fn recursive_union_dedupes() -> TestResult {
     assert_query_on(
         FILES,
@@ -1055,7 +984,6 @@ fn recursive_union_dedupes() -> TestResult {
 
 /// Under UNION, duplicate setup rows enter the queue once.
 #[test]
-#[ignore]
 fn recursive_union_setup_dedupes() -> TestResult {
     assert_query_on(
         FILES,
@@ -1069,7 +997,6 @@ fn recursive_union_setup_dedupes() -> TestResult {
 
 /// UNION ALL keeps every row.
 #[test]
-#[ignore]
 fn recursive_union_all_keeps_duplicates() -> TestResult {
     assert_query_on(
         FILES,
@@ -1086,7 +1013,6 @@ fn recursive_union_all_keeps_duplicates() -> TestResult {
 
 /// LIMIT ends an otherwise infinite recursion.
 #[test]
-#[ignore]
 fn recursive_limit_stops_recursion() -> TestResult {
     assert_query_on(
         FILES,
@@ -1101,7 +1027,6 @@ fn recursive_limit_stops_recursion() -> TestResult {
 
 /// OFFSET skips output rows but they still recurse.
 #[test]
-#[ignore]
 fn recursive_limit_offset() -> TestResult {
     assert_query_on(
         FILES,
@@ -1115,7 +1040,6 @@ fn recursive_limit_offset() -> TestResult {
 
 /// Several UNION ALL recursive arms run for each row, in order.
 #[test]
-#[ignore]
 fn recursive_multiple_arms() -> TestResult {
     assert_query_on(
         FILES,
@@ -1131,7 +1055,6 @@ fn recursive_multiple_arms() -> TestResult {
 
 /// Two-column recursion.
 #[test]
-#[ignore]
 fn recursive_fibonacci() -> TestResult {
     assert_query_on(
         FILES,
@@ -1152,7 +1075,6 @@ fn recursive_fibonacci() -> TestResult {
 
 /// A recursive CTE joined to itself.
 #[test]
-#[ignore]
 fn recursive_referenced_twice() -> TestResult {
     assert_query_on(
         FILES,
@@ -1166,7 +1088,6 @@ fn recursive_referenced_twice() -> TestResult {
 
 /// A recursive CTE drives a DELETE.
 #[test]
-#[ignore]
 fn recursive_in_delete() -> TestResult {
     assert_query_on(
         FILES,
@@ -1180,7 +1101,6 @@ fn recursive_in_delete() -> TestResult {
 
 /// Aggregates over a recursive CTE are fine.
 #[test]
-#[ignore]
 fn recursive_with_aggregate_outside() -> TestResult {
     assert_query_on(
         FILES,
@@ -1192,7 +1112,6 @@ fn recursive_with_aggregate_outside() -> TestResult {
 
 /// A recursive CTE inside a subquery.
 #[test]
-#[ignore]
 fn recursive_nested_in_subquery() -> TestResult {
     assert_query_on(
         FILES,
@@ -1209,7 +1128,6 @@ fn recursive_nested_in_subquery() -> TestResult {
 
 /// A recursive arm may reference the CTE once.
 #[test]
-#[ignore]
 fn recursive_two_direct_references() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -1220,7 +1138,6 @@ fn recursive_two_direct_references() -> TestResult {
 
 /// A recursive arm may not also reference the CTE in a subquery.
 #[test]
-#[ignore]
 fn recursive_reference_in_subquery() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -1231,7 +1148,6 @@ fn recursive_reference_in_subquery() -> TestResult {
 
 /// A self-reference only in a subquery is circular.
 #[test]
-#[ignore]
 fn self_reference_only_in_subquery() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -1242,7 +1158,6 @@ fn self_reference_only_in_subquery() -> TestResult {
 
 /// A self-reference in a derived table is circular.
 #[test]
-#[ignore]
 fn self_reference_in_derived_table() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -1253,7 +1168,6 @@ fn self_reference_in_derived_table() -> TestResult {
 
 /// Recursion requires UNION or UNION ALL.
 #[test]
-#[ignore]
 fn self_reference_under_intersect() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -1264,7 +1178,6 @@ fn self_reference_under_intersect() -> TestResult {
 
 /// The setup (leftmost) arm may not reference the CTE.
 #[test]
-#[ignore]
 fn self_reference_in_setup() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -1275,7 +1188,6 @@ fn self_reference_in_setup() -> TestResult {
 
 /// A recursive arm may not aggregate.
 #[test]
-#[ignore]
 fn recursive_aggregate() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -1286,7 +1198,6 @@ fn recursive_aggregate() -> TestResult {
 
 /// A recursive arm may not GROUP BY.
 #[test]
-#[ignore]
 fn recursive_group_by() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -1297,7 +1208,6 @@ fn recursive_group_by() -> TestResult {
 
 /// A recursive arm may not use window functions.
 #[test]
-#[ignore]
 fn recursive_window() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -1308,7 +1218,6 @@ fn recursive_window() -> TestResult {
 
 /// A recursive body's ORDER BY must name a result column.
 #[test]
-#[ignore]
 fn recursive_order_by_unknown() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -1319,7 +1228,6 @@ fn recursive_order_by_unknown() -> TestResult {
 
 /// A recursive body's ORDER BY position must be in range.
 #[test]
-#[ignore]
 fn recursive_order_by_out_of_range() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -1330,7 +1238,6 @@ fn recursive_order_by_out_of_range() -> TestResult {
 
 /// Every arm has the setup's column count.
 #[test]
-#[ignore]
 fn recursive_arm_column_count() -> TestResult {
     assert_query_on_fails(
         FILES,
@@ -1341,7 +1248,6 @@ fn recursive_arm_column_count() -> TestResult {
 
 /// A recursive body's LIMIT must be an integer.
 #[test]
-#[ignore]
 fn recursive_limit_must_be_integer() -> TestResult {
     assert_query_on_fails(
         FILES,
