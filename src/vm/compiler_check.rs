@@ -22,10 +22,28 @@ use sqlparser::ast::{
 use super::ast_compat::sql_option_key_value;
 use crate::error::{SqawkError, SqawkResult};
 
+/// Subjects of `unsupported` that take "are".
+const PLURAL: &[&str] = &[
+    "Column aliases on a FROM item",
+    "JSON paths in FROM",
+    "LATERAL subqueries",
+    "Optimizer hints",
+    "Pipe operators",
+    "SELECT modifiers",
+    "STRICT tables",
+    "Table comments",
+    "Table constraints",
+    "Table hints (WITH (...))",
+    "Table options other than WITH (DELIMITER / HEADER / COMMENTS)",
+    "Table-valued functions",
+    "Transaction modes",
+];
+
 fn unsupported<T>(what: &str) -> SqawkResult<T> {
+    let verb = if PLURAL.contains(&what) { "are" } else { "is" };
     Err(SqawkError::UnsupportedSqlFeature(format!(
-        "{} is not supported",
-        what
+        "{} {} not supported",
+        what, verb
     )))
 }
 

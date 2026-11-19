@@ -335,3 +335,32 @@ fn runs_without_file_operands() -> Result<(), Box<dyn std::error::Error>> {
         .stderr(predicates::str::contains("no such table: nosuch"));
     Ok(())
 }
+
+/// A parse error right after a name followed by `-` or `.` (a file name
+/// used as a table name) suggests quoting it.
+#[test]
+fn parse_error_suggests_quoting_a_dashed_name() -> Result<(), Box<dyn std::error::Error>> {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s").arg("SELECT * FROM my-data");
+    cmd.assert().code(1).stderr(predicates::str::contains(
+        "(to use my-data as a name, quote it: \"my-data\")",
+    ));
+    Ok(())
+}
+
+/// In a script of several statements, an error names the statement.
+#[test]
+fn error_names_the_failing_statement() -> Result<(), Box<dyn std::error::Error>> {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s").arg("SELECT 1 AS a; SELECT nosuch; SELECT 3");
+    cmd.assert()
+        .code(1)
+        .stdout("a\n1\n")
+        .stderr("sqawk: statement 2: no such column: nosuch\n");
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s").arg("SELECT nosuch");
+    cmd.assert()
+        .code(1)
+        .stderr("sqawk: no such column: nosuch\n");
+    Ok(())
+}

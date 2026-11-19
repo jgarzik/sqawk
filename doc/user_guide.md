@@ -580,6 +580,24 @@ $ sqawk -s "SELECT 1" missing.csv
 sqawk: cannot open 'missing.csv': No such file or directory
 ```
 
+In a script of several statements the message names the statement that
+failed (the rows of the statements before it have been printed):
+
+```
+$ sqawk -s "UPDATE t SET n = n + 1; SELECT nmae FROM t" t.csv
+sqawk: statement 2: no such column: nmae
+```
+
+A name that is not a plain identifier must be quoted, and the messages say
+so for the usual cases:
+
+```
+$ sqawk -s "SELECT * FROM my-data" my-data.csv
+sqawk: Expected: end of statement, found: - at Line: 1, Column: 17 (to use my-data as a name, quote it: "my-data")
+$ sqawk -s "SELECT * FROM data.csv" data.csv
+sqawk: no such table: data.csv (a file's table is named without its extension: data)
+```
+
 Command-line usage errors (an unknown option, a missing argument, an invalid
 `-F` value) are reported by the argument parser with a usage hint and exit
 status 2. A run that succeeds exits with status 0. In the REPL, an error is

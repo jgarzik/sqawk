@@ -36,6 +36,53 @@ pub const MAX_EXPR_DEPTH: usize = 1000;
 pub const MAX_COMPOUND_TERMS: usize = 500;
 
 /// Parse `sql` into statements: SQLite precedence, hex integer literals,
+/// A parse error at a `-` (or `.`) right after a name and before more of
+/// it, as in `FROM my-data`: suggest quoting the whole name.
+fn with_quote_hint(sql: &str, e: sqlparser::parser::ParserError) -> sqlparser::parser::ParserError {
+    use sqlparser::parser::ParserError;
+    let ParserError::ParserError(msg) = &e else {
+        return e;
+    };
+    let Some(at) = msg.rfind(" at Line: ") else {
+        return e;
+    };
+    let loc = &msg[at + " at Line: ".len()..];
+    let Some((line, col)) = loc.split_once(", Column: ") else {
+        return e;
+    };
+    let (Ok(line), Ok(col)) = (line.trim().parse::<usize>(), col.trim().parse::<usize>()) else {
+        return e;
+    };
+    let Some(text) = sql.lines().nth(line.saturating_sub(1)) else {
+        return e;
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let pos = col.saturating_sub(1);
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let joined = |c: char| word(c) || c == '-' || c == '.';
+    if !matches!(chars.get(pos), Some('-' | '.'))
+        || !pos
+            .checked_sub(1)
+            .and_then(|p| chars.get(p))
+            .is_some_and(|&c| word(c))
+        || !chars.get(pos + 1).is_some_and(|&c| word(c))
+    {
+        return e;
+    }
+    let mut start = pos;
+    while start > 0 && joined(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = pos + 1;
+    while end < chars.len() && joined(chars[end]) {
+        end += 1;
+    }
+    let name: String = chars[start..end].iter().collect();
+    ParserError::ParserError(format!(
+        "{msg} (to use {name} as a name, quote it: \"{name}\")"
+    ))
+}
+
 /// compound SELECTs left-deep, depth and compound-term limits enforced.
 pub fn parse_sql(sql: &str) -> SqawkResult<Vec<Statement>> {
     let mut tokens = Tokenizer::new(&SqawkDialect, sql)
@@ -46,7 +93,7 @@ pub fn parse_sql(sql: &str) -> SqawkResult<Vec<Statement>> {
     let mut statements = Parser::new(&SqawkDialect)
         .with_tokens_with_locations(tokens)
         .parse_statements()
-        .map_err(SqawkError::SqlParseError)?;
+        .map_err(|e| SqawkError::SqlParseError(with_quote_hint(sql, e)))?;
     for statement in &mut statements {
         normalize(statement)?;
     }

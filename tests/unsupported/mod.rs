@@ -199,3 +199,13 @@ fn unsupported_statement_message() -> R {
         "CREATE VIEW statements are not supported",
     )
 }
+
+/// A plural subject takes "are": "Table constraints are not supported".
+#[test]
+fn plural_subjects_read_correctly() -> R {
+    assert_query_fails(
+        &["tests/data/users.csv"],
+        "CREATE TABLE z (a INT, PRIMARY KEY (a))",
+        "Table constraints are not supported",
+    )
+}

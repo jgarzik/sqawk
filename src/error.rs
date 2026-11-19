@@ -54,6 +54,9 @@ pub enum SqawkError {
     /// Error when a referenced table doesn't exist
     TableNotFound(String),
 
+    /// The error of statement N (1-based) of a script of several
+    InStatement(usize, Box<SqawkError>),
+
     /// Error when trying to create a table that already exists
     TableAlreadyExists(String),
 
@@ -164,7 +167,25 @@ impl fmt::Display for SqawkError {
                     ParserError::RecursionLimitExceeded => write!(f, "recursion limit exceeded"),
                 }
             }
-            SqawkError::TableNotFound(name) => write!(f, "no such table: {}", name),
+            SqawkError::TableNotFound(name) => {
+                write!(f, "no such table: {}", name)?;
+                // `FROM data.csv`: tables are named without the extension.
+                if let Some((stem, ext)) = name.rsplit_once('.')
+                    && !stem.is_empty()
+                    && matches!(
+                        ext.to_ascii_lowercase().as_str(),
+                        "csv" | "tsv" | "tab" | "txt" | "dat" | "gz" | "zst"
+                    )
+                {
+                    let stem = stem.split('.').next().unwrap_or(stem);
+                    write!(
+                        f,
+                        " (a file's table is named without its extension: {stem})"
+                    )?;
+                }
+                Ok(())
+            }
+            SqawkError::InStatement(n, e) => write!(f, "statement {}: {}", n, e),
             SqawkError::TableAlreadyExists(name) => write!(f, "table {} already exists", name),
             SqawkError::NoFilePath(name) => {
                 write!(

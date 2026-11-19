@@ -320,7 +320,7 @@ fn earlier_results_print_before_a_later_error() -> Result<(), Box<dyn std::error
     cmd.assert()
         .code(1)
         .stdout("a\n1\nk\n1\n2\n")
-        .stderr("sqawk: no such column: nosuch\n");
+        .stderr("sqawk: statement 3: no such column: nosuch\n");
     Ok(())
 }
 
@@ -407,7 +407,7 @@ fn rows_before_a_runtime_error_are_printed() -> Result<(), Box<dyn std::error::E
     cmd.assert()
         .code(1)
         .stdout("a\n1\n2\n")
-        .stderr("sqawk: integer overflow\n");
+        .stderr("sqawk: statement 1: integer overflow\n");
     Ok(())
 }
 
