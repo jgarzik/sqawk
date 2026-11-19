@@ -160,7 +160,7 @@ fn int_arg(r: &Register) -> i64 {
 }
 
 fn text(s: String) -> SqawkResult<Register> {
-    Ok(Register::String(s))
+    Ok(Register::String(s.into()))
 }
 
 /// The longest string a function may build, in bytes: SQLite's default
@@ -487,7 +487,8 @@ fn printf(a: &[Register]) -> SqawkResult<Register> {
     if matches!(a[0], Register::Null) {
         return Ok(Register::Null);
     }
-    Ok(printf::format_str(&text_of(&a[0]), &a[1..])?.map_or(Register::Null, Register::String))
+    Ok(printf::format_str(&text_of(&a[0]), &a[1..])?
+        .map_or(Register::Null, |s| Register::String(s.into())))
 }
 
 /// QUOTE(x): the SQL literal for x. Text is single-quoted with quotes
@@ -661,7 +662,7 @@ mod tests {
     }
     fn txt(r: SqawkResult<Register>) -> String {
         match r.unwrap() {
-            Register::String(s) => s,
+            Register::String(s) => s.into(),
             Register::Null => "NULL".into(),
             other => format!("{:?}", other),
         }

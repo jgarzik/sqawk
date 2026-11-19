@@ -1139,7 +1139,7 @@ impl<'a> SqlCompiler<'a> {
                     0,
                     reg,
                     0,
-                    Some(s.clone().into_owned()),
+                    Some(s.to_string()),
                     &format!("r[{}] = '{}'", reg, s),
                 );
             }

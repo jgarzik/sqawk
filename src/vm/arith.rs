@@ -342,7 +342,7 @@ pub(crate) fn cast(r: Register, target: &str) -> Register {
             Register::Boolean(b) => Register::Integer(b as i64),
             other => other,
         },
-        _ => Register::String(text_of(&r)),
+        _ => Register::String(text_of(&r).into()),
     }
 }
 
@@ -708,7 +708,7 @@ pub(crate) fn real_text(f: f64) -> String {
 /// A non-NULL register's text form, as functions and `||` see it.
 pub(crate) fn text_of(r: &Register) -> String {
     match r {
-        Register::String(s) => s.clone(),
+        Register::String(s) => s.to_string(),
         Register::Integer(i) => i.to_string(),
         Register::Float(f) => real_text(*f),
         Register::Boolean(b) => (*b as i64).to_string(),

@@ -552,7 +552,7 @@ pub enum Register {
     /// Integer value
     Integer(i64),
     /// String value
-    String(String),
+    String(compact_str::CompactString),
     /// Floating point value
     Float(f64),
     /// Boolean value
@@ -561,12 +561,14 @@ pub enum Register {
     Null,
 }
 
+const _: () = assert!(std::mem::size_of::<Register>() == 24);
+
 impl From<Value> for Register {
     fn from(value: Value) -> Self {
         match value {
             Value::Integer(i) => Register::Integer(i),
             Value::Float(f) => Register::Float(f),
-            Value::String(s) => Register::String(s.into_owned()),
+            Value::String(s) => Register::String(s),
             Value::Boolean(b) => Register::Boolean(b),
             Value::Null => Register::Null,
         }
@@ -590,11 +592,10 @@ impl Register {
 
 impl From<Register> for Value {
     fn from(register: Register) -> Self {
-        use std::borrow::Cow;
         match register {
             Register::Integer(i) => Value::Integer(i),
             Register::Float(f) => Value::Float(f),
-            Register::String(s) => Value::String(Cow::Owned(s)),
+            Register::String(s) => Value::String(s),
             Register::Boolean(b) => Value::Boolean(b),
             Register::Null => Value::Null,
         }
@@ -618,8 +619,8 @@ mod tests {
             Register::Float(f64::INFINITY),
             Register::Boolean(true),
             Register::Boolean(false),
-            Register::String(String::new()),
-            Register::String("a,\"b".to_string()),
+            Register::String("".into()),
+            Register::String("a,\"b".into()),
         ];
         for r in regs {
             let v = Value::from(r.clone());

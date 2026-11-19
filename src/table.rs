@@ -23,7 +23,8 @@ use crate::error::{SqawkError, SqawkResult};
 /// It supports the common SQL data types and allows for type conversions
 /// between numeric types (Integer <-> Float) for comparison operations.
 ///
-/// String values are `Cow<'static, str>`; every stored string is owned.
+/// String values are `CompactString`s: text of up to 24 bytes is stored
+/// inline in the value itself, longer text on the heap.
 #[derive(Debug, Clone)]
 pub enum Value {
     /// Represents a NULL or missing value
@@ -32,11 +33,15 @@ pub enum Value {
     Integer(i64),
     /// 64-bit floating point number
     Float(f64),
-    /// UTF-8 string (owned or borrowed via Cow)
-    String(Cow<'static, str>),
+    /// UTF-8 string; up to 24 bytes are stored inline, without a heap
+    /// allocation (most cells of a typical file)
+    String(compact_str::CompactString),
     /// Boolean value (true/false)
     Boolean(bool),
 }
+
+// Every loaded cell is a Value: it must stay three words.
+const _: () = assert!(std::mem::size_of::<Value>() == 24);
 
 /// Implementation of equality comparison for Value
 ///
@@ -286,13 +291,13 @@ fn infer_value(s: &str) -> Option<Value> {
 /// Field text to Value, with canonical type inference (see `infer_value`).
 impl From<&str> for Value {
     fn from(s: &str) -> Self {
-        infer_value(s).unwrap_or_else(|| Value::String(Cow::Owned(s.to_string())))
+        infer_value(s).unwrap_or_else(|| Value::String(s.into()))
     }
 }
 
 impl From<String> for Value {
     fn from(s: String) -> Self {
-        infer_value(&s).unwrap_or(Value::String(Cow::Owned(s)))
+        infer_value(&s).unwrap_or(Value::String(s.into()))
     }
 }
 

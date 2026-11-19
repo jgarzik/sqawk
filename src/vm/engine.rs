@@ -55,8 +55,10 @@ pub(super) enum RowKey {
     Null,
     Int(i64),
     Real(u64),
-    Text(String),
+    Text(compact_str::CompactString),
 }
+
+const _: () = assert!(std::mem::size_of::<RowKey>() == 24);
 
 pub(super) fn row_key(v: &Value) -> RowKey {
     match v {
@@ -64,7 +66,7 @@ pub(super) fn row_key(v: &Value) -> RowKey {
         Value::Integer(i) => RowKey::Int(*i),
         Value::Boolean(b) => RowKey::Int(*b as i64),
         Value::Float(f) => real_key(*f),
-        Value::String(s) => RowKey::Text(s.to_string()),
+        Value::String(s) => RowKey::Text(s.clone()),
     }
 }
 
@@ -107,7 +109,7 @@ fn value_cmp_key(v: &Value) -> RowKey {
     match v {
         Value::String(s) => match numeric_text(s) {
             Some(n) => row_key(&n),
-            None => RowKey::Text(s.to_string()),
+            None => RowKey::Text(s.clone()),
         },
         other => row_key(other),
     }
@@ -510,7 +512,7 @@ pub(super) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
             let (nx, ny) = (a.as_numeric(), b.as_numeric());
             return match (nx, ny) {
                 (Some(nx), Some(ny)) => {
-                    compare_values(&nx, &ny).then_with(|| x.as_ref().cmp(y.as_ref()))
+                    compare_values(&nx, &ny).then_with(|| x.as_str().cmp(y.as_str()))
                 }
                 (Some(_), None) => Ordering::Less,
                 (None, Some(_)) => Ordering::Greater,
@@ -1468,7 +1470,7 @@ impl<'a> VmEngine<'a> {
                 let string_value = inst.p4.as_deref().unwrap_or("").to_string();
 
                 if register_idx < self.registers.len() {
-                    self.registers[register_idx] = Register::String(string_value);
+                    self.registers[register_idx] = Register::String(string_value.into());
                     Ok(ExecuteResult::Continue)
                 } else {
                     Err(SqawkError::VmError(format!(

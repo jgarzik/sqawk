@@ -33,6 +33,7 @@ stacker = "0.1"
 # The local time zone for the `localtime` and `utc` date modifiers ($TZ,
 # else the system zone).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+compact_str = "0.10.0"
 
 [dev-dependencies]
 assert_cmd = "2"

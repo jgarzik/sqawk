@@ -850,7 +850,7 @@ fn fmt_time(p: &DateTime) -> String {
 }
 
 fn text_or_null(v: Option<String>) -> Register {
-    v.map_or(Register::Null, Register::String)
+    v.map_or(Register::Null, |s| Register::String(s.into()))
 }
 
 /// `DATE(timevalue, modifier...)`.
@@ -984,7 +984,7 @@ pub(crate) fn strftime(args: &[Register]) -> SqawkResult<Register> {
         };
         out.extend_from_slice(piece.as_bytes());
     }
-    Ok(Register::String(String::from_utf8_lossy(&out).into_owned()))
+    Ok(Register::String(String::from_utf8_lossy(&out).into()))
 }
 
 /// `TIMEDIFF(a, b)`: the time from `b` to `a` as `±YYYY-MM-DD HH:MM:SS.SSS`
@@ -1068,7 +1068,7 @@ pub(crate) fn timediff(args: &[Register]) -> SqawkResult<Register> {
     d1.ijd += 148_699_540_800_000;
     clear_ymd_hms_tz(&mut d1);
     compute_ymd_hms(&mut d1);
-    Ok(Register::String(format!(
+    Ok(Register::String(compact_str::format_compact!(
         "{}{:04}-{:02}-{:02} {:02}:{:02}:{}",
         sign,
         y,
@@ -1100,12 +1100,12 @@ mod tests {
     use super::*;
 
     fn s(v: &str) -> Register {
-        Register::String(v.to_string())
+        Register::String(v.into())
     }
 
     fn txt(r: SqawkResult<Register>) -> Option<String> {
         match r.unwrap() {
-            Register::String(s) => Some(s),
+            Register::String(s) => Some(s.into()),
             Register::Null => None,
             other => Some(format!("{:?}", other)),
         }
