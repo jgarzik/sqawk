@@ -92,10 +92,10 @@ pub struct SqawkArgs {
     /// A path of `-` reads standard input, as the table `stdin` or under the
     /// name given as `table_name=-`. Piped input is treated as comma-separated
     /// unless -F says otherwise, and cannot be written back with --write.
-    #[clap(
-        required = true,
-        help = "Input files to process as [table_name=]file_path ('-' for stdin)"
-    )]
+    ///
+    /// Optional: with no operands there are no tables (standard input is
+    /// read only when `-` is named).
+    #[clap(help = "Input files to process as [table_name=]file_path ('-' for stdin)")]
     pub files: Vec<String>,
 
     /// Define column names for tables - format: table_name:col1,col2,col3,...

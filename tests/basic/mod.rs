@@ -317,3 +317,21 @@ fn test_delete_all() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+/// File operands are optional: with none there are no tables, so a query
+/// over constants (or a CREATE TABLE) runs, and standard input is read only
+/// when `-` is named.
+#[test]
+fn runs_without_file_operands() -> Result<(), Box<dyn std::error::Error>> {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s")
+        .arg("SELECT 1 + 1 AS two; CREATE TABLE t (a INT); INSERT INTO t VALUES (7); SELECT a FROM t")
+        .write_stdin("not,read\n");
+    cmd.assert().success().stdout("two\n2\na\n7\n");
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s").arg("SELECT * FROM nosuch");
+    cmd.assert()
+        .code(1)
+        .stderr(predicates::str::contains("no such table: nosuch"));
+    Ok(())
+}

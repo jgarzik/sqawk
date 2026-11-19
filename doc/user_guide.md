@@ -116,13 +116,15 @@ To build from source:
 The basic structure of a Sqawk command is:
 
 ```
-sqawk [OPTIONS] <FILES>...
+sqawk [OPTIONS] [FILES]...
 ```
 
 Where:
 - `OPTIONS` include SQL statements and other flags
-- `FILES` are the delimiter-separated files to process. At least one is
-  required. Each may be written as `[table_name=]file_path`, and a path of `-`
+- `FILES` are the delimiter-separated files to process. They are optional:
+  with none there are no tables, so `sqawk -s "SELECT 2 * 21"` or a script
+  that creates its own tables runs as is, and standard input is read only
+  when `-` is named. Each may be written as `[table_name=]file_path`, and a path of `-`
   reads [standard input](#reading-standard-input). The part before `=` names
   the table only when it is made of letters, digits and `_` (so a path such
   as `k=v/e.csv` in a directory named `k=v` still works when `v/e.csv` does
