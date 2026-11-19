@@ -1960,18 +1960,25 @@ impl<'a> VmEngine<'a> {
                 let start_reg = inst.p2 as usize;
                 let col_count = inst.p3 as usize;
 
-                let (row_data, position) = {
+                // Each value the program reads is cloned once, straight
+                // into its register form.
+                let (values, position) = {
                     let sorter = self.sorters.get(&sorter_id).ok_or_else(|| {
                         SqawkError::VmError(format!("Sorter {} not found", sorter_id))
                     })?;
                     let row = sorter.current_row().ok_or_else(|| {
                         SqawkError::VmError(format!("No current row in sorter {}", sorter_id))
                     })?;
-                    (row.clone(), sorter.position)
+                    let values: Vec<Register> = row
+                        .iter()
+                        .take(col_count)
+                        .map(|v| Register::from(v.clone()))
+                        .collect();
+                    (values, sorter.position)
                 };
 
-                for (i, value) in row_data.iter().take(col_count).enumerate() {
-                    self.set_register(start_reg + i, Register::from(value.clone()))?;
+                for (i, value) in values.into_iter().enumerate() {
+                    self.set_register(start_reg + i, value)?;
                 }
 
                 if self.verbose {
