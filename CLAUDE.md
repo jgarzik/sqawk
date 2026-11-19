@@ -156,8 +156,9 @@ effects of the ones before it.
   under `--comments`. Under `--write` or `-i` each table keeps its file's
   bytes (`RawRows` in `table.rs`: one buffer + per-row offsets), so
   untouched rows write back byte-for-byte; every row mutation in `table.rs`
-  keeps the offsets in sync. Otherwise (and for stdin) the bytes are dropped
-  (`ReadOptions::keep_source`) and writing the table is refused
+  keeps the offsets in sync. Otherwise (and for stdin) the input is parsed
+  as it is read (`read_table_from` over a `Feed` window, never the whole
+  file; `ReadOptions::keep_source`) and writing the table is refused
 
 ### SQL Features
 

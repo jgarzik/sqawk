@@ -80,7 +80,7 @@ impl FileHandler {
     }
 
     /// Read all of standard input.
-    fn read_stdin(&mut self) -> SqawkResult<Vec<u8>> {
+    fn stdin(&mut self) -> SqawkResult<std::io::StdinLock<'static>> {
         if !self.stdin_available {
             return Err(SqawkError::InvalidFileSpec(
                 "cannot read standard input here: the REPL reads its own commands from stdin"
@@ -93,10 +93,7 @@ impl FileHandler {
             ));
         }
         self.stdin_consumed = true;
-        let mut data = Vec::new();
-        std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut data)
-            .map_err(|e| SqawkError::open("standard input", e))?;
-        Ok(data)
+        Ok(std::io::stdin().lock())
     }
 
     /// Load a file into an in-memory table and add it to `db`
@@ -181,18 +178,30 @@ impl FileHandler {
             keep_source: db.keep_source() && !from_stdin,
         };
 
-        let data = match &canonical {
-            None => self.read_stdin()?,
-            Some(real) => std::fs::read(real).map_err(|e| SqawkError::open(&file_path, e))?,
+        let table = match canonical {
+            None => csv_handler::read_table_from(
+                &table_name,
+                self.stdin()?,
+                Path::new("standard input"),
+                None,
+                delimiter_str,
+                &opts,
+                &file_path_str,
+            )?,
+            Some(real) => {
+                let file =
+                    std::fs::File::open(&real).map_err(|e| SqawkError::open(&file_path, e))?;
+                csv_handler::read_table_from(
+                    &table_name,
+                    file,
+                    &file_path,
+                    Some(real),
+                    delimiter_str,
+                    &opts,
+                    &file_path_str,
+                )?
+            }
         };
-        let table = csv_handler::read_table(
-            &table_name,
-            data,
-            canonical,
-            delimiter_str,
-            &opts,
-            &file_path_str,
-        )?;
 
         // A source with no header row yields a table with no columns, which
         // the compiler cannot project from. Empty input is routine for a
@@ -413,8 +422,9 @@ pub fn load_location(
         columns: Some(schema.iter().map(|c| c.name.clone()).collect()),
         keep_source: db.keep_source(),
     };
-    let data = std::fs::read(&real).map_err(|e| SqawkError::open(given, e))?;
-    let mut table = csv_handler::read_table(table_name, data, Some(real), delimiter, &opts, path)?;
+    let file = std::fs::File::open(&real).map_err(|e| SqawkError::open(given, e))?;
+    let mut table =
+        csv_handler::read_table_from(table_name, file, given, Some(real), delimiter, &opts, path)?;
     table.set_declared_columns(schema);
     Ok((table, true))
 }

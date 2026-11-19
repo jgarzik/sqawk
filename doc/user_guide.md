@@ -1200,8 +1200,8 @@ downstream.
 
 ## Working with Large Files
 
-Sqawk reads every input file whole and holds all of its tables in memory for
-the whole run, so the data must fit in RAM.
+Sqawk holds all of its tables in memory for the whole run, so the data must
+fit in RAM.
 
 **How much memory.** A loaded table takes roughly six to seven times its
 file's size: the parsed values, plus (under `--write` or `-i` only) the
