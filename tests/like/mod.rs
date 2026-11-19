@@ -253,6 +253,27 @@ mod sqlite_semantics {
         assert_query_on(&[ONE], "SELECT 'é' ILIKE 'É' AS a FROM one", "a\n1")
     }
 
+    /// ESCAPE takes any expression, as in SQLite: a function, a scalar
+    /// subquery, or a column of the row being tested.
+    #[test]
+    fn escape_is_any_expression() -> R {
+        assert_query_on(
+            &[LK],
+            "SELECT k FROM lk WHERE s LIKE 'x\\%y' ESCAPE char(92)",
+            "k\n4",
+        )?;
+        assert_query_on(
+            &[LK],
+            "SELECT k FROM lk WHERE s LIKE 'x\\%y' ESCAPE (SELECT '\\')",
+            "k\n4",
+        )?;
+        assert_query_on(
+            &[LK],
+            "SELECT k FROM lk WHERE k > 3 AND s LIKE p ESCAPE substr(p, 2, 1)",
+            "k\n4",
+        )
+    }
+
     #[test]
     fn escape_must_be_one_character() -> R {
         assert_query_on_fails(

@@ -22,11 +22,11 @@ exclude = [
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-sqlparser = "0.62"
+sqlparser = "0.64"
 csv = "1"
 tempfile = "3"
 
-rustyline = "15"
+rustyline = "19"
 # Runs sqawk on a large stack (see MAIN_STACK_BYTES in main.rs); already in
 # the build through sqlparser -> recursive.
 stacker = "0.1"

@@ -37,8 +37,8 @@
 use std::collections::HashSet;
 
 use sqlparser::ast::{
-    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, JoinConstraint,
-    JoinOperator, ObjectName, TableFactor, TableWithJoins,
+    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, InTarget,
+    JoinConstraint, JoinOperator, ObjectName, TableFactor, TableWithJoins,
 };
 
 use super::bytecode::OpCode;
@@ -150,13 +150,30 @@ pub(crate) fn expr_children(expr: &Expr) -> Option<Vec<&Expr>> {
         Expr::Between {
             expr, low, high, ..
         } => vec![expr, low, high],
-        Expr::InList { expr, list, .. } => {
+        Expr::In {
+            expr,
+            target: InTarget::List(list),
+            ..
+        } => {
             let mut v: Vec<&Expr> = vec![expr];
             v.extend(list.iter());
             v
         }
-        Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
-            vec![expr, pattern]
+        Expr::Like {
+            expr,
+            pattern,
+            escape_char,
+            ..
+        }
+        | Expr::ILike {
+            expr,
+            pattern,
+            escape_char,
+            ..
+        } => {
+            let mut v: Vec<&Expr> = vec![expr, pattern];
+            v.extend(escape_char.as_deref());
+            v
         }
         Expr::Case {
             operand,
@@ -627,6 +644,11 @@ impl<'a> SqlCompiler<'a> {
                     continue;
                 }
                 JoinConstraint::None => continue,
+                JoinConstraint::UsingAlias(..) => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "USING (...) AS alias is not supported".into(),
+                    ));
+                }
                 JoinConstraint::Using(cols) => cols
                     .iter()
                     .map(|c: &ObjectName| super::ast_compat::object_name_last(c))

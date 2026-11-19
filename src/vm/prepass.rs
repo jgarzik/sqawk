@@ -965,7 +965,8 @@ fn table_factor(name: String, alias: Option<TableAlias>) -> TableFactor {
         with_ordinality: false,
         json_path: None,
         sample: None,
-        index_hints: Vec::new(),
+        index_directives: Vec::new(),
+        inheritance: None,
     }
 }
 

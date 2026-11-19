@@ -10,7 +10,7 @@ use super::ast_compat::{
 };
 use sqlparser::ast::{
     BinaryOperator, CaseWhen, DataType as SqlDataType, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArguments, Ident, ObjectName, Select, SelectItem,
+    FunctionArgExpr, FunctionArguments, Ident, InTarget, ObjectName, Select, SelectItem,
     SelectItemQualifiedWildcardKind, Statement, TrimWhereField, UnaryOperator, Value,
     ValueWithSpan,
 };
@@ -1169,7 +1169,7 @@ impl<'a> SqlCompiler<'a> {
         &mut self,
         expr: &Expr,
         pattern: &Expr,
-        escape: Option<&ValueWithSpan>,
+        escape: Option<&Expr>,
         any: bool,
         negated: bool,
         case_insensitive: bool,
@@ -1185,20 +1185,10 @@ impl<'a> SqlCompiler<'a> {
         let base = self.allocate_registers(if escape.is_some() { 3 } else { 2 });
         self.code_expr(expr, ctx, Some(base))?;
         self.code_expr(pattern, ctx, Some(base + 1))?;
+        // Any expression, as in SQLite; the Like opcode checks that its text
+        // is one character.
         if let Some(esc) = escape {
-            let lit = match &esc.value {
-                Value::SingleQuotedString(c) | Value::DoubleQuotedString(c) => {
-                    TableValue::String(c.clone().into())
-                }
-                Value::Null => TableValue::Null,
-                other => {
-                    return Err(SqawkError::InvalidSqlQuery(format!(
-                        "ESCAPE expression must be a single character, got {}",
-                        other
-                    )));
-                }
-            };
-            self.emit_value_literal(base + 2, &lit)?;
+            self.code_expr(esc, ctx, Some(base + 2))?;
         }
         let flags =
             (negated as i64) | ((case_insensitive as i64) << 1) | ((escape.is_some() as i64) << 2);
@@ -1977,7 +1967,7 @@ impl<'a> SqlCompiler<'a> {
             } => self.compile_like_pattern(
                 inner,
                 pattern,
-                escape_char.as_ref(),
+                escape_char.as_deref(),
                 *any,
                 *negated,
                 false,
@@ -1993,7 +1983,7 @@ impl<'a> SqlCompiler<'a> {
             } => self.compile_like_pattern(
                 inner,
                 pattern,
-                escape_char.as_ref(),
+                escape_char.as_deref(),
                 *any,
                 *negated,
                 true,
@@ -2006,15 +1996,17 @@ impl<'a> SqlCompiler<'a> {
                 low,
                 high,
             } => self.compile_between(inner, low, high, *negated, ctx, dest)?,
-            Expr::InList {
+            Expr::In {
                 expr: inner,
-                list,
+                target: InTarget::List(list),
                 negated,
+                global: false,
             } => self.compile_in_list(inner, list, *negated, ctx, dest)?,
-            Expr::InSubquery {
+            Expr::In {
                 expr: inner,
-                subquery,
+                target: InTarget::Subquery(subquery),
                 negated,
+                global: false,
             } => self.compile_in_subquery(inner, subquery, *negated, ctx, dest)?,
             Expr::Exists { subquery, negated } => {
                 self.compile_subquery(subquery, Sub::Exists, ctx, dest)?;

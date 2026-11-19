@@ -120,7 +120,8 @@ error `recursion limit exceeded`.
 `LIKE` follows SQLite: `%` matches any run of characters and `_` exactly one
 character (not byte), both including newlines; letters compare
 case-insensitively for ASCII only (`'a%'` matches `Alice`, but `'é'` does not
-match `'É'`). `ESCAPE 'c'` makes the character after `c` literal. The pattern
+match `'É'`). `ESCAPE 'c'` makes the character after `c` literal; the escape may be any
+expression whose text is one character. The pattern
 may be any expression, such as another column. `ILIKE` (not in SQLite) folds
 Unicode case. A NULL value, pattern or escape gives NULL.
 

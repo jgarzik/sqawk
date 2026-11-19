@@ -105,6 +105,7 @@ fn from_item_clauses() -> R {
         "SELECT id FROM emp TABLESAMPLE (10 PERCENT)",
         "SELECT id FROM emp WITH (NOLOCK)",
         "SELECT id FROM emp e, LATERAL (SELECT 1) x",
+        "SELECT id FROM emp a JOIN emp b USING (id) AS j",
     ])
 }
 

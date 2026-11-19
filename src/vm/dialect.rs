@@ -279,8 +279,7 @@ fn left_spine_exceeds(mut expr: &Expr, max: usize) -> bool {
             | Expr::ILike { expr: left, .. }
             | Expr::SimilarTo { expr: left, .. }
             | Expr::RLike { expr: left, .. }
-            | Expr::InList { expr: left, .. }
-            | Expr::InSubquery { expr: left, .. }
+            | Expr::In { expr: left, .. }
             | Expr::Between { expr: left, .. }
             | Expr::Collate { expr: left, .. }
             | Expr::Cast { expr: left, .. }

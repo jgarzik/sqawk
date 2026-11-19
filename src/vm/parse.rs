@@ -19,7 +19,7 @@
 
 use sqlparser::ast::{
     Expr, FromTable, FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArguments,
-    GroupByExpr, JoinConstraint, JoinOperator, LimitClause, NamedWindowExpr, OrderByExpr,
+    GroupByExpr, InTarget, JoinConstraint, JoinOperator, LimitClause, NamedWindowExpr, OrderByExpr,
     OrderByKind, Query, Select, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement,
     TableFactor, TableWithJoins, Values, WindowFrameBound, WindowSpec, WindowType,
 };
@@ -593,6 +593,7 @@ fn expr_children<'a>(e: &'a mut Expr, stack: &mut dyn FnMut(Node<'a>)) {
         | Expr::Ceil { expr: a, .. }
         | Expr::Floor { expr: a, .. }
         | Expr::Collate { expr: a, .. }
+        | Expr::IsJson { expr: a, .. }
         | Expr::Prefixed { value: a, .. }
         | Expr::Named { expr: a, .. }
         | Expr::OuterJoin(a)
@@ -603,21 +604,6 @@ fn expr_children<'a>(e: &'a mut Expr, stack: &mut dyn FnMut(Node<'a>)) {
         | Expr::IsNotDistinctFrom(a, b)
         | Expr::BinaryOp {
             left: a, right: b, ..
-        }
-        | Expr::Like {
-            expr: a,
-            pattern: b,
-            ..
-        }
-        | Expr::ILike {
-            expr: a,
-            pattern: b,
-            ..
-        }
-        | Expr::SimilarTo {
-            expr: a,
-            pattern: b,
-            ..
         }
         | Expr::RLike {
             expr: a,
@@ -630,11 +616,6 @@ fn expr_children<'a>(e: &'a mut Expr, stack: &mut dyn FnMut(Node<'a>)) {
         | Expr::AllOp {
             left: a, right: b, ..
         }
-        | Expr::InUnnest {
-            expr: a,
-            array_expr: b,
-            ..
-        }
         | Expr::AtTimeZone {
             timestamp: a,
             time_zone: b,
@@ -643,15 +624,54 @@ fn expr_children<'a>(e: &'a mut Expr, stack: &mut dyn FnMut(Node<'a>)) {
             push(stack, a);
             push(stack, b);
         }
-        Expr::InList { expr, list, .. } => {
+        Expr::Like {
+            expr,
+            pattern,
+            escape_char,
+            ..
+        }
+        | Expr::ILike {
+            expr,
+            pattern,
+            escape_char,
+            ..
+        }
+        | Expr::SimilarTo {
+            expr,
+            pattern,
+            escape_char,
+            ..
+        } => {
             push(stack, expr);
-            for item in list {
-                push(stack, item);
+            push(stack, pattern);
+            if let Some(e) = escape_char {
+                push(stack, e);
             }
         }
-        Expr::InSubquery { expr, subquery, .. } => {
+        Expr::In { expr, target, .. } => {
             push(stack, expr);
-            stack(Node::Query(subquery));
+            match target {
+                InTarget::List(list) => {
+                    for item in list {
+                        push(stack, item);
+                    }
+                }
+                InTarget::Subquery(q) => stack(Node::Query(q)),
+                InTarget::Unnest(e) => push(stack, e),
+                InTarget::Table { args: None, .. } => {}
+                InTarget::Table {
+                    args: Some(args), ..
+                } => {
+                    for arg in args {
+                        let (FunctionArg::Named { arg, .. }
+                        | FunctionArg::ExprNamed { arg, .. }
+                        | FunctionArg::Unnamed(arg)) = arg;
+                        if let FunctionArgExpr::Expr(e) = arg {
+                            stack(Node::Expr(e));
+                        }
+                    }
+                }
+            }
         }
         Expr::Between {
             expr, low, high, ..
