@@ -275,6 +275,7 @@ fn parse<R: Read>(
         bom,
         crlf,
         comments: opts.comments,
+        compression: crate::compress::Compression::None,
     });
     // Loading is not a modification.
     table.replace_rows(rows);
@@ -776,7 +777,19 @@ pub fn save_table(table: &Table, file_path: &Path) -> SqawkResult<()> {
 
     {
         let mut out = BufWriter::new(temp_file.as_file());
-        table.write_source_layout(&mut out).map_err(fail)?;
+        match table.file_layout().compression {
+            crate::compress::Compression::None => {
+                table.write_source_layout(&mut out).map_err(fail)?;
+            }
+            // A compressed file is rendered whole, then encoded.
+            compression => {
+                let mut plain = Vec::new();
+                table.write_source_layout(&mut plain).map_err(fail)?;
+                let encoded = compression.encode(&plain).map_err(fail)?;
+                drop(plain);
+                out.write_all(&encoded).map_err(fail)?;
+            }
+        }
         out.flush().map_err(fail)?;
     }
 

@@ -37,6 +37,7 @@ mod diag;
 mod aggregate;
 mod capacity;
 mod cli;
+mod compress;
 mod config;
 mod csv_handler;
 mod database;

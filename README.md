@@ -19,7 +19,7 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 - **DDL** - CREATE TABLE, CREATE TABLE AS SELECT, DROP, ALTER TABLE ADD COLUMN, TRUNCATE
 - **Transactions** - BEGIN, COMMIT, ROLLBACK over the in-memory tables; nothing uncommitted is written
 - **Expressions** - CASE, CAST, BETWEEN, IN, LIKE/ILIKE ... ESCAPE, IS [NOT] DISTINCT FROM, `||`, arithmetic; ORDER BY ... NULLS FIRST/LAST
-- **File Formats** - CSV, TSV (`.tsv`/`.tab`), and custom delimiters (`-F`); headerless files via `--no-header` or `--tabledef`; `#` comment lines via `--comments`; untouched rows survive `--write` byte for byte
+- **File Formats** - CSV, TSV (`.tsv`/`.tab`), and custom delimiters (`-F`); gzip and zstd files (`.csv.gz`, `.tsv.zst`), recompressed by `--write`; headerless files via `--no-header` or `--tabledef`; `#` comment lines via `--comments`; untouched rows survive `--write` byte for byte
 - **Pipelines** - Reads standard input with a `-` file operand
 - **Safe by Default** - Files unchanged unless `--write` flag is specified
 - **Interactive REPL** - Explore data interactively with `-i` flag

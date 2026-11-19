@@ -172,8 +172,12 @@ struct Location {
 struct Model {
     name: String,
     path: PathBuf,
-    /// The file's bytes before the run (None: created by the run).
+    /// The file's bytes before the run (None: created by the run),
+    /// decompressed.
     original: Option<Vec<u8>>,
+    /// The file on disk is gzip or zstd compressed (sqawk reads it so and
+    /// writes it back so).
+    compression: Compression,
     delim: u8,
     header: bool,
     comments: bool,
@@ -614,6 +618,7 @@ fn build_file(
         name: name.to_string(),
         path: PathBuf::new(),
         original: Some(bytes.clone()),
+        compression: Compression::None,
         delim: o.delim,
         header: o.header,
         comments: o.comments,
@@ -711,6 +716,63 @@ fn cond(r: &mut Rng, m: &Model) -> String {
         10 => format!("{id} BETWEEN {} AND {}", r.range(0, n), r.range(0, n)),
         _ => format!("length({c}) > {}", r.range(0, 6)),
     }
+}
+
+/// How a generated file is compressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Compression {
+    None,
+    Gzip,
+    Zstd,
+}
+
+impl Compression {
+    fn suffix(self) -> &'static str {
+        match self {
+            Compression::None => "",
+            Compression::Gzip => ".gz",
+            Compression::Zstd => ".zst",
+        }
+    }
+
+    fn encode(self, data: &[u8]) -> Vec<u8> {
+        match self {
+            Compression::None => data.to_vec(),
+            Compression::Gzip => {
+                let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                std::io::Write::write_all(&mut e, data).expect("write to Vec");
+                e.finish().expect("write to Vec")
+            }
+            Compression::Zstd => {
+                ruzstd::encoding::compress_to_vec(data, ruzstd::encoding::CompressionLevel::Fastest)
+            }
+        }
+    }
+
+    /// `data` decoded; None when it is not valid in this format (a file
+    /// sqawk should have written compressed was not).
+    fn decode(self, data: &[u8]) -> Option<Vec<u8>> {
+        use std::io::Read;
+        let mut out = Vec::new();
+        match self {
+            Compression::None => return Some(data.to_vec()),
+            Compression::Gzip => flate2::read::MultiGzDecoder::new(data)
+                .read_to_end(&mut out)
+                .ok()?,
+            Compression::Zstd => ruzstd::decoding::StreamingDecoder::new(data)
+                .ok()?
+                .read_to_end(&mut out)
+                .ok()?,
+        };
+        Some(out)
+    }
+}
+
+/// A model's file as it is now, decompressed (None: missing, or not in
+/// its format).
+fn read_plain(m: &Model) -> Option<Vec<u8>> {
+    let raw = fs::read(&m.path).ok()?;
+    m.compression.decode(&raw)
 }
 
 /// A random data statement on table `ti`.
@@ -993,7 +1055,13 @@ fn one(
         } else {
             r.range(1, 25) as usize
         };
-        let file_name = format!("t{k}.{ext}");
+        // Some files are compressed: `t0.csv.gz`, `t1.tsv.zst`.
+        let compression = match r.below(16) {
+            0 => Compression::Gzip,
+            1 => Compression::Zstd,
+            _ => Compression::None,
+        };
+        let file_name = format!("t{k}.{ext}{}", compression.suffix());
         let explicit = r.chance(0.3);
         let name = if explicit {
             format!("n{k}")
@@ -1009,7 +1077,8 @@ fn one(
             if no_header { nrows.max(1) } else { nrows },
         );
         let path = dir.join(&file_name);
-        fs::write(&path, &b.bytes)?;
+        fs::write(&path, compression.encode(&b.bytes))?;
+        b.model.compression = compression;
         let shown = if r.chance(0.5) {
             file_name.clone()
         } else {
@@ -1068,6 +1137,7 @@ fn one(
                     name: name.clone(),
                     path: PathBuf::new(),
                     original: None,
+                    compression: Compression::None,
                     delim,
                     header,
                     comments: lcomments,
@@ -1368,7 +1438,7 @@ fn one(
             ));
         }
         for (m, orig) in models.iter().zip(&originals) {
-            let now = fs::read(&m.path).ok();
+            let now = read_plain(m);
             if now != *orig {
                 problems.push(format!(
                     "{} written although the run was refused",
@@ -1390,7 +1460,7 @@ fn one(
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            let now = fs::read(&m.path).ok();
+            let now = read_plain(m);
             let created_new = m.location.as_ref().is_some_and(|l| !l.existing);
             // A new LOCATION file is created by --write even when nothing
             // was inserted.

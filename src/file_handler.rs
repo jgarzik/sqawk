@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::compress;
 use crate::config::AppConfig;
 use crate::csv_handler::{self, ReadOptions};
 use crate::database::Database;
@@ -178,28 +179,40 @@ impl FileHandler {
             keep_source: db.keep_source() && !from_stdin,
         };
 
+        // gzip / zstd input is decoded as it is read (see compress.rs).
         let table = match canonical {
-            None => csv_handler::read_table_from(
-                &table_name,
-                self.stdin()?,
-                Path::new("standard input"),
-                None,
-                delimiter_str,
-                &opts,
-                &file_path_str,
-            )?,
+            None => {
+                let name = Path::new("standard input");
+                let (input, compression) =
+                    compress::decoder(self.stdin()?).map_err(|e| SqawkError::open(name, e))?;
+                let mut t = csv_handler::read_table_from(
+                    &table_name,
+                    input,
+                    name,
+                    None,
+                    delimiter_str,
+                    &opts,
+                    &file_path_str,
+                )?;
+                set_compression(&mut t, compression);
+                t
+            }
             Some(real) => {
                 let file =
                     std::fs::File::open(&real).map_err(|e| SqawkError::open(&file_path, e))?;
-                csv_handler::read_table_from(
+                let (input, compression) =
+                    compress::decoder(file).map_err(|e| SqawkError::open(&file_path, e))?;
+                let mut t = csv_handler::read_table_from(
                     &table_name,
-                    file,
+                    input,
                     &file_path,
                     Some(real),
                     delimiter_str,
                     &opts,
                     &file_path_str,
-                )?
+                )?;
+                set_compression(&mut t, compression);
+                t
             }
         };
 
@@ -408,8 +421,10 @@ pub fn load_location(
 
     if !existing {
         let mut table = Table::new_with_schema(table_name, schema, Some(real), Some(delimiter));
+        // A new `.gz` / `.zst` file is created compressed.
         table.set_file_layout(FileLayout {
             has_header: options.header,
+            compression: compress::Compression::from_extension(given),
             ..FileLayout::default()
         });
         return Ok((table, false));
@@ -423,8 +438,10 @@ pub fn load_location(
         keep_source: db.keep_source(),
     };
     let file = std::fs::File::open(&real).map_err(|e| SqawkError::open(given, e))?;
+    let (input, compression) = compress::decoder(file).map_err(|e| SqawkError::open(given, e))?;
     let mut table =
-        csv_handler::read_table_from(table_name, file, given, Some(real), delimiter, &opts, path)?;
+        csv_handler::read_table_from(table_name, input, given, Some(real), delimiter, &opts, path)?;
+    set_compression(&mut table, compression);
     table.set_declared_columns(schema);
     Ok((table, true))
 }
@@ -445,8 +462,21 @@ fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
 
 /// Whether `path` names a tab-separated file: extension `.tsv` or `.tab`
 /// (any case).
+/// Record on a just-loaded table how its file was compressed.
+fn set_compression(table: &mut Table, compression: compress::Compression) {
+    let mut layout = table.file_layout();
+    layout.compression = compression;
+    table.set_file_layout(layout);
+}
+
 pub(crate) fn has_tab_extension(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| {
+    // `t.tsv.gz` is tab-separated too.
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    let inner = name
+        .as_deref()
+        .map(compress::strip_extension)
+        .map(Path::new);
+    inner.and_then(Path::extension).is_some_and(|ext| {
         let ext = ext.to_string_lossy();
         ext.eq_ignore_ascii_case("tsv") || ext.eq_ignore_ascii_case("tab")
     })
@@ -493,9 +523,10 @@ pub fn parse_table_spec(file_spec: &str) -> SqawkResult<(String, PathBuf)> {
         return Ok((STDIN_TABLE.to_string(), PathBuf::from(STDIN_SPEC)));
     }
     let path = PathBuf::from(file_spec);
+    // `data.csv.gz` is the table `data`.
     let file_name = path
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
+        .map(|n| compress::strip_extension(&n.to_string_lossy()).to_string())
         .unwrap_or_default();
     let table_name = match file_name.rfind('.') {
         Some(pos) => file_name[..pos].to_string(),

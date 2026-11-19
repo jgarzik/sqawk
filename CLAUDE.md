@@ -162,6 +162,7 @@ effects of the ones before it.
   stdin, table `stdin`); `has_tab_extension` is the `.tsv`/`.tab` rule used
   for loading and for `CREATE TABLE ... LOCATION`; `load_location` loads (or
   starts) a LOCATION table under its declared columns
+- **`compress.rs`**: gzip / zstd by magic bytes (`decoder`, multi-member / multi-frame streams; flate2 and ruzstd, pure Rust), `strip_extension` for table names and the `.tsv` rule, `Compression::encode` for writeback; a table records its file's compression in `FileLayout`
 - **`csv_handler.rs`**: The single loader (`read_table`, built on the `csv`
   crate) for every delimiter and for stdin, plus writeback. `.tsv`/`.tab` are
   tab-separated, everything else comma (unless `-F`); the first line is always

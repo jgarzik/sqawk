@@ -26,6 +26,7 @@
    - [Help (--help)](#help---help)
 5. [Working with Files](#working-with-files)
    - [File Format Support](#file-format-support)
+   - [Compressed Files](#compressed-files)
    - [Defining Schemas with CREATE TABLE](#defining-schemas-with-create-table)
    - [Table Naming](#table-naming)
    - [Handling Multiple Files](#handling-multiple-files)
@@ -637,6 +638,26 @@ Completely empty input is a different matter. The first line is the header, so
 a file or pipe with no content has no column names and is rejected with *"has
 no header row"* rather than loading an unusable table.
 
+### Compressed Files
+
+A gzip or zstd file is read as it is: sqawk recognizes it by its first bytes
+(whatever its name), decompresses it as it reads, and names the table after
+the file without `.gz` / `.zst`, so `sales.csv.gz` is the table `sales`.
+The extension under the compression one decides the delimiter as usual
+(`log.tsv.zst` is tab-separated). Standard input may be compressed too.
+Concatenated gzip members and zstd frames read as one file.
+
+```sh
+sqawk -s "SELECT region, SUM(total) FROM sales GROUP BY region" sales.csv.gz
+```
+
+With `--write`, a changed compressed table is written back compressed in the
+same format (gzip at the default level, zstd at its fastest; the
+compressed bytes differ from the original, the decompressed rows that were
+not changed do not). `CREATE TABLE ... LOCATION 'new.csv.gz'` creates a
+gzip file (`.zst`: zstd). A file that is not valid in its format is an
+error naming it (*"cannot open 'x.csv.gz': ..."*).
+
 ### Defining Schemas with CREATE TABLE
 
 Besides the tables loaded from input files, you can create tables with the
@@ -823,7 +844,8 @@ no file operand exits with a usage error.
 
 ### Table Naming
 
-By default, the table name is derived from the filename (without extension):
+By default, the table name is derived from the filename (without extension,
+and without a `.gz` / `.zst` before it):
 
 ```sh
 sqawk -s "SELECT * FROM employees" employees.csv  # Table name is "employees"

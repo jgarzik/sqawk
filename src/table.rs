@@ -495,6 +495,8 @@ pub struct FileLayout {
     /// row whose first field starts with `#` must be quoted on writeback, or
     /// it would be skipped as a comment when read again.
     pub comments: bool,
+    /// The file is gzip or zstd compressed, and is written back so.
+    pub compression: crate::compress::Compression,
 }
 
 /// The lines of a source file between its records -- blank lines, and the
@@ -538,6 +540,7 @@ impl Default for FileLayout {
             bom: false,
             crlf: false,
             comments: false,
+            compression: crate::compress::Compression::None,
         }
     }
 }
