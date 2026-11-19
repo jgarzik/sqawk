@@ -365,18 +365,42 @@ fn scan_sql(sql: &str) -> SqlScan {
     }
 }
 
-/// The history file for `XDG_STATE_HOME` / `HOME`: `$XDG_STATE_HOME/sqawk/history`
-/// when `XDG_STATE_HOME` is an absolute path, else `$HOME/.sqawk_history`
-/// when `HOME` is set and non-empty, else none.
-fn history_path(xdg_state_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    if let Some(state) = xdg_state_home
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-    {
-        return Some(state.join("sqawk").join("history"));
+/// The environment variables that locate the history file.
+#[derive(Default)]
+struct HistoryEnv {
+    xdg_state_home: Option<OsString>,
+    home: Option<OsString>,
+    /// Windows' per-user application data directory.
+    appdata: Option<OsString>,
+    /// Windows' home directory.
+    userprofile: Option<OsString>,
+}
+
+impl HistoryEnv {
+    fn from_env() -> Self {
+        let var = std::env::var_os;
+        HistoryEnv {
+            xdg_state_home: var("XDG_STATE_HOME"),
+            home: var("HOME"),
+            appdata: var("APPDATA"),
+            userprofile: var("USERPROFILE"),
+        }
     }
-    home.filter(|h| !h.is_empty())
-        .map(|h| PathBuf::from(h).join(".sqawk_history"))
+}
+
+/// The history file: `$XDG_STATE_HOME/sqawk/history` when `XDG_STATE_HOME`
+/// is an absolute path, else `$HOME/.sqawk_history` when `HOME` is set and
+/// non-empty, else (Windows, where neither is normally set)
+/// `%APPDATA%\sqawk\history` when `APPDATA` is absolute, else
+/// `%USERPROFILE%\.sqawk_history`, else none.
+fn history_path(env: HistoryEnv) -> Option<PathBuf> {
+    let absolute = |v: Option<OsString>| v.map(PathBuf::from).filter(|p| p.is_absolute());
+    let nonempty = |v: Option<OsString>| v.filter(|h| !h.is_empty()).map(PathBuf::from);
+    absolute(env.xdg_state_home)
+        .map(|s| s.join("sqawk").join("history"))
+        .or_else(|| nonempty(env.home).map(|h| h.join(".sqawk_history")))
+        .or_else(|| absolute(env.appdata).map(|a| a.join("sqawk").join("history")))
+        .or_else(|| nonempty(env.userprofile).map(|h| h.join(".sqawk_history")))
 }
 
 /// The rustyline helper: completion and multi-line statement entry.
@@ -522,8 +546,7 @@ impl Repl {
             match Editor::with_config(rustyline_config) {
                 Ok(mut ed) => {
                     ed.set_helper(Some(ReplHelper::default()));
-                    history =
-                        history_path(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"));
+                    history = history_path(HistoryEnv::from_env());
                     if let Some(path) = &history {
                         let _ = ed.load_history(path);
                     }
@@ -1460,24 +1483,42 @@ mod tests {
         // Absolute paths for this platform: "/state" has no drive letter and
         // is relative on Windows.
         #[cfg(windows)]
-        let (state, home) = (r"C:\state", r"C:\home\u");
+        let (state, home, appdata) = (r"C:\state", r"C:\home\u", r"C:\u\AppData\Roaming");
         #[cfg(not(windows))]
-        let (state, home) = ("/state", "/home/u");
+        let (state, home, appdata) = ("/state", "/home/u", "/u/appdata");
         let os = |s: &str| Some(OsString::from(s));
+        let env =
+            |x: Option<OsString>, h: Option<OsString>, a: Option<OsString>, u: Option<OsString>| {
+                HistoryEnv {
+                    xdg_state_home: x,
+                    home: h,
+                    appdata: a,
+                    userprofile: u,
+                }
+            };
         assert_eq!(
-            history_path(os(state), os(home)),
+            history_path(env(os(state), os(home), os(appdata), os(home))),
             Some(PathBuf::from(state).join("sqawk").join("history"))
         );
         assert_eq!(
-            history_path(None, os(home)),
+            history_path(env(None, os(home), os(appdata), None)),
             Some(PathBuf::from(home).join(".sqawk_history"))
         );
         // A relative XDG_STATE_HOME is invalid and ignored.
         assert_eq!(
-            history_path(os("rel"), os(home)),
+            history_path(env(os("rel"), os(home), None, None)),
             Some(PathBuf::from(home).join(".sqawk_history"))
         );
-        assert_eq!(history_path(os(""), os("")), None);
-        assert_eq!(history_path(None, None), None);
+        // Windows: no HOME, so APPDATA, then USERPROFILE.
+        assert_eq!(
+            history_path(env(None, None, os(appdata), os(home))),
+            Some(PathBuf::from(appdata).join("sqawk").join("history"))
+        );
+        assert_eq!(
+            history_path(env(None, os(""), os("rel"), os(home))),
+            Some(PathBuf::from(home).join(".sqawk_history"))
+        );
+        assert_eq!(history_path(env(os(""), os(""), os(""), os(""))), None);
+        assert_eq!(history_path(HistoryEnv::default()), None);
     }
 }

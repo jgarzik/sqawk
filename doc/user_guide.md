@@ -332,7 +332,9 @@ History is kept only when standard input is a terminal, in
 `$XDG_STATE_HOME/sqawk/history` when `XDG_STATE_HOME` is an absolute path
 (the directory is created as needed). Otherwise -- `XDG_STATE_HOME` unset,
 empty or relative -- it is `$HOME/.sqawk_history` when `HOME` is set and
-non-empty, and when neither applies no history is kept.
+non-empty. On Windows, where neither is normally set, it is
+`%APPDATA%\sqawk\history`, else `%USERPROFILE%\.sqawk_history`. When none
+applies, no history is kept.
 
 **Piping a script.** When standard input is not a terminal, `sqawk -i`
 reads commands from it line by line and prints no banner, no prompts and no
