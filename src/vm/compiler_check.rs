@@ -183,7 +183,14 @@ pub(crate) fn check_update(update: &Update) -> SqawkResult<()> {
         on_cluster,
         settings,
     } = update;
-    reject(from.is_some(), "UPDATE ... FROM")?;
+    // SQLite's `UPDATE t SET ... FROM ...`; not `UPDATE t FROM ... SET`.
+    reject(
+        matches!(
+            from,
+            Some(sqlparser::ast::UpdateTableFromKind::BeforeSet(_))
+        ),
+        "UPDATE ... FROM before SET",
+    )?;
     reject(returning.is_some(), "UPDATE ... RETURNING")?;
     reject(output.is_some(), "UPDATE ... OUTPUT")?;
     reject(or.is_some(), "UPDATE OR <conflict action>")?;

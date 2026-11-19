@@ -55,7 +55,6 @@ fn insert_conflict_and_returning_clauses() -> R {
 fn update_clauses() -> R {
     assert_rejected(&[
         "UPDATE emp SET salary = 1 RETURNING id",
-        "UPDATE emp SET salary = 1 FROM one WHERE emp.id = one.id",
         "UPDATE emp SET salary = 1 LIMIT 1",
     ])
 }
@@ -80,7 +79,6 @@ fn query_clauses() -> R {
         "WITH h AS (SELECT * FROM emp) SELECT id FROM h FETCH FIRST 1 ROWS ONLY",
         "SELECT 1 UNION (WITH h AS (SELECT 2) SELECT * FROM h)",
         "WITH h AS (SELECT id FROM emp) DELETE FROM emp WHERE id IN (SELECT id FROM h) RETURNING id",
-        "WITH h AS (SELECT 1) UPDATE emp SET id = 2 FROM one",
     ])
 }
 
@@ -189,17 +187,6 @@ fn transaction_clauses() -> R {
     sqls.push("BEGIN TRY".to_string());
     let refs: Vec<&str> = sqls.iter().map(String::as_str).collect();
     assert_rejected(&refs)
-}
-
-/// The red-list case: `UPDATE ... FROM` used to update every row from
-/// nothing; the documentation said it was "accepted without effect".
-#[test]
-fn update_from_message() -> R {
-    assert_query_fails(
-        &["tests/data/users.csv", "tests/data/orders.csv"],
-        "UPDATE users SET name = 'X' FROM orders WHERE users.id = 1",
-        "UPDATE ... FROM is not supported",
-    )
 }
 
 /// An unsupported statement is named by its keywords (the error used to

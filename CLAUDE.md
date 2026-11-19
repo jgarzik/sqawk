@@ -83,7 +83,9 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
   outer-join NULL-extension, hash join on equi-conditions); the projection /
   aggregate stage is a body callback emitted at the innermost level; a
   FROM-less SELECT is a plan with zero sources (one row)
-- `compiler_dml.rs`: INSERT / UPDATE / DELETE
+- `compiler_dml.rs`: INSERT / UPDATE / DELETE; `UPDATE ... FROM` plans
+  the target as source 0 of the FROM planner (a target row joined several
+  times is replaced once: `apply_modifications` keeps the first)
 - `compiler_ddl.rs`: CREATE / DROP / ALTER / TRUNCATE
 - `compiler_window.rs`: the window stage -- finished rows (every column, or
   a grouped query's keys and aggregates) plus window keys/arguments go into
@@ -96,7 +98,7 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
   same query compiler as fragments of the enclosing program (`Once` when
   uncorrelated; correlation found by `NameCtx` outward resolution)
 - `compiler_check.rs`: rejects every parsed clause sqawk does not implement
-  (RETURNING, ON CONFLICT, UPDATE FROM, QUALIFY, ...) before
+  (RETURNING, ON CONFLICT, DELETE ... USING, QUALIFY, ...) before
   compilation; INSERT/UPDATE/DELETE/Query/Select are destructured
   exhaustively so a new sqlparser field fails to compile until handled
 - `parse.rs`: `parse_sql`, the only SQL-to-AST entry point: parses with

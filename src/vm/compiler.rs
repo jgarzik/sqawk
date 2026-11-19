@@ -918,11 +918,24 @@ impl<'a> SqlCompiler<'a> {
             }
             Statement::Update(update) => {
                 check_update(update)?;
-                self.compile_update(
-                    &update.table,
-                    &update.assignments,
-                    update.selection.as_ref(),
-                )
+                let from = match &update.from {
+                    Some(sqlparser::ast::UpdateTableFromKind::AfterSet(from)) => from.as_slice(),
+                    _ => &[],
+                };
+                if from.is_empty() {
+                    self.compile_update(
+                        &update.table,
+                        &update.assignments,
+                        update.selection.as_ref(),
+                    )
+                } else {
+                    self.compile_update_from(
+                        &update.table,
+                        &update.assignments,
+                        from,
+                        update.selection.as_ref(),
+                    )
+                }
             }
             Statement::CreateTable(create) => {
                 check_create_table(create)?;

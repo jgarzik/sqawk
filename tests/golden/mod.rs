@@ -3142,3 +3142,57 @@ fn collate_errors() -> Result<(), Box<dyn std::error::Error>> {
          GROUP BY",
     )
 }
+
+const UPD_T: (&str, &str) = ("t.csv", "id,v\n1,10\n2,20\n3,30\n");
+const UPD_U: (&str, &str) = ("u.csv", "id,w\n1,100\n3,300\n3,301\n4,400\n");
+
+/// UPDATE ... FROM (SQLite 3.33+): the SET and WHERE see the target row
+/// and the FROM row joined with it (expected output from sqlite3).
+#[test]
+fn update_from() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[UPD_T, UPD_U],
+        "UPDATE t SET v = u.w FROM u WHERE t.id = u.id AND u.w < 301; \
+         SELECT id, v FROM t ORDER BY id",
+        "id,v\n1,100\n2,20\n3,300",
+    )?;
+    assert_query_on(
+        &[UPD_T, UPD_U],
+        "UPDATE t AS a SET v = a.v + b.w FROM u b WHERE a.id = b.id AND b.id = 1; \
+         SELECT id, v FROM t ORDER BY id",
+        "id,v\n1,110\n2,20\n3,30",
+    )?;
+    assert_query_on(
+        &[UPD_T, UPD_U],
+        "UPDATE t SET v = d.s FROM (SELECT id, SUM(w) AS s FROM u GROUP BY id) AS d \
+         WHERE t.id = d.id; SELECT id, v FROM t ORDER BY id",
+        "id,v\n1,100\n2,20\n3,601",
+    )?;
+    // A target row joined with several FROM rows is updated once, from the
+    // first of them in FROM order.
+    assert_query_on(
+        &[UPD_T, UPD_U],
+        "UPDATE t SET v = u.w FROM u WHERE t.id = u.id; SELECT id, v FROM t ORDER BY id",
+        "id,v\n1,100\n2,20\n3,300",
+    )
+}
+
+/// Each target row counts once, however many FROM rows it joins, and the
+/// change is written back.
+#[test]
+fn update_from_counts_and_writes() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = crate::helpers::create_temp_dir()?;
+    let t = dir.path().join("t.csv");
+    let u = dir.path().join("u.csv");
+    std::fs::write(&t, UPD_T.1)?;
+    std::fs::write(&u, UPD_U.1)?;
+    let out = crate::common::run_repl_script(
+        ".changes on\n.write on\nUPDATE t SET v = -1 FROM u;\n.exit\n",
+        &[t.to_str().unwrap(), u.to_str().unwrap()],
+        None,
+        false,
+    );
+    assert!(out.contains("3 rows affected"), "{out}");
+    assert_eq!(std::fs::read_to_string(&t)?, "id,v\n1,-1\n2,-1\n3,-1\n");
+    Ok(())
+}

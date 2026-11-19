@@ -735,12 +735,23 @@ It must yield one column per target column.
 
 ```sql
 UPDATE table SET col1 = val1 [, col2 = val2, ...]
+[FROM other [, ...] | FROM other JOIN ...]
 [WHERE condition]
 ```
 
-`UPDATE ... FROM other_table` is not supported and is rejected with an error.
-To pull a value from another table, use a correlated subquery in the SET
-expression:
+With `FROM` (SQLite 3.33's UPDATE-FROM), the target row is joined with the
+FROM items -- tables, derived tables, CTEs, joins -- and SET and WHERE see
+both:
+
+```sql
+UPDATE data SET category = lookup.category
+FROM lookup WHERE lookup.code = data.code
+```
+
+A target row that joins no FROM row is left alone. One that joins several
+is updated once, from the first of them in loop order (SQLite leaves the
+choice unspecified), and counts once. The same lookup with a correlated
+subquery in the SET expression updates every row:
 
 ```sql
 UPDATE data SET category =
@@ -947,7 +958,8 @@ nothing is modified. That includes:
 
 - `INSERT OR REPLACE` / `OR IGNORE` / ..., `ON CONFLICT`, `INSERT OVERWRITE`,
   and `RETURNING` on INSERT, UPDATE and DELETE (`REPLACE INTO` does not parse)
-- `UPDATE ... FROM`, `DELETE ... USING`, `DELETE t FROM t JOIN ...`, and
+- `UPDATE t FROM ... SET` (FROM before SET), `DELETE ... USING`,
+  `DELETE t FROM t JOIN ...`, and
   UPDATE / DELETE with `ORDER BY` or `LIMIT`
 - `WITH` on a parenthesized compound operand (`SELECT 1 UNION (WITH ...)`),
   a CTE body that is an INSERT / UPDATE / DELETE, typed CTE columns

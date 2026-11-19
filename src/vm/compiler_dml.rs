@@ -424,4 +424,79 @@ impl<'a> SqlCompiler<'a> {
 
         Ok(())
     }
+
+    /// `UPDATE target SET ... FROM items [WHERE ...]` (SQLite 3.33): the
+    /// target is the first source of a FROM plan and the items follow it,
+    /// so SET and WHERE see the target row joined with each FROM row. A
+    /// target row is replaced for every joined row, and the first
+    /// replacement is the one applied and counted (see
+    /// `apply_modifications`): with several matches, the first in loop
+    /// order wins.
+    pub(crate) fn compile_update_from(
+        &mut self,
+        table: &sqlparser::ast::TableWithJoins,
+        assignments: &[sqlparser::ast::Assignment],
+        from: &[sqlparser::ast::TableWithJoins],
+        selection: Option<&Expr>,
+    ) -> SqawkResult<()> {
+        let table_name = match &table.relation {
+            TableFactor::Table { name, .. } => self.get_table_name(name)?,
+            _ => {
+                return Err(SqawkError::UnsupportedSqlFeature(
+                    "Only simple table references are supported in UPDATE".to_string(),
+                ));
+            }
+        };
+        let target = self.database.get_table(&table_name)?;
+        let column_count = target.column_count();
+        let mut assignment_map: Vec<(usize, &Expr)> = Vec::new();
+        for assignment in assignments {
+            let col_name = assignment_column(assignment)?;
+            let col_idx = target
+                .column_index(&col_name)
+                .ok_or_else(|| SqawkError::ColumnNotFound(col_name.clone()))?;
+            assignment_map.push((col_idx, &assignment.value));
+        }
+
+        let mut sources = Vec::with_capacity(1 + from.len());
+        sources.push(sqlparser::ast::TableWithJoins {
+            relation: table.relation.clone(),
+            joins: Vec::new(),
+        });
+        sources.extend(from.iter().cloned());
+
+        let init_addr = self.program.len();
+        self.emit(OpCode::Init, 0, 0, 0, None, "Start UPDATE ... FROM");
+        let plan = self.plan_from(&sources, selection)?;
+        let cursor = plan.srcs[0].cursor;
+        let base = self.allocate_registers(column_count.max(1));
+        self.emit_scan(&plan, &mut |c, ctx| {
+            for i in 0..column_count {
+                c.emit(
+                    OpCode::Column,
+                    cursor,
+                    i as i64,
+                    base + i as i64,
+                    None,
+                    "target column",
+                );
+            }
+            // Every SET is computed from the row as it was.
+            for (col_idx, expr) in &assignment_map {
+                c.code_expr(expr, ctx, Some(base + *col_idx as i64))?;
+            }
+            c.emit(
+                OpCode::UpdateRow,
+                cursor,
+                base,
+                column_count as i64,
+                Some(table_name.clone()),
+                "Replace target row",
+            );
+            Ok(())
+        })?;
+        self.emit(OpCode::Halt, 0, 0, 0, None, "End UPDATE ... FROM");
+        self.patch_jump(init_addr, init_addr + 1);
+        Ok(())
+    }
 }

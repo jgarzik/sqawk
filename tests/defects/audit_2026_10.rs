@@ -1045,13 +1045,16 @@ fn insert_or_replace_is_error() -> TestResult {
     )
 }
 
-/// `UPDATE ... FROM` silently ignored the FROM clause; now rejected.
+/// `UPDATE ... FROM` once silently ignored the FROM clause (then it was
+/// rejected); the FROM rows now decide which target rows change.
 #[test]
-fn update_from_is_error() -> TestResult {
-    assert_query_fails(
+fn update_from_honours_from() -> TestResult {
+    assert_query(
         &[users_csv(), orders_csv()],
-        "UPDATE users SET name = 'X' FROM orders WHERE users.id = 1",
-        "not supported",
+        "UPDATE users SET name = 'X' FROM orders WHERE users.id = 1 AND orders.user_id = 99; \
+         UPDATE users SET email = 'y' FROM orders WHERE users.id = orders.user_id AND users.id = 2; \
+         SELECT id, name, email FROM users ORDER BY id",
+        "id,name,email\n1,John,john@example.com\n2,Jane,y",
     )
 }
 

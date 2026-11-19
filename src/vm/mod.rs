@@ -328,6 +328,9 @@ fn apply_modifications(
     let mut insert_counts_by_table: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
 
+    // (table, row) pairs already replaced by this statement.
+    let mut replaced: HashSet<(String, usize)> = HashSet::new();
+
     // Rows replaced in place by UPDATE, per table.
     let mut replace_counts_by_table: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
@@ -348,6 +351,12 @@ fn apply_modifications(
                 row_index,
                 row,
             } => {
+                // A row is replaced once per statement: UPDATE ... FROM
+                // replaces a target row for every FROM row it joins, and
+                // only the first counts and applies.
+                if !replaced.insert((table_name.clone(), row_index)) {
+                    continue;
+                }
                 let table = database.get_table_mut(&table_name)?;
                 table.replace_row(row_index, row)?;
                 // Tallied per table and reported once, not once per row.

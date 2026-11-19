@@ -741,6 +741,20 @@ fn data_stmt(r: &mut Rng, models: &[Model], ti: usize, alter_seq: &mut usize) ->
         if r.chance(0.05) {
             sets.push(format!("{id} = {id} + 100"));
         }
+        if r.chance(0.15) {
+            // UPDATE ... FROM a one-row derived table, so each target row
+            // joins exactly one FROM row (with several, SQLite leaves the
+            // choice unspecified).
+            let other = &models[r.below(models.len())];
+            let c = quote_ident(r.pick(&cols).as_str());
+            sets[0] = format!("{c} = fromx.v + {id}");
+            return plain(format!(
+                "UPDATE {t} SET {} FROM (SELECT COUNT(*) AS v FROM {}) AS fromx WHERE {}",
+                sets.join(", "),
+                quote_ident(&other.name),
+                cond(r, m)
+            ));
+        }
         plain(format!(
             "UPDATE {t} SET {} WHERE {}",
             sets.join(", "),
