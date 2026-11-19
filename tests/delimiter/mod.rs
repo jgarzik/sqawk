@@ -112,3 +112,44 @@ fn test_colon_delimiter() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+/// A file that loads as one column although its header holds `;`, `|` or
+/// a tab gets a warning suggesting -F; the run still succeeds.
+#[test]
+fn single_column_with_other_separator_warns() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let semi = dir.path().join("semi.csv");
+    std::fs::write(&semi, "a;b;c\n1;2;3\n")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s").arg("SELECT * FROM semi").arg(&semi);
+    let out = cmd
+        .assert()
+        .success()
+        .stdout("a;b;c\n1;2;3\n")
+        .get_output()
+        .clone();
+    let err = String::from_utf8(out.stderr)?;
+    assert!(err.starts_with("sqawk: warning: "), "{err}");
+    assert!(
+        err.ends_with(
+            "semi.csv loaded as one column, but its header contains ';' \
+             (for ';'-separated input use -F ';')\n"
+        ),
+        "{err}"
+    );
+    assert_eq!(err.lines().count(), 1, "{err}");
+    // A real one-column file, or -F given: no warning.
+    let one = dir.path().join("one.csv");
+    std::fs::write(&one, "name\nx\n")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s").arg("SELECT * FROM one").arg(&one);
+    cmd.assert().success().stderr("");
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-F")
+        .arg(";")
+        .arg("-s")
+        .arg("SELECT b FROM semi")
+        .arg(&semi);
+    cmd.assert().success().stdout("b\n2\n").stderr("");
+    Ok(())
+}

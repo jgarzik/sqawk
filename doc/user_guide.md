@@ -442,6 +442,14 @@ Notes on field separators:
   `-F`, else comma -- reading a tab-separated file without either prints
   comma-separated results (see [Output Options](#output-options))
 
+A file read with the default delimiter that comes out as a single column,
+although its header contains `;`, `|` or a tab, gets a warning on stderr
+suggesting the `-F` that would split it (the run itself goes on):
+
+```
+sqawk: warning: sales.csv loaded as one column, but its header contains ';' (for ';'-separated input use -F ';')
+```
+
 ### Output Options
 
 Query results are written to stdout, one result set per statement, as rows

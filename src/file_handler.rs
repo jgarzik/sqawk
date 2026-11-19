@@ -240,6 +240,37 @@ impl FileHandler {
             )));
         }
 
+        // One column, though the header holds another common separator:
+        // probably the wrong delimiter.
+        if self.config.field_separator().is_none()
+            && opts.header
+            && table.column_count() == 1
+            && let Some(sep) = likely_separator(&table.columns()[0])
+        {
+            let flag = if sep == '\t' {
+                "'\\t'".to_string()
+            } else {
+                format!("'{sep}'")
+            };
+            let shown = if sep == '\t' {
+                "a tab".to_string()
+            } else {
+                format!("'{sep}'")
+            };
+            diag!(
+                "sqawk: warning: {} loaded as one column, but its header contains {} \
+                 (for {}-separated input use -F {})",
+                crate::error::display_path(&file_path),
+                shown,
+                if sep == '\t' {
+                    "tab".to_string()
+                } else {
+                    format!("'{sep}'")
+                },
+                flag
+            );
+        }
+
         if from_stdin {
             self.stdin_table = Some(table_name.clone());
         }
@@ -576,6 +607,17 @@ fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
 
 /// Whether `path` names a tab-separated file: extension `.tsv` or `.tab`
 /// (any case).
+/// The separator a one-column header most likely means: the most frequent
+/// of `;`, `|` and tab in it, if any.
+fn likely_separator(header: &str) -> Option<char> {
+    [';', '|', '\t']
+        .into_iter()
+        .map(|c| (header.matches(c).count(), c))
+        .filter(|(n, _)| *n > 0)
+        .max_by_key(|(n, _)| *n)
+        .map(|(_, c)| c)
+}
+
 /// Whether `path` is a file pattern: it does not exist, and its name holds
 /// a GLOB wildcard.
 fn is_pattern(path: &Path) -> bool {
