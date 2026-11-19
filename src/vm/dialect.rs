@@ -240,6 +240,25 @@ impl Dialect for SqawkDialect {
                 }
             }));
         }
+        // `x [NOT] REGEXP p` / `RLIKE`: sqlparser reads a NULL keyword
+        // first (for `NOT NULL`), so `x REGEXP NULL` lost its pattern.
+        let not = word(parser, 0, Keyword::NOT);
+        let at = usize::from(not);
+        let regexp = word(parser, at, Keyword::REGEXP);
+        if regexp || word(parser, at, Keyword::RLIKE) {
+            if left_spine_exceeds(expr, super::parse::MAX_EXPR_DEPTH) {
+                return Some(Err(too_deep()));
+            }
+            for _ in 0..=at {
+                parser.advance_token();
+            }
+            return Some(parser.parse_subexpr(PREC_EQ).map(|pattern| Expr::RLike {
+                negated: not,
+                expr: Box::new(expr.clone()),
+                pattern: Box::new(pattern),
+                regexp,
+            }));
+        }
         if !word(parser, 0, Keyword::IS) {
             return None;
         }

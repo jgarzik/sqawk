@@ -35,6 +35,7 @@ pub(crate) mod like;
 pub mod parse;
 mod prepass;
 mod printf;
+mod regexp;
 mod window;
 
 #[cfg(test)]

@@ -1737,6 +1737,20 @@ impl<'a> SqlCompiler<'a> {
                 self.emit_call_refs("~", &[inner], ctx, dest)?;
             }
 
+            // `x [NOT] REGEXP p` (and RLIKE) is REGEXP(p, x), as the sqlite3
+            // shell defines it.
+            Expr::RLike {
+                negated,
+                expr: inner,
+                pattern,
+                ..
+            } => {
+                self.emit_call_refs("REGEXP", &[pattern, inner], ctx, dest)?;
+                if *negated {
+                    self.emit(OpCode::Not, dest, dest, 0, None, "NOT REGEXP");
+                }
+            }
+
             // `x GLOB p` is the function GLOB(p, x), as in SQLite.
             Expr::BinaryOp {
                 left,

@@ -823,6 +823,7 @@ dependencies = [
  "compact_str",
  "csv",
  "predicates",
+ "regex",
  "rustyline",
  "sqlparser",
  "stacker",

@@ -78,6 +78,11 @@ static FUNCS: &[FuncDef] = &[
     f!("QUOTE", 1, 1, quote),
     // GLOB(pattern, x) is `x GLOB pattern`.
     f!("GLOB", 2, 2, glob),
+    // REGEXP(pattern, x) is `x REGEXP pattern` (see regexp.rs).
+    f!("REGEXP", 2, 2, super::regexp::regexp),
+    f!("REGEXP_MATCHES", 2, 2, super::regexp::regexp_matches),
+    f!("REGEXP_REPLACE", 3, 4, super::regexp::regexp_replace),
+    f!("REGEXP_EXTRACT", 2, 3, super::regexp::regexp_extract),
     // Numbers
     f!("ABS", 1, 1, abs),
     f!("ROUND", 1, 2, round),

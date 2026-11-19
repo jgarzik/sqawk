@@ -216,6 +216,24 @@ past the limit (SQLite returns NULL or wraps the number), or a `REPLACE`,
 `HEX` or concatenation whose result would exceed it is the error "string or
 blob too big". The length is checked before anything is allocated.
 
+### Regular Expressions
+
+| Function | Description |
+|----------|-------------|
+| `s REGEXP p`, `s RLIKE p`, `s NOT REGEXP p` | 1 if `p` matches somewhere in `s`, else 0; `REGEXP(p, s)` is the same |
+| `REGEXP_MATCHES(s, p)` | `s REGEXP p` |
+| `REGEXP_REPLACE(s, p, r [, flags])` | `s` with the first match replaced by `r`; flag `g` replaces every match, `i` ignores case |
+| `REGEXP_EXTRACT(s, p [, group])` | The first match (or its group number `group`); empty text when nothing matches |
+
+Patterns use the Rust `regex` crate's syntax (Perl-like: `\d`, `\w`, `[...]`,
+`(?i)`, `+?`, ...; no backreferences or look-around) and search: anchor
+with `^` and `$` to match the whole text. In a replacement `\1` ... `\9`
+insert a group and `\0` the whole match (a group that did not take part
+inserts nothing); `\\` is a backslash. A NULL argument gives NULL; an
+invalid pattern, an unknown flag or a group the pattern does not have is an
+error. `REGEXP` is the operator the sqlite3 shell provides; the three
+functions are named and behave as in DuckDB.
+
 ### Math Functions
 
 | Function | Description |
@@ -948,9 +966,9 @@ sqawk aims to give SQLite's answers. Where it deliberately does not:
 | Aggregate of outer-query columns in a subquery (`(SELECT MIN(t.x) FROM u)`) | Evaluated in the outer query, which becomes an aggregate query | Rejected; an aggregate that also reads a column of the subquery's own tables aggregates in the subquery, as in SQLite |
 | Derived table (`FROM (SELECT ...)`) reading an outer-query column | Correlated | Rejected (`no such column`): a derived table is computed once, before the statement |
 | CTE body reading an outer-query column (`SELECT (WITH c AS (SELECT t.x) SELECT * FROM c) FROM t`) | Correlated | Rejected (`no such column`): a CTE is computed once, on first reference |
-| `ILIKE`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `TRIM(... FROM ...)` | Not available | Available |
+| `ILIKE`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `TRIM(... FROM ...)`, `REGEXP`, `REGEXP_MATCHES`, `REGEXP_REPLACE`, `REGEXP_EXTRACT` | Not available (`REGEXP` only in the sqlite3 shell, with its own pattern syntax) | Available |
 | `PRINTF` width or precision past the length limit | NULL, or the number wrapped to 31 bits | Error "string or blob too big" |
-| Parser | SQLite grammar | sqlparser's Hive dialect with SQLite's operator precedence: `TRIM(s, chars)`, `REPLACE INTO` do not parse, `REGEXP` is rejected, and parentheses nest at most 47 deep |
+| Parser | SQLite grammar | sqlparser's Hive dialect with SQLite's operator precedence: `TRIM(s, chars)`, `REPLACE INTO` do not parse, and parentheses nest at most 47 deep |
 
 Not implemented: views, indexes, triggers,
 `RETURNING`, row values, and blob values.

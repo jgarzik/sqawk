@@ -34,6 +34,7 @@ stacker = "0.1"
 # else the system zone).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 compact_str = "0.10.0"
+regex = "1.13.2"
 
 [dev-dependencies]
 assert_cmd = "2"

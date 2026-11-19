@@ -2991,3 +2991,50 @@ fn glob_matches_like_sqlite() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     Ok(())
 }
+
+/// `x REGEXP p` (the sqlite3 shell's operator; RLIKE is the same): an
+/// unanchored search with Rust regex syntax, NULL in gives NULL. REGEXP(p,
+/// x) is `x REGEXP p`.
+#[test]
+fn regexp_operator() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        r"SELECT 'abc' REGEXP 'b' AS a, 'abc' REGEXP '^b' AS b, 'abc' NOT REGEXP 'b' AS c, NULL REGEXP 'a' AS d, 'a' REGEXP NULL AS e, 'ABC' RLIKE 'b' AS f, regexp('\d', 'x7') AS g, 12 REGEXP '^1\d$' AS h",
+        "a,b,c,d,e,f,g,h\n1,0,0,,,0,1,1",
+    )
+}
+
+/// regexp_matches / regexp_replace / regexp_extract, named as in DuckDB.
+#[test]
+fn regexp_functions() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        r"SELECT regexp_matches('abc', 'B') AS a, regexp_matches('abc', '(?i)B') AS b, regexp_replace('a1b22c', '[0-9]+', '#') AS c, regexp_replace('a1b22c', '[0-9]+', '#', 'g') AS d, regexp_replace('ABab', 'a', 'x', 'gi') AS e, regexp_replace('john smith', '(\w+) (\w+)', '\2 \1') AS f, regexp_replace('a.b', '\.', '\\$') AS g",
+        "a,b,c,d,e,f,g\n0,1,a#b22c,a#b#c,xBxb,smith john,a\\$b",
+    )?;
+    assert_query_on(
+        &[ONE],
+        r"SELECT regexp_extract('abc123def', '[0-9]+') AS a, regexp_extract('key=val', '(\w+)=(\w+)', 2) AS b, length(regexp_extract('abc', 'x')) AS c, length(regexp_extract('abc', '(x)?b', 1)) AS d, regexp_extract(NULL, 'a') IS NULL AS e, regexp_replace('a', NULL, 'b') IS NULL AS f",
+        "a,b,c,d,e,f\n123,val,0,0,1,1",
+    )
+}
+
+/// A bad pattern, flag or group is an error naming it.
+#[test]
+fn regexp_errors() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on_fails(
+        &[ONE],
+        "SELECT 'a' REGEXP '('",
+        "invalid regular expression '(': unclosed group",
+    )?;
+    assert_query_on_fails(
+        &[ONE],
+        "SELECT regexp_replace('a', 'a', 'b', 'gz')",
+        "regexp_replace: unknown flag 'z'",
+    )?;
+    assert_query_on_fails(
+        &[ONE],
+        "SELECT regexp_extract('ab', '(a)', 2)",
+        "regexp_extract: group 2 out of range (the pattern has 1)",
+    )
+}

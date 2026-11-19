@@ -136,6 +136,9 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
   3.45's date.c: time strings, modifiers, `localtime` via the C library)
 - `like.rs`: the LIKE matcher (no regex; compiled pattern cached per
   instruction)
+- `regexp.rs`: `REGEXP` (parsed in `dialect.rs`, compiled to `REGEXP(p, x)`)
+  and DuckDB's `regexp_matches` / `regexp_replace` / `regexp_extract` on the
+  `regex` crate, compiled patterns cached per thread
 - `glob.rs`: the GLOB matcher, a port of SQLite's `patternCompare`;
   `x [NOT] GLOB p` is parsed in `dialect.rs` and compiled to the `GLOB(p, x)`
   function
