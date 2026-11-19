@@ -148,7 +148,7 @@ pub fn read_table(
             let cols = if header {
                 header_span = span;
                 match &opts.columns {
-                    None => record.iter().map(|f| field_text(f).into_owned()).collect(),
+                    None => header_names(record.iter().map(|f| field_text(f).into_owned())),
                     Some(cols) if cols.len() == record.len() => cols.clone(),
                     Some(cols) => {
                         return Err(SqawkError::CsvParseError {
@@ -232,8 +232,29 @@ pub fn read_table(
     Ok(table)
 }
 
-/// Reject a header (or column list) with an empty or repeated name. Names
-/// are case-insensitive, so `a` and `A` are the same column.
+/// Column names from a file's header line, named as sqlite3 names such
+/// columns: an empty name becomes `columnN` (its 1-based position) and a
+/// repeated one (case-insensitively) gets `:1`, `:2`, ... as the columns of
+/// a derived table do. Only the table's names change; the header line is
+/// written back as it was.
+fn header_names(fields: impl Iterator<Item = String>) -> Vec<String> {
+    let mut names: Vec<String> = fields
+        .enumerate()
+        .map(|(i, f)| {
+            if f.is_empty() {
+                format!("column{}", i + 1)
+            } else {
+                f
+            }
+        })
+        .collect();
+    crate::table::unique_column_names(&mut names);
+    names
+}
+
+/// Reject a declared column list (`--tabledef`, LOCATION) with an empty or
+/// repeated name. Names are case-insensitive, so `a` and `A` are the same
+/// column.
 fn check_column_names(cols: &[String], source: &str, line: usize) -> SqawkResult<()> {
     let err = |error: String| SqawkError::CsvParseError {
         file: source.to_string(),
@@ -725,11 +746,17 @@ mod tests {
     /// comment lines.
     #[test]
     fn bad_header_line() {
-        assert_eq!(error_line(b"a,a\r\n1,2\r\n", &ReadOptions::default()), 1);
-        assert_eq!(error_line(b"\r\n\r\na,a\r\n", &ReadOptions::default()), 3);
+        // A header that does not fit the declared columns (LOCATION) is an
+        // error on the header's own line, whatever comes before it.
+        let declared = ReadOptions {
+            columns: Some(vec!["x".to_string()]),
+            ..ReadOptions::default()
+        };
+        assert_eq!(error_line(b"a,b\r\n1,2\r\n", &declared), 1);
+        assert_eq!(error_line(b"\r\n\r\na,b\r\n", &declared), 3);
         let comments = ReadOptions {
             comments: true,
-            ..ReadOptions::default()
+            ..declared
         };
         assert_eq!(error_line(b"\xef\xbb\xbf#c\r\n\na,,b\r\n", &comments), 3);
     }
@@ -778,13 +805,29 @@ mod tests {
     }
 
     #[test]
-    fn bad_header_names() {
-        for data in [&b"a,a\n"[..], b"a,A\n", b"a,,c\n", b",\n"] {
-            assert!(
-                load(data, &ReadOptions::default()).is_err(),
-                "{:?}",
-                String::from_utf8_lossy(data)
-            );
+    fn header_names_are_made_unique() {
+        for (data, want) in [
+            (&b"a,a\n"[..], &["a", "a:1"][..]),
+            (b"a,A\n", &["a", "A:1"]),
+            (b"a,,c\n", &["a", "column2", "c"]),
+            (b",\n", &["column1", "column2"]),
+        ] {
+            let table = load(data, &ReadOptions::default()).unwrap();
+            let names: Vec<&str> = table
+                .column_metadata()
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect();
+            assert_eq!(names, want, "{:?}", String::from_utf8_lossy(data));
+        }
+        // A declared column list is SQL the user wrote: still rejected.
+        for cols in [&["a", "A"][..], &["a", ""]] {
+            let opts = ReadOptions {
+                columns: Some(cols.iter().map(|c| c.to_string()).collect()),
+                header: false,
+                ..ReadOptions::default()
+            };
+            assert!(load(b"1,2\n", &opts).is_err(), "{cols:?}");
         }
     }
 }

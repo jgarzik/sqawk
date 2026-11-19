@@ -494,8 +494,10 @@ sqawk -F: \
 - `--no-header` says no input file has a header row: the first line is data
   and the columns are named `a`, `b`, `c`, ... (or by `--tabledef`)
 - `--tabledef` likewise means the file has no header row
-- Column names are case-insensitive, so a header must not repeat a name
-  (`id,ID` is an error) or leave one empty (`a,,c` is an error)
+- Column names are case-insensitive. As in sqlite3, an empty header name
+  becomes `columnN` by its position, and a repeated one gets `:1`, `:2`,
+  ...: `,id,ID` loads as columns `column1`, `id`, `ID:1` (quote such names
+  in SQL: `"ID:1"`). The header line itself is written back unchanged
 
 A table loaded without a header row is written back without one.
 

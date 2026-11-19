@@ -246,14 +246,41 @@ fn load_error_lines_are_the_same_for_crlf() -> TestResult {
     Ok(())
 }
 
+/// A header that repeats a name (case-insensitively) or leaves one empty
+/// loads as sqlite3 names such columns: an empty name is `columnN` by its
+/// 1-based position, and a repeat gets `:1`, `:2`, ... (the rule for the
+/// columns of a derived table). The file's own header line is untouched.
 #[test]
-fn duplicate_header_names_are_named() -> TestResult {
-    let dir = create_temp_dir()?;
-    let p = put(dir.path(), "h.csv", b"id,Name,x,NAME,y\n1,2,3,4,5\n")?;
-    let (_out, stderr, ok) = run_sql("SELECT 1", &[&p], &[])?;
-    assert!(!ok);
-    assert!(stderr.contains("duplicate column name: NAME"), "{stderr}");
-    Ok(())
+fn duplicate_and_empty_header_names_are_named() -> TestResult {
+    crate::helpers::assert_query_on(
+        &[("h.csv", "id,Name,x,NAME,y,name\n1,2,3,4,5,6\n")],
+        "SELECT * FROM h",
+        "id,Name,x,NAME:1,y,name:2\n1,2,3,4,5,6",
+    )?;
+    // pandas' to_csv() writes an empty first header field for the index.
+    crate::helpers::assert_query_on(
+        &[("p.csv", ",a,,b\n0,x,y,z\n")],
+        "SELECT column1, a, column3, b FROM p",
+        "column1,a,column3,b\n0,x,y,z",
+    )?;
+    // A generated name that is already taken is made unique the same way.
+    crate::helpers::assert_query_on(
+        &[("q.csv", "column2,\n1,2\n")],
+        "SELECT * FROM q",
+        "column2,column2:1\n1,2",
+    )
+}
+
+/// Renamed columns do not change the file: --write keeps its header line.
+#[test]
+fn renamed_header_columns_write_back_verbatim() -> TestResult {
+    assert_write_back(
+        "w.csv",
+        b",id,ID\n1,2,3\n",
+        &[],
+        "UPDATE w SET \"ID:1\" = 9 WHERE column1 = 1",
+        b",id,ID\n1,2,9\n",
+    )
 }
 
 // ---------------------------------------------------------------------------
