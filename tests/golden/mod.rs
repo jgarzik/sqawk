@@ -2944,3 +2944,26 @@ fn length_and_unicode_stop_at_nul() -> Result<(), Box<dyn std::error::Error>> {
         "a,b,c,d,e,f\n0,1,,,3,6100",
     )
 }
+
+/// RANDOM() is a fresh 64-bit integer on every call (so every row of a
+/// derived table differs), and ORDER BY RANDOM() shuffles every row.
+#[test]
+fn random_is_a_fresh_integer_per_call() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT COUNT(DISTINCT r) AS n, MIN(typeof(r)) AS t, MAX(typeof(r)) AS u \
+         FROM (SELECT random() AS r FROM employees)",
+        "n,t,u\n8,integer,integer",
+    )?;
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT COUNT(*) AS n, SUM(id) AS s FROM \
+         (SELECT id FROM employees ORDER BY random())",
+        "n,s\n8,36",
+    )?;
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT random() = random() AS same",
+        "same\n0",
+    )
+}

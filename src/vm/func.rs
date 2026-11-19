@@ -84,6 +84,7 @@ static FUNCS: &[FuncDef] = &[
     f!("FLOOR", 1, 1, floor),
     f!("SIGN", 1, 1, sign),
     f!("TRUNC", 1, 1, trunc),
+    f!("RANDOM", 0, 0, random),
     // SQLite's math functions (SQLITE_ENABLE_MATH_FUNCTIONS)
     f!("SQRT", 1, 1, |a| math1(a, f64::sqrt)),
     f!("EXP", 1, 1, |a| math1(a, f64::exp)),
@@ -639,6 +640,31 @@ fn ceil(a: &[Register]) -> SqawkResult<Register> {
 
 fn floor(a: &[Register]) -> SqawkResult<Register> {
     ceil_floor(a, false)
+}
+
+/// RANDOM(): a pseudo-random 64-bit integer, different on every call.
+///
+/// splitmix64 over a per-thread state seeded from the standard library's
+/// randomly keyed hasher, so each run differs; not for cryptography (nor
+/// is SQLite's).
+fn random(_: &[Register]) -> SqawkResult<Register> {
+    use std::cell::Cell;
+    use std::hash::{BuildHasher, Hasher};
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new({
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u64(std::process::id() as u64);
+            h.finish()
+        });
+    }
+    let z = STATE.with(|s| {
+        let v = s.get().wrapping_add(0x9e37_79b9_7f4a_7c15);
+        s.set(v);
+        v
+    });
+    let z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    let z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    Ok(Register::Integer((z ^ (z >> 31)) as i64))
 }
 
 /// TRUNC(x): toward zero, SQLite's `ceilingFunc` with `trunc`.

@@ -231,6 +231,7 @@ blob too big". The length is checked before anything is allocated.
 | `POW(x, y)`, `POWER(x, y)` | x to the power y |
 | `MOD(x, y)` | Remainder of x / y, as a real (`MOD(7, 3)` is `1.0`) |
 | `PI()` | 3.14159265358979 |
+| `RANDOM()` | A pseudo-random 64-bit integer, new on every call (`ORDER BY RANDOM()` shuffles) |
 | `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, `ATAN2(y, x)` | Trigonometry, in radians |
 | `SINH`, `COSH`, `TANH`, `ASINH`, `ACOSH`, `ATANH` | Hyperbolic functions |
 | `DEGREES(n)`, `RADIANS(n)` | Radians to degrees and back |
