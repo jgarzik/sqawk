@@ -725,9 +725,31 @@ impl<'a> SqlCompiler<'a> {
             let terms = std::mem::take(&mut join_terms[i]);
             match kind {
                 JoinKind::Inner => {
-                    let mut level = new_level(i);
-                    level.on_terms = terms;
-                    plan.levels.push(level);
+                    // An inner join's ON is a filter like WHERE: each
+                    // conjunct is tested at the deepest table it reads, so a
+                    // conjunct on an earlier table rejects its rows before
+                    // this table (perhaps a derived table that would be
+                    // computed on first open) is ever read. On a table in an
+                    // outer-join group it filters after NULL-extension.
+                    plan.levels.push(new_level(i));
+                    for term in terms {
+                        let at = match expr_sources(&term, &ctx) {
+                            Some(s) if !s.is_empty() && s.iter().all(|src| *src <= i) => {
+                                let at = plan.max_level(&s);
+                                match plan.group_of(at).map(|g| g.end) {
+                                    Some(end) => {
+                                        plan.levels[end].post_terms.push(term);
+                                        continue;
+                                    }
+                                    None => at,
+                                }
+                            }
+                            // A constant, a later table (an error below) or a
+                            // subquery: on this join's own level.
+                            _ => plan.levels.len() - 1,
+                        };
+                        plan.levels[at].on_terms.push(term);
+                    }
                     continue;
                 }
                 JoinKind::Left | JoinKind::Full => {

@@ -160,3 +160,29 @@ fn test_complex_operations_with_join_on() -> Result<(), Box<dyn std::error::Erro
 
     Ok(())
 }
+
+/// An inner join's ON conjunct is tested at the deepest table it reads, as
+/// a WHERE conjunct is: `b.aid = 0` rejects every b row before the derived
+/// table is ever computed, so its overflowing SUM is never reached (SQLite
+/// returns no rows too).
+#[test]
+fn inner_on_conjunct_is_tested_at_its_own_table() -> Result<(), Box<dyn std::error::Error>> {
+    const A: (&str, &str) = ("a.csv", "k\n1\n1\n");
+    const B: (&str, &str) = ("b.csv", "aid,k\n5,1\n");
+    crate::helpers::assert_query_on(
+        &[A, B],
+        "SELECT 1 AS one FROM b JOIN \
+         (SELECT k, SUM(9223372036854775807) AS s FROM a GROUP BY k) d \
+         ON b.k = d.k AND b.aid = 0",
+        "one",
+    )?;
+    // After a LEFT JOIN, a conjunct on the NULL-extendable table filters the
+    // extended rows, as WHERE would: a row of b with no c match fails it.
+    const C: (&str, &str) = ("c.csv", "k,v\n9,x\n");
+    crate::helpers::assert_query_on(
+        &[A, B, C],
+        "SELECT b.aid, c.v FROM b LEFT JOIN c ON c.k = b.k \
+         JOIN a ON a.k = b.k AND c.v IS NULL",
+        "aid,v\n5,\n5,",
+    )
+}
