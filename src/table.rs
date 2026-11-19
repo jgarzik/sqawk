@@ -843,14 +843,6 @@ impl Table {
         &self.delimiter
     }
 
-    /// Set the delimiter for this table
-    ///
-    /// # Arguments
-    /// * `delimiter` - The new delimiter string to use
-    pub fn set_delimiter(&mut self, delimiter: String) {
-        self.delimiter = delimiter;
-    }
-
     /// Layout of the source file (header, line endings, comments)
     pub fn file_layout(&self) -> FileLayout {
         self.format
@@ -915,39 +907,14 @@ impl Table {
         self.raw = None;
     }
 
-    /// Print the table to stdout as a delimited file
-    ///
-    /// Header line (when `header`), then one record per row, using this
-    /// table's delimiter with RFC 4180 quoting where a field needs it. NULL
-    /// prints as an empty field. Returns the raw io::Error so the caller can
-    /// recognise a closed pipe (`sqawk ... | head`) and stop quietly.
-    pub fn print_to_stdout(&self, header: bool) -> std::io::Result<()> {
-        let stdout = std::io::stdout();
-        let mut out = std::io::BufWriter::new(stdout.lock());
-        self.write_delimited(&mut out, header, false, false, None)?;
-        std::io::Write::flush(&mut out)
-    }
-
-    /// Write the table as a delimited file to `out`.
+    /// Write the table as a delimited file to `out`, writing each record
+    /// that has source bytes in `raw` as those bytes.
     ///
     /// * `header` - emit the column names first
     /// * `crlf` - end records with CRLF instead of LF
     /// * `comments` - the file will be read with `#` comment skipping, so a
     ///   leading `#` in a record's first field must be quoted
     /// * `lines` - comment lines to put back around the records
-    pub fn write_delimited<W: std::io::Write>(
-        &self,
-        out: &mut W,
-        header: bool,
-        crlf: bool,
-        comments: bool,
-        lines: Option<&CommentLines>,
-    ) -> std::io::Result<()> {
-        self.write_records(out, header, crlf, comments, lines, None)
-    }
-
-    /// `write_delimited`, writing each record that has source bytes in
-    /// `raw` as those bytes.
     fn write_records<W: std::io::Write>(
         &self,
         out: &mut W,

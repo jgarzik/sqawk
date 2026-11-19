@@ -573,6 +573,21 @@ impl From<Value> for Register {
     }
 }
 
+impl Register {
+    /// This register as an output field, exactly as the same value's
+    /// [`Value::field_str`]: NULL is empty, text is borrowed.
+    pub fn field_str(&self) -> std::borrow::Cow<'_, str> {
+        use std::borrow::Cow;
+        match self {
+            Register::Null => Cow::Borrowed(""),
+            Register::String(s) => Cow::Borrowed(s),
+            Register::Integer(i) => Cow::Owned(i.to_string()),
+            Register::Float(f) => Cow::Owned(crate::vm::arith::real_text(*f)),
+            Register::Boolean(b) => Cow::Borrowed(if *b { "true" } else { "false" }),
+        }
+    }
+}
+
 impl From<Register> for Value {
     fn from(register: Register) -> Self {
         use std::borrow::Cow;
@@ -582,6 +597,33 @@ impl From<Register> for Value {
             Register::String(s) => Value::String(Cow::Owned(s)),
             Register::Boolean(b) => Value::Boolean(b),
             Register::Null => Value::Null,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Register;
+    use crate::table::Value;
+
+    #[test]
+    fn register_field_str_matches_value() {
+        let regs = [
+            Register::Null,
+            Register::Integer(i64::MIN),
+            Register::Integer(0),
+            Register::Float(-0.0),
+            Register::Float(1e20),
+            Register::Float(0.1),
+            Register::Float(f64::INFINITY),
+            Register::Boolean(true),
+            Register::Boolean(false),
+            Register::String(String::new()),
+            Register::String("a,\"b".to_string()),
+        ];
+        for r in regs {
+            let v = Value::from(r.clone());
+            assert_eq!(r.field_str(), v.field_str(), "{r:?}");
         }
     }
 }

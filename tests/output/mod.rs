@@ -389,3 +389,74 @@ fn repl_line_prints_earlier_results_before_an_error() -> Result<(), Box<dyn std:
     assert!(out.contains("after\n2\n"), "next line missing: {out:?}");
     Ok(())
 }
+
+// ============================================================================
+// ROWS STREAM TO STDOUT AS THEY ARE PRODUCED
+// ============================================================================
+
+/// A runtime error part-way through a statement keeps the rows produced
+/// before it (sqlite3 prints them too), then reports the error.
+#[test]
+fn rows_before_a_runtime_error_are_printed() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = create_temp_dir()?;
+    let t = create_custom_csv(dir.path(), "t.csv", "k\n1\n-2\n-9223372036854775808\n4\n")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s")
+        .arg("SELECT abs(k) AS a FROM t; SELECT 9 AS never")
+        .arg(t.to_str().unwrap());
+    cmd.assert()
+        .code(1)
+        .stdout("a\n1\n2\n")
+        .stderr("sqawk: integer overflow\n");
+    Ok(())
+}
+
+/// The output delimiter and --no-output-header apply to streamed rows, and
+/// fields are quoted as in a written file.
+#[test]
+fn streamed_rows_use_output_delimiter_and_header_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = create_temp_dir()?;
+    let t = create_custom_csv(dir.path(), "t.csv", "k;v\n1;\"a;b\"\n2;\" x\"\n")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-F")
+        .arg(";")
+        .arg("--no-output-header")
+        .arg("-s")
+        .arg("SELECT k, v, NULL AS n, 1.5 AS r FROM t")
+        .arg(t.to_str().unwrap());
+    cmd.assert()
+        .success()
+        .stdout("1;\"a;b\";;1.5\n2;\" x\";;1.5\n");
+    Ok(())
+}
+
+/// An empty result still prints its header, once per statement; a
+/// statement with no result columns (DML) prints nothing.
+#[test]
+fn empty_result_prints_header_only() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = create_temp_dir()?;
+    let t = create_custom_csv(dir.path(), "t.csv", "k\n1\n")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s")
+        .arg("SELECT k AS a, k AS b FROM t WHERE k > 5; DELETE FROM t; SELECT k FROM t")
+        .arg(t.to_str().unwrap());
+    cmd.assert().success().stdout("a,b\nk\n");
+    Ok(())
+}
+
+/// With -v the row count is reported after the statement's rows.
+#[test]
+fn verbose_row_count_follows_the_rows() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = create_temp_dir()?;
+    let t = create_custom_csv(dir.path(), "t.csv", "k\n1\n2\n")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-v")
+        .arg("-s")
+        .arg("SELECT k FROM t")
+        .arg(t.to_str().unwrap());
+    let out = cmd.assert().success().get_output().clone();
+    assert_eq!(String::from_utf8(out.stdout)?, "k\n1\n2\n");
+    let err = String::from_utf8(out.stderr)?;
+    assert!(err.contains("Query returned 2 rows"), "{err}");
+    Ok(())
+}

@@ -42,6 +42,7 @@ mod csv_handler;
 mod database;
 mod error;
 mod file_handler;
+mod output;
 mod repl;
 mod sql_executor;
 mod table;
@@ -54,6 +55,7 @@ use config::AppConfig;
 use database::Database;
 use error::{SqawkError, SqawkResult};
 use file_handler::FileHandler;
+use output::StdoutSink;
 use repl::Repl;
 use sql_executor::SqlExecutor;
 
@@ -241,35 +243,22 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
         return Ok(repl.run());
     }
 
-    let mut stdout_open = true;
-    let header = !config.no_output_header();
+    // Rows print as each statement produces them, each result set with its
+    // own header, so the output of earlier statements survives a later
+    // error. Once the reader of a pipe has gone away (`sqawk ... | head`),
+    // printing stops but later statements and --write still run.
+    let mut out = StdoutSink::new(
+        &config.output_delimiter(),
+        !config.no_output_header(),
+        config.verbose(),
+        false,
+    );
 
     // Process each SQL statement in the order specified on the command line
     // This allows operations like: UPDATE -> DELETE -> SELECT to see the effects
     for sql in &script {
-        // Execute the SQL against the in-memory tables. Each statement's
-        // result set (SELECT; none for UPDATE, DELETE, INSERT) is printed as
-        // soon as that statement finishes, each with its own header, so the
-        // output of earlier statements survives a later error.
-        let mut printed = 0;
-        sql_executor.execute(sql, &mut |table| {
-            printed += 1;
-            if config.verbose() {
-                let row_count = table.row_count();
-                diag!("Query returned {row_count} rows");
-            }
-            // Print the result table in delimiter-separated format. Once the
-            // reader of a pipe has gone away (`sqawk ... | head`), stop
-            // printing but keep going: later statements and --write still run.
-            if stdout_open && let Err(e) = table.print_to_stdout(header) {
-                if e.kind() != std::io::ErrorKind::BrokenPipe {
-                    return Err(SqawkError::write("standard output", e));
-                }
-                stdout_open = false;
-            }
-            Ok(())
-        })?;
-        if printed == 0 && config.verbose() {
+        sql_executor.execute(sql, &mut out)?;
+        if out.take_result_sets() == 0 && config.verbose() {
             diag!("Query executed successfully (no results to display)");
         }
     }

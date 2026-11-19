@@ -49,8 +49,9 @@ Sqawk is an SQL-based CLI tool for processing delimiter-separated files (CSV, TS
 - **`error.rs`**: `SqawkError`; each `Display` is one complete line and no variant exposes a `source()` (that would print the cause twice). File I/O errors name the user's file (`SqawkError::open` / `write`), never a temp file
 - **`diag.rs`**: `diag!` / `outln!` -- every stderr diagnostic (errors, `-v`) and REPL stdout line goes through them; write errors are ignored, so a closed stream never panics. Do not use `eprintln!`/`println!`
 - **`database.rs`**: Central store for in-memory tables; owns modification tracking (`mark_modified` / `is_modified` / `modified_tables`, which decide what `--write` saves) and transactions (`begin` / `commit` / `rollback`; a table's original is kept the first time a transaction changes it)
+- **`output.rs`**: `ResultSink` (`begin` / `row` / `end` / `abort`), which receives each statement's result rows as the VM produces them; `StdoutSink` prints them (output delimiter, header flag, 64 KiB buffer flushed per statement, a closed pipe silences the rest while statements and `--write` still run; `-v` row count after the rows), `CollectSink` gathers each result set into a `Table` (derived tables, CTEs)
 - **`table.rs`**: In-memory table representation with columns (name, type affinity, declared type name), rows, and projection capabilities
-- **`sql_executor.rs`**: `SqlExecutor`, the facade `main.rs` and the REPL use: `execute` hands SQL text to `vm::execute_vm` and applies the output delimiter to the result tables; it also saves modified tables (`save_modified_tables`, `save_table`), rolls back a transaction left open at exit (`finish`), and answers the REPL's table/column/row-count queries. It does no parsing itself
+- **`sql_executor.rs`**: `SqlExecutor`, the facade `main.rs` and the REPL use: `execute` hands SQL text and a `ResultSink` to `vm::execute_vm`; it also saves modified tables (`save_modified_tables`, `save_table`), rolls back a transaction left open at exit (`finish`), and answers the REPL's table/column/row-count queries. It does no parsing itself
 
 ### SQL Execution (VM-based)
 
@@ -120,7 +121,10 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
   `for_each_child`, the one enumeration of a statement's queries, FROM items
   and expressions shared by the limit walk and the pre-pass
 - `ast_compat.rs`: thin accessors normalizing sqlparser AST shapes
-- `engine.rs`: Executes bytecode instructions
+- `engine.rs`: Executes bytecode instructions. `step()` runs to the next
+  `ResultRow` (`Step::Row`, the row read in place with `row()`) or the end
+  (`Step::Done`), SQLite's step model; `execute()` loops it and buffers the
+  rows (lazy tables, the pre-pass, tests)
 - `arith.rs`: SQLite numeric semantics -- text-to-number coercion, i64
   arithmetic with overflow to real, bitwise operators, CAST, truth values
 - `func.rs`: the scalar function table (`FuncDef`: name, arity, body) run by

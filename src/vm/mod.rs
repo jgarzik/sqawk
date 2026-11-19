@@ -46,18 +46,12 @@ use std::sync::Arc;
 
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::Table;
+use crate::output::ResultSink;
 
 /// The names of the built-in scalar functions (upper case).
 pub(crate) fn scalar_function_names() -> impl Iterator<Item = &'static str> {
     func::names()
 }
-
-/// Receives each statement's result set as soon as that statement finishes,
-/// so a later statement's failure cannot swallow the output of earlier ones.
-/// A multi-statement script produces one result set per statement (each
-/// with its own header); an error from the sink stops the script.
-pub type ResultSink<'s> = dyn FnMut(Table) -> SqawkResult<()> + 's;
 
 /// Counts reported by a script's execution (its result sets went to the
 /// sink).
@@ -79,12 +73,16 @@ pub struct VmExecutionResult {
 /// 1. SQL parsing and bytecode generation
 /// 2. VM execution of bytecode instructions
 ///
-/// Each statement's result set goes to `sink` when the statement finishes.
+/// Each statement's result rows go to `sink` as the statement produces
+/// them, so a later statement's failure cannot swallow the output of
+/// earlier ones. A multi-statement script produces one result set per
+/// statement (each with its own header); an error from the sink stops the
+/// script.
 pub fn execute_vm(
     sql: &str,
     database: &mut Database,
     verbose: bool,
-    sink: &mut ResultSink<'_>,
+    sink: &mut dyn ResultSink,
 ) -> SqawkResult<VmExecutionResult> {
     if verbose {
         diag!("VM Engine: Executing SQL via bytecode: {}", sql);
@@ -149,7 +147,7 @@ pub fn execute_vm(
 /// query, whose column references are named as written (see `SqlCompiler`).
 /// `cte_names`: for such a query, the CTE names of the enclosing statement
 /// (see `prepass::Prepared::cte_names`); empty at top level. `sink` receives
-/// each statement's result set as soon as the statement finishes.
+/// each statement's result rows as the statement produces them.
 fn execute_statements(
     statements: Vec<sqlparser::ast::Statement>,
     database: &mut Database,
@@ -157,7 +155,7 @@ fn execute_statements(
     source: &Arc<parse::SqlSource>,
     in_derived: bool,
     cte_names: &Arc<HashSet<String>>,
-    sink: &mut ResultSink<'_>,
+    sink: &mut dyn ResultSink,
 ) -> SqawkResult<VmExecutionResult> {
     let mut affected_rows: usize = 0;
     let mut dml_executed = false;
@@ -189,7 +187,7 @@ fn execute_statements(
         // `SELECT bad FROM (SELECT ...) x` left `x` registered, so the next
         // statement using the same alias failed with "shadows an existing
         // table", and `.tables` listed a phantom table.
-        let outcome = (|| -> SqawkResult<(Option<Table>, AppliedModifications)> {
+        let outcome = (|| -> SqawkResult<AppliedModifications> {
             // PHASE 1: SQL -> BYTECODE, against the CURRENT database state.
             let program = {
                 let mut compiler = compiler::SqlCompiler::new(database, verbose)
@@ -206,15 +204,12 @@ fn execute_statements(
             // PHASE 2: EXECUTE
             let mut vm = engine::VmEngine::new_mut(database, verbose);
             vm.init(program);
-            vm.execute()?;
-
-            let result_table = vm.create_result_table()?;
+            stream_rows(&mut vm, sink)?;
             let modifications = vm.take_modifications();
             drop(vm);
 
             // PHASE 3: APPLY MODIFICATIONS before the next statement compiles.
-            let applied = apply_modifications(database, modifications, verbose)?;
-            Ok((result_table, applied))
+            apply_modifications(database, modifications, verbose)
         })();
 
         // Derived tables and CTEs live only for the statement that declared
@@ -223,7 +218,7 @@ fn execute_statements(
             database.remove_table(name);
         }
 
-        let (result_table, applied) = outcome?;
+        let applied = outcome?;
 
         // A DML statement reports its own count, INCLUDING zero.
         //
@@ -239,16 +234,46 @@ fn execute_statements(
             affected_rows = applied.affected_rows;
             dml_executed = true;
         }
-
-        if let Some(t) = result_table {
-            sink(t)?;
-        }
     }
 
     Ok(VmExecutionResult {
         affected_rows,
         dml_executed,
     })
+}
+
+/// Run a statement's program, handing its result rows to `sink` as they
+/// are produced. A result with columns but no rows still begins and ends
+/// (its header prints); a program without result columns sends nothing.
+/// On an error after the first row, the sink is aborted (keeping what it
+/// already printed) and the error returned.
+fn stream_rows(vm: &mut engine::VmEngine<'_>, sink: &mut dyn ResultSink) -> SqawkResult<()> {
+    let mut begun = false;
+    let outcome = (|| -> SqawkResult<()> {
+        while vm.step()? == engine::Step::Row {
+            if !begun {
+                let width = vm.row().len();
+                sink.begin(&engine::result_column_defs(vm.result_schema(), width))?;
+                begun = true;
+            }
+            sink.row(vm.row())?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = outcome {
+        if begun {
+            sink.abort();
+        }
+        return Err(e);
+    }
+    if !begun {
+        let schema = vm.result_schema();
+        if schema.is_empty() {
+            return Ok(());
+        }
+        sink.begin(&engine::result_column_defs(schema, schema.columns.len()))?;
+    }
+    sink.end()
 }
 
 /// Whether a statement's affected-row count is meaningful to report.

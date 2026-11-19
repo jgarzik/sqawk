@@ -861,10 +861,10 @@ impl Walker<'_> {
             &source,
             true,
             &self.cte_names,
-            &mut |t| {
+            &mut crate::output::CollectSink::new(|t| {
                 last = Some(t);
                 Ok(())
-            },
+            }),
         )?;
         last.ok_or_else(|| {
             SqawkError::InvalidSqlQuery("Subquery in FROM produced no result".to_string())

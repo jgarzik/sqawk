@@ -784,13 +784,15 @@ impl Repl {
         };
 
         // Every statement's result set, each with its own header, printed
-        // exactly as the command line prints it: as soon as the statement
-        // finishes, so a later error on the line keeps the earlier output.
-        let header = !self.config.no_output_header();
-        self.executor.execute(sql, &mut |table| {
-            let _ = table.print_to_stdout(header);
-            Ok(())
-        })?;
+        // exactly as the command line prints it: row by row as the statement
+        // runs, so a later error on the line keeps the earlier output.
+        let mut out = crate::output::StdoutSink::new(
+            &self.config.output_delimiter(),
+            !self.config.no_output_header(),
+            false,
+            true,
+        );
+        self.executor.execute(sql, &mut out)?;
 
         // The change count is reported independently of whether the line also
         // produced rows: a trailing DML on `SELECT ...; DELETE ...` reports

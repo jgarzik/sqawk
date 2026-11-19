@@ -367,11 +367,14 @@ Sqawk supports two primary output modes:
    This is independent of the delimiter a source table was parsed with
 2. **File Writeback**: Modified tables (via INSERT, UPDATE, DELETE, ALTER TABLE, TRUNCATE) are written back to their source files when `--write` is specified, preserving that file's delimiter
 
-A statement's result set is built in memory as a table and printed as soon
-as that statement finishes, so when a later statement fails, the output of
-the ones before it has already been printed (the run still exits 1 and
-writes nothing back). For file writeback, the atomic write pattern described
-above is used.
+A statement's result rows are printed as the VM produces them (SQLite's
+step model: `ResultRow` hands one row to the output sink, `src/output.rs`),
+through a 64 KiB buffer flushed at the end of each statement. A result is
+never held whole in memory unless the query itself needs it (ORDER BY,
+DISTINCT, GROUP BY, window functions). When a statement fails, the rows it
+and the statements before it produced have already been printed; the run
+still exits 1 and writes nothing back. For file writeback, the atomic write
+pattern described above is used.
 
 ## Storage
 

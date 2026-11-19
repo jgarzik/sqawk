@@ -685,6 +685,22 @@ pub struct VmEngine<'a> {
     /// Each `Like` instruction's last compiled pattern, by address: the
     /// pattern text, the escape character and the compiled form.
     like_cache: HashMap<usize, (String, Option<char>, like::Pattern)>,
+
+    /// The registers of the row the last `step` returned: first, count.
+    row: (usize, usize),
+
+    /// The program has run to its Halt.
+    halted: bool,
+}
+
+/// What one call of [`VmEngine::step`] reached.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Step {
+    /// A result row, readable with [`VmEngine::row`] until the next step
+    /// (SQLite's SQLITE_ROW).
+    Row,
+    /// The program halted (SQLITE_DONE).
+    Done,
 }
 
 impl<'a> VmEngine<'a> {
@@ -705,6 +721,8 @@ impl<'a> VmEngine<'a> {
             once_flags: HashMap::with_capacity(DEFAULT_CURSOR_CAPACITY),
             funcs: Vec::new(),
             like_cache: HashMap::new(),
+            row: (0, 0),
+            halted: false,
         }
     }
 
@@ -726,6 +744,8 @@ impl<'a> VmEngine<'a> {
         self.pending_modifications.clear();
         self.once_flags.clear();
         self.like_cache.clear();
+        self.row = (0, 0);
+        self.halted = false;
         self.funcs = self
             .program
             .instructions
@@ -770,48 +790,64 @@ impl<'a> VmEngine<'a> {
         std::mem::take(&mut self.pending_modifications)
     }
 
-    /// Execute the current program
+    /// Run the program to its end, keeping every result row (see
+    /// [`take_results`](Self::take_results)).
     pub fn execute(&mut self) -> SqawkResult<()> {
         if self.program.is_empty() {
             return Err(SqawkError::VmError("No program to execute".to_string()));
         }
+        while self.step()? == Step::Row {
+            let row = self.row().iter().cloned().map(Value::from).collect();
+            self.results.push(row);
+        }
+        Ok(())
+    }
 
-        // Start execution at PC 0
-        self.pc = 0;
-
-        // Main execution loop
+    /// Run the program until it produces a result row or halts. After
+    /// [`Step::Row`], [`row`](Self::row) holds the row and the next call
+    /// resumes after it; after [`Step::Done`], every further call returns
+    /// `Done`.
+    pub fn step(&mut self) -> SqawkResult<Step> {
+        if self.halted {
+            return Ok(Step::Done);
+        }
         loop {
-            // Get current instruction
-            let inst_clone = self
+            let inst = self
                 .program
                 .get(self.pc)
                 .ok_or_else(|| {
                     SqawkError::VmError(format!("Invalid program counter: {}", self.pc))
                 })?
-                .clone(); // Clone the instruction to avoid borrowing issues
+                .clone();
 
             if self.verbose {
-                diag!("Executing [{}]: {}", self.pc, inst_clone);
+                diag!("Executing [{}]: {}", self.pc, inst);
             }
 
-            // Execute the instruction
-            match self.execute_instruction(&inst_clone)? {
-                ExecuteResult::Continue => {
-                    // Move to next instruction
+            match self.execute_instruction(&inst)? {
+                ExecuteResult::Continue => self.pc += 1,
+                ExecuteResult::Jump(addr) => self.pc = addr,
+                ExecuteResult::Row => {
                     self.pc += 1;
-                }
-                ExecuteResult::Jump(addr) => {
-                    // Jump to specified address
-                    self.pc = addr;
+                    return Ok(Step::Row);
                 }
                 ExecuteResult::Halt => {
-                    // End execution
-                    break;
+                    self.halted = true;
+                    return Ok(Step::Done);
                 }
             }
         }
+    }
 
-        Ok(())
+    /// The registers of the row the last [`step`](Self::step) returned.
+    pub fn row(&self) -> &[Register] {
+        let (first, count) = self.row;
+        &self.registers[first..first + count]
+    }
+
+    /// The program's result columns.
+    pub fn result_schema(&self) -> &super::bytecode::ResultSchema {
+        &self.program.result_schema
     }
 
     /// Execute a single instruction
@@ -1458,29 +1494,18 @@ impl<'a> VmEngine<'a> {
             }
 
             OpCode::ResultRow => {
-                // Return a result row from registers
+                // P1..P1+P2 hold the row; the caller of `step` reads it in
+                // place.
                 let start_reg = inst.p1 as usize;
                 let column_count = inst.p2 as usize;
-
-                // Collect values from registers
-                let mut row = Vec::with_capacity(column_count);
-                for i in 0..column_count {
-                    let reg_idx = start_reg + i;
-                    if reg_idx < self.registers.len() {
-                        // Convert register to Value
-                        let value = Value::from(self.registers[reg_idx].clone());
-                        row.push(value);
-                    } else {
-                        return Err(SqawkError::VmError(format!(
-                            "Register index out of bounds: {}",
-                            reg_idx
-                        )));
-                    }
+                if start_reg + column_count > self.registers.len() {
+                    return Err(SqawkError::VmError(format!(
+                        "Register index out of bounds: {}",
+                        start_reg + column_count - 1
+                    )));
                 }
-
-                self.results.push(row);
-
-                Ok(ExecuteResult::Continue)
+                self.row = (start_reg, column_count);
+                Ok(ExecuteResult::Row)
             }
 
             OpCode::Lt | OpCode::Le | OpCode::Gt | OpCode::Ge | OpCode::Eq | OpCode::Ne => {
@@ -2198,6 +2223,7 @@ impl<'a> VmEngine<'a> {
     /// Move the result rows out of the engine into a table named `result`.
     /// With no rows, a non-empty result schema still gives an empty table
     /// (its header is printed); an empty schema gives `None`.
+    #[cfg(test)]
     pub fn create_result_table(&mut self) -> SqawkResult<Option<Table>> {
         let rows = std::mem::take(&mut self.results);
         let schema = &self.program.result_schema;
@@ -2405,6 +2431,8 @@ enum ExecuteResult {
     Continue,
     /// Jump to specified address
     Jump(usize),
+    /// A result row is in the registers (see `VmEngine::step`)
+    Row,
     /// Halt execution
     Halt,
 }

@@ -1205,10 +1205,11 @@ the whole run, so the data must fit in RAM.
 
 **How much memory.** A loaded table takes roughly six to seven times its
 file's size: the parsed values, plus the file's own bytes, which are kept so
-that `--write` can reproduce untouched rows exactly. Each statement's result
-set is also built in memory before it is printed, so a query that returns
-most of a table needs about as much again. Measured on an 83 MB CSV of one
-million 10-column rows:
+that `--write` can reproduce untouched rows exactly. Rows are printed as a
+query produces them, so `SELECT * FROM big` needs little beyond the loaded
+table; a query that must see every row before its first output (ORDER BY,
+DISTINCT, GROUP BY, window functions) holds those rows too. Measured on an
+83 MB CSV of one million 10-column rows:
 
 | Query | Peak memory |
 |-------|-------------|

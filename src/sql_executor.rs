@@ -58,14 +58,14 @@ impl SqlExecutor {
     /// # Arguments
     /// * `sql` - SQL statement to execute
     ///
-    /// Each statement's result set, set to the output delimiter, goes to
-    /// `sink` as soon as that statement finishes, so the output of earlier
-    /// statements survives a later statement's error. The result sets are
-    /// deliberately NOT merged, since each has its own column schema.
+    /// Each statement's result rows go to `sink` as they are produced, so
+    /// the output of earlier statements survives a later statement's error.
+    /// The result sets are deliberately NOT merged, since each has its own
+    /// column schema.
     pub fn execute(
         &mut self,
         sql: &str,
-        sink: &mut dyn FnMut(&crate::table::Table) -> SqawkResult<()>,
+        sink: &mut dyn crate::output::ResultSink,
     ) -> SqawkResult<()> {
         if self.config.verbose() {
             diag!("Executing SQL: {}", sql);
@@ -73,17 +73,7 @@ impl SqlExecutor {
 
         // Execute via VM engine (which also records the modified tables in
         // the database)
-        let delim = self.config.output_delimiter();
-        let result = crate::vm::execute_vm(
-            sql,
-            &mut self.database,
-            self.config.verbose(),
-            &mut |mut t| {
-                // Result tables print with the output delimiter
-                t.set_delimiter(delim.clone());
-                sink(&t)
-            },
-        )?;
+        let result = crate::vm::execute_vm(sql, &mut self.database, self.config.verbose(), sink)?;
 
         // Track affected rows from the last statement
         self.affected_rows = result.affected_rows;
