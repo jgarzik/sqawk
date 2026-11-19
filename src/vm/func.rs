@@ -229,8 +229,9 @@ fn lower(a: &[Register]) -> SqawkResult<Register> {
 /// Characters in the text form of the value.
 fn length(a: &[Register]) -> SqawkResult<Register> {
     null_in_null_out!(a);
+    // SQLite counts the characters before the first NUL.
     let n = match &a[0] {
-        Register::String(s) => s.chars().count(),
+        Register::String(s) => s.chars().take_while(|&c| c != '\0').count(),
         other => text_of(other).len(),
     };
     Ok(Register::Integer(n as i64))
@@ -504,10 +505,11 @@ fn char_fn(a: &[Register]) -> SqawkResult<Register> {
 /// UNICODE(s): the code point of the first character; NULL for ''.
 fn unicode(a: &[Register]) -> SqawkResult<Register> {
     null_in_null_out!(a);
-    Ok(text_of(&a[0])
-        .chars()
-        .next()
-        .map_or(Register::Null, |c| Register::Integer(c as i64)))
+    // Text that starts with NUL reads as empty in SQLite: NULL.
+    Ok(match text_of(&a[0]).chars().next() {
+        Some(c) if c != '\0' => Register::Integer(c as i64),
+        _ => Register::Null,
+    })
 }
 
 /// PRINTF(format, ...) / FORMAT: SQLite's printf (see `printf.rs`). A NULL

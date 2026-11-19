@@ -2930,3 +2930,17 @@ fn negated_real_literal_keeps_its_sign() -> Result<(), Box<dyn std::error::Error
         "a,b,c,d,e,f\n3.14159265358979,3.14159265358979,3.14159265358979,0.0,-1.5,-2.5",
     )
 }
+
+/// LENGTH counts the characters before the first NUL, and UNICODE of text
+/// starting with NUL is NULL, as in SQLite (which reads both as C strings);
+/// other functions see the whole text.
+#[test]
+fn length_and_unicode_stop_at_nul() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "SELECT length(char(0)) AS a, length('a' || char(0) || 'b') AS b, \
+         unicode(char(0)) AS c, unicode(printf('%c', '')) AS d, \
+         instr('a' || char(0) || 'b', 'b') AS e, hex('a' || char(0)) AS f",
+        "a,b,c,d,e,f\n0,1,,,3,6100",
+    )
+}

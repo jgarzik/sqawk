@@ -162,7 +162,7 @@ gives NULL, and a number argument is used in its text form.
 | Function | Description |
 |----------|-------------|
 | `UPPER(s)`, `LOWER(s)` | Case conversion (all of Unicode) |
-| `LENGTH(s)` | Number of characters |
+| `LENGTH(s)` | Number of characters (before the first NUL, as in SQLite) |
 | `TRIM(s)` | Strip whitespace from both ends |
 | `LTRIM(s [, chars])`, `RTRIM(s [, chars])` | Strip whitespace, or any of `chars`, from the start / the end |
 | `TRIM([BOTH\|LEADING\|TRAILING] chars FROM s)` | Strip any of `chars` from both ends / the start / the end |
@@ -176,7 +176,7 @@ gives NULL, and a number argument is used in its text form.
 | `LPAD(s, len [, fill])`, `RPAD` | Pad to `len` characters (see below) |
 | `HEX(x)` | Upper-case hex of the UTF-8 bytes; `''` for NULL |
 | `CHAR(n, ...)` | The characters with these code points |
-| `UNICODE(s)` | Code point of the first character |
+| `UNICODE(s)` | Code point of the first character; NULL for empty text or text starting with NUL |
 | `PRINTF(fmt, ...)`, `FORMAT` | SQLite's printf (see below) |
 | `QUOTE(x)` | The SQL literal for `x`: `'it''s'`, `12`, `1.5`, `NULL` |
 | `a \|\| b` | Concatenation; NULL if either side is NULL |
