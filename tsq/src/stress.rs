@@ -194,6 +194,26 @@ pub const WORKLOADS: &[Workload] = &[
             &["wide"],
         ),
     },
+    Workload {
+        name: "items_all",
+        about: "SELECT * FROM order_items (every row printed)",
+        kind: Kind::Query("SELECT * FROM order_items", ITEMS),
+    },
+    Workload {
+        name: "items_sort_all",
+        about: "SELECT * FROM order_items ORDER BY line_total (every row)",
+        kind: Kind::Query("SELECT * FROM order_items ORDER BY line_total", ITEMS),
+    },
+    Workload {
+        name: "orders_count",
+        about: "load orders (dates, statuses, free text), COUNT(*)",
+        kind: Kind::Query("SELECT COUNT(*) FROM orders", &["orders"]),
+    },
+    Workload {
+        name: "orders_all",
+        about: "SELECT * FROM orders (text-heavy, every row printed)",
+        kind: Kind::Query("SELECT * FROM orders", &["orders"]),
+    },
 ];
 
 const WIDE_COLS: usize = 1000;
