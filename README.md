@@ -24,8 +24,9 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 - **Safe by Default** - Files unchanged unless `--write` flag is specified
 - **Interactive REPL** - Explore data interactively with `-i` flag
 
-Every input file is loaded whole into memory: plan on six to seven times the
-file's size, plus the result set (see
+Every input table is held in memory: plan on about four to five times the
+file's size (about six under `--write`). Rows are printed as they are
+produced; only sorting, grouping and similar steps hold more (see
 [Working with Large Files](doc/user_guide.md#working-with-large-files)).
 
 ## Installation

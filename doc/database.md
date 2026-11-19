@@ -461,12 +461,13 @@ Sqawk's in-memory database is optimized for:
 - **Zero Configuration**: No setup required, works directly with files in various formats
 
 Memory: every table is resident for the whole run. A loaded table takes
-roughly six to seven times its file's size -- each cell is a `Value` (with a
-heap string for text), and the file's bytes are kept as well for verbatim
-writeback. An 83 MB, one-million-row, 10-column CSV peaks at about 530 MB for
-`SELECT COUNT(*)`. A statement's result set is materialized on top of that
-before it prints (1.4 GB peak for `SELECT *` of the same file, 1.9 GB with
-`ORDER BY`, which also holds the sorter's copy).
+about four to five times its file's size -- each cell is a 24-byte `Value`,
+whose text is stored inline up to 24 bytes (`CompactString`), and each row
+a `Vec` of them. The file's bytes are kept as well only under `--write` or
+`-i`, for verbatim writeback. A 66 MB, one-million-row, 10-column CSV peaks
+at about 285 MB for `SELECT COUNT(*)` and for `SELECT *` (rows stream to
+stdout), 595 MB with `ORDER BY` (the sorter holds its copy of every row);
+`--write` adds the file's size and its 16 bytes of offsets per row.
 
 ## Join Implementation
 

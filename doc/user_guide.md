@@ -1203,27 +1203,29 @@ downstream.
 Sqawk holds all of its tables in memory for the whole run, so the data must
 fit in RAM.
 
-**How much memory.** A loaded table takes roughly six to seven times its
-file's size: the parsed values, plus (under `--write` or `-i` only) the
-file's own bytes, kept so that writeback can reproduce untouched rows
-exactly. Rows are printed as a
-query produces them, so `SELECT * FROM big` needs little beyond the loaded
-table; a query that must see every row before its first output (ORDER BY,
-DISTINCT, GROUP BY, window functions) holds those rows too. Measured on an
-83 MB CSV of one million 10-column rows:
+**How much memory.** A loaded table takes about four to five times its
+file's size in parsed values (text of up to 24 bytes is stored inline,
+without a separate allocation). Under `--write` or `-i` the file's own
+bytes are kept as well, so that writeback can reproduce untouched rows
+exactly; otherwise the file is parsed as it is read and never held whole.
+Rows are printed as a query produces them, so `SELECT * FROM big` needs
+nothing beyond the loaded table; a query that must see every row before
+its first output (ORDER BY, DISTINCT, GROUP BY, window functions) holds
+those rows too. Measured on a 66 MB CSV of one million 10-column rows:
 
-| Query | Peak memory |
-|-------|-------------|
-| `SELECT COUNT(*) FROM big` | 530 MB |
-| `SELECT * FROM big WHERE score > 95` (5% of rows) | 580 MB |
-| `SELECT city, COUNT(*) FROM big GROUP BY city` | 660 MB |
-| `SELECT * FROM big` | 1.4 GB |
-| `SELECT * FROM big ORDER BY amount` | 1.9 GB |
+| Query | Peak memory | With `--write` |
+|-------|-------------|----------------|
+| `SELECT COUNT(*) FROM big` | 285 MB | 370 MB |
+| `SELECT * FROM big WHERE score > 95` (5% of rows) | 285 MB | 370 MB |
+| `SELECT city, COUNT(*) FROM big GROUP BY city` | 385 MB | 470 MB |
+| `SELECT * FROM big` | 285 MB | 370 MB |
+| `SELECT * FROM big ORDER BY amount` | 595 MB | 675 MB |
 
 **Tips for handling large files:**
 
-1. **Return less**: the table is loaded in full whatever the query, but a
-   WHERE clause, an aggregate or a LIMIT keeps the result set small
+1. **Sort less**: the table is loaded in full whatever the query, but rows
+   stream to the output unless the query sorts or groups them; a WHERE
+   clause before an ORDER BY keeps the sorted set small
    ```sh
    sqawk -s "SELECT * FROM large_data WHERE date > '2023-01-01'" large_data.csv
    ```
@@ -1291,9 +1293,10 @@ DISTINCT, GROUP BY, window functions) holds those rows too. Measured on an
      regular data
 
 7. **Memory limitations**:
-   - Every input table is loaded whole: expect six to seven times the file
-     size, plus the result set (see [Working with Large Files](#working-with-large-files))
-   - Keep result sets small with WHERE, aggregates or LIMIT
+   - Every input table is held in memory: expect four to five times the
+     file size (about six under `--write`), plus whatever a sort or grouping
+     holds (see [Working with Large Files](#working-with-large-files))
+   - Filter with WHERE before ORDER BY, DISTINCT or GROUP BY
    - Split a file that does not fit and process the pieces
 
 8. **Changes not saved**:
