@@ -56,7 +56,7 @@ use super::compiler_check::check_order_by_expr;
 use super::compiler_select::compound_order_key;
 use super::compiler_window::contains_window;
 use super::engine::{self, RowKey, VmEngine};
-use super::parse::{self, for_each_child, Node, SqlSource};
+use super::parse::{self, Node, SqlSource, for_each_child};
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::{ColumnDefinition, Row, Table};
@@ -326,14 +326,13 @@ impl Walker<'_> {
     /// Spell a one-part `name` that some CTE of the statement declares as
     /// `main.name`.
     fn qualify(&self, name: &mut ObjectName) {
-        if let [part] = name.0.as_slice() {
-            if part
+        if let [part] = name.0.as_slice()
+            && part
                 .as_ident()
                 .is_some_and(|i| self.declared.contains(&key_of(i)))
-            {
-                name.0
-                    .insert(0, ObjectNamePart::Identifier(Ident::new("main")));
-            }
+        {
+            name.0
+                .insert(0, ObjectNamePart::Identifier(Ident::new("main")));
         }
     }
 
@@ -564,7 +563,7 @@ impl Walker<'_> {
             Some(OrderByKind::All(_)) => {
                 return Err(SqawkError::UnsupportedSqlFeature(
                     "ORDER BY ALL is not supported".into(),
-                ))
+                ));
             }
             Some(OrderByKind::Expressions(exprs)) => {
                 for (n, ob) in exprs.iter().enumerate() {
@@ -832,10 +831,10 @@ impl Walker<'_> {
         let mut statement = parse::parse_sql("SELECT NULL")?
             .pop()
             .expect("one statement");
-        if let Statement::Query(q) = &mut statement {
-            if let SetExpr::Select(select) = q.body.as_mut() {
-                select.projection = vec![SelectItem::UnnamedExpr(expr)];
-            }
+        if let Statement::Query(q) = &mut statement
+            && let SetExpr::Select(select) = q.body.as_mut()
+        {
+            select.projection = vec![SelectItem::UnnamedExpr(expr)];
         }
         self.visit(Node::Statement(&mut statement))?;
         let Statement::Query(q) = statement else {
@@ -854,15 +853,20 @@ impl Walker<'_> {
     /// Run a query (already walked) and return its result.
     fn run_query(&mut self, query: Query) -> SqawkResult<Table> {
         let source = Arc::clone(&self.source);
-        let result = super::execute_statements(
+        let mut last = None;
+        super::execute_statements(
             vec![Statement::Query(Box::new(query))],
             self.database,
             self.verbose,
             &source,
             true,
             &self.cte_names,
+            &mut crate::output::CollectSink::new(|t| {
+                last = Some(t);
+                Ok(())
+            }),
         )?;
-        result.tables.into_iter().next_back().ok_or_else(|| {
+        last.ok_or_else(|| {
             SqawkError::InvalidSqlQuery("Subquery in FROM produced no result".to_string())
         })
     }
@@ -966,7 +970,8 @@ fn table_factor(name: String, alias: Option<TableAlias>) -> TableFactor {
         with_ordinality: false,
         json_path: None,
         sample: None,
-        index_hints: Vec::new(),
+        index_directives: Vec::new(),
+        inheritance: None,
     }
 }
 

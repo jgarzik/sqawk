@@ -32,7 +32,7 @@ use sqlparser::ast::{
 
 use super::ast_compat::{func_args, func_is_distinct, order_by_is_asc};
 use super::bytecode::{
-    FrameBound, KeyOrder, OpCode, WindowDef, WindowFrame, WindowFunc, WindowFuncKind, AGG_COUNT,
+    AGG_COUNT, FrameBound, KeyOrder, OpCode, WindowDef, WindowFrame, WindowFunc, WindowFuncKind,
 };
 use super::compiler::{ColBindings, ColumnRef, NameCtx, OutCol, SqlCompiler};
 use super::compiler_check::check_order_by_expr;
@@ -203,7 +203,7 @@ fn frame_of(spec: &WindowSpec) -> SqawkResult<WindowFrame> {
         WindowFrameUnits::Groups => {
             return Err(SqawkError::UnsupportedSqlFeature(
                 "GROUPS window frames are not supported".into(),
-            ))
+            ));
         }
     };
     let bound = |b: &WindowFrameBound, which: &str| -> SqawkResult<FrameBound> {
@@ -343,7 +343,7 @@ fn window_kind(func: &Function, nargs: usize) -> SqawkResult<WindowFuncKind> {
                 return Err(SqawkError::UnsupportedSqlFeature(format!(
                     "{}() may not be used as a window function",
                     func.name
-                )))
+                )));
             }
         },
     };
@@ -376,13 +376,13 @@ fn window_args(func: &Function) -> SqawkResult<Vec<Expr>> {
             "DISTINCT is not supported for window functions".into(),
         ));
     }
-    if let FunctionArguments::List(list) = &func.args {
-        if !list.clauses.is_empty() {
-            return Err(SqawkError::UnsupportedSqlFeature(format!(
-                "Clauses inside the argument list of {}() are not supported",
-                name
-            )));
-        }
+    if let FunctionArguments::List(list) = &func.args
+        && !list.clauses.is_empty()
+    {
+        return Err(SqawkError::UnsupportedSqlFeature(format!(
+            "Clauses inside the argument list of {}() are not supported",
+            name
+        )));
     }
     let is_count = name.eq_ignore_ascii_case("COUNT");
     let mut out = Vec::new();
@@ -394,7 +394,7 @@ fn window_args(func: &Function) -> SqawkResult<Vec<Expr>> {
                 return Err(SqawkError::InvalidSqlQuery(format!(
                     "Unsupported argument to window function {}(): {}",
                     name, a
-                )))
+                )));
             }
         }
     }
@@ -593,7 +593,7 @@ impl<'a> SqlCompiler<'a> {
             Some(_) if regs.len() != ws.nslots => {
                 return Err(SqawkError::VmError(
                     "window stage: inconsistent row scope".into(),
-                ))
+                ));
             }
             Some(_) => {}
         }

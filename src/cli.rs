@@ -92,10 +92,10 @@ pub struct SqawkArgs {
     /// A path of `-` reads standard input, as the table `stdin` or under the
     /// name given as `table_name=-`. Piped input is treated as comma-separated
     /// unless -F says otherwise, and cannot be written back with --write.
-    #[clap(
-        required = true,
-        help = "Input files to process as [table_name=]file_path ('-' for stdin)"
-    )]
+    ///
+    /// Optional: with no operands there are no tables (standard input is
+    /// read only when `-` is named).
+    #[clap(help = "Input files to process as [table_name=]file_path ('-' for stdin)")]
     pub files: Vec<String>,
 
     /// Define column names for tables - format: table_name:col1,col2,col3,...
@@ -139,6 +139,29 @@ pub struct SqawkArgs {
     )]
     pub output_delimiter: Option<String>,
 
+    /// How query results are printed
+    ///
+    /// csv (the default; --output-delimiter applies), tsv, json (one array
+    /// of objects per result set), jsonl (one object per line), markdown,
+    /// or table (aligned, with box-drawing borders; the REPL's default on a
+    /// terminal).
+    #[clap(
+        long = "format",
+        value_name = "FORMAT",
+        value_enum,
+        help = "Result format: csv, tsv, json, jsonl, markdown, table (default csv)"
+    )]
+    pub format: Option<crate::output::Format>,
+
+    /// How NULL prints in csv, tsv, markdown and table output (JSON always
+    /// uses null). Default: an empty field.
+    #[clap(
+        long = "null",
+        value_name = "TEXT",
+        help = "Text for NULL in csv/tsv/markdown/table output"
+    )]
+    pub null: Option<String>,
+
     /// Omit the header line of every result set
     #[clap(
         long = "no-output-header",
@@ -163,14 +186,17 @@ pub struct SqawkArgs {
 
     /// Print debugging information on standard error
     ///
-    /// Shows table loading, the compiled bytecode and each executed
-    /// instruction. The output is for debugging; its format is not stable.
+    /// `-v` reports the tables loaded (rows, columns, load time), each
+    /// statement's row count, run time and the files written; `-vv` adds the
+    /// compiled bytecode and a trace of every executed instruction. The
+    /// output is for people; its format is not stable.
     #[clap(
         short,
         long,
-        help = "Print debugging output on stderr (format is not stable)"
+        action = clap::ArgAction::Count,
+        help = "Report progress on stderr; -vv adds the bytecode trace (format is not stable)"
     )]
-    pub verbose: bool,
+    pub verbose: u8,
 
     /// Write changes back to input files (default is to not modify files)
     ///

@@ -11,7 +11,7 @@
 //!
 //! Known-wrong behaviour is NOT pinned here -- it lives in `tests/defects/`.
 
-use crate::helpers::{assert_query, assert_query_on, assert_query_on_fails, ONE};
+use crate::helpers::{ONE, assert_query, assert_query_on, assert_query_on_fails};
 
 #[test]
 fn select_star() -> Result<(), Box<dyn std::error::Error>> {
@@ -67,7 +67,10 @@ fn select_literal_expressions() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT UPPER('ab') || 'c', CAST('12' AS INTEGER) + 1, CASE WHEN 1 > 2 THEN 'x' ELSE 'y' END, SUBSTR('hello', 2, 3), -ABS(-4)",
-        concat!("UPPER('ab') || 'c',CAST('12' AS INTEGER) + 1,CASE WHEN 1 > 2 THEN 'x' ELSE 'y' END,\"SUBSTR('hello', 2, 3)\",-ABS(-4)", "\nABc,13,y,ell,-4"),
+        concat!(
+            "UPPER('ab') || 'c',CAST('12' AS INTEGER) + 1,CASE WHEN 1 > 2 THEN 'x' ELSE 'y' END,\"SUBSTR('hello', 2, 3)\",-ABS(-4)",
+            "\nABc,13,y,ell,-4"
+        ),
     )
 }
 
@@ -77,7 +80,10 @@ fn select_three_valued_predicates() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT NULL AND 0, NULL OR 1, NULL OR 0, 2 IN (1, NULL), 1 IN (1, NULL), NULL BETWEEN 1 AND 2, NULL LIKE 'a%'",
-        concat!("NULL AND 0,NULL OR 1,NULL OR 0,\"2 IN (1, NULL)\",\"1 IN (1, NULL)\",NULL BETWEEN 1 AND 2,NULL LIKE 'a%'", "\n0,1,,,1,,"),
+        concat!(
+            "NULL AND 0,NULL OR 1,NULL OR 0,\"2 IN (1, NULL)\",\"1 IN (1, NULL)\",NULL BETWEEN 1 AND 2,NULL LIKE 'a%'",
+            "\n0,1,,,1,,"
+        ),
     )
 }
 
@@ -555,7 +561,11 @@ fn join_implicit() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn join_three() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
-        &["tests/data/users.csv", "tests/data/orders.csv", "tests/data/products.csv"],
+        &[
+            "tests/data/users.csv",
+            "tests/data/orders.csv",
+            "tests/data/products.csv",
+        ],
         "SELECT users.name, products.name FROM users, orders, products WHERE users.id = orders.user_id AND orders.product_id = products.product_id",
         concat!(
             "name,name",
@@ -573,12 +583,7 @@ fn union() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT department FROM employees WHERE age < 26 UNION SELECT department FROM employees WHERE age > 44",
-        concat!(
-            "department",
-            "\nHR",
-            "\nMarketing",
-            "\nSales",
-        ),
+        concat!("department", "\nHR", "\nMarketing", "\nSales",),
     )
 }
 
@@ -587,12 +592,7 @@ fn union_all() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT department FROM employees WHERE age < 26 UNION ALL SELECT department FROM employees WHERE age > 44",
-        concat!(
-            "department",
-            "\nMarketing",
-            "\nHR",
-            "\nSales",
-        ),
+        concat!("department", "\nMarketing", "\nHR", "\nSales",),
     )
 }
 
@@ -601,10 +601,7 @@ fn intersect() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT department FROM employees WHERE age < 31 INTERSECT SELECT department FROM employees WHERE age > 31",
-        concat!(
-            "department",
-            "\nEngineering",
-        ),
+        concat!("department", "\nEngineering",),
     )
 }
 
@@ -613,11 +610,7 @@ fn except() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT department FROM employees WHERE age < 31 EXCEPT SELECT department FROM employees WHERE age > 31",
-        concat!(
-            "department",
-            "\nHR",
-            "\nMarketing",
-        ),
+        concat!("department", "\nHR", "\nMarketing",),
     )
 }
 
@@ -644,11 +637,7 @@ fn subquery_exists() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)",
-        concat!(
-            "name",
-            "\nJohn",
-            "\nJane",
-        ),
+        concat!("name", "\nJohn", "\nJane",),
     )
 }
 
@@ -1117,12 +1106,7 @@ fn outer_join_inner_baseline() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT customers.name, purchases.item FROM customers INNER JOIN purchases ON customers.id = purchases.customer_id",
-        concat!(
-            "name,item",
-            "\nAnn,Book",
-            "\nAnn,Pen",
-            "\nBen,Desk",
-        ),
+        concat!("name,item", "\nAnn,Book", "\nAnn,Pen", "\nBen,Desk",),
     )
 }
 
@@ -2426,8 +2410,8 @@ fn substr_without_start_is_rejected() -> Result<(), Box<dyn std::error::Error>> 
 }
 
 #[test]
-fn unqualified_ambiguous_column_in_multi_table_is_rejected(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn unqualified_ambiguous_column_in_multi_table_is_rejected()
+-> Result<(), Box<dyn std::error::Error>> {
     // `id` exists in both tables. The multi-table resolver returned the first
     // match where NameCtx reports ambiguity, so the same name resolved
     // differently depending on which resolver the path reached.
@@ -2847,4 +2831,368 @@ fn derived_and_ctas_column_names_are_unique() -> Result<(), Box<dyn std::error::
          ALTER TABLE z ADD COLUMN \"e:f|g\" TEXT; SELECT * FROM z",
         "a:b,c|d,e:f|g\n1,x,",
     )
+}
+
+/// `LIMIT offset, count` is SQLite's (and MySQL's) spelling of
+/// `LIMIT count OFFSET offset`: the first number is the offset.
+#[test]
+fn limit_offset_comma() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT id FROM employees ORDER BY id LIMIT 2, 3",
+        "id\n3\n4\n5",
+    )?;
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT id FROM employees ORDER BY id LIMIT 7, 5",
+        "id\n8",
+    )
+}
+
+/// `x IN ()` is false and `x NOT IN ()` true, even when x is NULL
+/// (SQLite).
+#[test]
+fn in_empty_list() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "SELECT 1 IN () AS a, 1 NOT IN () AS b, NULL IN () AS c, NULL NOT IN () AS d, \
+         (SELECT COUNT(*) FROM one WHERE id IN ()) AS e",
+        "a,b,c,d,e\n0,1,0,1,0",
+    )
+}
+
+/// CEIL / FLOOR read a text argument only when all of it is a number
+/// (SQLite's sqlite3_value_numeric_type): other text gives NULL, and an
+/// integer spelled as text comes back an integer.
+#[test]
+fn ceil_floor_text_arguments() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "SELECT ceil('abc') AS a, ceil('4abc') AS b, floor(' 4.5 ') AS c, \
+         ceil('007') AS d, typeof(ceil('007')) AS e, ceiling('-1.5') AS f",
+        "a,b,c,d,e,f\n,,4.0,7,integer,-1.0",
+    )
+}
+
+/// SQLite 3.45's math functions (expected output from sqlite3 itself): a
+/// non-number argument, or a result out of the domain (NaN), is NULL;
+/// LOG(x) is base 10 and LOG(b, x) base b; TRUNC returns an integer
+/// unchanged; MOD is a real remainder.
+#[test]
+fn math_functions_match_sqlite() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "SELECT sqrt(16) AS c0, sqrt(2) AS c1, sqrt(-1) AS c2, sqrt('9') AS c3, sqrt('x') AS c4, sqrt(NULL) AS c5, pow(2,10) AS c6, power(2,0.5) AS c7",
+        "c0,c1,c2,c3,c4,c5,c6,c7\n4.0,1.4142135623731,,3.0,,,1024.0,1.4142135623731",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT pow(0,-1) AS c0, pow(-8,1.0/3) AS c1, pow('2',3) AS c2, exp(1) AS c3, exp(1000) AS c4, ln(1) AS c5, ln(0) AS c6, ln(-1) AS c7",
+        "c0,c1,c2,c3,c4,c5,c6,c7\nInf,,8.0,2.71828182845905,Inf,0.0,,",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT log(100) AS c0, log(2,8) AS c1, log(1,5) AS c2, log(0.5,4) AS c3, log(2,'8x') AS c4, log('x',8) AS c5, log(2,NULL) AS c6, log10(1000) AS c7",
+        "c0,c1,c2,c3,c4,c5,c6,c7\n2.0,3.0,,,3.0,,,3.0",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT log2(1024) AS c0, mod(7,3) AS c1, mod(-7,3) AS c2, mod(7.5,2) AS c3, mod(1,0) AS c4, mod('9',4) AS c5, mod(9,NULL) AS c6, pi() AS c7",
+        "c0,c1,c2,c3,c4,c5,c6,c7\n10.0,1.0,-1.0,1.5,,1.0,,3.14159265358979",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT trunc(2.7) AS c0, trunc(-2.7) AS c1, trunc(5) AS c2, typeof(trunc(5)) AS c3, trunc(-0.5) AS c4, trunc('x') AS c5, sin(0) AS c6, cos(0) AS c7",
+        "c0,c1,c2,c3,c4,c5,c6,c7\n2.0,-2.0,5,integer,0.0,,0.0,1.0",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT tan(1) AS c0, asin(2) AS c1, acos(1) AS c2, atan(1) AS c3, atan2(1,1) AS c4, atan2(0,-1) AS c5, sinh(1) AS c6, cosh(1) AS c7",
+        "c0,c1,c2,c3,c4,c5,c6,c7\n1.5574077246549,,0.0,0.785398163397448,0.785398163397448,3.14159265358979,1.1752011936438,1.54308063481524",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT tanh(1) AS c0, asinh(1) AS c1, acosh(1) AS c2, acosh(0.5) AS c3, atanh(0.5) AS c4, atanh(1) AS c5, degrees(pi()) AS c6, radians(180) AS c7",
+        "c0,c1,c2,c3,c4,c5,c6,c7\n0.761594155955765,0.881373587019543,0.0,,0.549306144334055,Inf,180.0,3.14159265358979",
+    )?;
+    Ok(())
+}
+
+/// A minus on a real literal is part of the literal, as in SQLite, so
+/// `-0.0` is negative zero (ATAN2 tells it apart); parentheses do not
+/// matter. A minus on anything else is `0 - x`.
+#[test]
+fn negated_real_literal_keeps_its_sign() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "SELECT atan2(0, -0.0) AS a, atan2(0, -(0.0)) AS b, atan2(0, x) AS c, \
+         atan2(0, -(-0.0)) AS d, -1.5 AS e, -(2.5e0) AS f FROM (SELECT -0.0 AS x)",
+        "a,b,c,d,e,f\n3.14159265358979,3.14159265358979,3.14159265358979,0.0,-1.5,-2.5",
+    )
+}
+
+/// LENGTH counts the characters before the first NUL, and UNICODE of text
+/// starting with NUL is NULL, as in SQLite (which reads both as C strings);
+/// other functions see the whole text.
+#[test]
+fn length_and_unicode_stop_at_nul() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "SELECT length(char(0)) AS a, length('a' || char(0) || 'b') AS b, \
+         unicode(char(0)) AS c, unicode(printf('%c', '')) AS d, \
+         instr('a' || char(0) || 'b', 'b') AS e, hex('a' || char(0)) AS f",
+        "a,b,c,d,e,f\n0,1,,,3,6100",
+    )
+}
+
+/// RANDOM() is a fresh 64-bit integer on every call (so every row of a
+/// derived table differs), and ORDER BY RANDOM() shuffles every row.
+#[test]
+fn random_is_a_fresh_integer_per_call() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT COUNT(DISTINCT r) AS n, MIN(typeof(r)) AS t, MAX(typeof(r)) AS u \
+         FROM (SELECT random() AS r FROM employees)",
+        "n,t,u\n8,integer,integer",
+    )?;
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT COUNT(*) AS n, SUM(id) AS s FROM \
+         (SELECT id FROM employees ORDER BY random())",
+        "n,s\n8,36",
+    )?;
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT random() = random() AS same",
+        "same\n0",
+    )
+}
+
+/// GLOB and NOT GLOB (SQLite): case-sensitive, `*` any run, `?` one
+/// character, `[...]` a set with ranges, `[^...]` its complement; an
+/// unclosed set matches nothing; NULL in gives NULL. GLOB(p, x) is
+/// `x GLOB p`. Expected output from sqlite3 3.45.1.
+#[test]
+fn glob_matches_like_sqlite() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "SELECT 'abc' GLOB 'a*' AS c0, 'abc' GLOB 'A*' AS c1, 'abc' GLOB '?b?' AS c2, 'abc' GLOB 'a?' AS c3, 'abc' NOT GLOB 'a*' AS c4, 'a.c' GLOB '*.c' AS c5, 'b' GLOB '[a-c]' AS c6, 'd' GLOB '[a-c]' AS c7, 'd' GLOB '[^a-c]' AS c8",
+        "c0,c1,c2,c3,c4,c5,c6,c7,c8\n1,0,1,0,0,1,1,0,1",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT ']' GLOB '[]]' AS c0, '-' GLOB '[a-]' AS c1, 'x' GLOB '[abc' AS c2, '' GLOB '*' AS c3, '' GLOB '?' AS c4, NULL GLOB '*' AS c5, 'a' GLOB NULL AS c6, 12 GLOB '1*' AS c7, 1.5 GLOB '1.?' AS c8",
+        "c0,c1,c2,c3,c4,c5,c6,c7,c8\n1,1,0,1,0,,,1,1",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT 'héllo' GLOB 'h?llo' AS c0, 'aXbXc' GLOB '*X*X*' AS c1, 'ab' GLOB '*[b]' AS c2, glob('a*', 'abc') AS c3, 'a*b' GLOB 'a[*]b' AS c4, 'abc' GLOB 'a*' = 1 AND 1 GLOB 1 AS c5, NOT 'x' GLOB 'y' AS c6",
+        "c0,c1,c2,c3,c4,c5,c6\n1,1,1,1,1,1,1",
+    )?;
+    Ok(())
+}
+
+/// `x REGEXP p` (the sqlite3 shell's operator; RLIKE is the same): an
+/// unanchored search with Rust regex syntax, NULL in gives NULL. REGEXP(p,
+/// x) is `x REGEXP p`.
+#[test]
+fn regexp_operator() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        r"SELECT 'abc' REGEXP 'b' AS a, 'abc' REGEXP '^b' AS b, 'abc' NOT REGEXP 'b' AS c, NULL REGEXP 'a' AS d, 'a' REGEXP NULL AS e, 'ABC' RLIKE 'b' AS f, regexp('\d', 'x7') AS g, 12 REGEXP '^1\d$' AS h",
+        "a,b,c,d,e,f,g,h\n1,0,0,,,0,1,1",
+    )
+}
+
+/// regexp_matches / regexp_replace / regexp_extract, named as in DuckDB.
+#[test]
+fn regexp_functions() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        r"SELECT regexp_matches('abc', 'B') AS a, regexp_matches('abc', '(?i)B') AS b, regexp_replace('a1b22c', '[0-9]+', '#') AS c, regexp_replace('a1b22c', '[0-9]+', '#', 'g') AS d, regexp_replace('ABab', 'a', 'x', 'gi') AS e, regexp_replace('john smith', '(\w+) (\w+)', '\2 \1') AS f, regexp_replace('a.b', '\.', '\\$') AS g",
+        "a,b,c,d,e,f,g\n0,1,a#b22c,a#b#c,xBxb,smith john,a\\$b",
+    )?;
+    assert_query_on(
+        &[ONE],
+        r"SELECT regexp_extract('abc123def', '[0-9]+') AS a, regexp_extract('key=val', '(\w+)=(\w+)', 2) AS b, length(regexp_extract('abc', 'x')) AS c, length(regexp_extract('abc', '(x)?b', 1)) AS d, regexp_extract(NULL, 'a') IS NULL AS e, regexp_replace('a', NULL, 'b') IS NULL AS f",
+        "a,b,c,d,e,f\n123,val,0,0,1,1",
+    )
+}
+
+/// A bad pattern, flag or group is an error naming it.
+#[test]
+fn regexp_errors() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on_fails(
+        &[ONE],
+        "SELECT 'a' REGEXP '('",
+        "invalid regular expression '(': unclosed group",
+    )?;
+    assert_query_on_fails(
+        &[ONE],
+        "SELECT regexp_replace('a', 'a', 'b', 'gz')",
+        "regexp_replace: unknown flag 'z'",
+    )?;
+    assert_query_on_fails(
+        &[ONE],
+        "SELECT regexp_extract('ab', '(a)', 2)",
+        "regexp_extract: group 2 out of range (the pattern has 1)",
+    )
+}
+
+/// VALUES is a query wherever a SELECT is: a statement, a FROM item, a
+/// compound operand, a CTE body, a subquery. Its columns are named
+/// column1, column2, ... (expected output from sqlite3).
+#[test]
+fn values_as_a_query() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "VALUES (1, 'a'), (2, NULL)",
+        "column1,column2\n1,a\n2,",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT column2, column1 * 10 AS x FROM (VALUES (1, 2), (3, 4)) AS v WHERE column1 > 1",
+        "column2,x\n4,30",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT 0 AS n UNION ALL VALUES (7) UNION ALL SELECT id FROM one",
+        "n\n0\n7\n1",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "WITH c(a, b) AS (VALUES (1, 2)) SELECT b, a FROM c",
+        "b,a\n2,1",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT (VALUES (5)) AS s, 9 IN (VALUES (8), (9)) AS i",
+        "s,i\n5,1",
+    )?;
+    assert_query_on_fails(
+        &[ONE],
+        "VALUES (1), (2, 3)",
+        "all VALUES must have the same number of terms",
+    )
+}
+
+const NAMES: (&str, &str) = ("n.csv", "name,v\nab,1\nAb,2\n\"AB \",3\nc,4\nb,5\n");
+
+/// COLLATE BINARY / NOCASE / RTRIM in comparisons, BETWEEN and IN lists,
+/// with SQLite's rule: the left operand's collation, else the right's.
+/// Expected output from sqlite3.
+#[test]
+fn collate_in_comparisons() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "SELECT 'a' = 'A' COLLATE NOCASE AS a, 'a' COLLATE NOCASE = 'A' AS b, \
+         'a' COLLATE BINARY = 'A' COLLATE NOCASE AS c, 'x ' = 'x' COLLATE RTRIM AS d, \
+         'B' > 'a' COLLATE NOCASE AS e, 'B' BETWEEN 'a' COLLATE NOCASE AND 'c' AS f, \
+         'AB' COLLATE NOCASE IN ('x', 'ab') AS g, (('A' COLLATE nocase)) = 'a' AS h",
+        "a,b,c,d,e,f,g,h\n1,1,0,1,1,1,1,1",
+    )?;
+    assert_query_on(
+        &[NAMES],
+        "SELECT v FROM n WHERE name = 'ab' COLLATE NOCASE ORDER BY v",
+        "v\n1\n2",
+    )
+}
+
+/// ORDER BY and GROUP BY terms with COLLATE; a group shows the value of
+/// its first row (expected output from sqlite3).
+#[test]
+fn collate_in_order_by_and_group_by() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[NAMES],
+        "SELECT name, v FROM n ORDER BY name COLLATE NOCASE, v",
+        "name,v\nab,1\nAb,2\n\"AB \",3\nb,5\nc,4",
+    )?;
+    assert_query_on(
+        &[NAMES],
+        "SELECT name FROM n ORDER BY 1 COLLATE NOCASE DESC, v",
+        "name\nc\nb\n\"AB \"\nab\nAb",
+    )?;
+    assert_query_on(
+        &[NAMES],
+        "SELECT name, COUNT(*) AS k, SUM(v) AS s FROM n GROUP BY name COLLATE NOCASE \
+         ORDER BY k DESC, s",
+        "name,k,s\nab,2,3\n\"AB \",1,3\nc,1,4\nb,1,5",
+    )?;
+    assert_query_on(
+        &[NAMES],
+        "SELECT name FROM n UNION ALL SELECT 'B' ORDER BY 1 COLLATE NOCASE, 1",
+        "name\nAb\nab\n\"AB \"\nB\nb\nc",
+    )
+}
+
+/// An unknown collation is SQLite's error; COLLATE where sqawk does not
+/// apply it (a result column, a function argument) is an error rather
+/// than silently ignored.
+#[test]
+fn collate_errors() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on_fails(
+        &[ONE],
+        "SELECT 'a' = 'b' COLLATE klingon",
+        "no such collation sequence: klingon",
+    )?;
+    assert_query_on_fails(
+        &[NAMES],
+        "SELECT DISTINCT name COLLATE NOCASE FROM n",
+        "COLLATE is not supported here, only in comparisons, BETWEEN, IN lists, ORDER BY and \
+         GROUP BY",
+    )
+}
+
+const UPD_T: (&str, &str) = ("t.csv", "id,v\n1,10\n2,20\n3,30\n");
+const UPD_U: (&str, &str) = ("u.csv", "id,w\n1,100\n3,300\n3,301\n4,400\n");
+
+/// UPDATE ... FROM (SQLite 3.33+): the SET and WHERE see the target row
+/// and the FROM row joined with it (expected output from sqlite3).
+#[test]
+fn update_from() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[UPD_T, UPD_U],
+        "UPDATE t SET v = u.w FROM u WHERE t.id = u.id AND u.w < 301; \
+         SELECT id, v FROM t ORDER BY id",
+        "id,v\n1,100\n2,20\n3,300",
+    )?;
+    assert_query_on(
+        &[UPD_T, UPD_U],
+        "UPDATE t AS a SET v = a.v + b.w FROM u b WHERE a.id = b.id AND b.id = 1; \
+         SELECT id, v FROM t ORDER BY id",
+        "id,v\n1,110\n2,20\n3,30",
+    )?;
+    assert_query_on(
+        &[UPD_T, UPD_U],
+        "UPDATE t SET v = d.s FROM (SELECT id, SUM(w) AS s FROM u GROUP BY id) AS d \
+         WHERE t.id = d.id; SELECT id, v FROM t ORDER BY id",
+        "id,v\n1,100\n2,20\n3,601",
+    )?;
+    // A target row joined with several FROM rows is updated once, from the
+    // first of them in FROM order.
+    assert_query_on(
+        &[UPD_T, UPD_U],
+        "UPDATE t SET v = u.w FROM u WHERE t.id = u.id; SELECT id, v FROM t ORDER BY id",
+        "id,v\n1,100\n2,20\n3,300",
+    )
+}
+
+/// Each target row counts once, however many FROM rows it joins, and the
+/// change is written back.
+#[test]
+fn update_from_counts_and_writes() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = crate::helpers::create_temp_dir()?;
+    let t = dir.path().join("t.csv");
+    let u = dir.path().join("u.csv");
+    std::fs::write(&t, UPD_T.1)?;
+    std::fs::write(&u, UPD_U.1)?;
+    let out = crate::common::run_repl_script(
+        ".changes on\n.write on\nUPDATE t SET v = -1 FROM u;\n.exit\n",
+        &[t.to_str().unwrap(), u.to_str().unwrap()],
+        None,
+        false,
+    );
+    assert!(out.contains("3 rows affected"), "{out}");
+    assert_eq!(std::fs::read_to_string(&t)?, "id,v\n1,-1\n2,-1\n3,-1\n");
+    Ok(())
 }

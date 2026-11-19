@@ -69,8 +69,23 @@ pub type Result<T> = std::result::Result<T, ReplError>;
 
 /// Every dot-command, for completion.
 const DOT_COMMANDS: &[&str] = &[
-    ".cd", ".changes", ".exit", ".help", ".load", ".print", ".quit", ".save", ".schema", ".show",
-    ".stats", ".tables", ".version", ".write",
+    ".cd",
+    ".changes",
+    ".exit",
+    ".headers",
+    ".help",
+    ".load",
+    ".mode",
+    ".nullvalue",
+    ".print",
+    ".quit",
+    ".save",
+    ".schema",
+    ".show",
+    ".stats",
+    ".tables",
+    ".version",
+    ".write",
 ];
 
 /// Dot-commands whose argument is a table name.
@@ -365,18 +380,42 @@ fn scan_sql(sql: &str) -> SqlScan {
     }
 }
 
-/// The history file for `XDG_STATE_HOME` / `HOME`: `$XDG_STATE_HOME/sqawk/history`
-/// when `XDG_STATE_HOME` is an absolute path, else `$HOME/.sqawk_history`
-/// when `HOME` is set and non-empty, else none.
-fn history_path(xdg_state_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    if let Some(state) = xdg_state_home
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-    {
-        return Some(state.join("sqawk").join("history"));
+/// The environment variables that locate the history file.
+#[derive(Default)]
+struct HistoryEnv {
+    xdg_state_home: Option<OsString>,
+    home: Option<OsString>,
+    /// Windows' per-user application data directory.
+    appdata: Option<OsString>,
+    /// Windows' home directory.
+    userprofile: Option<OsString>,
+}
+
+impl HistoryEnv {
+    fn from_env() -> Self {
+        let var = std::env::var_os;
+        HistoryEnv {
+            xdg_state_home: var("XDG_STATE_HOME"),
+            home: var("HOME"),
+            appdata: var("APPDATA"),
+            userprofile: var("USERPROFILE"),
+        }
     }
-    home.filter(|h| !h.is_empty())
-        .map(|h| PathBuf::from(h).join(".sqawk_history"))
+}
+
+/// The history file: `$XDG_STATE_HOME/sqawk/history` when `XDG_STATE_HOME`
+/// is an absolute path, else `$HOME/.sqawk_history` when `HOME` is set and
+/// non-empty, else (Windows, where neither is normally set)
+/// `%APPDATA%\sqawk\history` when `APPDATA` is absolute, else
+/// `%USERPROFILE%\.sqawk_history`, else none.
+fn history_path(env: HistoryEnv) -> Option<PathBuf> {
+    let absolute = |v: Option<OsString>| v.map(PathBuf::from).filter(|p| p.is_absolute());
+    let nonempty = |v: Option<OsString>| v.filter(|h| !h.is_empty()).map(PathBuf::from);
+    absolute(env.xdg_state_home)
+        .map(|s| s.join("sqawk").join("history"))
+        .or_else(|| nonempty(env.home).map(|h| h.join(".sqawk_history")))
+        .or_else(|| absolute(env.appdata).map(|a| a.join("sqawk").join("history")))
+        .or_else(|| nonempty(env.userprofile).map(|h| h.join(".sqawk_history")))
 }
 
 /// The rustyline helper: completion and multi-line statement entry.
@@ -479,8 +518,24 @@ enum ReplCommand {
     Show(Option<String>),
     /// Show statistics or toggle statistics mode
     Stats(Option<String>),
+    /// Show or set the result format
+    Mode(Option<String>),
+    /// Turn result headers on or off
+    Headers(Option<String>),
+    /// Show or set the text NULL prints as
+    NullValue(Option<String>),
     /// A malformed or unknown dot-command (the error message)
     Invalid(String),
+}
+
+/// The REPL's result format: `--format` if given, else a table on a
+/// terminal and CSV when piped (so scripts see what `-s` prints).
+fn default_format(given: Option<crate::output::Format>, terminal: bool) -> crate::output::Format {
+    given.unwrap_or(if terminal {
+        crate::output::Format::Table
+    } else {
+        crate::output::Format::Csv
+    })
 }
 
 /// REPL interface for interactive SQL entry
@@ -506,6 +561,8 @@ pub struct Repl {
     show_changes: bool,
     /// Whether to show query statistics
     show_stats: bool,
+    /// How results print (`.mode`, `.headers`, `.nullvalue`)
+    output: crate::output::OutputSettings,
 }
 
 impl Repl {
@@ -522,8 +579,7 @@ impl Repl {
             match Editor::with_config(rustyline_config) {
                 Ok(mut ed) => {
                     ed.set_helper(Some(ReplHelper::default()));
-                    history =
-                        history_path(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"));
+                    history = history_path(HistoryEnv::from_env());
                     if let Some(path) = &history {
                         let _ = ed.load_history(path);
                     }
@@ -544,6 +600,12 @@ impl Repl {
             failed: false,
             show_changes: false,
             show_stats: false,
+            output: crate::output::OutputSettings {
+                format: default_format(app_config.format(), interactive),
+                delimiter: app_config.output_delimiter(),
+                header: !app_config.no_output_header(),
+                null: app_config.null_text().to_string(),
+            },
         }
     }
 
@@ -717,6 +779,9 @@ impl Repl {
                 "save" => ReplCommand::Save(arg),
                 "show" => ReplCommand::Show(arg),
                 "stats" => ReplCommand::Stats(arg),
+                "mode" => ReplCommand::Mode(arg),
+                "headers" => ReplCommand::Headers(arg),
+                "nullvalue" => ReplCommand::NullValue(parts.get(1).map(|a| a.to_string())),
                 _ => ReplCommand::Invalid(format!("unknown command: .{}", command)),
             }
         } else if scan_sql(input).has_tokens {
@@ -747,6 +812,15 @@ impl Repl {
                 Ok(())
             }
             ReplCommand::Version => self.show_version(),
+            ReplCommand::Mode(arg) => self.set_mode(arg.as_deref()),
+            ReplCommand::Headers(arg) => self.set_headers(arg.as_deref()),
+            ReplCommand::NullValue(arg) => {
+                match arg {
+                    Some(text) => self.output.null = text,
+                    None => outln!("{}", self.output.null),
+                }
+                Ok(())
+            }
             ReplCommand::Invalid(msg) => Err(ReplError::Command(msg)),
         }
     }
@@ -760,23 +834,21 @@ impl Repl {
             None
         };
 
-        let result = self.executor.execute(sql)?;
-
         // Every statement's result set, each with its own header, printed
-        // exactly as the command line prints it.
-        let header = !self.config.no_output_header();
-        for table in &result {
-            let _ = table.print_to_stdout(header);
-        }
+        // exactly as the command line prints it: row by row as the statement
+        // runs, so a later error on the line keeps the earlier output.
+        let mut out = crate::output::StdoutSink::new(self.output.clone(), false, true);
+        self.executor.execute(sql, &mut out)?;
 
         // The change count is reported independently of whether the line also
         // produced rows: a trailing DML on `SELECT ...; DELETE ...` reports
         // too. It is reported even when zero, so a statement that matched
         // nothing still shows that it ran.
-        if self.show_changes && self.executor.last_statement_changed_rows() {
-            if let Ok(affected_rows) = self.executor.get_affected_row_count() {
-                outln!("{} rows affected", affected_rows);
-            }
+        if self.show_changes
+            && self.executor.last_statement_changed_rows()
+            && let Ok(affected_rows) = self.executor.get_affected_row_count()
+        {
+            outln!("{} rows affected", affected_rows);
         }
 
         // Display query statistics if enabled
@@ -857,8 +929,18 @@ impl Repl {
             if self.show_changes { "ON" } else { "OFF" }
         );
         outln!("  .exit ?CODE?          Exit the REPL with exit status CODE");
+        outln!(
+            "  .headers on|off       Show result headers (currently: {})",
+            if self.output.header { "ON" } else { "OFF" }
+        );
         outln!("  .help                 Show this help message");
         outln!("  .load [TABLE=]FILE    Load FILE into TABLE");
+        outln!(
+            "  .mode ?FORMAT?        Result format: {} (currently: {})",
+            crate::output::Format::NAMES.join(", "),
+            self.output.format.name()
+        );
+        outln!("  .nullvalue ?TEXT?     Text NULL prints as (csv, tsv, markdown, table)");
         outln!("  .print STRING...      Print literal STRING");
         outln!("  .quit                 Exit the REPL");
         outln!("  .save ?TABLE?         Save changes to all tables or a specific TABLE");
@@ -898,10 +980,10 @@ impl Repl {
     /// Print the CREATE TABLE form of `name`'s columns.
     fn print_schema(&self, name: &str) -> Result<()> {
         let column_types = self.executor.get_table_column_types(name)?;
-        outln!("CREATE TABLE {} (", name);
+        outln!("CREATE TABLE {} (", quote_ident(name));
         for (i, (column_name, data_type)) in column_types.iter().enumerate() {
             let sep = if i + 1 < column_types.len() { "," } else { "" };
-            outln!("  {} {}{}", column_name, data_type, sep);
+            outln!("  {} {}{}", quote_ident(column_name), data_type, sep);
         }
         outln!(");");
         Ok(())
@@ -930,6 +1012,33 @@ impl Repl {
             ))
         })?;
         self.note(format_args!("Changed directory to {}", dir));
+        Ok(())
+    }
+
+    /// `.mode [FORMAT]`: print the result format, or set it.
+    fn set_mode(&mut self, arg: Option<&str>) -> Result<()> {
+        match arg.filter(|a| !a.is_empty()) {
+            None => outln!("{}", self.output.format.name()),
+            Some(name) => {
+                self.output.format = crate::output::Format::parse(name).ok_or_else(|| {
+                    ReplError::Command(format!(
+                        "unknown mode: {} (use {})",
+                        name,
+                        crate::output::Format::NAMES.join(", ")
+                    ))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `.headers on|off`: result headers (csv, tsv, table).
+    fn set_headers(&mut self, arg: Option<&str>) -> Result<()> {
+        self.output.header = match arg {
+            Some("on") => true,
+            Some("off") => false,
+            _ => return Err(ReplError::Command("usage: .headers on|off".to_string())),
+        };
         Ok(())
     }
 
@@ -1044,6 +1153,11 @@ impl Repl {
                     "  Statistics:  {}",
                     if self.show_stats { "ON" } else { "OFF" }
                 );
+                outln!("  Mode:        {}", self.output.format.name());
+                outln!(
+                    "  Headers:     {}",
+                    if self.output.header { "ON" } else { "OFF" }
+                );
                 outln!(
                     "  Verbose:     {}",
                     if self.config.verbose() { "ON" } else { "OFF" }
@@ -1109,7 +1223,7 @@ impl Repl {
                 return Err(ReplError::Command(format!(
                     "unknown option for .stats: {} (usage: .stats [on|off])",
                     other
-                )))
+                )));
             }
         };
         self.note(format_args!(
@@ -1124,9 +1238,195 @@ impl Repl {
     }
 }
 
+/// SQLite's keywords (https://sqlite.org/lang_keywords.html), sorted: a
+/// column with one of these names must be quoted.
+const SQLITE_KEYWORDS: [&str; 147] = [
+    "ABORT",
+    "ACTION",
+    "ADD",
+    "AFTER",
+    "ALL",
+    "ALTER",
+    "ALWAYS",
+    "ANALYZE",
+    "AND",
+    "AS",
+    "ASC",
+    "ATTACH",
+    "AUTOINCREMENT",
+    "BEFORE",
+    "BEGIN",
+    "BETWEEN",
+    "BY",
+    "CASCADE",
+    "CASE",
+    "CAST",
+    "CHECK",
+    "COLLATE",
+    "COLUMN",
+    "COMMIT",
+    "CONFLICT",
+    "CONSTRAINT",
+    "CREATE",
+    "CROSS",
+    "CURRENT",
+    "CURRENT_DATE",
+    "CURRENT_TIME",
+    "CURRENT_TIMESTAMP",
+    "DATABASE",
+    "DEFAULT",
+    "DEFERRABLE",
+    "DEFERRED",
+    "DELETE",
+    "DESC",
+    "DETACH",
+    "DISTINCT",
+    "DO",
+    "DROP",
+    "EACH",
+    "ELSE",
+    "END",
+    "ESCAPE",
+    "EXCEPT",
+    "EXCLUDE",
+    "EXCLUSIVE",
+    "EXISTS",
+    "EXPLAIN",
+    "FAIL",
+    "FILTER",
+    "FIRST",
+    "FOLLOWING",
+    "FOR",
+    "FOREIGN",
+    "FROM",
+    "FULL",
+    "GENERATED",
+    "GLOB",
+    "GROUP",
+    "GROUPS",
+    "HAVING",
+    "IF",
+    "IGNORE",
+    "IMMEDIATE",
+    "IN",
+    "INDEX",
+    "INDEXED",
+    "INITIALLY",
+    "INNER",
+    "INSERT",
+    "INSTEAD",
+    "INTERSECT",
+    "INTO",
+    "IS",
+    "ISNULL",
+    "JOIN",
+    "KEY",
+    "LAST",
+    "LEFT",
+    "LIKE",
+    "LIMIT",
+    "MATCH",
+    "MATERIALIZED",
+    "NATURAL",
+    "NO",
+    "NOT",
+    "NOTHING",
+    "NOTNULL",
+    "NULL",
+    "NULLS",
+    "OF",
+    "OFFSET",
+    "ON",
+    "OR",
+    "ORDER",
+    "OTHERS",
+    "OUTER",
+    "OVER",
+    "PARTITION",
+    "PLAN",
+    "PRAGMA",
+    "PRECEDING",
+    "PRIMARY",
+    "QUERY",
+    "RAISE",
+    "RANGE",
+    "RECURSIVE",
+    "REFERENCES",
+    "REGEXP",
+    "REINDEX",
+    "RELEASE",
+    "RENAME",
+    "REPLACE",
+    "RESTRICT",
+    "RETURNING",
+    "RIGHT",
+    "ROLLBACK",
+    "ROW",
+    "ROWS",
+    "SAVEPOINT",
+    "SELECT",
+    "SET",
+    "TABLE",
+    "TEMP",
+    "TEMPORARY",
+    "THEN",
+    "TIES",
+    "TO",
+    "TRANSACTION",
+    "TRIGGER",
+    "UNBOUNDED",
+    "UNION",
+    "UNIQUE",
+    "UPDATE",
+    "USING",
+    "VACUUM",
+    "VALUES",
+    "VIEW",
+    "VIRTUAL",
+    "WHEN",
+    "WHERE",
+    "WINDOW",
+    "WITH",
+    "WITHOUT",
+];
+
+/// `name` as an SQL identifier: as is when it is a plain identifier that is
+/// not a keyword, else double-quoted with any `"` doubled (sqlite3's
+/// `.schema` quotes the same names).
+fn quote_ident(name: &str) -> std::borrow::Cow<'_, str> {
+    let plain = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && SQLITE_KEYWORDS
+            .binary_search(&name.to_ascii_uppercase().as_str())
+            .is_err();
+    if plain {
+        std::borrow::Cow::Borrowed(name)
+    } else {
+        std::borrow::Cow::Owned(format!("\"{}\"", name.replace('"', "\"\"")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifiers_are_quoted_when_needed() {
+        assert_eq!(quote_ident("id"), "id");
+        assert_eq!(quote_ident("_x9"), "_x9");
+        assert_eq!(quote_ident("first name"), "\"first name\"");
+        assert_eq!(quote_ident("9lives"), "\"9lives\"");
+        assert_eq!(quote_ident("Select"), "\"Select\"");
+        assert_eq!(quote_ident("a\"b"), "\"a\"\"b\"");
+        assert_eq!(quote_ident(""), "\"\"");
+        assert_eq!(quote_ident("ID:1"), "\"ID:1\"");
+        assert_eq!(quote_ident("name"), "name");
+        assert_eq!(quote_ident("order"), "\"order\"");
+        assert!(SQLITE_KEYWORDS.windows(2).all(|w| w[0] < w[1]));
+    }
 
     fn schema() -> Schema {
         vec![
@@ -1179,6 +1479,15 @@ mod tests {
         assert_eq!(cands, vec!["WHEN".to_string(), "WHERE".to_string()]);
     }
 
+    /// A table on a terminal, CSV when piped, unless --format says.
+    #[test]
+    fn default_result_format() {
+        use crate::output::Format;
+        assert_eq!(default_format(None, true), Format::Table);
+        assert_eq!(default_format(None, false), Format::Csv);
+        assert_eq!(default_format(Some(Format::Json), true), Format::Json);
+    }
+
     #[test]
     fn completes_function_names() {
         let (_, cands) = complete("SELECT upp");
@@ -1200,6 +1509,7 @@ mod tests {
                 "Depts".to_string(),
                 "dept".to_string(),
                 "Descr".to_string(),
+                "degrees".to_string(),
                 "delete".to_string(),
                 "dense_rank".to_string(),
                 "desc".to_string()
@@ -1273,24 +1583,42 @@ mod tests {
         // Absolute paths for this platform: "/state" has no drive letter and
         // is relative on Windows.
         #[cfg(windows)]
-        let (state, home) = (r"C:\state", r"C:\home\u");
+        let (state, home, appdata) = (r"C:\state", r"C:\home\u", r"C:\u\AppData\Roaming");
         #[cfg(not(windows))]
-        let (state, home) = ("/state", "/home/u");
+        let (state, home, appdata) = ("/state", "/home/u", "/u/appdata");
         let os = |s: &str| Some(OsString::from(s));
+        let env =
+            |x: Option<OsString>, h: Option<OsString>, a: Option<OsString>, u: Option<OsString>| {
+                HistoryEnv {
+                    xdg_state_home: x,
+                    home: h,
+                    appdata: a,
+                    userprofile: u,
+                }
+            };
         assert_eq!(
-            history_path(os(state), os(home)),
+            history_path(env(os(state), os(home), os(appdata), os(home))),
             Some(PathBuf::from(state).join("sqawk").join("history"))
         );
         assert_eq!(
-            history_path(None, os(home)),
+            history_path(env(None, os(home), os(appdata), None)),
             Some(PathBuf::from(home).join(".sqawk_history"))
         );
         // A relative XDG_STATE_HOME is invalid and ignored.
         assert_eq!(
-            history_path(os("rel"), os(home)),
+            history_path(env(os("rel"), os(home), None, None)),
             Some(PathBuf::from(home).join(".sqawk_history"))
         );
-        assert_eq!(history_path(os(""), os("")), None);
-        assert_eq!(history_path(None, None), None);
+        // Windows: no HOME, so APPDATA, then USERPROFILE.
+        assert_eq!(
+            history_path(env(None, None, os(appdata), os(home))),
+            Some(PathBuf::from(appdata).join("sqawk").join("history"))
+        );
+        assert_eq!(
+            history_path(env(None, os(""), os("rel"), os(home))),
+            Some(PathBuf::from(home).join(".sqawk_history"))
+        );
+        assert_eq!(history_path(env(os(""), os(""), os(""), os(""))), None);
+        assert_eq!(history_path(HistoryEnv::default()), None);
     }
 }

@@ -7,10 +7,10 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 
 ## Features
 
-- **SQL Query Engine** - SELECT, INSERT, UPDATE, DELETE with WHERE, ORDER BY, GROUP BY, HAVING, LIMIT/OFFSET
+- **SQL Query Engine** - SELECT, INSERT, UPDATE (including `UPDATE ... FROM`), DELETE with WHERE, ORDER BY, GROUP BY, HAVING, LIMIT/OFFSET (and `LIMIT offset, count`); VALUES as a query
 - **Joins** - INNER, LEFT, RIGHT, FULL OUTER, and CROSS joins with ON, USING or NATURAL; equality joins run as hash joins
 - **Aggregates** - COUNT, SUM, TOTAL, AVG, MIN, MAX, GROUP_CONCAT/STRING_AGG with GROUP BY, DISTINCT and `FILTER (WHERE ...)`
-- **Functions** - String (UPPER, LOWER, LENGTH, SUBSTR, INSTR, REPLACE, TRIM, LPAD/RPAD, PRINTF, QUOTE, ...), math (ABS, ROUND, CEIL, FLOOR, SIGN, multi-argument MIN/MAX, bitwise operators), conditional (COALESCE, IFNULL, NULLIF, IIF, TYPEOF), date/time (DATE, TIME, DATETIME, STRFTIME, JULIANDAY, UNIXEPOCH, TIMEDIFF with SQLite's modifiers)
+- **Functions** - String (UPPER, LOWER, LENGTH, SUBSTR, INSTR, REPLACE, TRIM, LPAD/RPAD, PRINTF, QUOTE, ...), math (ABS, ROUND, CEIL, FLOOR, TRUNC, SIGN, SQRT, POW, EXP, LN, LOG, trigonometric and hyperbolic functions, RANDOM, multi-argument MIN/MAX, bitwise operators), regular expressions (REGEXP, REGEXP_MATCHES, REGEXP_REPLACE, REGEXP_EXTRACT), conditional (COALESCE, IFNULL, NULLIF, IIF, TYPEOF), date/time (DATE, TIME, DATETIME, STRFTIME, JULIANDAY, UNIXEPOCH, TIMEDIFF with SQLite's modifiers)
 - **SQLite semantics** - 64-bit integer arithmetic, SQLite CAST rules, ASCII case-insensitive LIKE with ESCAPE, character-based strings; unimplemented syntax is an error, never silently ignored
 - **Subqueries** - Scalar, `IN (SELECT ...)`, and `EXISTS`, including correlated
 - **Common Table Expressions** - `WITH` and `WITH RECURSIVE` (tree walks, counters), on SELECT, INSERT, UPDATE and DELETE
@@ -18,14 +18,16 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 - **Window Functions** - ROW_NUMBER, RANK, DENSE_RANK, PERCENT_RANK, CUME_DIST, NTILE, LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE, and aggregates with `OVER (PARTITION BY ... ORDER BY ...)`, ROWS frames and named windows
 - **DDL** - CREATE TABLE, CREATE TABLE AS SELECT, DROP, ALTER TABLE ADD COLUMN, TRUNCATE
 - **Transactions** - BEGIN, COMMIT, ROLLBACK over the in-memory tables; nothing uncommitted is written
-- **Expressions** - CASE, CAST, BETWEEN, IN, LIKE/ILIKE ... ESCAPE, IS [NOT] DISTINCT FROM, `||`, arithmetic; ORDER BY ... NULLS FIRST/LAST
-- **File Formats** - CSV, TSV (`.tsv`/`.tab`), and custom delimiters (`-F`); headerless files via `--no-header` or `--tabledef`; `#` comment lines via `--comments`; untouched rows survive `--write` byte for byte
-- **Pipelines** - Reads standard input with a `-` file operand
+- **Expressions** - CASE, CAST, BETWEEN, IN, LIKE/ILIKE ... ESCAPE, GLOB, REGEXP, IS [NOT] DISTINCT FROM, `||`, arithmetic; COLLATE BINARY / NOCASE / RTRIM; ORDER BY ... NULLS FIRST/LAST
+- **File Formats** - CSV, TSV (`.tsv`/`.tab`), and custom delimiters (`-F`); gzip and zstd files (`.csv.gz`, `.tsv.zst`), recompressed by `--write`; several files as one table (`logs=jan.csv logs=feb.csv`, `'logs=logs/*.csv'`); headerless files via `--no-header` or `--tabledef`; `#` comment lines via `--comments`; untouched rows survive `--write` byte for byte
+- **Pipelines** - Reads standard input (plain or compressed) with a `-` file operand
 - **Safe by Default** - Files unchanged unless `--write` flag is specified
+- **Output formats** - CSV (default), TSV, JSON, JSON Lines, Markdown or an aligned table (`--format`)
 - **Interactive REPL** - Explore data interactively with `-i` flag
 
-Every input file is loaded whole into memory: plan on six to seven times the
-file's size, plus the result set (see
+Every input table is held in memory: plan on about four to five times the
+file's size (about six under `--write`). Rows are printed as they are
+produced; only sorting, grouping and similar steps hold more (see
 [Working with Large Files](doc/user_guide.md#working-with-large-files)).
 
 ## Installation
@@ -34,7 +36,7 @@ file's size, plus the result set (see
 cargo install --locked sqawk
 ```
 
-This installs the `sqawk` binary. Requires Rust 1.88 or newer. `--locked`
+This installs the `sqawk` binary. Requires Rust 1.95 or newer. `--locked`
 builds with the dependency versions sqawk was tested with.
 
 ## Quick Examples
@@ -57,6 +59,12 @@ cat employees.csv | sqawk -s "SELECT name FROM stdin WHERE salary > 70000" -
 
 # Run the statements in a file; print tab-separated results without a header
 sqawk -f report.sql --output-delimiter '\t' --no-output-header employees.csv
+
+# A compressed file, results as an aligned table
+sqawk --format table -s "SELECT region, SUM(total) FROM sales GROUP BY region" sales.csv.gz
+
+# No input file needed for a computation
+sqawk -s "SELECT 2 * PI() AS tau"
 ```
 
 Errors are one line on stderr (`sqawk: no such column: nmae`) with exit
@@ -111,8 +119,9 @@ queries on every OS.
 - **`tsq wb`** fuzzes `--write`: random files (CSV / TSV / `-F` separators,
   LF / CRLF / mixed line endings, byte order marks, ragged rows, blank and
   `#` comment lines, quoted and multi-line fields, edge values) and random
-  UPDATE / DELETE / INSERT / ALTER TABLE / TRUNCATE sequences with
-  transactions and `CREATE TABLE ... LOCATION`. Every file must equal what
+  UPDATE (including `UPDATE ... FROM`) / DELETE / INSERT / ALTER TABLE /
+  TRUNCATE sequences with transactions and `CREATE TABLE ... LOCATION`; some
+  files are gzip or zstd compressed. Every file must equal what
   the writeback rules give for SQLite's final table (untouched rows byte for
   byte, changed rows from their values); rolled-back work and read-only
   targets must leave files untouched. On Unix it also kills sqawk during a
@@ -127,8 +136,8 @@ queries on every OS.
   `--only N`. Last line: `CLI SUMMARY {ok, bad, crash}`.
 - **`tsq stress`** times workloads (scan, filter, group, joins, sort,
   distinct, windows, CTEs, subqueries, compounds, `--write`, a 1000-column
-  table) over generated data, `--rows` 1,000,000 to 10,000,000 in the
-  largest table, recording wall time and, on Linux, the peak RSS of sqawk.
+  table, `SELECT *` of whole tables) over generated data, `--rows` (1,000 to
+  10,000,000) in the largest table, recording wall time and, on Linux, the peak RSS of sqawk.
   `--json OUT` saves the results; `--baseline FILE --tolerance PCT` exits 1
   when a workload regressed; `--repeat K` keeps the best of K runs;
   `--workloads a,b` / `--list`.

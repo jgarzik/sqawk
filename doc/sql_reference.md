@@ -63,7 +63,7 @@ FROM table [alias] [, table2 ...]
 [GROUP BY columns]
 [HAVING condition]
 [ORDER BY expr [ASC|DESC] [NULLS FIRST|NULLS LAST], ...]
-[LIMIT n [OFFSET m]]
+[LIMIT n [OFFSET m] | LIMIT m, n]
 ```
 
 ### Column Selection
@@ -86,9 +86,11 @@ SELECT col alias                -- alias without AS
 | `AND`, `OR`, `NOT` | `a > 1 AND b < 5` |
 | `IS NULL`, `IS NOT NULL` | `col IS NULL` |
 | `LIKE`, `ILIKE` | `name LIKE 'A%'`, `code LIKE 'x\_%' ESCAPE '\'` |
+| `GLOB` | `name GLOB 'A*'`, `code GLOB '[0-9]?'`: case-sensitive; `*` any run, `?` one character, `[a-z]` / `[^a-z]` a set; `GLOB(p, x)` is `x GLOB p` |
+| `REGEXP`, `RLIKE` | `code REGEXP '^[A-Z]{3}[0-9]+$'` (see Regular Expressions) |
 | `IS [NOT]`, `IS [NOT] DISTINCT FROM` | `a IS b`, `a IS NOT DISTINCT FROM b` (NULL-safe `=`) |
 | `BETWEEN` | `col BETWEEN 1 AND 10` |
-| `IN` | `col IN (1, 2, 3)` |
+| `IN` | `col IN (1, 2, 3)`; `col IN ()` is false, `col NOT IN ()` true |
 | `IN (SELECT ...)` | `id IN (SELECT id FROM t)` |
 
 Operators bind as in SQLite, loosest first; operators on one line share a
@@ -100,13 +102,14 @@ level and group left to right (`2 = 1 < 2` is `2 = (1 < 2)`, `2 * 3 || 4` is
 | `OR` |
 | `AND` |
 | `NOT` |
-| `=` `==` `!=` `<>` `IS [NOT]` `IS [NOT] DISTINCT FROM` `IN` `LIKE` `BETWEEN` |
+| `=` `==` `!=` `<>` `IS [NOT]` `IS [NOT] DISTINCT FROM` `IN` `LIKE` `GLOB` `REGEXP` `BETWEEN` |
 | `<` `<=` `>` `>=` |
 | `&` `\|` `<<` `>>` |
 | `+` `-` |
 | `*` `/` `%` |
 | `\|\|` |
 | unary `-` `+` `~` |
+| `COLLATE` (postfix: `x COLLATE NOCASE`) |
 
 An expression may nest at most 1000 levels deep (SQLite's limit; a chain
 `a + b + ...` of n terms is n levels, parentheses add none). A deeper one is
@@ -120,9 +123,28 @@ error `recursion limit exceeded`.
 `LIKE` follows SQLite: `%` matches any run of characters and `_` exactly one
 character (not byte), both including newlines; letters compare
 case-insensitively for ASCII only (`'a%'` matches `Alice`, but `'é'` does not
-match `'É'`). `ESCAPE 'c'` makes the character after `c` literal. The pattern
+match `'É'`). `ESCAPE 'c'` makes the character after `c` literal; the escape may be any
+expression whose text is one character. The pattern
 may be any expression, such as another column. `ILIKE` (not in SQLite) folds
 Unicode case. A NULL value, pattern or escape gives NULL.
+
+### Collation
+
+`COLLATE BINARY` (the default), `COLLATE NOCASE` and `COLLATE RTRIM` work as
+in SQLite where they decide how text compares:
+
+- In a comparison (`=`, `<>`, `<`, ...), `BETWEEN` and an `IN` list:
+  `name = 'alice' COLLATE NOCASE`. The left operand's COLLATE wins, else
+  the right's.
+- On an ORDER BY term: `ORDER BY name COLLATE NOCASE`.
+- On a GROUP BY term: `GROUP BY name COLLATE NOCASE` puts `Alice` and
+  `ALICE` in one group; `name` in the SELECT list shows the value of the
+  group's first row.
+
+NOCASE folds only the ASCII letters A-Z; RTRIM ignores trailing spaces.
+Text with a numeric reading still compares as a number (see Type
+coercion), so a collation matters only between texts. A COLLATE written
+anywhere else is an error (see Unsupported syntax).
 
 ### CASE Expression
 
@@ -161,7 +183,7 @@ gives NULL, and a number argument is used in its text form.
 | Function | Description |
 |----------|-------------|
 | `UPPER(s)`, `LOWER(s)` | Case conversion (all of Unicode) |
-| `LENGTH(s)` | Number of characters |
+| `LENGTH(s)` | Number of characters (before the first NUL, as in SQLite) |
 | `TRIM(s)` | Strip whitespace from both ends |
 | `LTRIM(s [, chars])`, `RTRIM(s [, chars])` | Strip whitespace, or any of `chars`, from the start / the end |
 | `TRIM([BOTH\|LEADING\|TRAILING] chars FROM s)` | Strip any of `chars` from both ends / the start / the end |
@@ -175,7 +197,7 @@ gives NULL, and a number argument is used in its text form.
 | `LPAD(s, len [, fill])`, `RPAD` | Pad to `len` characters (see below) |
 | `HEX(x)` | Upper-case hex of the UTF-8 bytes; `''` for NULL |
 | `CHAR(n, ...)` | The characters with these code points |
-| `UNICODE(s)` | Code point of the first character |
+| `UNICODE(s)` | Code point of the first character; NULL for empty text or text starting with NUL |
 | `PRINTF(fmt, ...)`, `FORMAT` | SQLite's printf (see below) |
 | `QUOTE(x)` | The SQL literal for `x`: `'it''s'`, `12`, `1.5`, `NULL` |
 | `a \|\| b` | Concatenation; NULL if either side is NULL |
@@ -214,6 +236,24 @@ past the limit (SQLite returns NULL or wraps the number), or a `REPLACE`,
 `HEX` or concatenation whose result would exceed it is the error "string or
 blob too big". The length is checked before anything is allocated.
 
+### Regular Expressions
+
+| Function | Description |
+|----------|-------------|
+| `s REGEXP p`, `s RLIKE p`, `s NOT REGEXP p` | 1 if `p` matches somewhere in `s`, else 0; `REGEXP(p, s)` is the same |
+| `REGEXP_MATCHES(s, p)` | `s REGEXP p` |
+| `REGEXP_REPLACE(s, p, r [, flags])` | `s` with the first match replaced by `r`; flag `g` replaces every match, `i` ignores case |
+| `REGEXP_EXTRACT(s, p [, group])` | The first match (or its group number `group`); empty text when nothing matches |
+
+Patterns use the Rust `regex` crate's syntax (Perl-like: `\d`, `\w`, `[...]`,
+`(?i)`, `+?`, ...; no backreferences or look-around) and search: anchor
+with `^` and `$` to match the whole text. In a replacement `\1` ... `\9`
+insert a group and `\0` the whole match (a group that did not take part
+inserts nothing); `\\` is a backslash. A NULL argument gives NULL; an
+invalid pattern, an unknown flag or a group the pattern does not have is an
+error. `REGEXP` is the operator the sqlite3 shell provides; the three
+functions are named and behave as in DuckDB.
+
 ### Math Functions
 
 | Function | Description |
@@ -223,6 +263,17 @@ blob too big". The length is checked before anything is allocated.
 | `CEIL(n)`, `CEILING(n)` | Round up |
 | `FLOOR(n)` | Round down |
 | `SIGN(n)` | -1, 0 or 1; NULL for text that is not a number |
+| `TRUNC(n)` | Round toward zero |
+| `SQRT(n)`, `EXP(n)` | Square root, e to the power n |
+| `LN(n)`, `LOG10(n)`, `LOG2(n)` | Natural, base-10, base-2 logarithm |
+| `LOG(n)`, `LOG(b, n)` | Base-10 logarithm (as in SQLite), or base `b` |
+| `POW(x, y)`, `POWER(x, y)` | x to the power y |
+| `MOD(x, y)` | Remainder of x / y, as a real (`MOD(7, 3)` is `1.0`) |
+| `PI()` | 3.14159265358979 |
+| `RANDOM()` | A pseudo-random 64-bit integer, new on every call (`ORDER BY RANDOM()` shuffles) |
+| `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, `ATAN2(y, x)` | Trigonometry, in radians |
+| `SINH`, `COSH`, `TANH`, `ASINH`, `ACOSH`, `ATANH` | Hyperbolic functions |
+| `DEGREES(n)`, `RADIANS(n)` | Radians to degrees and back |
 | `MIN(a, b, ...)`, `MAX(a, b, ...)` | Least / greatest argument; NULL if any is NULL |
 
 `ROUND(3.14159, 2)` is `3.14`. Halves round away from zero, judged on the
@@ -236,10 +287,20 @@ than a silent `0`.
 
 `ABS` of an integer is an integer, and `ABS(-9223372036854775808)` is an
 `integer overflow` error. `CEIL` and `FLOOR` return an integer argument
-unchanged. With one argument, `MIN` and `MAX` are the aggregates.
+unchanged; text counts as a number only when all of it is one (`'007'` is
+the integer 7, `' 4.5 '` the real 4.5), and any other text is NULL. With one argument, `MIN` and `MAX` are the aggregates.
 
 `ROUND` returns a real, so a whole result prints with `.0` (see Real output):
 `ROUND(2.0, 2)` is `2.0`.
+
+The functions from `TRUNC` down are SQLite 3.45's math functions, with its
+rules: an argument that is NULL or not a number (text counts only when all
+of it is one) gives NULL, and so does a result outside the function's
+domain (`SQRT(-1)`, `LN(0)`, `ACOS(2)`, `MOD(1, 0)`); an overflow is `Inf`
+(`EXP(1000)`). `LOG(b, n)` is NULL when `b` <= 1 or `n` <= 0, and its `n`
+is read the way arithmetic reads text (`LOG(2, '8x')` is `3.0`), as in
+SQLite. Every result is a real except `TRUNC` of an integer, which is that
+integer.
 
 ### Arithmetic
 
@@ -651,6 +712,16 @@ right: `A UNION ALL B INTERSECT C` is `(A UNION ALL B) INTERSECT C`.
 Parenthesize an operand to group differently. A compound may have at most
 500 terms (`too many terms in compound SELECT`).
 
+## VALUES
+
+`VALUES (1, 'a'), (2, 'b')` is a query wherever a SELECT may be: a statement
+of its own, a FROM item (`FROM (VALUES ...) AS v`), an operand of UNION /
+INTERSECT / EXCEPT, a CTE body, a scalar subquery (`(VALUES (5))`) and an
+`IN (VALUES ...)` list. Its columns are named `column1`, `column2`, ... as
+in SQLite, and every tuple must have as many values as the first ("all
+VALUES must have the same number of terms"). A VALUES statement also takes
+ORDER BY and LIMIT, which SQLite rejects there.
+
 ## INSERT
 
 ```sql
@@ -666,12 +737,23 @@ It must yield one column per target column.
 
 ```sql
 UPDATE table SET col1 = val1 [, col2 = val2, ...]
+[FROM other [, ...] | FROM other JOIN ...]
 [WHERE condition]
 ```
 
-`UPDATE ... FROM other_table` is not supported and is rejected with an error.
-To pull a value from another table, use a correlated subquery in the SET
-expression:
+With `FROM` (SQLite 3.33's UPDATE-FROM), the target row is joined with the
+FROM items -- tables, derived tables, CTEs, joins -- and SET and WHERE see
+both:
+
+```sql
+UPDATE data SET category = lookup.category
+FROM lookup WHERE lookup.code = data.code
+```
+
+A target row that joins no FROM row is left alone. One that joins several
+is updated once, from the first of them in loop order (SQLite leaves the
+choice unspecified), and counts once. The same lookup with a correlated
+subquery in the SET expression updates every row:
 
 ```sql
 UPDATE data SET category =
@@ -814,7 +896,7 @@ one rule:
 - A number (or numeric-reading text) is less than text without one:
   `10 < 'abc'`, `'-x' > 10`.
 - Two texts without a numeric reading compare byte by byte (BINARY):
-  `'B' < 'a'`.
+  `'B' < 'a'`, unless a COLLATE says otherwise (see Collation).
 - Any NULL operand makes the comparison UNKNOWN (sorting puts NULLs first).
 
 `<` and `ORDER BY` therefore agree: a column sorts `9, 10, -x, abc`, and
@@ -844,7 +926,10 @@ Rows no statement changed are written back byte for byte, exactly as they
 were read; a changed or inserted row is written from its values, NULL as an
 empty field. The source file's delimiter, header line (or its absence), byte
 order mark, line endings, blank lines, `#` comment lines (under
-`--comments`) and permissions are kept.
+`--comments`), compression (a gzip or zstd file is written back compressed
+the same way) and permissions are kept. A table read from standard input
+or from several files (`NAME=` repeated, or a pattern) has no file to go
+back to: if it is modified, `--write` fails and writes nothing.
 
 Every target file is checked before any is written: a read-only file fails
 the run (`cannot write 'x.csv': file is read-only`) and no file is written.
@@ -878,7 +963,8 @@ nothing is modified. That includes:
 
 - `INSERT OR REPLACE` / `OR IGNORE` / ..., `ON CONFLICT`, `INSERT OVERWRITE`,
   and `RETURNING` on INSERT, UPDATE and DELETE (`REPLACE INTO` does not parse)
-- `UPDATE ... FROM`, `DELETE ... USING`, `DELETE t FROM t JOIN ...`, and
+- `UPDATE t FROM ... SET` (FROM before SET), `DELETE ... USING`,
+  `DELETE t FROM t JOIN ...`, and
   UPDATE / DELETE with `ORDER BY` or `LIMIT`
 - `WITH` on a parenthesized compound operand (`SELECT 1 UNION (WITH ...)`),
   a CTE body that is an INSERT / UPDATE / DELETE, typed CTE columns
@@ -891,7 +977,11 @@ nothing is modified. That includes:
   list, `FILTER` or `DISTINCT` on a scalar function, `FILTER` on a window
   function
 - `CAST ... FORMAT`, `LIKE ANY`, blob literals (`X'00'`) and parameters
-- `COLLATE` (any collation, in expressions and `ORDER BY`)
+- `COLLATE` outside comparisons, BETWEEN, IN lists, ORDER BY and GROUP BY
+  (on a result column, a function argument, inside an operator such as
+  `a || b COLLATE NOCASE`, DISTINCT, window clauses), on a declared column,
+  and collations other than BINARY, NOCASE and RTRIM ("no such collation
+  sequence")
 - a RIGHT JOIN whose left side already contains an outer join, a FULL JOIN
   followed by further joins, parenthesized joins, and `INTERSECT ALL` /
   `EXCEPT ALL`
@@ -925,9 +1015,9 @@ sqawk aims to give SQLite's answers. Where it deliberately does not:
 | Aggregate of outer-query columns in a subquery (`(SELECT MIN(t.x) FROM u)`) | Evaluated in the outer query, which becomes an aggregate query | Rejected; an aggregate that also reads a column of the subquery's own tables aggregates in the subquery, as in SQLite |
 | Derived table (`FROM (SELECT ...)`) reading an outer-query column | Correlated | Rejected (`no such column`): a derived table is computed once, before the statement |
 | CTE body reading an outer-query column (`SELECT (WITH c AS (SELECT t.x) SELECT * FROM c) FROM t`) | Correlated | Rejected (`no such column`): a CTE is computed once, on first reference |
-| `ILIKE`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `TRIM(... FROM ...)` | Not available | Available |
+| `ILIKE`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `TRIM(... FROM ...)`, `REGEXP`, `REGEXP_MATCHES`, `REGEXP_REPLACE`, `REGEXP_EXTRACT` | Not available (`REGEXP` only in the sqlite3 shell, with its own pattern syntax) | Available |
 | `PRINTF` width or precision past the length limit | NULL, or the number wrapped to 31 bits | Error "string or blob too big" |
-| Parser | SQLite grammar | sqlparser's Hive dialect with SQLite's operator precedence: `GLOB`, `LIMIT n, m`, `TRIM(s, chars)`, `REPLACE INTO`, `x IN ()` do not parse, `REGEXP` is rejected, and parentheses nest at most 47 deep |
+| Parser | SQLite grammar | sqlparser's Hive dialect with SQLite's operator precedence: `TRIM(s, chars)`, `REPLACE INTO` do not parse, and parentheses nest at most 47 deep |
 
 Not implemented: views, indexes, triggers,
-`RETURNING`, row values, `GLOB`, and blob values.
+`RETURNING`, row values, and blob values.

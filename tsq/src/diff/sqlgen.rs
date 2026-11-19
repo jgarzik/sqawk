@@ -30,7 +30,7 @@
 
 use std::rc::Rc;
 
-use super::ast::{expr, list, nest, opt, seq, tok, Node};
+use super::ast::{Node, expr, list, nest, opt, seq, tok};
 use super::schema::{Col, Kind, Props, Rel, Schema};
 use crate::rng::Rng;
 
@@ -171,6 +171,21 @@ const LIKE_PATS: &[&str] = &[
     "'%o%'",
     "'S%'",
     "'%n'",
+];
+const GLOB_PATS: &[&str] = &[
+    "'a*'",
+    "'*a*'",
+    "'?'",
+    "'*e?'",
+    "'B*'",
+    "'*'",
+    "'[A-M]*'",
+    "'*[^a-z]'",
+    "'r?d*'",
+    "'*[0-9]'",
+    "'S*'",
+    "'*n'",
+    "'[]a]*'",
 ];
 const PRINTF_FMTS: &[(&str, &str)] = &[
     ("'%5d|%s|%.2f'", "its"),
@@ -447,8 +462,11 @@ impl<'s> Gen<'s> {
     /// An integer expression without the i64 extremes, for SUM and ABS:
     /// their overflow is an error, and whether a query reaches it depends
     /// on what each engine's planner skips (SQLite omits unused LEFT JOINs
-    /// and empty branches; sqawk computes every derived table and CTE it
-    /// names), which is not a difference in answers.
+    /// and empty branches, flattens subqueries and reorders loops; sqawk
+    /// computes a derived table or CTE the first time a loop opens it),
+    /// which is not a difference in answers. Only the argument's own text is
+    /// checked: a derived column holding an extreme literal still gets
+    /// through.
     fn tame_int(&mut self, sc: &Scope, d: u32) -> Node {
         for _ in 0..6 {
             let (n, _) = self.expr(sc, W::I, d);
@@ -567,7 +585,7 @@ impl<'s> Gen<'s> {
 
     fn real_func(&mut self, sc: &Scope, d: u32) -> Node {
         let dates = self.date_cols(sc);
-        match self.range(0, 10) {
+        match self.range(0, 12) {
             0 => {
                 let (x, _) = self.expr(sc, W::R, d - 1);
                 let n = self.range(0, 3);
@@ -616,6 +634,25 @@ impl<'s> Gen<'s> {
                 let (x, _) = self.expr(sc, W::R, d - 1);
                 mk('r', vec![tok("ROUND("), x, tok(")")])
             }
+            // SQLite's math functions; out of the domain is NULL in both.
+            9 => {
+                let f = self.pick(&[
+                    "SQRT", "EXP", "LN", "LOG", "LOG10", "LOG2", "SIN", "COS", "TAN", "ASIN",
+                    "ACOS", "ATAN", "SINH", "COSH", "TANH", "ASINH", "ACOSH", "ATANH", "DEGREES",
+                    "RADIANS", "TRUNC",
+                ]);
+                let w = self.pick(&[W::R, W::I]);
+                let (x, _) = self.expr(sc, w, d - 1);
+                mk('r', vec![tok(format!("{f}(")), x, tok(")")])
+            }
+            10 => {
+                let f = self.pick(&["POW", "POWER", "MOD", "ATAN2", "LOG"]);
+                let (x, _) = self.expr(sc, W::R, d - 1);
+                let w = self.pick(&[W::R, W::I]);
+                let (y, _) = self.expr(sc, w, d - 1);
+                mk('r', vec![tok(format!("{f}(")), x, tok(", "), y, tok(")")])
+            }
+            11 => mk('r', vec![tok("(PI() * 2)")]),
             _ => {
                 let (x, _) = self.expr(sc, W::R, d - 1);
                 let (y, _) = self.expr(sc, W::R, d - 1);
@@ -970,7 +1007,8 @@ impl<'s> Gen<'s> {
             let not = self.pick(&["", "NOT "]);
             if self.chance(0.7) {
                 let (x, _) = self.expr(sc, W::I, dm);
-                let n = self.range(1, 4);
+                // An empty list too: `x IN ()` is false, `NOT IN ()` true.
+                let n = self.range(0, 4);
                 let items: Vec<Node> = (0..n)
                     .map(|_| tok(self.pick(&["1", "2", "3", "NULL", "42", "-7", "0"])))
                     .collect();
@@ -979,7 +1017,7 @@ impl<'s> Gen<'s> {
                     vec![
                         x,
                         tok(format!(" {not}IN (")),
-                        list(", ", 1, items),
+                        list(", ", 0, items),
                         tok(")"),
                     ],
                 ));
@@ -1001,9 +1039,40 @@ impl<'s> Gen<'s> {
                 ],
             ));
         }
+        if c < 0.78 && self.chance(0.15) {
+            // A collated comparison of texts without a numeric reading (on
+            // which both engines compare text as text). The COLLATE goes on
+            // a whole, parenthesized operand.
+            let (l, _) = self.text_with(sc, dm, |p| p.letter);
+            let (r, _) = self.text_with(sc, 0, |p| p.letter);
+            let op = self.pick(&["=", "<>", "<", ">="]);
+            let coll = self.pick(&["NOCASE", "RTRIM", "BINARY"]);
+            let parts = if self.chance(0.5) {
+                vec![
+                    tok("("),
+                    l,
+                    tok(format!(") COLLATE {coll} {op} (")),
+                    r,
+                    tok(")"),
+                ]
+            } else {
+                vec![
+                    tok("("),
+                    l,
+                    tok(format!(") {op} (")),
+                    r,
+                    tok(format!(") COLLATE {coll}")),
+                ]
+            };
+            return b(mk('b', parts));
+        }
         if c < 0.78 {
             let (x, _) = self.expr(sc, W::T, dm);
             let not = self.pick(&["", "NOT "]);
+            if self.chance(0.3) {
+                let pat = self.pick(GLOB_PATS);
+                return b(mk('b', vec![x, tok(format!(" {not}GLOB {pat}"))]));
+            }
             let pat = self.pick(LIKE_PATS);
             return b(mk('b', vec![x, tok(format!(" {not}LIKE {pat}"))]));
         }
@@ -1139,32 +1208,32 @@ impl<'s> Gen<'s> {
             return (mk('t', vec![nest(seq(parts))]), p);
         }
         // A key lookup returns at most one row.
-        if let Some(k) = src.rel.key {
-            if self.chance(0.2) {
-                let cs: Vec<&Col> = src.rel.cols.iter().filter(|c| c.props.is_num()).collect();
-                if !cs.is_empty() {
-                    let c = cs[self.r.below(cs.len())].name.clone();
-                    let (o, _) = self.expr(sc, W::I, 0);
-                    let kname = &src.rel.cols[k].name;
-                    let props = if w == W::I { Props::INT } else { Props::REAL };
-                    let col_props = src.rel.cols.iter().find(|x| x.name == c).unwrap().props;
-                    if w == W::R || col_props.kind == Kind::Int {
-                        return (
-                            mk(
-                                kind_char(&props),
-                                vec![nest(seq(vec![
-                                    tok(format!(
-                                        "(SELECT {a}.{c} FROM {} {a} WHERE {a}.{kname} = ",
-                                        src.rel.name,
-                                        a = src.alias
-                                    )),
-                                    o,
-                                    tok(")"),
-                                ]))],
-                            ),
-                            props,
-                        );
-                    }
+        if let Some(k) = src.rel.key
+            && self.chance(0.2)
+        {
+            let cs: Vec<&Col> = src.rel.cols.iter().filter(|c| c.props.is_num()).collect();
+            if !cs.is_empty() {
+                let c = cs[self.r.below(cs.len())].name.clone();
+                let (o, _) = self.expr(sc, W::I, 0);
+                let kname = &src.rel.cols[k].name;
+                let props = if w == W::I { Props::INT } else { Props::REAL };
+                let col_props = src.rel.cols.iter().find(|x| x.name == c).unwrap().props;
+                if w == W::R || col_props.kind == Kind::Int {
+                    return (
+                        mk(
+                            kind_char(&props),
+                            vec![nest(seq(vec![
+                                tok(format!(
+                                    "(SELECT {a}.{c} FROM {} {a} WHERE {a}.{kname} = ",
+                                    src.rel.name,
+                                    a = src.alias
+                                )),
+                                o,
+                                tok(")"),
+                            ]))],
+                        ),
+                        props,
+                    );
                 }
             }
         }
@@ -1290,11 +1359,11 @@ impl<'s> Gen<'s> {
                     ));
                 }
             }
-            if l.rel.name == right.rel.name {
-                if let Some(k) = l.rel.key {
-                    let n = &l.rel.cols[k].name;
-                    fk.push(format!("{}.{n} = {}.{n}", l.alias, right.alias));
-                }
+            if l.rel.name == right.rel.name
+                && let Some(k) = l.rel.key
+            {
+                let n = &l.rel.cols[k].name;
+                fk.push(format!("{}.{n} = {}.{n}", l.alias, right.alias));
             }
         }
         if !fk.is_empty() && (self.cfg.large || self.chance(0.7)) {
@@ -1712,10 +1781,17 @@ impl<'s> Gen<'s> {
             } else {
                 self.range(0, 6)
             };
-            let mut l = vec![tok(format!(" LIMIT {lim}"))];
-            if self.chance(0.4) {
-                l.push(tok(format!(" OFFSET {}", self.range(0, 4))));
-            }
+            let l = if self.chance(0.4) {
+                let off = self.range(0, 4);
+                // SQLite's `LIMIT offset, count` spelling, or OFFSET.
+                if self.chance(0.5) {
+                    vec![tok(format!(" LIMIT {off}, {lim}"))]
+                } else {
+                    vec![tok(format!(" LIMIT {lim}")), tok(format!(" OFFSET {off}"))]
+                }
+            } else {
+                vec![tok(format!(" LIMIT {lim}"))]
+            };
             parts.push(opt(seq(l)));
         }
         Some(opt(Node::Order(Box::new(seq(parts)))))
@@ -1861,10 +1937,11 @@ impl<'s> Gen<'s> {
                     items.push((expr('m', tok(c)), p));
                 }
             }
-            if top && self.chance(0.25) {
-                if let Some(w) = self.window_item(&sc, &tabs) {
-                    items.push(w);
-                }
+            if top
+                && self.chance(0.25)
+                && let Some(w) = self.window_item(&sc, &tabs)
+            {
+                items.push(w);
             }
         }
         let distinct = self.chance(0.18);
@@ -2555,8 +2632,15 @@ impl<'s> Gen<'s> {
             card: q.card,
             fks: vec![],
         });
+        // SQLite declares a column made by `CAST(x AS REAL)` (or INTEGER)
+        // REAL (INT), and that affinity converts what later DML writes to
+        // it; sqawk's declared types convert nothing ("Differences",
+        // Column types). Such a table gets no DML.
+        let mut text = String::new();
+        q.node.render(&mut text);
+        let affinity = text.contains(" AS REAL)") || text.contains(" AS INTEGER)");
         let mut v = vec![seq(vec![tok(format!("CREATE TABLE {name} AS ")), q.node])];
-        if self.chance(0.3) {
+        if self.chance(0.3) && !affinity {
             v.push(self.dml_stmt(&rel));
         }
         v.push(self.show(&rel));

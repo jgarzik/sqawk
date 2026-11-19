@@ -12,7 +12,7 @@ fn test_limit_basic() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM sample LIMIT 2")
         .arg(get_sample_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Execute the command and capture its output
     let output = cmd.output()?;
@@ -54,7 +54,7 @@ fn test_limit_with_offset() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM sample LIMIT 2 OFFSET 1")
         .arg(get_sample_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Execute the command and capture its output
     let output = cmd.output()?;
@@ -99,7 +99,7 @@ fn test_limit_with_order_by() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM sample ORDER BY age DESC LIMIT 2")
         .arg(get_sample_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Execute the command and capture its output
     let output = cmd.output()?;
@@ -194,7 +194,7 @@ fn test_distinct_with_limit() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT DISTINCT department, role FROM duplicates ORDER BY department ASC LIMIT 3 OFFSET 1")
         .arg(get_duplicates_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Execute the command and capture its output
     let output = cmd.output()?;
@@ -260,7 +260,7 @@ fn test_zero_limit() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM sample LIMIT 0")
         .arg(get_sample_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Execute the command and capture its output
     let output = cmd.output()?;
@@ -308,7 +308,7 @@ fn test_offset_beyond_table_size() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT * FROM sample LIMIT 10 OFFSET 10")
         .arg(get_sample_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Execute the command and capture its output
     let output = cmd.output()?;

@@ -3,8 +3,8 @@
 //! This file contains fundamental end-to-end tests for the sqawk application.
 
 use crate::helpers::{
-    create_custom_csv, create_temp_dir, get_people_file, run_test_case,
-    run_test_case_with_static_file, SqawkTestCase,
+    SqawkTestCase, create_custom_csv, create_temp_dir, get_people_file, run_test_case,
+    run_test_case_with_static_file,
 };
 
 use predicates::prelude::PredicateBooleanExt;
@@ -249,7 +249,7 @@ fn test_delete_with_where() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-s")
         .arg("SELECT * FROM people") // Check result after deletion
         .arg(file_path.to_str().unwrap())
-        .arg("-v"); // Verbose mode to see more details
+        .arg("-vv"); // Verbose mode to see more details
 
     // Verify deletion worked correctly
     cmd.assert()
@@ -297,7 +297,7 @@ fn test_delete_all() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-s")
         .arg("SELECT * FROM people") // Check result after deletion
         .arg(file_path.to_str().unwrap())
-        .arg("-v"); // Verbose mode to see more details
+        .arg("-vv"); // Verbose mode to see more details
 
     // Verify deletion worked correctly - should only show header, no rows
     cmd.assert()
@@ -315,5 +315,52 @@ fn test_delete_all() -> Result<(), Box<dyn std::error::Error>> {
     assert!(content.contains("2,Bob,25"));
     assert!(content.contains("3,Charlie,35"));
 
+    Ok(())
+}
+
+/// File operands are optional: with none there are no tables, so a query
+/// over constants (or a CREATE TABLE) runs, and standard input is read only
+/// when `-` is named.
+#[test]
+fn runs_without_file_operands() -> Result<(), Box<dyn std::error::Error>> {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s")
+        .arg("SELECT 1 + 1 AS two; CREATE TABLE t (a INT); INSERT INTO t VALUES (7); SELECT a FROM t")
+        .write_stdin("not,read\n");
+    cmd.assert().success().stdout("two\n2\na\n7\n");
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s").arg("SELECT * FROM nosuch");
+    cmd.assert()
+        .code(1)
+        .stderr(predicates::str::contains("no such table: nosuch"));
+    Ok(())
+}
+
+/// A parse error right after a name followed by `-` or `.` (a file name
+/// used as a table name) suggests quoting it.
+#[test]
+fn parse_error_suggests_quoting_a_dashed_name() -> Result<(), Box<dyn std::error::Error>> {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s").arg("SELECT * FROM my-data");
+    cmd.assert().code(1).stderr(predicates::str::contains(
+        "(to use my-data as a name, quote it: \"my-data\")",
+    ));
+    Ok(())
+}
+
+/// In a script of several statements, an error names the statement.
+#[test]
+fn error_names_the_failing_statement() -> Result<(), Box<dyn std::error::Error>> {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s").arg("SELECT 1 AS a; SELECT nosuch; SELECT 3");
+    cmd.assert()
+        .code(1)
+        .stdout("a\n1\n")
+        .stderr("sqawk: statement 2: no such column: nosuch\n");
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s").arg("SELECT nosuch");
+    cmd.assert()
+        .code(1)
+        .stderr("sqawk: no such column: nosuch\n");
     Ok(())
 }

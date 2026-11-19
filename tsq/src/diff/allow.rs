@@ -357,8 +357,8 @@ fn cte_correlated(ctx: &Ctx) -> bool {
         && has(ctx.sql, "WITH ")
 }
 
-/// "ILIKE, LPAD, RPAD, LEFT, RIGHT, TRIM(... FROM ...)": sqawk extensions
-/// SQLite lacks.
+/// "ILIKE, LPAD, RPAD, LEFT, RIGHT, TRIM(... FROM ...), REGEXP, ...":
+/// sqawk extensions SQLite lacks.
 fn sqawk_extensions(ctx: &Ctx) -> bool {
     if ctx.outcome != Outcome::SqliteErr {
         return false;
@@ -366,7 +366,19 @@ fn sqawk_extensions(ctx: &Ctx) -> bool {
     let toks = tokens(ctx.sql);
     toks.windows(2).any(|w| {
         let u = upper(&w[0]);
-        u == "ILIKE" || (matches!(u.as_str(), "LPAD" | "RPAD" | "LEFT" | "RIGHT") && w[1] == "(")
+        u == "ILIKE"
+            || u == "REGEXP"
+            || u == "RLIKE"
+            || (matches!(
+                u.as_str(),
+                "LPAD"
+                    | "RPAD"
+                    | "LEFT"
+                    | "RIGHT"
+                    | "REGEXP_MATCHES"
+                    | "REGEXP_REPLACE"
+                    | "REGEXP_EXTRACT"
+            ) && w[1] == "(")
     }) || (has(ctx.sql, "TRIM(") && has(ctx.sql, " FROM '"))
         || (has(ctx.sql, "TRIM(")
             && toks.windows(3).any(|w| {
@@ -393,23 +405,18 @@ fn paren_depth(sql: &str) -> usize {
     m
 }
 
-/// "Parser": `GLOB`, `LIMIT n, m`, `TRIM(s, chars)`, `REPLACE INTO`,
-/// `x IN ()` do not parse, `REGEXP` is rejected, parentheses nest at most
-/// 47 deep.
+/// "Parser": `TRIM(s, chars)`, `REPLACE INTO` do not parse, parentheses
+/// nest at most 47 deep.
 fn parser(ctx: &Ctx) -> bool {
     if ctx.outcome != Outcome::SqawkErr {
         return false;
     }
     let toks = tokens(ctx.sql);
     let u: Vec<String> = toks.iter().map(|t| upper(t)).collect();
-    let construct = u.iter().any(|t| t == "GLOB" || t == "REGEXP")
-        || u.windows(3).any(|w| w[0] == "LIMIT" && w[2] == ",")
-        || u.windows(2).any(|w| w[0] == "REPLACE" && w[1] == "INTO")
-        || u.windows(3)
-            .any(|w| w[0] == "IN" && w[1] == "(" && w[2] == ")")
+
+    u.windows(2).any(|w| w[0] == "REPLACE" && w[1] == "INTO")
         || trim_two_args(&u)
-        || paren_depth(ctx.sql) > 47;
-    construct
+        || paren_depth(ctx.sql) > 47
 }
 
 /// `TRIM(x, y)` at the top level of the TRIM call.
@@ -511,7 +518,7 @@ pub const RULES: &[Rule] = &[
     },
     Rule {
         name: "sqawk_extensions",
-        doc: "Differences from SQLite: ILIKE, LPAD, RPAD, LEFT, RIGHT, TRIM(... FROM ...)",
+        doc: "Differences from SQLite: ILIKE, LPAD, RPAD, LEFT, RIGHT, TRIM(... FROM ...), REGEXP",
         matches: sqawk_extensions,
     },
     Rule {
@@ -571,7 +578,11 @@ mod tests {
             Some("column_types")
         );
         assert_eq!(
-            r("SELECT 1 LIMIT 2, 3", Outcome::SqawkErr, "Expected: end"),
+            r(
+                "REPLACE INTO t VALUES (1)",
+                Outcome::SqawkErr,
+                "Expected: end"
+            ),
             Some("parser")
         );
         assert_eq!(

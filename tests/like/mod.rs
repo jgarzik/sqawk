@@ -179,7 +179,7 @@ fn test_like_special_chars() -> Result<(), Box<dyn std::error::Error>> {
 // ---------------------------------------------------------------------------
 
 mod sqlite_semantics {
-    use crate::helpers::{assert_query_on, assert_query_on_fails, ONE};
+    use crate::helpers::{ONE, assert_query_on, assert_query_on_fails};
 
     type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -251,6 +251,27 @@ mod sqlite_semantics {
     #[test]
     fn ilike_folds_unicode() -> R {
         assert_query_on(&[ONE], "SELECT 'é' ILIKE 'É' AS a FROM one", "a\n1")
+    }
+
+    /// ESCAPE takes any expression, as in SQLite: a function, a scalar
+    /// subquery, or a column of the row being tested.
+    #[test]
+    fn escape_is_any_expression() -> R {
+        assert_query_on(
+            &[LK],
+            "SELECT k FROM lk WHERE s LIKE 'x\\%y' ESCAPE char(92)",
+            "k\n4",
+        )?;
+        assert_query_on(
+            &[LK],
+            "SELECT k FROM lk WHERE s LIKE 'x\\%y' ESCAPE (SELECT '\\')",
+            "k\n4",
+        )?;
+        assert_query_on(
+            &[LK],
+            "SELECT k FROM lk WHERE k > 3 AND s LIKE p ESCAPE substr(p, 2, 1)",
+            "k\n4",
+        )
     }
 
     #[test]

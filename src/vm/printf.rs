@@ -22,7 +22,7 @@
 
 use super::arith::{fp_decode, real_to_int, text_of, text_to_int, text_to_num};
 use super::bytecode::Register;
-use super::func::{too_big, MAX_LENGTH};
+use super::func::{MAX_LENGTH, too_big};
 use crate::error::SqawkResult;
 
 /// SQLite's SQLITE_FP_PRECISION_LIMIT: the largest precision a real
@@ -357,12 +357,12 @@ pub(crate) fn format(fmt: &[u8], args: &[Register]) -> SqawkResult<Option<Vec<u8
             }
             Kind::CharX => {
                 let mut ch: Vec<u8> = vec![0];
-                if let Some(t) = args.text() {
-                    if let Some(&first) = t.first() {
-                        ch[0] = first;
-                        if first & 0xc0 == 0xc0 {
-                            ch.extend(t[1..].iter().take(3).take_while(|&&b| b & 0xc0 == 0x80));
-                        }
+                if let Some(t) = args.text()
+                    && let Some(&first) = t.first()
+                {
+                    ch[0] = first;
+                    if first & 0xc0 == 0xc0 {
+                        ch.extend(t[1..].iter().take(3).take_while(|&&b| b & 0xc0 == 0x80));
                     }
                 }
                 if precision > 1 {

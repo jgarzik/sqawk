@@ -1,11 +1,12 @@
 [package]
 name = "tsq"
 version = "0.2.0"
-edition = "2021"
-authors = ["Jeff Garzik <jgarzik@pobox.com>"]
 description = "Test data generator, differential tester and fuzzer for sqawk"
-license = "MIT"
-rust-version = "1.88"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 # Local development tool only; never published to crates.io.
 publish = false
 
@@ -13,13 +14,16 @@ publish = false
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 # Portable seeded RNG: the same seed gives the same stream on every OS.
-rand = { version = "0.9", default-features = false, features = ["std"] }
-rand_chacha = "0.9"
+rand = { version = "0.10", default-features = false, features = ["std"] }
+rand_chacha = "0.10"
 # The differential oracle. The 0.31 line bundles SQLite 3.45.0, the release
 # whose semantics sqawk follows (doc/sql_reference.md); later lines bundle
 # newer SQLite releases whose answers differ in places sqawk does not track.
 rusqlite = { version = "0.31", features = ["bundled", "backup", "hooks"] }
 tempfile = "3"
+# `tsq wb` writes gzip / zstd input files and decodes what sqawk writes back.
+flate2 = "1"
+ruzstd = "0.9"
 
 [dev-dependencies]
 assert_cmd = "2"

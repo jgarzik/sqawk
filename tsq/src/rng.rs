@@ -6,7 +6,7 @@
 //! through the unbiased range sampling of `rand` (no modulo bias), and
 //! floats are uniform in [0, 1).
 
-use rand::{Rng as _, SeedableRng};
+use rand::{RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 pub struct Rng(ChaCha8Rng);
@@ -27,7 +27,7 @@ impl Rng {
 
     #[cfg(test)]
     pub fn next_u64(&mut self) -> u64 {
-        rand::RngCore::next_u64(&mut self.0)
+        rand::Rng::next_u64(&mut self.0)
     }
 
     /// Uniform in [0, n). `n` must be positive.

@@ -246,14 +246,41 @@ fn load_error_lines_are_the_same_for_crlf() -> TestResult {
     Ok(())
 }
 
+/// A header that repeats a name (case-insensitively) or leaves one empty
+/// loads as sqlite3 names such columns: an empty name is `columnN` by its
+/// 1-based position, and a repeat gets `:1`, `:2`, ... (the rule for the
+/// columns of a derived table). The file's own header line is untouched.
 #[test]
-fn duplicate_header_names_are_named() -> TestResult {
-    let dir = create_temp_dir()?;
-    let p = put(dir.path(), "h.csv", b"id,Name,x,NAME,y\n1,2,3,4,5\n")?;
-    let (_out, stderr, ok) = run_sql("SELECT 1", &[&p], &[])?;
-    assert!(!ok);
-    assert!(stderr.contains("duplicate column name: NAME"), "{stderr}");
-    Ok(())
+fn duplicate_and_empty_header_names_are_named() -> TestResult {
+    crate::helpers::assert_query_on(
+        &[("h.csv", "id,Name,x,NAME,y,name\n1,2,3,4,5,6\n")],
+        "SELECT * FROM h",
+        "id,Name,x,NAME:1,y,name:2\n1,2,3,4,5,6",
+    )?;
+    // pandas' to_csv() writes an empty first header field for the index.
+    crate::helpers::assert_query_on(
+        &[("p.csv", ",a,,b\n0,x,y,z\n")],
+        "SELECT column1, a, column3, b FROM p",
+        "column1,a,column3,b\n0,x,y,z",
+    )?;
+    // A generated name that is already taken is made unique the same way.
+    crate::helpers::assert_query_on(
+        &[("q.csv", "column2,\n1,2\n")],
+        "SELECT * FROM q",
+        "column2,column2:1\n1,2",
+    )
+}
+
+/// Renamed columns do not change the file: --write keeps its header line.
+#[test]
+fn renamed_header_columns_write_back_verbatim() -> TestResult {
+    assert_write_back(
+        "w.csv",
+        b",id,ID\n1,2,3\n",
+        &[],
+        "UPDATE w SET \"ID:1\" = 9 WHERE column1 = 1",
+        b",id,ID\n1,2,9\n",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -306,5 +333,77 @@ fn same_file_through_symlink_is_error() -> TestResult {
     let (_out, stderr, ok) = run_sql("SELECT 1", &[&p, link.to_str().unwrap()], &[])?;
     assert!(!ok);
     assert!(stderr.contains("is already loaded as table a"), "{stderr}");
+    Ok(())
+}
+
+// ============================================================================
+// SEVERAL FILES AS ONE TABLE
+// ============================================================================
+
+/// Repeating `NAME=` concatenates the files in operand order; a
+/// `NAME=pattern` expands sorted (wildcards in the file name only).
+#[test]
+fn several_files_form_one_table() -> TestResult {
+    let dir = create_temp_dir()?;
+    let p = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+    std::fs::write(p("b.csv"), "k,v\n2,b\n")?;
+    std::fs::write(p("a.csv"), "k,v\n1,a\n")?;
+    std::fs::write(p("c.txt"), "k,v\n9,c\n")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s")
+        .arg("SELECT k, v FROM t; SELECT COUNT(*) AS n FROM g")
+        .arg(format!("t={}", p("b.csv")))
+        .arg(format!("t={}", p("a.csv")))
+        .arg(format!("g={}", p("*.csv")));
+    cmd.assert().success().stdout("k,v\n2,b\n1,a\nn\n2\n");
+    Ok(())
+}
+
+/// The files of one table must have the same header; a pattern needs a
+/// table name and must match something; a changed multi-file table cannot
+/// be written back (nothing is).
+#[test]
+fn several_files_errors() -> TestResult {
+    let dir = create_temp_dir()?;
+    let p = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+    std::fs::write(p("a.csv"), "k,v\n1,a\n")?;
+    std::fs::write(p("b.csv"), "k,w\n2,b\n")?;
+    std::fs::write(p("c.csv"), "k,v\n3,c\n")?;
+    let run = |args: Vec<String>, want: &str| {
+        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+        cmd.args(&args);
+        let out = cmd.assert().code(1).get_output().clone();
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(err.contains(want), "{args:?}: {err}");
+        assert_eq!(err.lines().count(), 1, "{err}");
+    };
+    run(
+        vec![
+            "-s".into(),
+            "SELECT 1".into(),
+            format!("t={}", p("a.csv")),
+            format!("t={}", p("b.csv")),
+        ],
+        "must have the same columns",
+    );
+    run(
+        vec!["-s".into(), "SELECT 1".into(), p("*.csv")],
+        "needs a table name",
+    );
+    run(
+        vec!["-s".into(), "SELECT 1".into(), format!("t={}", p("*.zzz"))],
+        "no file matches",
+    );
+    run(
+        vec![
+            "--write".into(),
+            "-s".into(),
+            "UPDATE t SET v = 'x'".into(),
+            format!("t={}", p("a.csv")),
+            format!("t={}", p("c.csv")),
+        ],
+        "several files and cannot be written back",
+    );
+    assert_eq!(std::fs::read_to_string(p("a.csv"))?, "k,v\n1,a\n");
     Ok(())
 }

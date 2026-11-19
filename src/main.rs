@@ -37,11 +37,13 @@ mod diag;
 mod aggregate;
 mod capacity;
 mod cli;
+mod compress;
 mod config;
 mod csv_handler;
 mod database;
 mod error;
 mod file_handler;
+mod output;
 mod repl;
 mod sql_executor;
 mod table;
@@ -54,6 +56,7 @@ use config::AppConfig;
 use database::Database;
 use error::{SqawkError, SqawkResult};
 use file_handler::FileHandler;
+use output::{Format, OutputSettings, StdoutSink};
 use repl::Repl;
 use sql_executor::SqlExecutor;
 
@@ -177,10 +180,12 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
     .with_no_header(args.no_header)
     .with_comments(args.comments)
     .with_output_delimiter(args.output_delimiter.clone())
-    .with_no_output_header(args.no_output_header);
+    .with_no_output_header(args.no_output_header)
+    .with_format(args.format)
+    .with_null_text(args.null.clone());
 
-    // Debugging output (-v); its format is not stable.
-    if config.verbose() {
+    // -vv: the parsed arguments.
+    if config.trace() {
         diag!("Running in verbose mode");
         diag!("Arguments: {args:?}");
     }
@@ -189,6 +194,9 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
 
     // Create a new Database instance to serve as the central store for tables
     let mut database = Database::new();
+    // Only --write and the REPL (.write, .save) can write a table back, so
+    // otherwise a loaded file's bytes would only cost memory.
+    database.set_keep_source(args.write || args.interactive);
 
     // Compile table definitions from the CLI arguments
     // This makes Database the source of truth for table schemas defined via CLI
@@ -210,17 +218,25 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
 
     // Load all specified files into in-memory tables
     // Each file can specify its table name with table_name=file_path syntax
-    for file_spec in &args.files {
-        file_handler.load_file(&mut database, file_spec)?;
-    }
+    let load_start = std::time::Instant::now();
+    file_handler.load_files(&mut database, &args.files)?;
     database.check_table_definitions_used()?;
 
-    // Log table loading results in verbose mode
+    // -v: what was loaded, and how long it took.
     if config.verbose() {
         let table_count = database.table_count();
-        diag!("Loaded {table_count} tables");
+        diag!(
+            "Loaded {table_count} tables in {:.1} ms",
+            load_start.elapsed().as_secs_f64() * 1000.0
+        );
         for table_name in database.table_names() {
-            diag!("Table '{table_name}' loaded");
+            if let Ok(t) = database.get_table(&table_name) {
+                diag!(
+                    "Table '{table_name}': {} rows, {} columns",
+                    t.row_count(),
+                    t.column_count()
+                );
+            }
         }
     }
 
@@ -241,40 +257,29 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
         return Ok(repl.run());
     }
 
-    let mut stdout_open = true;
-    let header = !config.no_output_header();
+    // Rows print as each statement produces them, each result set with its
+    // own header, so the output of earlier statements survives a later
+    // error. Once the reader of a pipe has gone away (`sqawk ... | head`),
+    // printing stops but later statements and --write still run.
+    let mut out = StdoutSink::new(
+        OutputSettings {
+            format: config.format().unwrap_or(Format::Csv),
+            delimiter: config.output_delimiter(),
+            header: !config.no_output_header(),
+            null: config.null_text().to_string(),
+        },
+        config.verbose(),
+        false,
+    );
 
     // Process each SQL statement in the order specified on the command line
     // This allows operations like: UPDATE -> DELETE -> SELECT to see the effects
     for sql in &script {
-        // Execute the SQL statement against the in-memory tables
-        // The result may be a table (for SELECT) or None (for UPDATE, DELETE, INSERT)
-        let result = sql_executor.execute(sql)?;
-
-        // Output results to stdout (for SELECT queries).
-        //
-        // One result set per statement, each with its own header. They used to
-        // share a single buffer and schema, so `SELECT a; SELECT b` printed
-        // every row under the last statement's header.
-        for table in &result {
-            if config.verbose() {
-                let row_count = table.row_count();
-                diag!("Query returned {row_count} rows");
-            }
-            // Print the result table in delimiter-separated format. Once the
-            // reader of a pipe has gone away (`sqawk ... | head`), stop
-            // printing but keep going: later statements and --write still run.
-            if stdout_open {
-                if let Err(e) = table.print_to_stdout(header) {
-                    if e.kind() != std::io::ErrorKind::BrokenPipe {
-                        return Err(SqawkError::write("standard output", e));
-                    }
-                    stdout_open = false;
-                }
-            }
-        }
-        if result.is_empty() && config.verbose() {
-            diag!("Query executed successfully (no results to display)");
+        let start = std::time::Instant::now();
+        sql_executor.execute(sql, &mut out)?;
+        out.take_result_sets();
+        if config.verbose() {
+            diag!("Ran in {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
         }
     }
 

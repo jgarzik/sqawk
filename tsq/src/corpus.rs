@@ -13,10 +13,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
-use crate::diff::oracle::{split_statements, Oracle};
-use crate::diff::{describe, run_all, tables, Cat, Env, Script, Tally};
+use crate::diff::oracle::{Oracle, split_statements};
+use crate::diff::{Cat, Env, Script, Tally, describe, run_all, tables};
 
 pub struct CorpusOptions {
     pub files: Vec<PathBuf>,
@@ -85,7 +85,7 @@ pub fn run(sqawk: &Path, opts: &CorpusOptions, verbose: bool) -> Result<i32> {
             bail!("unknown table set {set:?} (harness, edge)");
         };
         let tmp = tempfile::Builder::new().prefix("tsq-corpus-").tempdir()?;
-        crate::gen::write_csv_tables(tmp.path(), &tabs)?;
+        crate::datagen::write_csv_tables(tmp.path(), &tabs)?;
         let oracle = Oracle::new(&tabs)?;
         let schema = tables::schema_of(&tabs, &oracle)?;
         let env = Env::new(sqawk, tmp.path(), &tabs, &schema, opts.timeout);

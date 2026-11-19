@@ -18,12 +18,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
-use crate::data::{write_table, Format, Table};
-use crate::gen;
+use crate::data::{Format, Table, write_table};
+use crate::datagen;
 use crate::rng::Rng;
-use crate::run::{execute, Job, StdoutMode};
+use crate::run::{Job, StdoutMode, execute};
 
 pub struct StressOptions {
     pub rows: usize,
@@ -194,6 +194,26 @@ pub const WORKLOADS: &[Workload] = &[
             &["wide"],
         ),
     },
+    Workload {
+        name: "items_all",
+        about: "SELECT * FROM order_items (every row printed)",
+        kind: Kind::Query("SELECT * FROM order_items", ITEMS),
+    },
+    Workload {
+        name: "items_sort_all",
+        about: "SELECT * FROM order_items ORDER BY line_total (every row)",
+        kind: Kind::Query("SELECT * FROM order_items ORDER BY line_total", ITEMS),
+    },
+    Workload {
+        name: "orders_count",
+        about: "load orders (dates, statuses, free text), COUNT(*)",
+        kind: Kind::Query("SELECT COUNT(*) FROM orders", &["orders"]),
+    },
+    Workload {
+        name: "orders_all",
+        about: "SELECT * FROM orders (text-heavy, every row printed)",
+        kind: Kind::Query("SELECT * FROM orders", &["orders"]),
+    },
 ];
 
 const WIDE_COLS: usize = 1000;
@@ -210,7 +230,7 @@ struct Result1 {
 fn generate(seed: u64, rows: usize, dir: &Path, verbose: bool) -> Result<()> {
     fs::create_dir_all(dir)?;
     let mut layout = Rng::new(0);
-    let tables = gen::base_tables(seed, (rows / 10).max(1));
+    let tables = datagen::base_tables(seed, (rows / 10).max(1));
     for t in &tables {
         let p = write_table(dir, t, &Format::default(), &mut layout)?;
         if verbose {
@@ -390,27 +410,29 @@ fn compare(base: &[Result1], now: &[Result1], tol: f64) -> Vec<String> {
             out.push(format!("{}: {} (baseline ok)", n.name, n.status));
             continue;
         }
-        if let (Some(bs), Some(ns)) = (b.seconds, n.seconds) {
-            if ns > bs * f && ns - bs > 0.05 {
-                out.push(format!(
-                    "{}: time {:.3}s vs {:.3}s (+{:.0}%)",
-                    n.name,
-                    ns,
-                    bs,
-                    (ns / bs - 1.0) * 100.0
-                ));
-            }
+        if let (Some(bs), Some(ns)) = (b.seconds, n.seconds)
+            && ns > bs * f
+            && ns - bs > 0.05
+        {
+            out.push(format!(
+                "{}: time {:.3}s vs {:.3}s (+{:.0}%)",
+                n.name,
+                ns,
+                bs,
+                (ns / bs - 1.0) * 100.0
+            ));
         }
-        if let (Some(br), Some(nr)) = (b.peak_rss_kb, n.peak_rss_kb) {
-            if nr as f64 > br as f64 * f && nr.saturating_sub(br) > 1024 {
-                out.push(format!(
-                    "{}: peak RSS {} KiB vs {} KiB (+{:.0}%)",
-                    n.name,
-                    nr,
-                    br,
-                    (nr as f64 / br as f64 - 1.0) * 100.0
-                ));
-            }
+        if let (Some(br), Some(nr)) = (b.peak_rss_kb, n.peak_rss_kb)
+            && nr as f64 > br as f64 * f
+            && nr.saturating_sub(br) > 1024
+        {
+            out.push(format!(
+                "{}: peak RSS {} KiB vs {} KiB (+{:.0}%)",
+                n.name,
+                nr,
+                br,
+                (nr as f64 / br as f64 - 1.0) * 100.0
+            ));
         }
     }
     out

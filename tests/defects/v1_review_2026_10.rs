@@ -32,7 +32,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use crate::helpers::{assert_query_on, assert_query_on_fails, create_temp_dir, run_sql, ONE};
+use crate::helpers::{ONE, assert_query_on, assert_query_on_fails, create_temp_dir, run_sql};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -871,28 +871,35 @@ fn unclosed_quote_is_error() -> TestResult {
 // B10. Duplicate / empty column names (csv_handler.rs ~126; compiler_ddl.rs)
 // ---------------------------------------------------------------------------
 
-fn assert_load_fails(name: &str, content: &str) -> TestResult {
-    let out = run_sqls(&[(name, content)], &[], &["SELECT 1 AS v"])?;
-    assert_fails_cleanly(&out);
-    Ok(())
+/// Header `a,a` used to load with both columns reading as the first. Each
+/// column now has its own name (sqlite3's rule) and reads its own value.
+#[test]
+fn duplicate_header_columns_are_distinct() -> TestResult {
+    crate::helpers::assert_query_on(
+        &[("dh.csv", "a,a\n1,2\n")],
+        "SELECT a, \"a:1\" FROM dh",
+        "a,a:1\n1,2",
+    )
 }
 
-/// Header `a,a` loads; both columns read as the first.
+/// Header `a,A`: names are case-insensitive, so `A` is a repeat of `a`.
 #[test]
-fn duplicate_header_is_error() -> TestResult {
-    assert_load_fails("dh.csv", "a,a\n1,2\n")
+fn case_insensitive_duplicate_header_columns_are_distinct() -> TestResult {
+    crate::helpers::assert_query_on(
+        &[("dhc.csv", "a,A\n1,2\n")],
+        "SELECT a, \"A:1\" FROM dhc",
+        "a,A:1\n1,2",
+    )
 }
 
-/// Header `a,A` loads; column names are case-insensitive, so it is a duplicate.
+/// Header `a,,c` used to load with an empty column name; it is `column2`.
 #[test]
-fn case_insensitive_duplicate_header_is_error() -> TestResult {
-    assert_load_fails("dhc.csv", "a,A\n1,2\n")
-}
-
-/// Header `a,,c` loads with an empty column name.
-#[test]
-fn empty_header_name_is_error() -> TestResult {
-    assert_load_fails("eh.csv", "a,,c\n1,2,3\n")
+fn empty_header_name_is_generated() -> TestResult {
+    crate::helpers::assert_query_on(
+        &[("eh.csv", "a,,c\n1,2,3\n")],
+        "SELECT column2 FROM eh",
+        "column2\n2",
+    )
 }
 
 /// `ALTER TABLE al ADD COLUMN a INT` adds a second column `a`.

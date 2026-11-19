@@ -10,16 +10,17 @@ use super::ast_compat::{
 };
 use sqlparser::ast::{
     BinaryOperator, CaseWhen, DataType as SqlDataType, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArguments, Ident, ObjectName, Select, SelectItem,
+    FunctionArgExpr, FunctionArguments, Ident, InTarget, ObjectName, Select, SelectItem,
     SelectItemQualifiedWildcardKind, Statement, TrimWhereField, UnaryOperator, Value,
     ValueWithSpan,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::bytecode::{Instruction, OpCode, Program, AGG_COUNT, AGG_DISTINCT};
+use super::bytecode::{AGG_COUNT, AGG_DISTINCT, Instruction, OpCode, Program};
+use super::collate::{self, Collation};
 use super::compiler_check::{check_create_table, check_delete, check_insert, check_update};
-use super::compiler_from::{expr_children, FromPlan};
+use super::compiler_from::{FromPlan, expr_children};
 use super::compiler_subquery::Sub;
 use super::compiler_window::window_call_children;
 use super::func;
@@ -453,7 +454,7 @@ fn declared_column_name(ctx: &NameCtx<'_>, qualifier: Option<&str>, name: &str) 
 /// sqlparser lowers `CEIL`/`FLOOR` to [`sqlparser::ast::Expr::Ceil`] and
 /// [`sqlparser::ast::Expr::Floor`] rather than `Expr::Function`, carrying any
 /// second argument in `field` instead of an argument list. They therefore miss
-/// [`check_math_func_arity`] entirely, and `CEIL(1.2, 3)` used to return 2
+/// the function table's arity check (`func::check_arity`), and `CEIL(1.2, 3)` used to return 2
 /// while the `CEILING(1.2, 3)` spelling of the same call was rejected.
 fn check_ceil_floor_field(
     func_name: &str,
@@ -917,11 +918,24 @@ impl<'a> SqlCompiler<'a> {
             }
             Statement::Update(update) => {
                 check_update(update)?;
-                self.compile_update(
-                    &update.table,
-                    &update.assignments,
-                    update.selection.as_ref(),
-                )
+                let from = match &update.from {
+                    Some(sqlparser::ast::UpdateTableFromKind::AfterSet(from)) => from.as_slice(),
+                    _ => &[],
+                };
+                if from.is_empty() {
+                    self.compile_update(
+                        &update.table,
+                        &update.assignments,
+                        update.selection.as_ref(),
+                    )
+                } else {
+                    self.compile_update_from(
+                        &update.table,
+                        &update.assignments,
+                        from,
+                        update.selection.as_ref(),
+                    )
+                }
             }
             Statement::CreateTable(create) => {
                 check_create_table(create)?;
@@ -1021,7 +1035,7 @@ impl<'a> SqlCompiler<'a> {
                         SelectItemQualifiedWildcardKind::Expr(_) => {
                             return Err(SqawkError::UnsupportedSqlFeature(
                                 "expr.* is not supported".into(),
-                            ))
+                            ));
                         }
                     };
                     let src = plan
@@ -1055,7 +1069,7 @@ impl<'a> SqlCompiler<'a> {
                 SelectItem::ExprWithAliases { .. } => {
                     return Err(SqawkError::UnsupportedSqlFeature(
                         "Multiple column aliases are not supported".into(),
-                    ))
+                    ));
                 }
             }
         }
@@ -1139,7 +1153,7 @@ impl<'a> SqlCompiler<'a> {
                     0,
                     reg,
                     0,
-                    Some(s.clone().into_owned()),
+                    Some(s.to_string()),
                     &format!("r[{}] = '{}'", reg, s),
                 );
             }
@@ -1169,7 +1183,7 @@ impl<'a> SqlCompiler<'a> {
         &mut self,
         expr: &Expr,
         pattern: &Expr,
-        escape: Option<&ValueWithSpan>,
+        escape: Option<&Expr>,
         any: bool,
         negated: bool,
         case_insensitive: bool,
@@ -1185,20 +1199,10 @@ impl<'a> SqlCompiler<'a> {
         let base = self.allocate_registers(if escape.is_some() { 3 } else { 2 });
         self.code_expr(expr, ctx, Some(base))?;
         self.code_expr(pattern, ctx, Some(base + 1))?;
+        // Any expression, as in SQLite; the Like opcode checks that its text
+        // is one character.
         if let Some(esc) = escape {
-            let lit = match &esc.value {
-                Value::SingleQuotedString(c) | Value::DoubleQuotedString(c) => {
-                    TableValue::String(c.clone().into())
-                }
-                Value::Null => TableValue::Null,
-                other => {
-                    return Err(SqawkError::InvalidSqlQuery(format!(
-                        "ESCAPE expression must be a single character, got {}",
-                        other
-                    )))
-                }
-            };
-            self.emit_value_literal(base + 2, &lit)?;
+            self.code_expr(esc, ctx, Some(base + 2))?;
         }
         let flags =
             (negated as i64) | ((case_insensitive as i64) << 1) | ((escape.is_some() as i64) << 2);
@@ -1233,9 +1237,17 @@ impl<'a> SqlCompiler<'a> {
         ctx: &NameCtx<'a>,
         dest: i64,
     ) -> SqawkResult<()> {
-        let x = self.code_expr(expr, ctx, None)?;
-        let lo = self.code_expr(low, ctx, None)?;
-        let hi = self.code_expr(high, ctx, None)?;
+        // Each half is a comparison of its own: x's collation, else the
+        // bound's.
+        let (expr, xc) = collate::split(expr)?;
+        let (low, lc) = collate::split(low)?;
+        let (high, hc) = collate::split(high)?;
+        let lo_coll = xc.or(lc).unwrap_or_default();
+        let hi_coll = xc.or(hc).unwrap_or_default();
+        let raw = self.code_expr(expr, ctx, None)?;
+        let x = self.fold_reg(raw, lo_coll);
+        let lo = self.code_collated(low, lo_coll, ctx)?;
+        let hi = self.code_collated(high, hi_coll, ctx)?;
         let ge = self.allocate_register();
         let le = self.allocate_register();
         self.emit(
@@ -1246,6 +1258,7 @@ impl<'a> SqlCompiler<'a> {
             None,
             &format!("r[{}] = r[{}] >= r[{}]", ge, x, lo),
         );
+        let x = self.fold_reg(raw, hi_coll);
         self.emit(
             OpCode::Le,
             x,
@@ -1261,6 +1274,38 @@ impl<'a> SqlCompiler<'a> {
         Ok(())
     }
 
+    /// Compile `e` and apply `coll`'s transform (see `collate.rs`): the
+    /// register to compare.
+    pub(crate) fn code_collated(
+        &mut self,
+        e: &Expr,
+        coll: Collation,
+        ctx: &NameCtx<'a>,
+    ) -> SqawkResult<i64> {
+        let r = self.code_expr(e, ctx, None)?;
+        Ok(self.fold_reg(r, coll))
+    }
+
+    /// `reg` with `coll`'s transform applied, in a new register; `reg`
+    /// itself for BINARY.
+    pub(crate) fn fold_reg(&mut self, reg: i64, coll: Collation) -> i64 {
+        match coll.func_name() {
+            None => reg,
+            Some(name) => {
+                let out = self.allocate_register();
+                self.emit(
+                    OpCode::Function,
+                    reg,
+                    1,
+                    out,
+                    Some(name.to_string()),
+                    &format!("r[{}] = {}(r[{}])", out, name, reg),
+                );
+                out
+            }
+        }
+    }
+
     /// Compile `expr [NOT] IN (list)` into `dest` (see [`Self::emit_in_step`]).
     fn compile_in_list(
         &mut self,
@@ -1274,13 +1319,19 @@ impl<'a> SqlCompiler<'a> {
             self.emit_empty_in(negated, dest);
             return Ok(());
         }
-        let x = self.code_expr(expr, ctx, None)?;
+        // Each item is compared under x's collation, else its own.
+        let (expr, xc) = collate::split(expr)?;
+        let raw = self.code_expr(expr, ctx, None)?;
         let item = self.allocate_register();
         let hit = self.allocate_register();
         self.emit(OpCode::Integer, 0, dest, 0, None, "IN list init");
         for value in list {
+            let (value, vc) = collate::split(value)?;
+            let coll = xc.or(vc).unwrap_or_default();
+            let x = self.fold_reg(raw, coll);
             self.code_expr(value, ctx, Some(item))?;
-            self.emit_in_step(x, item, hit, dest);
+            let it = self.fold_reg(item, coll);
+            self.emit_in_step(x, it, hit, dest);
         }
         if negated {
             self.emit(OpCode::Not, dest, dest, 0, None, "NOT IN");
@@ -1472,7 +1523,7 @@ impl<'a> SqlCompiler<'a> {
         match &func.args {
             FunctionArguments::Subquery(_) => return unsupported("A subquery argument"),
             FunctionArguments::List(list) if !list.clauses.is_empty() => {
-                return unsupported("A clause in the argument list")
+                return unsupported("A clause in the argument list");
             }
             _ => {}
         }
@@ -1696,7 +1747,7 @@ impl<'a> SqlCompiler<'a> {
                     Value::HexStringLiteral(_) => {
                         return Err(SqawkError::UnsupportedSqlFeature(
                             "blob literals are not supported".into(),
-                        ))
+                        ));
                     }
                     // Placeholders, dollar-quoted and other dialect
                     // literals used to become their SQL text.
@@ -1704,7 +1755,7 @@ impl<'a> SqlCompiler<'a> {
                         return Err(SqawkError::UnsupportedSqlFeature(format!(
                             "Literal {} is not supported",
                             other
-                        )))
+                        )));
                     }
                 };
                 self.emit_value_literal(dest, &literal)?;
@@ -1745,6 +1796,36 @@ impl<'a> SqlCompiler<'a> {
                 expr: inner,
             } => {
                 self.emit_call_refs("~", &[inner], ctx, dest)?;
+            }
+
+            // COLLATE is applied by the sites that compare or sort (see
+            // collate.rs); as a value anywhere else it is an error.
+            Expr::Collate { .. } => {
+                collate::split(expr)?;
+                return Err(collate::unsupported());
+            }
+
+            // `x [NOT] REGEXP p` (and RLIKE) is REGEXP(p, x), as the sqlite3
+            // shell defines it.
+            Expr::RLike {
+                negated,
+                expr: inner,
+                pattern,
+                ..
+            } => {
+                self.emit_call_refs("REGEXP", &[pattern, inner], ctx, dest)?;
+                if *negated {
+                    self.emit(OpCode::Not, dest, dest, 0, None, "NOT REGEXP");
+                }
+            }
+
+            // `x GLOB p` is the function GLOB(p, x), as in SQLite.
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Glob,
+                right,
+            } => {
+                self.emit_call_refs("GLOB", &[right, left], ctx, dest)?;
             }
 
             // Logical AND / OR with SQL three-valued logic: both operands are
@@ -1795,8 +1876,29 @@ impl<'a> SqlCompiler<'a> {
                         | BinaryOperator::NotEq
                 ) =>
             {
-                let left_reg = self.code_expr(left, ctx, None)?;
-                let right_reg = self.code_expr(right, ctx, None)?;
+                let comparison = !matches!(
+                    op,
+                    BinaryOperator::Plus
+                        | BinaryOperator::Minus
+                        | BinaryOperator::Multiply
+                        | BinaryOperator::Divide
+                        | BinaryOperator::Modulo
+                );
+                let (left_reg, right_reg) = if comparison {
+                    // The left operand's collation, else the right's.
+                    let (l, lc) = collate::split(left)?;
+                    let (r, rc) = collate::split(right)?;
+                    let coll = lc.or(rc).unwrap_or_default();
+                    (
+                        self.code_collated(l, coll, ctx)?,
+                        self.code_collated(r, coll, ctx)?,
+                    )
+                } else {
+                    (
+                        self.code_expr(left, ctx, None)?,
+                        self.code_expr(right, ctx, None)?,
+                    )
+                };
                 let opcode = match op {
                     BinaryOperator::Plus => OpCode::Add,
                     BinaryOperator::Minus => OpCode::Subtract,
@@ -1902,13 +2004,19 @@ impl<'a> SqlCompiler<'a> {
                 op: UnaryOperator::Minus,
                 expr: inner,
             } => {
-                // A negated numeric literal is one literal, so that
+                // A negated numeric literal is one literal (parentheses
+                // around it do not count, as in SQLite's parser), so that
                 // -9223372036854775808 is the integer i64::MIN rather than
-                // the negation of an out-of-range (hence real) literal.
+                // the negation of an out-of-range (hence real) literal, and
+                // -0.0 is the real negative zero rather than 0 - 0.0.
+                let mut lit = &**inner;
+                while let Expr::Nested(e) = lit {
+                    lit = e;
+                }
                 if let Expr::Value(ValueWithSpan {
                     value: Value::Number(n, _),
                     ..
-                }) = &**inner
+                }) = lit
                 {
                     // Only a hex literal (0x8000000000000000) becomes a
                     // number token with a sign; its negation does not fit.
@@ -1919,6 +2027,10 @@ impl<'a> SqlCompiler<'a> {
                     }
                     if let Ok(i) = format!("-{}", n).parse::<i64>() {
                         self.emit_value_literal(dest, &TableValue::Integer(i))?;
+                        return Ok(dest);
+                    }
+                    if n.parse::<f64>().is_ok() {
+                        self.emit_real_literal(dest, &format!("-{n}"));
                         return Ok(dest);
                     }
                 }
@@ -1977,7 +2089,7 @@ impl<'a> SqlCompiler<'a> {
             } => self.compile_like_pattern(
                 inner,
                 pattern,
-                escape_char.as_ref(),
+                escape_char.as_deref(),
                 *any,
                 *negated,
                 false,
@@ -1993,7 +2105,7 @@ impl<'a> SqlCompiler<'a> {
             } => self.compile_like_pattern(
                 inner,
                 pattern,
-                escape_char.as_ref(),
+                escape_char.as_deref(),
                 *any,
                 *negated,
                 true,
@@ -2006,15 +2118,17 @@ impl<'a> SqlCompiler<'a> {
                 low,
                 high,
             } => self.compile_between(inner, low, high, *negated, ctx, dest)?,
-            Expr::InList {
+            Expr::In {
                 expr: inner,
-                list,
+                target: InTarget::List(list),
                 negated,
+                global: false,
             } => self.compile_in_list(inner, list, *negated, ctx, dest)?,
-            Expr::InSubquery {
+            Expr::In {
                 expr: inner,
-                subquery,
+                target: InTarget::Subquery(subquery),
                 negated,
+                global: false,
             } => self.compile_in_subquery(inner, subquery, *negated, ctx, dest)?,
             Expr::Exists { subquery, negated } => {
                 self.compile_subquery(subquery, Sub::Exists, ctx, dest)?;
@@ -2077,7 +2191,7 @@ impl<'a> SqlCompiler<'a> {
                 return Err(SqawkError::UnsupportedSqlFeature(format!(
                     "Unsupported expression: {}",
                     other
-                )))
+                )));
             }
         }
 
@@ -2201,15 +2315,14 @@ impl<'a> SqlCompiler<'a> {
         if name.0.is_empty() {
             return Err(SqawkError::InvalidSqlQuery("Empty table name".to_string()));
         }
-        if let [part] = name.0.as_slice() {
-            if let Some(ident) = part.as_ident() {
-                if self.cte_names.contains(&ident.value.to_ascii_lowercase()) {
-                    return Err(SqawkError::VmError(format!(
-                        "internal error: unresolved CTE {}",
-                        ident.value
-                    )));
-                }
-            }
+        if let [part] = name.0.as_slice()
+            && let Some(ident) = part.as_ident()
+            && self.cte_names.contains(&ident.value.to_ascii_lowercase())
+        {
+            return Err(SqawkError::VmError(format!(
+                "internal error: unresolved CTE {}",
+                ident.value
+            )));
         }
 
         // `t` or `main.t` (see `main_table_name`). Table names match
@@ -2416,12 +2529,12 @@ impl<'a> SqlCompiler<'a> {
         if Self::is_aggregate_call(expr) {
             return true;
         }
-        if let Expr::Function(f) = expr {
-            if f.over.is_some() {
-                return window_call_children(f)
-                    .into_iter()
-                    .any(|c| self.is_aggregate_expr(c));
-            }
+        if let Expr::Function(f) = expr
+            && f.over.is_some()
+        {
+            return window_call_children(f)
+                .into_iter()
+                .any(|c| self.is_aggregate_expr(c));
         }
         expr_children(expr)
             .is_some_and(|children| children.into_iter().any(|c| self.is_aggregate_expr(c)))

@@ -12,7 +12,7 @@ fn test_distinct_basic() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT DISTINCT name, department FROM duplicates")
         .arg(get_duplicates_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Execute the command and capture its output
     let output = cmd.output()?;
@@ -54,7 +54,7 @@ fn test_distinct_with_where() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT DISTINCT name, role FROM duplicates WHERE department = 'Engineering'")
         .arg(get_duplicates_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Execute the command and capture its output
     let output = cmd.output()?;
@@ -113,7 +113,7 @@ fn test_distinct_with_order_by() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT DISTINCT name, department FROM duplicates ORDER BY department, name")
         .arg(get_duplicates_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Execute the command and capture its output
     let output = cmd.output()?;
@@ -177,7 +177,7 @@ fn test_distinct_with_join() -> Result<(), Box<dyn std::error::Error>> {
         .arg("SELECT DISTINCT users.name, orders.product_id FROM users INNER JOIN orders ON users.id = orders.user_id")
         .arg(get_users_file().to_str().unwrap())
         .arg(get_orders_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Execute the command and capture its output
     let output = cmd.output()?;
@@ -229,7 +229,7 @@ fn test_distinct_with_select_star() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT DISTINCT * FROM duplicates WHERE department = 'Engineering'")
         .arg(get_duplicates_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Execute the command and capture its output
     let output = cmd.output()?;
@@ -292,7 +292,7 @@ fn test_distinct_without_id() -> Result<(), Box<dyn std::error::Error>> {
     cmd.arg("-s")
         .arg("SELECT DISTINCT name, department, role FROM duplicates")
         .arg(get_duplicates_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Execute the command and capture its output
     let output = cmd.output()?;

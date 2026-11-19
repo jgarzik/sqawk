@@ -287,6 +287,8 @@ pub struct KeyOrder {
     pub col: usize,
     pub asc: bool,
     pub nulls_first: bool,
+    /// How text compares (`ORDER BY x COLLATE NOCASE`).
+    pub coll: super::collate::Collation,
 }
 
 impl KeyOrder {
@@ -296,18 +298,31 @@ impl KeyOrder {
             col,
             asc,
             nulls_first: nulls_first.unwrap_or(asc),
+            coll: super::collate::Collation::Binary,
         }
     }
 
+    /// This key compared under `coll`.
+    pub fn with_collation(mut self, coll: super::collate::Collation) -> Self {
+        self.coll = coll;
+        self
+    }
+
     /// This key in a SorterOpen / OpenEphemeral P4 spec: `col:asc|desc`,
-    /// plus `:nf` / `:nl` when NULL placement is not the default.
+    /// plus `:nf` / `:nl` when NULL placement is not the default, plus
+    /// `:nocase` / `:rtrim` for a collation other than BINARY.
     pub fn spec(&self) -> String {
         let dir = if self.asc { "asc" } else { "desc" };
-        match (self.asc, self.nulls_first) {
+        let mut s = match (self.asc, self.nulls_first) {
             (true, true) | (false, false) => format!("{}:{}", self.col, dir),
             (_, true) => format!("{}:{}:nf", self.col, dir),
             (_, false) => format!("{}:{}:nl", self.col, dir),
+        };
+        if self.coll != super::collate::Collation::Binary {
+            s.push(':');
+            s.push_str(self.coll.spec());
         }
+        s
     }
 
     /// Parse a comma-separated spec (see [`KeyOrder::spec`]).
@@ -317,12 +332,20 @@ impl KeyOrder {
                 let mut parts = k.split(':');
                 let col = parts.next()?.parse::<usize>().ok()?;
                 let asc = parts.next()? != "desc";
-                let nulls = match parts.next() {
-                    Some("nf") => Some(true),
-                    Some("nl") => Some(false),
-                    _ => None,
-                };
-                Some(KeyOrder::new(col, asc, nulls))
+                let mut nulls = None;
+                let mut coll = super::collate::Collation::Binary;
+                for p in parts {
+                    match p {
+                        "nf" => nulls = Some(true),
+                        "nl" => nulls = Some(false),
+                        other => {
+                            if let Some(c) = super::collate::Collation::from_spec(other) {
+                                coll = c;
+                            }
+                        }
+                    }
+                }
+                Some(KeyOrder::new(col, asc, nulls).with_collation(coll))
             })
             .collect()
     }
@@ -552,7 +575,7 @@ pub enum Register {
     /// Integer value
     Integer(i64),
     /// String value
-    String(String),
+    String(compact_str::CompactString),
     /// Floating point value
     Float(f64),
     /// Boolean value
@@ -561,27 +584,70 @@ pub enum Register {
     Null,
 }
 
+const _: () = assert!(std::mem::size_of::<Register>() == 24);
+
 impl From<Value> for Register {
     fn from(value: Value) -> Self {
         match value {
             Value::Integer(i) => Register::Integer(i),
             Value::Float(f) => Register::Float(f),
-            Value::String(s) => Register::String(s.into_owned()),
+            Value::String(s) => Register::String(s),
             Value::Boolean(b) => Register::Boolean(b),
             Value::Null => Register::Null,
         }
     }
 }
 
+impl Register {
+    /// This register as an output field, exactly as the same value's
+    /// [`Value::field_str`]: NULL is empty, text is borrowed.
+    pub fn field_str(&self) -> std::borrow::Cow<'_, str> {
+        use std::borrow::Cow;
+        match self {
+            Register::Null => Cow::Borrowed(""),
+            Register::String(s) => Cow::Borrowed(s),
+            Register::Integer(i) => Cow::Owned(i.to_string()),
+            Register::Float(f) => Cow::Owned(crate::vm::arith::real_text(*f)),
+            Register::Boolean(b) => Cow::Borrowed(if *b { "true" } else { "false" }),
+        }
+    }
+}
+
 impl From<Register> for Value {
     fn from(register: Register) -> Self {
-        use std::borrow::Cow;
         match register {
             Register::Integer(i) => Value::Integer(i),
             Register::Float(f) => Value::Float(f),
-            Register::String(s) => Value::String(Cow::Owned(s)),
+            Register::String(s) => Value::String(s),
             Register::Boolean(b) => Value::Boolean(b),
             Register::Null => Value::Null,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Register;
+    use crate::table::Value;
+
+    #[test]
+    fn register_field_str_matches_value() {
+        let regs = [
+            Register::Null,
+            Register::Integer(i64::MIN),
+            Register::Integer(0),
+            Register::Float(-0.0),
+            Register::Float(1e20),
+            Register::Float(0.1),
+            Register::Float(f64::INFINITY),
+            Register::Boolean(true),
+            Register::Boolean(false),
+            Register::String("".into()),
+            Register::String("a,\"b".into()),
+        ];
+        for r in regs {
+            let v = Value::from(r.clone());
+            assert_eq!(r.field_str(), v.field_str(), "{r:?}");
         }
     }
 }

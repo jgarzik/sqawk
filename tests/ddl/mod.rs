@@ -20,7 +20,7 @@ fn test_drop_table_basic() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("DROP TABLE people")
-        .arg("-v")
+        .arg("-vv")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -62,7 +62,7 @@ fn test_drop_table_if_exists() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("DROP TABLE IF EXISTS nonexistent")
-        .arg("-v")
+        .arg("-vv")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -86,7 +86,7 @@ fn test_drop_table_if_exists_existing() -> Result<(), Box<dyn std::error::Error>
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("DROP TABLE IF EXISTS people")
-        .arg("-v")
+        .arg("-vv")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -134,7 +134,7 @@ fn test_truncate_verbose() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("TRUNCATE TABLE people")
-        .arg("-v")
+        .arg("-vv")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -275,7 +275,7 @@ fn test_create_table_verbose() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
     cmd.arg("-s")
         .arg("CREATE TABLE copy AS SELECT * FROM people")
-        .arg("-v")
+        .arg("-vv")
         .arg(file_path.to_str().unwrap());
 
     cmd.assert()
@@ -422,7 +422,7 @@ fn test_create_table_with_location_multiple_operations() -> Result<(), Box<dyn s
 // ---------------------------------------------------------------------------
 
 mod query_into_table {
-    use crate::helpers::{assert_query_on, assert_query_on_fails, ONE};
+    use crate::helpers::{ONE, assert_query_on, assert_query_on_fails};
 
     type R = Result<(), Box<dyn std::error::Error>>;
 

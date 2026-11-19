@@ -32,6 +32,10 @@ pub struct Database {
 
     /// The open transaction, if any (BEGIN ... COMMIT / ROLLBACK).
     transaction: Option<Transaction>,
+
+    /// Whether loaded files keep their bytes for writeback (see
+    /// `ReadOptions::keep_source`).
+    keep_source: bool,
 }
 
 /// What ROLLBACK needs to put the database back as it was at BEGIN.
@@ -122,6 +126,14 @@ impl Database {
         }
         true
     }
+
+    /// Take a table out of the database while loading (outside any
+    /// transaction), e.g. to merge several files into one table.
+    pub fn take_table(&mut self, name: &str) -> Option<Table> {
+        self.lazy.remove(name);
+        self.modified.remove(name);
+        self.tables.remove(name)
+    }
 }
 
 /// Transactions and the modified-table set.
@@ -202,7 +214,20 @@ impl Database {
             lazy: HashMap::new(),
             modified: HashSet::new(),
             transaction: None,
+            keep_source: true,
         }
+    }
+
+    /// Whether files loaded from now on keep their bytes for writeback.
+    /// The command line turns this off when the run can never write back
+    /// (no `--write` and no REPL, whose `.write` / `.save` can).
+    pub fn set_keep_source(&mut self, keep: bool) {
+        self.keep_source = keep;
+    }
+
+    /// See [`set_keep_source`](Self::set_keep_source).
+    pub fn keep_source(&self) -> bool {
+        self.keep_source
     }
 
     /// Add a table to the database
@@ -252,12 +277,11 @@ impl Database {
     /// Inside a transaction, the first call for a table saves a copy of it
     /// for ROLLBACK.
     pub fn get_table_mut(&mut self, name: &str) -> SqawkResult<&mut Table> {
-        if let Some(txn) = &mut self.transaction {
-            if !txn.originals.contains_key(name) {
-                if let Some(table) = self.tables.get(name) {
-                    txn.originals.insert(name.to_string(), Some(table.clone()));
-                }
-            }
+        if let Some(txn) = &mut self.transaction
+            && !txn.originals.contains_key(name)
+            && let Some(table) = self.tables.get(name)
+        {
+            txn.originals.insert(name.to_string(), Some(table.clone()));
         }
         self.tables
             .get_mut(name)

@@ -5,7 +5,7 @@
 use sqlparser::ast::{AlterTableOperation, ObjectName, ObjectType};
 
 use super::ast_compat::sql_option_key_value;
-use super::bytecode::{spec_escape, OpCode, ResultSchema};
+use super::bytecode::{OpCode, ResultSchema, spec_escape};
 use super::compiler::{InsertTarget, SqlCompiler};
 use super::compiler_check::option_flag;
 use super::compiler_select::Sink;

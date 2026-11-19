@@ -37,8 +37,8 @@
 use std::collections::HashSet;
 
 use sqlparser::ast::{
-    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, JoinConstraint,
-    JoinOperator, ObjectName, TableFactor, TableWithJoins,
+    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, InTarget,
+    JoinConstraint, JoinOperator, ObjectName, TableFactor, TableWithJoins,
 };
 
 use super::bytecode::OpCode;
@@ -81,10 +81,10 @@ fn classify_join(op: &JoinOperator) -> SqawkResult<(JoinKind, &JoinConstraint)> 
         JoinOperator::FullOuter(c) => (JoinKind::Full, c),
         JoinOperator::CrossJoin(c) => (JoinKind::Inner, c),
         JoinOperator::Semi(_) | JoinOperator::LeftSemi(_) | JoinOperator::RightSemi(_) => {
-            return unsupported("SEMI JOIN")
+            return unsupported("SEMI JOIN");
         }
         JoinOperator::Anti(_) | JoinOperator::LeftAnti(_) | JoinOperator::RightAnti(_) => {
-            return unsupported("ANTI JOIN")
+            return unsupported("ANTI JOIN");
         }
         JoinOperator::CrossApply => return unsupported("CROSS APPLY"),
         JoinOperator::OuterApply => return unsupported("OUTER APPLY"),
@@ -93,7 +93,7 @@ fn classify_join(op: &JoinOperator) -> SqawkResult<(JoinKind, &JoinConstraint)> 
         // the join order. Rejected rather than silently ignoring the hint.
         JoinOperator::StraightJoin(_) => return unsupported("STRAIGHT_JOIN"),
         JoinOperator::ArrayJoin | JoinOperator::LeftArrayJoin | JoinOperator::InnerArrayJoin => {
-            return unsupported("ARRAY JOIN")
+            return unsupported("ARRAY JOIN");
         }
     })
 }
@@ -124,6 +124,15 @@ pub(crate) fn split_conjuncts(expr: &Expr, out: &mut Vec<Expr>) {
     }
 }
 
+/// Whether `expr` may contain a subquery: true for any shape
+/// `expr_children` does not enumerate (subqueries among them).
+fn may_hold_subquery(expr: &Expr) -> bool {
+    match expr_children(expr) {
+        Some(children) => children.into_iter().any(may_hold_subquery),
+        None => true,
+    }
+}
+
 /// The direct sub-expressions of `expr`, or `None` for a node whose meaning
 /// is not a pure function of its children and the current row (a subquery,
 /// a window function, anything not listed).
@@ -150,13 +159,30 @@ pub(crate) fn expr_children(expr: &Expr) -> Option<Vec<&Expr>> {
         Expr::Between {
             expr, low, high, ..
         } => vec![expr, low, high],
-        Expr::InList { expr, list, .. } => {
+        Expr::In {
+            expr,
+            target: InTarget::List(list),
+            ..
+        } => {
             let mut v: Vec<&Expr> = vec![expr];
             v.extend(list.iter());
             v
         }
-        Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
-            vec![expr, pattern]
+        Expr::Like {
+            expr,
+            pattern,
+            escape_char,
+            ..
+        }
+        | Expr::ILike {
+            expr,
+            pattern,
+            escape_char,
+            ..
+        } => {
+            let mut v: Vec<&Expr> = vec![expr, pattern];
+            v.extend(escape_char.as_deref());
+            v
         }
         Expr::Case {
             operand,
@@ -578,12 +604,12 @@ impl<'a> SqlCompiler<'a> {
                 TableFactor::NestedJoin { .. } => {
                     return Err(SqawkError::UnsupportedSqlFeature(
                         "Parenthesized joins are not supported".into(),
-                    ))
+                    ));
                 }
                 _ => {
                     return Err(SqawkError::UnsupportedSqlFeature(
                         "Only table references are supported in FROM".into(),
-                    ))
+                    ));
                 }
             };
             if alias.as_ref().is_some_and(|a| !a.columns.is_empty()) {
@@ -627,6 +653,11 @@ impl<'a> SqlCompiler<'a> {
                     continue;
                 }
                 JoinConstraint::None => continue,
+                JoinConstraint::UsingAlias(..) => {
+                    return Err(SqawkError::UnsupportedSqlFeature(
+                        "USING (...) AS alias is not supported".into(),
+                    ));
+                }
                 JoinConstraint::Using(cols) => cols
                     .iter()
                     .map(|c: &ObjectName| super::ast_compat::object_name_last(c))
@@ -703,9 +734,31 @@ impl<'a> SqlCompiler<'a> {
             let terms = std::mem::take(&mut join_terms[i]);
             match kind {
                 JoinKind::Inner => {
-                    let mut level = new_level(i);
-                    level.on_terms = terms;
-                    plan.levels.push(level);
+                    // An inner join's ON is a filter like WHERE: each
+                    // conjunct is tested at the deepest table it reads, so a
+                    // conjunct on an earlier table rejects its rows before
+                    // this table (perhaps a derived table that would be
+                    // computed on first open) is ever read. On a table in an
+                    // outer-join group it filters after NULL-extension.
+                    plan.levels.push(new_level(i));
+                    for term in terms {
+                        let at = match expr_sources(&term, &ctx) {
+                            Some(s) if !s.is_empty() && s.iter().all(|src| *src <= i) => {
+                                let at = plan.max_level(&s);
+                                match plan.group_of(at).map(|g| g.end) {
+                                    Some(end) => {
+                                        plan.levels[end].post_terms.push(term);
+                                        continue;
+                                    }
+                                    None => at,
+                                }
+                            }
+                            // A constant, a later table (an error below) or a
+                            // subquery: on this join's own level.
+                            _ => plan.levels.len() - 1,
+                        };
+                        plan.levels[at].on_terms.push(term);
+                    }
                     continue;
                 }
                 JoinKind::Left | JoinKind::Full => {
@@ -755,13 +808,13 @@ impl<'a> SqlCompiler<'a> {
         // (Outer-join conjuncts were placed at their deepest table already.)
         for (lvl, level) in plan.levels.iter().enumerate() {
             for term in &level.on_terms {
-                if let Some(s) = expr_sources(term, &ctx) {
-                    if s.iter().any(|src| plan.level_of(*src) > lvl) {
-                        return Err(SqawkError::InvalidSqlQuery(format!(
-                            "ON clause refers to a table joined later: {}",
-                            term
-                        )));
-                    }
+                if let Some(s) = expr_sources(term, &ctx)
+                    && s.iter().any(|src| plan.level_of(*src) > lvl)
+                {
+                    return Err(SqawkError::InvalidSqlQuery(format!(
+                        "ON clause refers to a table joined later: {}",
+                        term
+                    )));
                 }
             }
         }
@@ -787,11 +840,20 @@ impl<'a> SqlCompiler<'a> {
                     expr_sources(&term, &ctx).or_else(|| self.compiled_term_sources(&term, &ctx));
                 match sources {
                     None => plan.levels[last].post_terms.push(term),
-                    // A conjunct reading no table of this FROM (a constant,
-                    // a test of an enclosing query's row, an uncorrelated
-                    // subquery) is tested once, before the nest: when it is
-                    // false no row can qualify, and in a correlated
-                    // subquery the scan is skipped for that outer row.
+                    // A conjunct holding a subquery is not a constant, as in
+                    // SQLite: it is tested in the outermost loop, after that
+                    // level's plain conjuncts, so a row they reject never
+                    // runs the subquery.
+                    Some(s)
+                        if s.is_empty() && !plan.levels.is_empty() && may_hold_subquery(&term) =>
+                    {
+                        plan.levels[0].on_terms.push(term)
+                    }
+                    // Any other conjunct reading no table of this FROM (a
+                    // constant, a test of an enclosing query's row) is
+                    // tested once, before the nest: when it is false no row
+                    // can qualify, and in a correlated subquery the scan is
+                    // skipped for that outer row.
                     Some(s) if s.is_empty() => plan.const_where.push(term),
                     Some(s) => {
                         let at = plan.max_level(&s);
@@ -1092,7 +1154,12 @@ impl<'a> SqlCompiler<'a> {
             ),
         }
         self.resolve(top);
-        for term in &level.on_terms {
+        // Plain conjuncts first, then those holding a subquery (SQLite's
+        // wherecode.c defers TERM_VARSELECT terms the same way), so a row a
+        // cheap test rejects never runs the subquery.
+        let (plain, deferred): (Vec<&Expr>, Vec<&Expr>) =
+            level.on_terms.iter().partition(|t| !may_hold_subquery(t));
+        for term in plain.into_iter().chain(deferred) {
             let r = self.code_expr(term, ctx, None)?;
             self.emit_jump_to(OpCode::IfZ, r, next, 0, None, "ON / WHERE");
         }

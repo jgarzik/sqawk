@@ -14,7 +14,7 @@ fn test_inner_join_on_basic() -> Result<(), Box<dyn std::error::Error>> {
         .arg("SELECT users.name, orders.product_id, orders.date FROM users INNER JOIN orders ON users.id = orders.user_id")
         .arg(get_users_file().to_str().unwrap())
         .arg(get_orders_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Check output
     cmd.assert()
@@ -55,7 +55,7 @@ fn test_inner_join_on_with_where() -> Result<(), Box<dyn std::error::Error>> {
         .arg("SELECT users.name, orders.product_id, orders.date FROM users INNER JOIN orders ON users.id = orders.user_id WHERE orders.product_id > 102")
         .arg(get_users_file().to_str().unwrap())
         .arg(get_orders_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Check output - should only include orders with product_id > 102
     cmd.assert()
@@ -92,7 +92,7 @@ fn test_three_way_inner_join_on() -> Result<(), Box<dyn std::error::Error>> {
         .arg(get_users_file().to_str().unwrap())
         .arg(get_orders_file().to_str().unwrap())
         .arg(get_products_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Check column aliases and content
     cmd.assert()
@@ -119,7 +119,7 @@ fn test_complex_operations_with_join_on() -> Result<(), Box<dyn std::error::Erro
         .arg(get_users_file().to_str().unwrap())
         .arg(get_orders_file().to_str().unwrap())
         .arg(get_products_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Verify the command executes successfully
     cmd.assert().success();
@@ -158,5 +158,48 @@ fn test_complex_operations_with_join_on() -> Result<(), Box<dyn std::error::Erro
         "Keyboard should not be in results (price ≤ 100)"
     );
 
+    Ok(())
+}
+
+/// An inner join's ON conjunct is tested at the deepest table it reads, as
+/// a WHERE conjunct is: `b.aid = 0` rejects every b row before the derived
+/// table is ever computed, so its overflowing SUM is never reached (SQLite
+/// returns no rows too).
+#[test]
+fn inner_on_conjunct_is_tested_at_its_own_table() -> Result<(), Box<dyn std::error::Error>> {
+    const A: (&str, &str) = ("a.csv", "k\n1\n1\n");
+    const B: (&str, &str) = ("b.csv", "aid,k\n5,1\n");
+    crate::helpers::assert_query_on(
+        &[A, B],
+        "SELECT 1 AS one FROM b JOIN \
+         (SELECT k, SUM(9223372036854775807) AS s FROM a GROUP BY k) d \
+         ON b.k = d.k AND b.aid = 0",
+        "one",
+    )?;
+    // After a LEFT JOIN, a conjunct on the NULL-extendable table filters the
+    // extended rows, as WHERE would: a row of b with no c match fails it.
+    const C: (&str, &str) = ("c.csv", "k,v\n9,x\n");
+    crate::helpers::assert_query_on(
+        &[A, B, C],
+        "SELECT b.aid, c.v FROM b LEFT JOIN c ON c.k = b.k \
+         JOIN a ON a.k = b.k AND c.v IS NULL",
+        "aid,v\n5,\n5,",
+    )
+}
+
+/// A conjunct holding a subquery is tested after the level's plain
+/// conjuncts and is never hoisted ahead of the loop as a constant (SQLite's
+/// wherecode.c defers TERM_VARSELECT terms the same way): no b row passes
+/// `aid = 0`, so the overflowing SUM is never computed.
+#[test]
+fn subquery_conjunct_is_tested_after_plain_ones() -> Result<(), Box<dyn std::error::Error>> {
+    const A: (&str, &str) = ("a.csv", "k\n1\n1\n");
+    const B: (&str, &str) = ("b.csv", "aid,k\n5,1\n");
+    for sql in [
+        "SELECT 1 AS one FROM b WHERE b.aid = 0 AND (SELECT SUM(9223372036854775807) FROM a) > 0",
+        "SELECT 1 AS one FROM b WHERE (SELECT SUM(9223372036854775807) FROM a) > 0 AND b.aid = 0",
+    ] {
+        crate::helpers::assert_query_on(&[A, B], sql, "one")?;
+    }
     Ok(())
 }

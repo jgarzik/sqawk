@@ -201,20 +201,20 @@ pub(crate) fn compound_order_key(
     term: usize,
     schema: &ResultSchema,
 ) -> SqawkResult<KeyOrder> {
-    let pos = match term_position(&ob.expr, term, "ORDER", schema.columns.len())? {
+    let (expr, coll) = super::collate::split(&ob.expr)?;
+    let pos = match term_position(expr, term, "ORDER", schema.columns.len())? {
         Some(j) => j,
-        None => schema_position(schema, &ob.expr).ok_or_else(|| {
+        None => schema_position(schema, expr).ok_or_else(|| {
             SqawkError::InvalidSqlQuery(format!(
                 "{} ORDER BY term does not match any column in the result set",
                 ordinal(term + 1)
             ))
         })?,
     };
-    Ok(KeyOrder::new(
-        pos,
-        order_by_is_asc(ob),
-        ob.options.nulls_first,
-    ))
+    Ok(
+        KeyOrder::new(pos, order_by_is_asc(ob), ob.options.nulls_first)
+            .with_collation(coll.unwrap_or_default()),
+    )
 }
 
 /// The output column whose header `expr` names, if any.
@@ -318,10 +318,12 @@ impl<'a> SqlCompiler<'a> {
 
         let schema = match &*query.body {
             SetExpr::Select(select) => self.compile_select_core(select, order_by, out)?,
-            body @ (SetExpr::SetOperation { .. } | SetExpr::Query(_)) if order_by.is_empty() => {
+            body @ (SetExpr::SetOperation { .. } | SetExpr::Query(_) | SetExpr::Values(_))
+                if order_by.is_empty() =>
+            {
                 self.compile_compound(body, out)?
             }
-            body @ (SetExpr::SetOperation { .. } | SetExpr::Query(_)) => {
+            body @ (SetExpr::SetOperation { .. } | SetExpr::Query(_) | SetExpr::Values(_)) => {
                 // Every arm feeds one sorter; its payload is the output row,
                 // and the keys are output columns of the leftmost SELECT.
                 let sorter = self.alloc_sorter();
@@ -349,7 +351,7 @@ impl<'a> SqlCompiler<'a> {
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(
                     "Only SELECT queries and compound SELECTs are supported".to_string(),
-                ))
+                ));
             }
         };
         self.resolve(exit);
@@ -390,6 +392,7 @@ impl<'a> SqlCompiler<'a> {
     fn compile_compound(&mut self, expr: &SetExpr, dest: Dest) -> SqawkResult<ResultSchema> {
         let (op, quantifier, left, right) = match expr {
             SetExpr::Select(select) => return self.compile_select_core(select, &[], dest),
+            SetExpr::Values(values) => return self.compile_values(values, dest),
             SetExpr::Query(q) => {
                 check_query(q)?;
                 if q.with.is_some()
@@ -413,7 +416,7 @@ impl<'a> SqlCompiler<'a> {
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(
                     "Unsupported compound SELECT operand".to_string(),
-                ))
+                ));
             }
         };
         let all = match quantifier {
@@ -423,7 +426,7 @@ impl<'a> SqlCompiler<'a> {
                 return Err(SqawkError::UnsupportedSqlFeature(format!(
                     "{} {} is not supported",
                     op, q
-                )))
+                )));
             }
         };
         self.add_comment(&format!("{}{}", op, if all { " ALL" } else { "" }));
@@ -648,20 +651,23 @@ impl<'a> SqlCompiler<'a> {
         let mut keys = Vec::with_capacity(order_by.len());
         let mut spec = Vec::with_capacity(order_by.len());
         for (i, ob) in order_by.iter().enumerate() {
-            let text = NameCtx::agg_key(&ob.expr);
-            let key = if let Some(j) = term_position(&ob.expr, i, "ORDER", n)? {
+            // A COLLATE on the term is the sort key's collation; the term
+            // without it is resolved as usual.
+            let (term, coll) = super::collate::split(&ob.expr)?;
+            let text = NameCtx::agg_key(term);
+            let key = if let Some(j) = term_position(term, i, "ORDER", n)? {
                 SortKey::Out(j)
-            } else if let Some(j) = alias_position(outs, &ob.expr) {
+            } else if let Some(j) = alias_position(outs, term) {
                 SortKey::Out(j)
             } else if let Some(j) = outs.iter().position(|o| NameCtx::agg_key(&o.expr) == text) {
                 SortKey::Out(j)
             } else if let Some(ctx) = ctx {
-                match bare_output_position(outs, &ob.expr, ctx) {
+                match bare_output_position(outs, term, ctx) {
                     Some(j) => SortKey::Out(j),
-                    None => SortKey::Expr(Box::new(ob.expr.clone())),
+                    None => SortKey::Expr(Box::new(term.clone())),
                 }
             } else {
-                SortKey::Out(schema_position(&schema, &ob.expr).ok_or_else(|| {
+                SortKey::Out(schema_position(&schema, term).ok_or_else(|| {
                     SqawkError::InvalidSqlQuery(format!(
                         "ORDER BY expression must appear in the SELECT list: {}",
                         ob.expr
@@ -669,7 +675,11 @@ impl<'a> SqlCompiler<'a> {
                 })?)
             };
             keys.push(key);
-            spec.push(KeyOrder::new(i, order_by_is_asc(ob), ob.options.nulls_first).spec());
+            spec.push(
+                KeyOrder::new(i, order_by_is_asc(ob), ob.options.nulls_first)
+                    .with_collation(coll.unwrap_or_default())
+                    .spec(),
+            );
         }
         let nk = keys.len();
 
@@ -854,6 +864,39 @@ impl<'a> SqlCompiler<'a> {
             None,
             "Insert row",
         );
+    }
+
+    /// A VALUES list as a query: one row per tuple, sent to `dest`, with
+    /// columns named `column1`, `column2`, ... as SQLite names them (types
+    /// from the first tuple). Every tuple must be as wide as the first.
+    /// The tuples are evaluated into the same registers one after another.
+    fn compile_values(
+        &mut self,
+        values: &sqlparser::ast::Values,
+        dest: Dest,
+    ) -> SqawkResult<ResultSchema> {
+        let ctx = NameCtx::empty();
+        let width = values.rows.first().map_or(0, |r| r.content.len());
+        let mut schema = ResultSchema::new();
+        if let Some(first) = values.rows.first() {
+            for (i, e) in first.content.iter().enumerate() {
+                schema.add_column(format!("column{}", i + 1), self.infer_expr_type(e, &ctx));
+            }
+        }
+        let start = self.allocate_registers(width.max(1));
+        for row in &values.rows {
+            if row.content.len() != width {
+                return Err(SqawkError::InvalidSqlQuery(
+                    "all VALUES must have the same number of terms".into(),
+                ));
+            }
+            for (i, e) in row.content.iter().enumerate() {
+                self.code_expr(e, &ctx, Some(start + i as i64))?;
+            }
+            self.emit_to_dest(start, width, dest);
+        }
+        self.program.set_result_schema(schema.clone());
+        Ok(schema)
     }
 
     /// Send the `n`-column row at `start` to `dest`.

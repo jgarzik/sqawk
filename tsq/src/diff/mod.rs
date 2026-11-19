@@ -32,12 +32,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::data::Table;
-use crate::run::{run_sqawk, Exit};
+use crate::run::{Exit, run_sqawk};
 use oracle::{Oracle, SqlResult};
-use render::{raw_records, same_rows, split_sets, ResultSet};
+use render::{ResultSet, raw_records, same_rows, split_sets};
 use schema::{Kind, Schema};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -132,10 +132,10 @@ impl Env {
             .filter(|t| words.contains(&t.to_ascii_lowercase()))
             .map(|t| self.dir.join(format!("{t}.csv")))
             .collect();
-        if files.is_empty() {
-            if let Some(t) = self.tables.first() {
-                files.push(self.dir.join(format!("{t}.csv")));
-            }
+        if files.is_empty()
+            && let Some(t) = self.tables.first()
+        {
+            files.push(self.dir.join(format!("{t}.csv")));
         }
         files
     }
@@ -240,11 +240,7 @@ pub fn judge(
                         a.header == b.header && same_rows(ord, &a.rows, &b.rows)
                     });
                     v.sqawk_sets = got;
-                    if ok {
-                        Cat::Pass
-                    } else {
-                        Cat::Diff
-                    }
+                    if ok { Cat::Pass } else { Cat::Diff }
                 }
                 None => {
                     v.sqawk_sets = vec![ResultSet {
@@ -448,8 +444,8 @@ pub fn diff_tables(seed: u64, opts: &DiffOptions) -> Result<(Vec<Table>, bool)> 
     let Scale::Rows(rows) = opts.scale;
     match opts.tables.as_str() {
         "gen" => {
-            let mut t = crate::gen::base_tables(seed, rows);
-            crate::gen::inject_edges(&mut t, seed, opts.edge_rate);
+            let mut t = crate::datagen::base_tables(seed, rows);
+            crate::datagen::inject_edges(&mut t, seed, opts.edge_rate);
             Ok((t, rows >= 5000))
         }
         name => match tables::builtin(name) {
@@ -535,7 +531,7 @@ pub fn run(seed: u64, sqawk: &Path, opts: &DiffOptions, verbose: bool) -> Result
     let started = Instant::now();
     let (tables, large) = diff_tables(seed, opts)?;
     let tmp = tempfile::Builder::new().prefix("tsq-diff-").tempdir()?;
-    crate::gen::write_csv_tables(tmp.path(), &tables)?;
+    crate::datagen::write_csv_tables(tmp.path(), &tables)?;
     let oracle = Oracle::new(&tables).context("load tables into SQLite")?;
     let schema = tables::schema_of(&tables, &oracle)?;
     let cfg = sqlgen::GenConfig { large };

@@ -90,18 +90,80 @@ pub fn split_sets(recs: &[String], like: &[ResultSet]) -> Option<Vec<ResultSet>>
 }
 
 /// Equal as sequences when `ordered`, else as multisets.
+///
+/// An ordered comparison still lets rows that tie on every column swap
+/// places. The engines sort ties in the order their join loops produced
+/// them, which may differ. A tie can be told apart only when equal numbers
+/// render differently: the integer `-9223372036854775808` and the real
+/// `-9.22337203685478e+18` compare equal. Each run of tied rows must still
+/// match exactly as a multiset, so a rendering difference is still caught.
 pub fn same_rows(ordered: bool, a: &[String], b: &[String]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    if ordered {
-        return a == b;
+    if !ordered {
+        return same_multiset(a, b);
     }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] == b[i] {
+            i += 1;
+            continue;
+        }
+        let head = fields(&a[i]);
+        let mut j = i + 1;
+        while j < a.len() && ties(&head, &fields(&a[j])) && ties(&head, &fields(&b[j])) {
+            j += 1;
+        }
+        if !ties(&head, &fields(&b[i])) || !same_multiset(&a[i..j], &b[i..j]) {
+            return false;
+        }
+        i = j;
+    }
+    true
+}
+
+fn same_multiset(a: &[String], b: &[String]) -> bool {
     let mut x: Vec<&String> = a.iter().collect();
     let mut y: Vec<&String> = b.iter().collect();
     x.sort();
     y.sort();
     x == y
+}
+
+/// Rows that compare equal on every column: equal text, or numbers equal
+/// up to the 15 significant digits a real is printed with.
+fn ties(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x == y
+                || match (x.parse::<f64>(), y.parse::<f64>()) {
+                    (Ok(p), Ok(q)) => p == q || (p - q).abs() <= 1e-14 * p.abs().max(q.abs()),
+                    _ => false,
+                }
+        })
+}
+
+/// The fields of one RFC 4180 record (as written by `record`).
+fn fields(rec: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut chars = rec.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quoted, c) {
+            (true, '"') if chars.peek() == Some(&'"') => {
+                cur.push('"');
+                chars.next();
+            }
+            (true, '"') => quoted = false,
+            (false, '"') => quoted = true,
+            (false, ',') => out.push(std::mem::take(&mut cur)),
+            (_, c) => cur.push(c),
+        }
+    }
+    out.push(cur);
+    out
 }
 
 #[cfg(test)]
@@ -116,6 +178,31 @@ mod tests {
         );
         assert_eq!(record(&[""]), "\"\"");
         assert_eq!(record(&["", ""]), ",");
+    }
+
+    fn rows(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn ordered_rows_may_swap_ties_only() {
+        // Equal int and real keys may come out in either order.
+        let a = rows(&["0,-9.22337203685478e+18", "0,-9223372036854775808", "1,5"]);
+        let b = rows(&["0,-9223372036854775808", "0,-9.22337203685478e+18", "1,5"]);
+        assert!(same_rows(true, &a, &b));
+        // Rows that do not tie must stay in order.
+        let c = rows(&["1,5", "0,-9223372036854775808", "0,-9.22337203685478e+18"]);
+        assert!(!same_rows(true, &a, &c));
+        // A tie run must still match exactly: `1` printed as `1.0` is caught.
+        let d = rows(&["0,-9.22337203685478e+18", "0,-9.22337203685478e+18", "1,5"]);
+        assert!(!same_rows(true, &a, &d));
+        assert!(!same_rows(true, &rows(&["1"]), &rows(&["1.0"])));
+    }
+
+    #[test]
+    fn fields_follow_quoting() {
+        assert_eq!(fields("a,\"b,c\",\"q\"\"\""), vec!["a", "b,c", "q\""]);
+        assert_eq!(fields(""), vec![""]);
     }
 
     #[test]

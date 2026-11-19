@@ -10,10 +10,10 @@
 //! Semantics follow SQLite 3.45 unless a comment says otherwise. String
 //! functions count characters, not bytes.
 
-use super::arith::{self, text_of, text_to_num, to_num, Num};
+use super::arith::{self, Num, text_of, text_to_num, to_num};
 use super::bytecode::Register;
 use super::datetime;
-use super::engine::{compare_values, VmEngine};
+use super::engine::{VmEngine, compare_values};
 use super::printf;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Value;
@@ -76,6 +76,23 @@ static FUNCS: &[FuncDef] = &[
     f!("PRINTF", 1, VARIADIC, printf),
     f!("FORMAT", 1, VARIADIC, printf),
     f!("QUOTE", 1, 1, quote),
+    // Collation transforms, applied to both sides of a collated comparison
+    // or sort key (see collate.rs); not callable by name.
+    f!("COLLATE NOCASE", 1, 1, |a| collate(
+        a,
+        super::collate::Collation::NoCase
+    )),
+    f!("COLLATE RTRIM", 1, 1, |a| collate(
+        a,
+        super::collate::Collation::Rtrim
+    )),
+    // GLOB(pattern, x) is `x GLOB pattern`.
+    f!("GLOB", 2, 2, glob),
+    // REGEXP(pattern, x) is `x REGEXP pattern` (see regexp.rs).
+    f!("REGEXP", 2, 2, super::regexp::regexp),
+    f!("REGEXP_MATCHES", 2, 2, super::regexp::regexp_matches),
+    f!("REGEXP_REPLACE", 3, 4, super::regexp::regexp_replace),
+    f!("REGEXP_EXTRACT", 2, 3, super::regexp::regexp_extract),
     // Numbers
     f!("ABS", 1, 1, abs),
     f!("ROUND", 1, 2, round),
@@ -83,6 +100,36 @@ static FUNCS: &[FuncDef] = &[
     f!("CEILING", 1, 1, ceil),
     f!("FLOOR", 1, 1, floor),
     f!("SIGN", 1, 1, sign),
+    f!("TRUNC", 1, 1, trunc),
+    f!("RANDOM", 0, 0, random),
+    // SQLite's math functions (SQLITE_ENABLE_MATH_FUNCTIONS)
+    f!("SQRT", 1, 1, |a| math1(a, f64::sqrt)),
+    f!("EXP", 1, 1, |a| math1(a, f64::exp)),
+    f!("LN", 1, 1, |a| log_fn(a, f64::ln)),
+    f!("LOG", 1, 2, |a| log_fn(a, f64::log10)),
+    f!("LOG10", 1, 1, |a| log_fn(a, f64::log10)),
+    f!("LOG2", 1, 1, |a| log_fn(a, f64::log2)),
+    f!("POW", 2, 2, |a| math2(a, f64::powf)),
+    f!("POWER", 2, 2, |a| math2(a, f64::powf)),
+    f!("MOD", 2, 2, |a| math2(a, |x, y| x % y)),
+    f!("ATAN2", 2, 2, |a| math2(a, f64::atan2)),
+    f!("PI", 0, 0, |_| Ok(Register::Float(std::f64::consts::PI))),
+    f!("SIN", 1, 1, |a| math1(a, f64::sin)),
+    f!("COS", 1, 1, |a| math1(a, f64::cos)),
+    f!("TAN", 1, 1, |a| math1(a, f64::tan)),
+    f!("ASIN", 1, 1, |a| math1(a, f64::asin)),
+    f!("ACOS", 1, 1, |a| math1(a, f64::acos)),
+    f!("ATAN", 1, 1, |a| math1(a, f64::atan)),
+    f!("SINH", 1, 1, |a| math1(a, f64::sinh)),
+    f!("COSH", 1, 1, |a| math1(a, f64::cosh)),
+    f!("TANH", 1, 1, |a| math1(a, f64::tanh)),
+    f!("ASINH", 1, 1, |a| math1(a, f64::asinh)),
+    f!("ACOSH", 1, 1, |a| math1(a, f64::acosh)),
+    f!("ATANH", 1, 1, |a| math1(a, f64::atanh)),
+    f!("DEGREES", 1, 1, |a| math1(a, |x| x
+        * (180.0 / std::f64::consts::PI))),
+    f!("RADIANS", 1, 1, |a| math1(a, |x| x
+        * (std::f64::consts::PI / 180.0))),
     // Multi-argument MIN / MAX (one argument is the aggregate).
     f!("MIN", 2, VARIADIC, min_scalar),
     f!("MAX", 2, VARIADIC, max_scalar),
@@ -160,7 +207,7 @@ fn int_arg(r: &Register) -> i64 {
 }
 
 fn text(s: String) -> SqawkResult<Register> {
-    Ok(Register::String(s))
+    Ok(Register::String(s.into()))
 }
 
 /// The longest string a function may build, in bytes: SQLite's default
@@ -200,8 +247,9 @@ fn lower(a: &[Register]) -> SqawkResult<Register> {
 /// Characters in the text form of the value.
 fn length(a: &[Register]) -> SqawkResult<Register> {
     null_in_null_out!(a);
+    // SQLite counts the characters before the first NUL.
     let n = match &a[0] {
-        Register::String(s) => s.chars().count(),
+        Register::String(s) => s.chars().take_while(|&c| c != '\0').count(),
         other => text_of(other).len(),
     };
     Ok(Register::Integer(n as i64))
@@ -475,10 +523,28 @@ fn char_fn(a: &[Register]) -> SqawkResult<Register> {
 /// UNICODE(s): the code point of the first character; NULL for ''.
 fn unicode(a: &[Register]) -> SqawkResult<Register> {
     null_in_null_out!(a);
-    Ok(text_of(&a[0])
-        .chars()
-        .next()
-        .map_or(Register::Null, |c| Register::Integer(c as i64)))
+    // Text that starts with NUL reads as empty in SQLite: NULL.
+    Ok(match text_of(&a[0]).chars().next() {
+        Some(c) if c != '\0' => Register::Integer(c as i64),
+        _ => Register::Null,
+    })
+}
+
+/// A collation's transform of a text value (see `collate.rs`); any other
+/// value unchanged.
+fn collate(a: &[Register], coll: super::collate::Collation) -> SqawkResult<Register> {
+    Ok(match &a[0] {
+        Register::String(s) => Register::String(coll.fold(s).as_ref().into()),
+        other => other.clone(),
+    })
+}
+
+/// GLOB(pattern, x): whether x matches the GLOB pattern (see `glob.rs`);
+/// NULL if either is NULL.
+fn glob(a: &[Register]) -> SqawkResult<Register> {
+    null_in_null_out!(a);
+    let m = super::glob::glob(&text_of(&a[0]), &text_of(&a[1]));
+    Ok(Register::Integer(m as i64))
 }
 
 /// PRINTF(format, ...) / FORMAT: SQLite's printf (see `printf.rs`). A NULL
@@ -487,7 +553,8 @@ fn printf(a: &[Register]) -> SqawkResult<Register> {
     if matches!(a[0], Register::Null) {
         return Ok(Register::Null);
     }
-    Ok(printf::format_str(&text_of(&a[0]), &a[1..])?.map_or(Register::Null, Register::String))
+    Ok(printf::format_str(&text_of(&a[0]), &a[1..])?
+        .map_or(Register::Null, |s| Register::String(s.into())))
 }
 
 /// QUOTE(x): the SQL literal for x. Text is single-quoted with quotes
@@ -548,7 +615,7 @@ fn round(a: &[Register]) -> SqawkResult<Register> {
                 return Err(SqawkError::InvalidSqlQuery(format!(
                     "ROUND precision must be a number, got '{}'",
                     s
-                )))
+                )));
             }
         },
         Some(r) => int_arg(r),
@@ -576,8 +643,25 @@ pub(crate) fn round_decimal(x: f64, digits: i64) -> f64 {
 }
 
 /// CEIL / FLOOR: an integer is returned as is; a real stays a real.
+/// A math function's argument as a number, as SQLite's
+/// `sqlite3_value_numeric_type` reads it: text only when all of it (but
+/// surrounding whitespace) is a number, so `'4abc'` and `'abc'` are not;
+/// `None` for those and for NULL.
+fn math_num(r: &Register) -> Option<Num> {
+    match r {
+        Register::String(s) => match crate::table::numeric_text(s) {
+            Some(Value::Integer(i)) => Some(Num::Int(i)),
+            Some(Value::Float(f)) => Some(Num::Real(f)),
+            _ => None,
+        },
+        other => to_num(other),
+    }
+}
+
+/// CEIL / FLOOR (SQLite's `ceilingFunc`): an integer comes back unchanged,
+/// a real rounded; anything that is not a number is NULL.
 fn ceil_floor(a: &[Register], up: bool) -> SqawkResult<Register> {
-    Ok(match to_num(&a[0]) {
+    Ok(match math_num(&a[0]) {
         None => Register::Null,
         Some(Num::Int(i)) => Register::Integer(i),
         Some(Num::Real(f)) => Register::Float(if up { f.ceil() } else { f.floor() }),
@@ -590,6 +674,93 @@ fn ceil(a: &[Register]) -> SqawkResult<Register> {
 
 fn floor(a: &[Register]) -> SqawkResult<Register> {
     ceil_floor(a, false)
+}
+
+/// RANDOM(): a pseudo-random 64-bit integer, different on every call.
+///
+/// splitmix64 over a per-thread state seeded from the standard library's
+/// randomly keyed hasher, so each run differs; not for cryptography (nor
+/// is SQLite's).
+fn random(_: &[Register]) -> SqawkResult<Register> {
+    use std::cell::Cell;
+    use std::hash::{BuildHasher, Hasher};
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new({
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u64(std::process::id() as u64);
+            h.finish()
+        });
+    }
+    let z = STATE.with(|s| {
+        let v = s.get().wrapping_add(0x9e37_79b9_7f4a_7c15);
+        s.set(v);
+        v
+    });
+    let z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    let z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    Ok(Register::Integer((z ^ (z >> 31)) as i64))
+}
+
+/// TRUNC(x): toward zero, SQLite's `ceilingFunc` with `trunc`.
+fn trunc(a: &[Register]) -> SqawkResult<Register> {
+    Ok(match math_num(&a[0]) {
+        None => Register::Null,
+        Some(Num::Int(i)) => Register::Integer(i),
+        Some(Num::Real(f)) => Register::Float(f.trunc()),
+    })
+}
+
+/// A math function's real result; NaN (out of the domain) is NULL, as
+/// SQLite stores a NaN result.
+fn real_result(x: f64) -> Register {
+    if x.is_nan() {
+        Register::Null
+    } else {
+        Register::Float(x)
+    }
+}
+
+/// A one-argument math function (SQLite's `math1Func`): NULL unless the
+/// argument is a number (see [`math_num`]).
+fn math1(a: &[Register], f: fn(f64) -> f64) -> SqawkResult<Register> {
+    Ok(match math_num(&a[0]) {
+        Some(x) => real_result(f(x.as_f64())),
+        None => Register::Null,
+    })
+}
+
+/// A two-argument math function (SQLite's `math2Func`).
+fn math2(a: &[Register], f: fn(f64, f64) -> f64) -> SqawkResult<Register> {
+    Ok(match (math_num(&a[0]), math_num(&a[1])) {
+        (Some(x), Some(y)) => real_result(f(x.as_f64(), y.as_f64())),
+        _ => Register::Null,
+    })
+}
+
+/// LN, LOG10, LOG2 and LOG (SQLite's `logFunc`): NULL for a non-number or
+/// an argument <= 0. `LOG(x)` is base 10 (`one`); `LOG(b, x)` is
+/// `ln(x) / ln(b)`, NULL when `ln(b) <= 0`. As in SQLite, the `x` of the
+/// two-argument form is read like arithmetic reads it (`'8x'` is 8, NULL
+/// is 0) rather than checked for being a number.
+fn log_fn(a: &[Register], one: fn(f64) -> f64) -> SqawkResult<Register> {
+    let Some(x) = math_num(&a[0]).map(Num::as_f64) else {
+        return Ok(Register::Null);
+    };
+    if x <= 0.0 {
+        return Ok(Register::Null);
+    }
+    let Some(arg) = a.get(1) else {
+        return Ok(real_result(one(x)));
+    };
+    let b = x.ln();
+    if b <= 0.0 {
+        return Ok(Register::Null);
+    }
+    let x = to_num(arg).map_or(0.0, Num::as_f64);
+    if x <= 0.0 {
+        return Ok(Register::Null);
+    }
+    Ok(real_result(x.ln() / b))
 }
 
 /// SIGN(x): -1, 0 or 1; NULL for NULL and for text that is not a number.
@@ -661,7 +832,7 @@ mod tests {
     }
     fn txt(r: SqawkResult<Register>) -> String {
         match r.unwrap() {
-            Register::String(s) => s,
+            Register::String(s) => s.into(),
             Register::Null => "NULL".into(),
             other => format!("{:?}", other),
         }

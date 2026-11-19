@@ -158,8 +158,7 @@ fn test_repl_save_command() -> Result<(), Box<dyn std::error::Error>> {
     drop(temp_file); // Close the file
 
     // Commands to test the .save command
-    let test_commands =
-        "UPDATE sample SET age = 33 WHERE id = 1;\n.save\nUPDATE sample SET age = 34 WHERE id = 2;\n.save sample\n.exit\n";
+    let test_commands = "UPDATE sample SET age = 33 WHERE id = 1;\n.save\nUPDATE sample SET age = 34 WHERE id = 2;\n.save sample\n.exit\n";
 
     // Start the sqawk process with the temporary file
     let mut process = Command::new(env!("CARGO_BIN_EXE_sqawk"))
@@ -228,4 +227,21 @@ fn table_listing_order_is_deterministic() {
         .filter(|l| ["employees", "orders", "users"].contains(l))
         .collect();
     assert_eq!(names, vec!["employees", "orders", "users"]);
+}
+
+/// `.schema` prints SQL that parses back: a name that is not a plain
+/// identifier, or is a keyword, is double-quoted (a `"` inside doubled).
+#[test]
+fn schema_quotes_names_that_need_it() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = crate::helpers::create_temp_dir()?;
+    let p = dir.path().join("t.csv");
+    std::fs::write(&p, "id,first name,Total $,select,a\"b\n1,2,3,4,5\n")?;
+    let out = crate::common::run_repl_script(".schema t\n", &[p.to_str().unwrap()], None, false);
+    assert!(
+        out.contains(
+            "CREATE TABLE t (\n  id TEXT,\n  \"first name\" TEXT,\n  \"Total $\" TEXT,\n  \"select\" TEXT,\n  \"a\"\"b\" TEXT\n);"
+        ),
+        "{out:?}"
+    );
+    Ok(())
 }

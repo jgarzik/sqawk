@@ -19,7 +19,7 @@
 
 use sqlparser::ast::{
     Expr, FromTable, FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArguments,
-    GroupByExpr, JoinConstraint, JoinOperator, LimitClause, NamedWindowExpr, OrderByExpr,
+    GroupByExpr, InTarget, JoinConstraint, JoinOperator, LimitClause, NamedWindowExpr, OrderByExpr,
     OrderByKind, Query, Select, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement,
     TableFactor, TableWithJoins, Values, WindowFrameBound, WindowSpec, WindowType,
 };
@@ -36,6 +36,53 @@ pub const MAX_EXPR_DEPTH: usize = 1000;
 pub const MAX_COMPOUND_TERMS: usize = 500;
 
 /// Parse `sql` into statements: SQLite precedence, hex integer literals,
+/// A parse error at a `-` (or `.`) right after a name and before more of
+/// it, as in `FROM my-data`: suggest quoting the whole name.
+fn with_quote_hint(sql: &str, e: sqlparser::parser::ParserError) -> sqlparser::parser::ParserError {
+    use sqlparser::parser::ParserError;
+    let ParserError::ParserError(msg) = &e else {
+        return e;
+    };
+    let Some(at) = msg.rfind(" at Line: ") else {
+        return e;
+    };
+    let loc = &msg[at + " at Line: ".len()..];
+    let Some((line, col)) = loc.split_once(", Column: ") else {
+        return e;
+    };
+    let (Ok(line), Ok(col)) = (line.trim().parse::<usize>(), col.trim().parse::<usize>()) else {
+        return e;
+    };
+    let Some(text) = sql.lines().nth(line.saturating_sub(1)) else {
+        return e;
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let pos = col.saturating_sub(1);
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let joined = |c: char| word(c) || c == '-' || c == '.';
+    if !matches!(chars.get(pos), Some('-' | '.'))
+        || !pos
+            .checked_sub(1)
+            .and_then(|p| chars.get(p))
+            .is_some_and(|&c| word(c))
+        || !chars.get(pos + 1).is_some_and(|&c| word(c))
+    {
+        return e;
+    }
+    let mut start = pos;
+    while start > 0 && joined(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = pos + 1;
+    while end < chars.len() && joined(chars[end]) {
+        end += 1;
+    }
+    let name: String = chars[start..end].iter().collect();
+    ParserError::ParserError(format!(
+        "{msg} (to use {name} as a name, quote it: \"{name}\")"
+    ))
+}
+
 /// compound SELECTs left-deep, depth and compound-term limits enforced.
 pub fn parse_sql(sql: &str) -> SqawkResult<Vec<Statement>> {
     let mut tokens = Tokenizer::new(&SqawkDialect, sql)
@@ -46,7 +93,7 @@ pub fn parse_sql(sql: &str) -> SqawkResult<Vec<Statement>> {
     let mut statements = Parser::new(&SqawkDialect)
         .with_tokens_with_locations(tokens)
         .parse_statements()
-        .map_err(SqawkError::SqlParseError)?;
+        .map_err(|e| SqawkError::SqlParseError(with_quote_hint(sql, e)))?;
     for statement in &mut statements {
         normalize(statement)?;
     }
@@ -331,10 +378,10 @@ pub(crate) fn for_each_child<'a>(node: Node<'a>, f: &mut dyn FnMut(Node<'a>)) {
                 }
             }
             f(Node::SetExpr(&mut q.body));
-            if let Some(ob) = q.order_by.as_mut() {
-                if let OrderByKind::Expressions(exprs) = &mut ob.kind {
-                    order_by_children(exprs, f);
-                }
+            if let Some(ob) = q.order_by.as_mut()
+                && let OrderByKind::Expressions(exprs) = &mut ob.kind
+            {
+                order_by_children(exprs, f);
             }
             match q.limit_clause.as_mut() {
                 Some(LimitClause::LimitOffset {
@@ -593,6 +640,7 @@ fn expr_children<'a>(e: &'a mut Expr, stack: &mut dyn FnMut(Node<'a>)) {
         | Expr::Ceil { expr: a, .. }
         | Expr::Floor { expr: a, .. }
         | Expr::Collate { expr: a, .. }
+        | Expr::IsJson { expr: a, .. }
         | Expr::Prefixed { value: a, .. }
         | Expr::Named { expr: a, .. }
         | Expr::OuterJoin(a)
@@ -603,21 +651,6 @@ fn expr_children<'a>(e: &'a mut Expr, stack: &mut dyn FnMut(Node<'a>)) {
         | Expr::IsNotDistinctFrom(a, b)
         | Expr::BinaryOp {
             left: a, right: b, ..
-        }
-        | Expr::Like {
-            expr: a,
-            pattern: b,
-            ..
-        }
-        | Expr::ILike {
-            expr: a,
-            pattern: b,
-            ..
-        }
-        | Expr::SimilarTo {
-            expr: a,
-            pattern: b,
-            ..
         }
         | Expr::RLike {
             expr: a,
@@ -630,11 +663,6 @@ fn expr_children<'a>(e: &'a mut Expr, stack: &mut dyn FnMut(Node<'a>)) {
         | Expr::AllOp {
             left: a, right: b, ..
         }
-        | Expr::InUnnest {
-            expr: a,
-            array_expr: b,
-            ..
-        }
         | Expr::AtTimeZone {
             timestamp: a,
             time_zone: b,
@@ -643,15 +671,54 @@ fn expr_children<'a>(e: &'a mut Expr, stack: &mut dyn FnMut(Node<'a>)) {
             push(stack, a);
             push(stack, b);
         }
-        Expr::InList { expr, list, .. } => {
+        Expr::Like {
+            expr,
+            pattern,
+            escape_char,
+            ..
+        }
+        | Expr::ILike {
+            expr,
+            pattern,
+            escape_char,
+            ..
+        }
+        | Expr::SimilarTo {
+            expr,
+            pattern,
+            escape_char,
+            ..
+        } => {
             push(stack, expr);
-            for item in list {
-                push(stack, item);
+            push(stack, pattern);
+            if let Some(e) = escape_char {
+                push(stack, e);
             }
         }
-        Expr::InSubquery { expr, subquery, .. } => {
+        Expr::In { expr, target, .. } => {
             push(stack, expr);
-            stack(Node::Query(subquery));
+            match target {
+                InTarget::List(list) => {
+                    for item in list {
+                        push(stack, item);
+                    }
+                }
+                InTarget::Subquery(q) => stack(Node::Query(q)),
+                InTarget::Unnest(e) => push(stack, e),
+                InTarget::Table { args: None, .. } => {}
+                InTarget::Table {
+                    args: Some(args), ..
+                } => {
+                    for arg in args {
+                        let (FunctionArg::Named { arg, .. }
+                        | FunctionArg::ExprNamed { arg, .. }
+                        | FunctionArg::Unnamed(arg)) = arg;
+                        if let FunctionArgExpr::Expr(e) = arg {
+                            stack(Node::Expr(e));
+                        }
+                    }
+                }
+            }
         }
         Expr::Between {
             expr, low, high, ..
@@ -983,16 +1050,16 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        if let SelectItem::UnnamedExpr(Expr::Subquery(sub)) = &sel.projection[0] {
-            if let SetExpr::Select(inner) = sub.body.as_ref() {
-                out.extend(
-                    source
-                        .select_item_texts(inner)
-                        .expect("inner")
-                        .into_iter()
-                        .map(String::from),
-                );
-            }
+        if let SelectItem::UnnamedExpr(Expr::Subquery(sub)) = &sel.projection[0]
+            && let SetExpr::Select(inner) = sub.body.as_ref()
+        {
+            out.extend(
+                source
+                    .select_item_texts(inner)
+                    .expect("inner")
+                    .into_iter()
+                    .map(String::from),
+            );
         }
         out
     }

@@ -15,26 +15,41 @@
 use sqlparser::ast::{
     CreateTable, CreateTableOptions, Delete, FileFormat, FromTable, GroupByExpr,
     HiveDistributionStyle, HiveFormat, HiveIOFormat, Insert, LimitClause, OrderBy, OrderByExpr,
-    OrderByOptions, Query, Select, SelectFlavor, TableAlias, TableFactor, TableWithJoins, Update,
+    OrderByOptions, OrderBySort, Query, Select, SelectFlavor, SqliteTableOption, TableAlias,
+    TableFactor, TableWithJoins, Update,
 };
 
 use super::ast_compat::sql_option_key_value;
 use crate::error::{SqawkError, SqawkResult};
 
+/// Subjects of `unsupported` that take "are".
+const PLURAL: &[&str] = &[
+    "Column aliases on a FROM item",
+    "JSON paths in FROM",
+    "LATERAL subqueries",
+    "Optimizer hints",
+    "Pipe operators",
+    "SELECT modifiers",
+    "STRICT tables",
+    "Table comments",
+    "Table constraints",
+    "Table hints (WITH (...))",
+    "Table options other than WITH (DELIMITER / HEADER / COMMENTS)",
+    "Table-valued functions",
+    "Transaction modes",
+];
+
 fn unsupported<T>(what: &str) -> SqawkResult<T> {
+    let verb = if PLURAL.contains(&what) { "are" } else { "is" };
     Err(SqawkError::UnsupportedSqlFeature(format!(
-        "{} is not supported",
-        what
+        "{} {} not supported",
+        what, verb
     )))
 }
 
 /// Fail with "`what` is not supported" when `present`.
 fn reject(present: bool, what: &str) -> SqawkResult<()> {
-    if present {
-        unsupported(what)
-    } else {
-        Ok(())
-    }
+    if present { unsupported(what) } else { Ok(()) }
 }
 
 /// A transaction-control statement sqawk implements.
@@ -136,6 +151,8 @@ pub(crate) fn check_insert(insert: &Insert) -> SqawkResult<()> {
         multi_table_into_clauses,
         multi_table_when_clauses,
         multi_table_else_clause,
+        by_name,
+        overriding,
     } = insert;
     reject(or.is_some(), "INSERT OR <conflict action>")?;
     reject(*replace_into, "REPLACE INTO")?;
@@ -156,6 +173,8 @@ pub(crate) fn check_insert(insert: &Insert) -> SqawkResult<()> {
     reject(settings.is_some(), "INSERT ... SETTINGS")?;
     reject(format_clause.is_some(), "INSERT ... FORMAT")?;
     reject(!optimizer_hints.is_empty(), "Optimizer hints")?;
+    reject(*by_name, "INSERT ... BY NAME")?;
+    reject(overriding.is_some(), "INSERT ... OVERRIDING")?;
     reject(
         multi_table_insert_type.is_some()
             || !multi_table_into_clauses.is_empty()
@@ -179,13 +198,24 @@ pub(crate) fn check_update(update: &Update) -> SqawkResult<()> {
         or,
         order_by,
         limit,
+        on_cluster,
+        settings,
     } = update;
-    reject(from.is_some(), "UPDATE ... FROM")?;
+    // SQLite's `UPDATE t SET ... FROM ...`; not `UPDATE t FROM ... SET`.
+    reject(
+        matches!(
+            from,
+            Some(sqlparser::ast::UpdateTableFromKind::BeforeSet(_))
+        ),
+        "UPDATE ... FROM before SET",
+    )?;
     reject(returning.is_some(), "UPDATE ... RETURNING")?;
     reject(output.is_some(), "UPDATE ... OUTPUT")?;
     reject(or.is_some(), "UPDATE OR <conflict action>")?;
     reject(!order_by.is_empty(), "UPDATE ... ORDER BY")?;
     reject(limit.is_some(), "UPDATE ... LIMIT")?;
+    reject(on_cluster.is_some(), "ON CLUSTER")?;
+    reject(settings.is_some(), "UPDATE ... SETTINGS")?;
     reject(!optimizer_hints.is_empty(), "Optimizer hints")?;
     reject(!table.joins.is_empty(), "UPDATE with a JOIN")?;
     check_dml_target(&table.relation, "UPDATE")
@@ -204,6 +234,8 @@ pub(crate) fn check_delete(delete: &Delete) -> SqawkResult<()> {
         output,
         order_by,
         limit,
+        on_cluster,
+        settings,
     } = delete;
     reject(
         !tables.is_empty(),
@@ -214,6 +246,8 @@ pub(crate) fn check_delete(delete: &Delete) -> SqawkResult<()> {
     reject(output.is_some(), "DELETE ... OUTPUT")?;
     reject(!order_by.is_empty(), "DELETE ... ORDER BY")?;
     reject(limit.is_some(), "DELETE ... LIMIT")?;
+    reject(on_cluster.is_some(), "ON CLUSTER")?;
+    reject(settings.is_some(), "DELETE ... SETTINGS")?;
     reject(!optimizer_hints.is_empty(), "Optimizer hints")?;
     let from = match from {
         FromTable::WithFromKeyword(t) | FromTable::WithoutKeyword(t) => t,
@@ -350,7 +384,8 @@ fn check_table_factor(factor: &TableFactor) -> SqawkResult<()> {
             partitions,
             json_path,
             sample,
-            index_hints,
+            index_directives,
+            inheritance,
         } => {
             reject(args.is_some(), "Table-valued functions")?;
             reject(!with_hints.is_empty(), "Table hints (WITH (...))")?;
@@ -359,7 +394,11 @@ fn check_table_factor(factor: &TableFactor) -> SqawkResult<()> {
             reject(!partitions.is_empty(), "PARTITION selection")?;
             reject(json_path.is_some(), "JSON paths in FROM")?;
             reject(sample.is_some(), "TABLESAMPLE")?;
-            reject(!index_hints.is_empty(), "Index hints")?;
+            reject(
+                !index_directives.is_empty(),
+                "Index hints (INDEXED BY / NOT INDEXED / USE INDEX)",
+            )?;
+            reject(inheritance.is_some(), "ONLY / table inheritance")?;
             check_alias(alias.as_ref())
         }
         TableFactor::Derived { lateral, alias, .. } => {
@@ -385,17 +424,21 @@ fn check_alias(alias: Option<&TableAlias>) -> SqawkResult<()> {
     Ok(())
 }
 
-/// An ORDER BY term (of a query or a window). `NULLS FIRST / LAST` is
-/// honoured; `WITH FILL` is not.
+/// An ORDER BY term (of a query or a window). `ASC` / `DESC` and `NULLS
+/// FIRST / LAST` are honoured; `USING <operator>` and `WITH FILL` are not.
 pub(crate) fn check_order_by_expr(ob: &OrderByExpr) -> SqawkResult<()> {
     let OrderByExpr {
         expr: _,
         options: OrderByOptions {
-            asc: _,
+            sort,
             nulls_first: _,
         },
         with_fill,
     } = ob;
+    reject(
+        matches!(sort, Some(OrderBySort::Using(_))),
+        "ORDER BY ... USING",
+    )?;
     reject(with_fill.is_some(), "ORDER BY ... WITH FILL")
 }
 
@@ -410,6 +453,7 @@ pub(crate) fn check_create_table(create: &CreateTable) -> SqawkResult<()> {
     let CreateTable {
         or_replace,
         temporary,
+        unlogged,
         external,
         dynamic,
         global,
@@ -427,7 +471,7 @@ pub(crate) fn check_create_table(create: &CreateTable) -> SqawkResult<()> {
         file_format,
         location,
         query,
-        without_rowid,
+        sqlite_table_options,
         like,
         clone,
         version,
@@ -442,7 +486,6 @@ pub(crate) fn check_create_table(create: &CreateTable) -> SqawkResult<()> {
         inherits,
         partition_of,
         for_values,
-        strict,
         copy_grants,
         enable_schema_evolution,
         change_tracking,
@@ -467,6 +510,10 @@ pub(crate) fn check_create_table(create: &CreateTable) -> SqawkResult<()> {
         distkey,
         sortkey,
         backup,
+        with_connection,
+        multiset,
+        fallback,
+        with_data,
     } = create;
     reject(*or_replace, "CREATE OR REPLACE TABLE")?;
     reject(*if_not_exists, "CREATE TABLE IF NOT EXISTS")?;
@@ -478,8 +525,9 @@ pub(crate) fn check_create_table(create: &CreateTable) -> SqawkResult<()> {
             || *volatile
             || *iceberg
             || *snapshot
-            || *require_user,
-        "CREATE TABLE modifiers (GLOBAL, TRANSIENT, VOLATILE, ...)",
+            || *require_user
+            || *unlogged,
+        "CREATE TABLE modifiers (GLOBAL, TRANSIENT, UNLOGGED, ...)",
     )?;
     reject(!constraints.is_empty(), "Table constraints")?;
     reject(
@@ -492,8 +540,12 @@ pub(crate) fn check_create_table(create: &CreateTable) -> SqawkResult<()> {
     reject(comment.is_some(), "Table comments")?;
     reject(on_commit.is_some(), "ON COMMIT")?;
     reject(on_cluster.is_some(), "ON CLUSTER")?;
-    reject(*without_rowid, "WITHOUT ROWID")?;
-    reject(*strict, "STRICT tables")?;
+    for option in &sqlite_table_options.options {
+        match option {
+            SqliteTableOption::WithoutRowid => unsupported("WITHOUT ROWID")?,
+            SqliteTableOption::Strict => unsupported("STRICT tables")?,
+        }
+    }
     reject(primary_key.is_some(), "PRIMARY KEY")?;
     reject(order_by.is_some(), "CREATE TABLE ... ORDER BY")?;
     reject(partition_by.is_some(), "CREATE TABLE ... PARTITION BY")?;
@@ -525,12 +577,17 @@ pub(crate) fn check_create_table(create: &CreateTable) -> SqawkResult<()> {
             || target_lag.is_some()
             || warehouse.is_some()
             || refresh_mode.is_some()
-            || initialize.is_some(),
+            || initialize.is_some()
+            || with_connection.is_some(),
         "Warehouse table properties",
     )?;
     reject(
         diststyle.is_some() || distkey.is_some() || sortkey.is_some() || backup.is_some(),
         "DISTSTYLE / DISTKEY / SORTKEY / BACKUP",
+    )?;
+    reject(
+        multiset.is_some() || fallback.is_some() || with_data.is_some(),
+        "MULTISET / FALLBACK / WITH DATA",
     )?;
     reject(
         !matches!(hive_distribution, HiveDistributionStyle::NONE),
@@ -569,7 +626,7 @@ pub(crate) fn check_create_table(create: &CreateTable) -> SqawkResult<()> {
         CreateTableOptions::Options(_)
         | CreateTableOptions::Plain(_)
         | CreateTableOptions::TableProperties(_) => {
-            return unsupported("Table options other than WITH (DELIMITER / HEADER / COMMENTS)")
+            return unsupported("Table options other than WITH (DELIMITER / HEADER / COMMENTS)");
         }
     };
     for option in options {

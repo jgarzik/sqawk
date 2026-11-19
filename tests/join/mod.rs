@@ -16,7 +16,7 @@ fn test_cross_join() -> Result<(), Box<dyn std::error::Error>> {
         .arg("SELECT * FROM users, orders")
         .arg(get_users_file().to_str().unwrap())
         .arg(get_orders_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Check output - should have combined columns for a complete cross join
     cmd.assert()
@@ -39,7 +39,7 @@ fn test_cross_join() -> Result<(), Box<dyn std::error::Error>> {
         .arg("SELECT * FROM users, orders LIMIT 5")
         .arg(get_users_file().to_str().unwrap())
         .arg(get_orders_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // With LIMIT 5, we should see all rows containing John but none with Jane
     cmd2.assert()
@@ -70,7 +70,7 @@ fn test_inner_join() -> Result<(), Box<dyn std::error::Error>> {
         .arg("SELECT * FROM users, orders WHERE users.id = orders.user_id")
         .arg(get_users_file().to_str().unwrap())
         .arg(get_orders_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Check output - should include john and jane, but only their own orders
     cmd.assert()

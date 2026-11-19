@@ -13,17 +13,15 @@ use std::process::{Command, Output};
 
 /// The sqawk binary from the shared workspace target directory.
 ///
-/// sqawk is a different package, so `cargo_bin!` cannot name it. A test
-/// executable lives in `target/<profile>/deps/`, and the workspace's binaries
-/// in `target/<profile>/`. `cargo test --workspace` builds both packages
-/// before running any test.
+/// sqawk is a different package, so `cargo_bin!` cannot name it. The
+/// workspace's binaries share one directory, so sqawk is next to tsq (the
+/// same rule tsq's own `--sqawk` default uses). The test executable's own
+/// path says nothing: Cargo's build-dir layout puts it under
+/// `target/<profile>/build/tsq/<hash>/`. `cargo test --workspace` builds both
+/// packages before running any test.
 fn sqawk_path() -> PathBuf {
-    let exe = std::env::current_exe().expect("current test executable");
-    let profile_dir = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("test executable is in target/<profile>/deps");
-    let bin = profile_dir.join(format!("sqawk{}", std::env::consts::EXE_SUFFIX));
+    let bin = Path::new(env!("CARGO_BIN_EXE_tsq"))
+        .with_file_name(format!("sqawk{}", std::env::consts::EXE_SUFFIX));
     assert!(
         bin.exists(),
         "{} not found: run `cargo test --workspace`, or build sqawk first",
@@ -110,7 +108,7 @@ fn query(args: &[&str], sql: &str, files: &[PathBuf]) -> String {
 
 const TABLES: [&str; 5] = ["customers", "products", "orders", "order_items", "reviews"];
 
-/// Row counts for `rows` customers (see tsq/src/gen.rs).
+/// Row counts for `rows` customers (see tsq/src/datagen.rs).
 fn counts(rows: usize) -> [usize; 5] {
     [
         rows,
@@ -292,15 +290,15 @@ fn corpus_counts_match_the_python_harness() {
     };
     assert_eq!(
         run(&["queries.sql", "queries2.sql"]),
-        "CORPUS SUMMARY {pass: 544, diff: 3, sqawk_err: 9, sqlite_err: 1, both_err: 7, crash: 0} \
-         documented {column_types: 2, insert_or_replace: 1, parser: 3, sqawk_extensions: 1, \
+        "CORPUS SUMMARY {pass: 546, diff: 3, sqawk_err: 7, sqlite_err: 2, both_err: 6, crash: 0} \
+         documented {column_types: 2, insert_or_replace: 1, parser: 1, sqawk_extensions: 2, \
          unsupported_syntax: 5, upper_lower: 1} oracle_timeouts 0 findings 0"
     );
     assert_eq!(
         run(&["hand1.sql", "hand2.sql", "hand3.sql"]),
-        "CORPUS SUMMARY {pass: 359, diff: 13, sqawk_err: 15, sqlite_err: 0, both_err: 36, crash: 0} \
-         documented {bare_column: 7, column_types: 9, derived_correlated: 1, parser: 5, \
-         sum_avg_text: 2, unsupported_syntax: 2, update_snapshot: 1, upper_lower: 1} \
+        "CORPUS SUMMARY {pass: 363, diff: 13, sqawk_err: 11, sqlite_err: 1, both_err: 35, crash: 0} \
+         documented {bare_column: 7, column_types: 9, derived_correlated: 1, parser: 2, \
+         sqawk_extensions: 1, sum_avg_text: 2, unsupported_syntax: 1, update_snapshot: 1, upper_lower: 1} \
          oracle_timeouts 0 findings 0"
     );
 }

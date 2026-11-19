@@ -1,45 +1,42 @@
 [package]
 name = "sqawk"
 version = "0.9.0"
-edition = "2021"
-authors = ["Jeff Garzik <jgarzik@pobox.com>"]
 description = "An SQL-based command-line tool for processing delimiter-separated files (CSV, TSV, etc.), inspired by awk"
-license = "MIT"
-repository = "https://github.com/jgarzik/sqawk"
-homepage = "https://github.com/jgarzik/sqawk"
 readme = "README.md"
 keywords = ["csv", "tsv", "sql", "delimited", "awk"]
 categories = ["command-line-utilities", "text-processing"]
-# Minimum supported Rust version.
-#
-# Verified by building with that toolchain, not inferred. The binding
-# constraints are transitive: `home` (via rustyline) and `psm` (via
-# sqlparser -> recursive -> stacker) both require 1.88.
-rust-version = "1.88"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 # `doc/` is deliberately NOT excluded: README.md links into it, and shipping it
 # keeps those links resolvable in a vendored or offline copy of the crate.
+# `.cargo/` only configures tsq's SQLite oracle.
 exclude = [
     "tests/",
     ".github/",
+    ".cargo/",
     "CLAUDE.md",
-    "generated-icon.png",
-    ".replit",
-    ".sqawk_history",
 ]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-sqlparser = "0.62"
+sqlparser = "0.64"
 csv = "1"
 tempfile = "3"
 
-rustyline = "15"
+rustyline = "19"
 # Runs sqawk on a large stack (see MAIN_STACK_BYTES in main.rs); already in
 # the build through sqlparser -> recursive.
 stacker = "0.1"
 # The local time zone for the `localtime` and `utc` date modifiers ($TZ,
 # else the system zone).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+compact_str = "0.10.0"
+regex = "1.13.2"
+flate2 = "1.1.11"
+ruzstd = "0.9.1"
 
 [dev-dependencies]
 assert_cmd = "2"
@@ -55,10 +52,6 @@ inherits = "release"
 debug = true
 strip = false
 
-[[bin]]
-name = "sqawk"
-path = "src/main.rs"
-
 # `tsq`, the test-data generator, is a separate workspace member with
 # `publish = false`: it builds and runs locally (`cargo run -p tsq`) but is
 # not part of the published sqawk crate. `cargo package` skips nested crates.
@@ -67,3 +60,14 @@ path = "src/main.rs"
 [workspace]
 members = ["tsq"]
 default-members = ["."]
+
+[workspace.package]
+edition = "2024"
+# Minimum supported Rust version.
+#
+# Verified by building with that toolchain, not inferred. The binding
+# constraint is rustyline 19, which uses `cfg_select!` (stable in 1.95).
+rust-version = "1.95"
+authors = ["Jeff Garzik <jgarzik@pobox.com>"]
+license = "MIT"
+repository = "https://github.com/jgarzik/sqawk"

@@ -23,7 +23,8 @@ use crate::error::{SqawkError, SqawkResult};
 /// It supports the common SQL data types and allows for type conversions
 /// between numeric types (Integer <-> Float) for comparison operations.
 ///
-/// String values are `Cow<'static, str>`; every stored string is owned.
+/// String values are `CompactString`s: text of up to 24 bytes is stored
+/// inline in the value itself, longer text on the heap.
 #[derive(Debug, Clone)]
 pub enum Value {
     /// Represents a NULL or missing value
@@ -32,11 +33,15 @@ pub enum Value {
     Integer(i64),
     /// 64-bit floating point number
     Float(f64),
-    /// UTF-8 string (owned or borrowed via Cow)
-    String(Cow<'static, str>),
+    /// UTF-8 string; up to 24 bytes are stored inline, without a heap
+    /// allocation (most cells of a typical file)
+    String(compact_str::CompactString),
     /// Boolean value (true/false)
     Boolean(bool),
 }
+
+// Every loaded cell is a Value: it must stay three words.
+const _: () = assert!(std::mem::size_of::<Value>() == 24);
 
 /// Implementation of equality comparison for Value
 ///
@@ -286,13 +291,13 @@ fn infer_value(s: &str) -> Option<Value> {
 /// Field text to Value, with canonical type inference (see `infer_value`).
 impl From<&str> for Value {
     fn from(s: &str) -> Self {
-        infer_value(s).unwrap_or_else(|| Value::String(Cow::Owned(s.to_string())))
+        infer_value(s).unwrap_or_else(|| Value::String(s.into()))
     }
 }
 
 impl From<String> for Value {
     fn from(s: String) -> Self {
-        infer_value(&s).unwrap_or(Value::String(Cow::Owned(s)))
+        infer_value(&s).unwrap_or(Value::String(s.into()))
     }
 }
 
@@ -412,6 +417,11 @@ pub struct Table {
     /// reproduces untouched rows byte-for-byte (see [`RawRows`]).
     raw: Option<Box<RawRows>>,
 
+    /// Loaded without its source bytes because the run cannot write it back
+    /// (see `ReadOptions::keep_source`); writing it is a bug, refused by
+    /// `write_source_layout`.
+    source_dropped: bool,
+
     /// Lower-cased column name -> index, built on the first
     /// [`Table::column_index`] of a wide table so that resolving every
     /// column of a wide table costs linear, not quadratic, time. Reset
@@ -485,6 +495,8 @@ pub struct FileLayout {
     /// row whose first field starts with `#` must be quoted on writeback, or
     /// it would be skipped as a comment when read again.
     pub comments: bool,
+    /// The file is gzip or zstd compressed, and is written back so.
+    pub compression: crate::compress::Compression,
 }
 
 /// The lines of a source file between its records -- blank lines, and the
@@ -528,6 +540,7 @@ impl Default for FileLayout {
             bom: false,
             crlf: false,
             comments: false,
+            compression: crate::compress::Compression::None,
         }
     }
 }
@@ -650,6 +663,7 @@ impl Table {
             comments: CommentLines::default(),
             placeholder: false,
             raw: None,
+            source_dropped: false,
             name_index: OnceLock::new(),
         }
     }
@@ -694,6 +708,7 @@ impl Table {
             comments: CommentLines::default(),
             placeholder: false,
             raw: None,
+            source_dropped: false,
             name_index: OnceLock::new(),
         }
     }
@@ -832,6 +847,18 @@ impl Table {
         self.file_path.as_ref()
     }
 
+    /// Change (or clear) the writeback target.
+    pub fn set_file_path(&mut self, path: Option<PathBuf>) {
+        self.file_path = path;
+    }
+
+    /// Move every row out of the table (its source bytes go with them).
+    pub fn take_rows(&mut self) -> Vec<Row> {
+        self.raw = None;
+        self.comments = CommentLines::default();
+        std::mem::take(&mut self.rows)
+    }
+
     /// Get the delimiter for this table
     ///
     /// Returns the delimiter used for this table.
@@ -841,14 +868,6 @@ impl Table {
     /// * A string reference to the delimiter (always defined, defaults to comma)
     pub fn delimiter(&self) -> &String {
         &self.delimiter
-    }
-
-    /// Set the delimiter for this table
-    ///
-    /// # Arguments
-    /// * `delimiter` - The new delimiter string to use
-    pub fn set_delimiter(&mut self, delimiter: String) {
-        self.delimiter = delimiter;
     }
 
     /// Layout of the source file (header, line endings, comments)
@@ -915,39 +934,14 @@ impl Table {
         self.raw = None;
     }
 
-    /// Print the table to stdout as a delimited file
-    ///
-    /// Header line (when `header`), then one record per row, using this
-    /// table's delimiter with RFC 4180 quoting where a field needs it. NULL
-    /// prints as an empty field. Returns the raw io::Error so the caller can
-    /// recognise a closed pipe (`sqawk ... | head`) and stop quietly.
-    pub fn print_to_stdout(&self, header: bool) -> std::io::Result<()> {
-        let stdout = std::io::stdout();
-        let mut out = std::io::BufWriter::new(stdout.lock());
-        self.write_delimited(&mut out, header, false, false, None)?;
-        std::io::Write::flush(&mut out)
-    }
-
-    /// Write the table as a delimited file to `out`.
+    /// Write the table as a delimited file to `out`, writing each record
+    /// that has source bytes in `raw` as those bytes.
     ///
     /// * `header` - emit the column names first
     /// * `crlf` - end records with CRLF instead of LF
     /// * `comments` - the file will be read with `#` comment skipping, so a
     ///   leading `#` in a record's first field must be quoted
     /// * `lines` - comment lines to put back around the records
-    pub fn write_delimited<W: std::io::Write>(
-        &self,
-        out: &mut W,
-        header: bool,
-        crlf: bool,
-        comments: bool,
-        lines: Option<&CommentLines>,
-    ) -> std::io::Result<()> {
-        self.write_records(out, header, crlf, comments, lines, None)
-    }
-
-    /// `write_delimited`, writing each record that has source bytes in
-    /// `raw` as those bytes.
     fn write_records<W: std::io::Write>(
         &self,
         out: &mut W,
@@ -1023,6 +1017,11 @@ impl Table {
     /// order mark, header, line endings) and comment lines, with every row
     /// that still has its source bytes written as those bytes.
     pub fn write_source_layout<W: std::io::Write>(&self, out: &mut W) -> std::io::Result<()> {
+        if self.source_dropped {
+            return Err(std::io::Error::other(
+                "internal error: the table was loaded without its source bytes",
+            ));
+        }
         let layout = self.file_layout();
         if layout.bom {
             out.write_all(b"\xef\xbb\xbf")?;
@@ -1035,6 +1034,12 @@ impl Table {
             Some(&self.comments),
             self.raw.as_deref(),
         )
+    }
+
+    /// Note that the table was loaded without its source bytes, so it must
+    /// never be written back.
+    pub fn mark_source_dropped(&mut self) {
+        self.source_dropped = true;
     }
 
     /// Record the source bytes of the header and rows (see [`RawRows`]).

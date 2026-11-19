@@ -61,12 +61,12 @@ pub fn locate_sqawk(explicit: Option<&Path>) -> PathBuf {
         return PathBuf::from(p);
     }
     let name = format!("sqawk{}", std::env::consts::EXE_SUFFIX);
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let cand = dir.join(&name);
-            if cand.exists() {
-                return cand;
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let cand = dir.join(&name);
+        if cand.exists() {
+            return cand;
         }
     }
     PathBuf::from(name)
@@ -181,7 +181,7 @@ pub fn execute(job: &Job) -> Finished {
                 stderr: Vec::new(),
                 elapsed: start.elapsed(),
                 peak_rss_kb: None,
-            }
+            };
         }
     };
     let writer = child.stdin.take().map(|mut pipe| {
@@ -227,10 +227,10 @@ pub fn execute(job: &Job) -> Finished {
     let mut peak: Option<u64> = None;
     let mut timed_out = false;
     let status = loop {
-        if job.watch_rss {
-            if let Some(kb) = peak_rss(pid) {
-                peak = Some(peak.map_or(kb, |p| p.max(kb)));
-            }
+        if job.watch_rss
+            && let Some(kb) = peak_rss(pid)
+        {
+            peak = Some(peak.map_or(kb, |p| p.max(kb)));
         }
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),

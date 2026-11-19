@@ -11,12 +11,13 @@
 ///
 /// Reported by the REPL's `.version`, since which SQL dialect version is in
 /// use is the single most useful thing to know when a statement is rejected.
-pub const SQLPARSER_VERSION: &str = "0.62";
+pub const SQLPARSER_VERSION: &str = "0.64";
 
 mod agg;
 pub(crate) mod arith;
 pub mod ast_compat;
 pub mod bytecode;
+mod collate;
 pub mod compiler;
 mod compiler_aggregate;
 mod compiler_check;
@@ -30,10 +31,12 @@ mod datetime;
 pub mod dialect;
 pub mod engine;
 mod func;
+pub(crate) mod glob;
 pub(crate) mod like;
 pub mod parse;
 mod prepass;
 mod printf;
+mod regexp;
 mod window;
 
 #[cfg(test)]
@@ -46,21 +49,16 @@ use std::sync::Arc;
 
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::Table;
+use crate::output::ResultSink;
 
 /// The names of the built-in scalar functions (upper case).
 pub(crate) fn scalar_function_names() -> impl Iterator<Item = &'static str> {
     func::names()
 }
 
-/// Result of VM execution including both the result table and modified table names
+/// Counts reported by a script's execution (its result sets went to the
+/// sink).
 pub struct VmExecutionResult {
-    /// One result table per statement that produced rows, in order.
-    ///
-    /// A multi-statement script produces one result set per statement; folding
-    /// them into a single table would print every statement's rows under one
-    /// header.
-    pub tables: Vec<Table>,
     /// Number of rows affected by the last DML statement (INSERT, UPDATE, DELETE)
     pub affected_rows: usize,
     /// Whether any statement in this script was a row-counting DML.
@@ -78,11 +76,16 @@ pub struct VmExecutionResult {
 /// 1. SQL parsing and bytecode generation
 /// 2. VM execution of bytecode instructions
 ///
-/// Returns both the result table and a set of modified table names.
+/// Each statement's result rows go to `sink` as the statement produces
+/// them, so a later statement's failure cannot swallow the output of
+/// earlier ones. A multi-statement script produces one result set per
+/// statement (each with its own header); an error from the sink stops the
+/// script.
 pub fn execute_vm(
     sql: &str,
     database: &mut Database,
     verbose: bool,
+    sink: &mut dyn ResultSink,
 ) -> SqawkResult<VmExecutionResult> {
     if verbose {
         diag!("VM Engine: Executing SQL via bytecode: {}", sql);
@@ -136,6 +139,7 @@ pub fn execute_vm(
         &source,
         false,
         &Arc::default(),
+        sink,
     )
 }
 
@@ -145,7 +149,8 @@ pub fn execute_vm(
 /// result columns. `in_derived`: the statement is a derived table's or CTE's
 /// query, whose column references are named as written (see `SqlCompiler`).
 /// `cte_names`: for such a query, the CTE names of the enclosing statement
-/// (see `prepass::Prepared::cte_names`); empty at top level.
+/// (see `prepass::Prepared::cte_names`); empty at top level. `sink` receives
+/// each statement's result rows as the statement produces them.
 fn execute_statements(
     statements: Vec<sqlparser::ast::Statement>,
     database: &mut Database,
@@ -153,99 +158,137 @@ fn execute_statements(
     source: &Arc<parse::SqlSource>,
     in_derived: bool,
     cte_names: &Arc<HashSet<String>>,
+    sink: &mut dyn ResultSink,
 ) -> SqawkResult<VmExecutionResult> {
-    let mut tables: Vec<Table> = Vec::new();
     let mut affected_rows: usize = 0;
     let mut dml_executed = false;
 
-    for mut statement in statements {
-        // BEGIN / COMMIT / ROLLBACK act on the database directly; they have
-        // no bytecode.
-        if let Some(control) = compiler_check::transaction_control(&statement)? {
-            match control {
-                compiler_check::TransactionControl::Begin => database.begin()?,
-                compiler_check::TransactionControl::Commit => database.commit()?,
-                compiler_check::TransactionControl::Rollback => database.rollback()?,
-            }
-            continue;
-        }
-
-        // PHASE 0: MATERIALIZE DERIVED TABLES AND CTEs.
-        //
-        // `FROM (SELECT ...) t` and a CTE reference have no representation in
-        // the compiler, which only knows how to open a cursor on a named
-        // table. Each is computed first and registered under an internal
-        // name, and the statement is rewritten to reference that name (see
-        // `prepass.rs`). The compiler then sees ordinary tables.
-        let prepared = prepass::run(&mut statement, database, verbose, source, cte_names)?;
-
-        // Phases 1-3 run inside a closure so a failure anywhere still drops
-        // the tables registered above. Leaving them behind made the alias
-        // unusable for the rest of the session: a failed
-        // `SELECT bad FROM (SELECT ...) x` left `x` registered, so the next
-        // statement using the same alias failed with "shadows an existing
-        // table", and `.tables` listed a phantom table.
-        let outcome = (|| -> SqawkResult<(Option<Table>, AppliedModifications)> {
-            // PHASE 1: SQL -> BYTECODE, against the CURRENT database state.
-            let program = {
-                let mut compiler = compiler::SqlCompiler::new(database, verbose)
-                    .with_source(Some(Arc::clone(source)), in_derived)
-                    .with_cte_names(Arc::clone(&prepared.cte_names));
-                compiler.compile_statement_program(&statement)?
-            };
-
-            if verbose {
-                diag!("Generated bytecode:");
-                diag!("{}", program);
+    let count = statements.len();
+    for (idx, mut statement) in statements.into_iter().enumerate() {
+        let ran = (|| -> SqawkResult<()> {
+            // BEGIN / COMMIT / ROLLBACK act on the database directly; they have
+            // no bytecode.
+            if let Some(control) = compiler_check::transaction_control(&statement)? {
+                match control {
+                    compiler_check::TransactionControl::Begin => database.begin()?,
+                    compiler_check::TransactionControl::Commit => database.commit()?,
+                    compiler_check::TransactionControl::Rollback => database.rollback()?,
+                }
+                return Ok(());
             }
 
-            // PHASE 2: EXECUTE
-            let mut vm = engine::VmEngine::new_mut(database, verbose);
-            vm.init(program);
-            vm.execute()?;
+            // PHASE 0: MATERIALIZE DERIVED TABLES AND CTEs.
+            //
+            // `FROM (SELECT ...) t` and a CTE reference have no representation in
+            // the compiler, which only knows how to open a cursor on a named
+            // table. Each is computed first and registered under an internal
+            // name, and the statement is rewritten to reference that name (see
+            // `prepass.rs`). The compiler then sees ordinary tables.
+            let prepared = prepass::run(&mut statement, database, verbose, source, cte_names)?;
 
-            let result_table = vm.create_result_table()?;
-            let modifications = vm.take_modifications();
-            drop(vm);
+            // Phases 1-3 run inside a closure so a failure anywhere still drops
+            // the tables registered above. Leaving them behind made the alias
+            // unusable for the rest of the session: a failed
+            // `SELECT bad FROM (SELECT ...) x` left `x` registered, so the next
+            // statement using the same alias failed with "shadows an existing
+            // table", and `.tables` listed a phantom table.
+            let outcome = (|| -> SqawkResult<AppliedModifications> {
+                // PHASE 1: SQL -> BYTECODE, against the CURRENT database state.
+                let program = {
+                    let mut compiler = compiler::SqlCompiler::new(database, verbose)
+                        .with_source(Some(Arc::clone(source)), in_derived)
+                        .with_cte_names(Arc::clone(&prepared.cte_names));
+                    compiler.compile_statement_program(&statement)?
+                };
 
-            // PHASE 3: APPLY MODIFICATIONS before the next statement compiles.
-            let applied = apply_modifications(database, modifications, verbose)?;
-            Ok((result_table, applied))
+                if verbose {
+                    diag!("Generated bytecode:");
+                    diag!("{}", program);
+                }
+
+                // PHASE 2: EXECUTE
+                let mut vm = engine::VmEngine::new_mut(database, verbose);
+                vm.init(program);
+                stream_rows(&mut vm, sink)?;
+                let modifications = vm.take_modifications();
+                drop(vm);
+
+                // PHASE 3: APPLY MODIFICATIONS before the next statement compiles.
+                apply_modifications(database, modifications, verbose)
+            })();
+
+            // Derived tables and CTEs live only for the statement that declared
+            // them, and must be dropped whether or not it succeeded.
+            for name in &prepared.registered {
+                database.remove_table(name);
+            }
+
+            let applied = outcome?;
+
+            // A DML statement reports its own count, INCLUDING zero.
+            //
+            // Guarding on `applied.affected_rows > 0` conflated two different
+            // things: a statement that was not DML at all (a SELECT contributes no
+            // modifications), and a DML statement that matched no rows. The latter
+            // then inherited the previous statement's count, so
+            // `UPDATE ... WHERE <matches 3>; UPDATE ... WHERE <matches nothing>`
+            // reported 3 rows affected instead of 0.
+            //
+            // Which statements count is the same set SQL's `changes()` uses.
+            if is_row_counting_dml(&statement) {
+                affected_rows = applied.affected_rows;
+                dml_executed = true;
+            }
+            Ok(())
         })();
-
-        // Derived tables and CTEs live only for the statement that declared
-        // them, and must be dropped whether or not it succeeded.
-        for name in &prepared.registered {
-            database.remove_table(name);
-        }
-
-        let (result_table, applied) = outcome?;
-
-        // A DML statement reports its own count, INCLUDING zero.
-        //
-        // Guarding on `applied.affected_rows > 0` conflated two different
-        // things: a statement that was not DML at all (a SELECT contributes no
-        // modifications), and a DML statement that matched no rows. The latter
-        // then inherited the previous statement's count, so
-        // `UPDATE ... WHERE <matches 3>; UPDATE ... WHERE <matches nothing>`
-        // reported 3 rows affected instead of 0.
-        //
-        // Which statements count is the same set SQL's `changes()` uses.
-        if is_row_counting_dml(&statement) {
-            affected_rows = applied.affected_rows;
-            dml_executed = true;
-        }
-
-        if let Some(t) = result_table {
-            tables.push(t);
+        // In a script of several statements, say which one failed.
+        if let Err(e) = ran {
+            return Err(if !in_derived && count > 1 {
+                SqawkError::InStatement(idx + 1, Box::new(e))
+            } else {
+                e
+            });
         }
     }
 
     Ok(VmExecutionResult {
-        tables,
         affected_rows,
         dml_executed,
     })
+}
+
+/// Run a statement's program, handing its result rows to `sink` as they
+/// are produced. A result with columns but no rows still begins and ends
+/// (its header prints); a program without result columns sends nothing.
+/// On an error after the first row, the sink is aborted (keeping what it
+/// already printed) and the error returned.
+fn stream_rows(vm: &mut engine::VmEngine<'_>, sink: &mut dyn ResultSink) -> SqawkResult<()> {
+    let mut begun = false;
+    let outcome = (|| -> SqawkResult<()> {
+        while vm.step()? == engine::Step::Row {
+            if !begun {
+                let width = vm.row().len();
+                sink.begin(&engine::result_column_defs(vm.result_schema(), width))?;
+                begun = true;
+            }
+            sink.row(vm.row())?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = outcome {
+        if begun {
+            sink.abort();
+        }
+        return Err(e);
+    }
+    if !begun {
+        let schema = vm.result_schema();
+        if schema.is_empty() {
+            return Ok(());
+        }
+        sink.begin(&engine::result_column_defs(schema, schema.columns.len()))?;
+    }
+    sink.end()
 }
 
 /// Whether a statement's affected-row count is meaningful to report.
@@ -297,6 +340,9 @@ fn apply_modifications(
     let mut insert_counts_by_table: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
 
+    // (table, row) pairs already replaced by this statement.
+    let mut replaced: HashSet<(String, usize)> = HashSet::new();
+
     // Rows replaced in place by UPDATE, per table.
     let mut replace_counts_by_table: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
@@ -317,6 +363,12 @@ fn apply_modifications(
                 row_index,
                 row,
             } => {
+                // A row is replaced once per statement: UPDATE ... FROM
+                // replaces a target row for every FROM row it joins, and
+                // only the first counts and applies.
+                if !replaced.insert((table_name.clone(), row_index)) {
+                    continue;
+                }
                 let table = database.get_table_mut(&table_name)?;
                 table.replace_row(row_index, row)?;
                 // Tallied per table and reported once, not once per row.
@@ -467,4 +519,23 @@ fn apply_modifications(
     }
 
     Ok(AppliedModifications { affected_rows })
+}
+
+#[cfg(test)]
+mod version_tests {
+    /// `.version` reports the sqlparser actually built in: the major and
+    /// minor version in Cargo.lock.
+    #[test]
+    fn sqlparser_version_matches_cargo_lock() {
+        let lock = include_str!("../../Cargo.lock");
+        let at = lock
+            .find("name = \"sqlparser\"")
+            .expect("sqlparser in Cargo.lock");
+        let key = "version = \"";
+        let rest = &lock[at..];
+        let rest = &rest[rest.find(key).unwrap() + key.len()..];
+        let version = &rest[..rest.find('"').unwrap()];
+        let minor: Vec<&str> = version.split('.').take(2).collect();
+        assert_eq!(super::SQLPARSER_VERSION, minor.join("."));
+    }
 }

@@ -29,7 +29,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::data::{write_table, Format, Table};
+use crate::data::{Format, Table, write_table};
 use crate::rng::Rng;
 
 const FIRST_NAMES: &[&str] = &[

@@ -12,7 +12,7 @@
 use sqlparser::ast::{
     Assignment, AssignmentTarget, CreateTableOptions, DuplicateTreatment, Expr, FromTable,
     Function, FunctionArg, FunctionArguments, GroupByExpr, LimitClause, ObjectName, OrderBy,
-    OrderByExpr, OrderByKind, Query, SqlOption, TableObject, TableWithJoins,
+    OrderByExpr, OrderByKind, OrderBySort, Query, SqlOption, TableObject, TableWithJoins,
 };
 
 use crate::error::{SqawkError, SqawkResult};
@@ -89,10 +89,10 @@ pub(crate) fn is_order_by_all(query: &Query) -> bool {
 
 /// Sort direction for one ORDER BY key: `true` ascending, `false` descending.
 ///
-/// Ascending is the SQL default when the direction is omitted. `asc` moved
-/// from `OrderByExpr` into a nested `OrderByOptions`.
+/// Ascending is the SQL default when the direction is omitted.
+/// `compiler_check` rejects PostgreSQL's `USING <operator>`.
 pub(crate) fn order_by_is_asc(expr: &OrderByExpr) -> bool {
-    expr.options.asc.unwrap_or(true)
+    !matches!(expr.options.sort, Some(OrderBySort::Desc))
 }
 
 /// The LIMIT expression, if any.
@@ -188,7 +188,12 @@ pub(crate) fn sql_option_key_value(option: &SqlOption) -> Option<(String, String
                 Expr::Identifier(ident) => ident.value.clone(),
                 other => other.to_string(),
             };
-            Some((key.value.clone(), text))
+            // A dotted key (`a.b`) keeps its dots and so matches no option.
+            let key = match key.0.as_slice() {
+                [_] => object_name_last(key),
+                _ => key.to_string(),
+            };
+            Some((key, text))
         }
         _ => None,
     }

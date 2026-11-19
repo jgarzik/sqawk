@@ -17,7 +17,7 @@ use super::ast::{apply, cuts};
 use super::oracle::Oracle;
 use super::render::ResultSet;
 use super::sqlgen::Case;
-use super::{judge, Env, Verdict};
+use super::{Env, Verdict, judge};
 use crate::data::Table;
 
 pub struct Repro {
@@ -43,7 +43,7 @@ impl Checker<'_> {
             .prefix("tsq-shrink-")
             .tempdir()
             .ok()?;
-        crate::gen::write_csv_tables(tmp.path(), tables).ok()?;
+        crate::datagen::write_csv_tables(tmp.path(), tables).ok()?;
         let oracle = Oracle::new(tables).ok()?;
         let env = Env {
             sqawk: self.env.sqawk.clone(),
@@ -138,11 +138,12 @@ pub fn shrink(env: &Env, tables: &[Table], case: &Case, orig: &Verdict) -> Resul
         .filter(|t| mentions(&sql, &t.name))
         .cloned()
         .collect();
-    if !named.is_empty() && named.len() < data.len() {
-        if let Some(v) = ck.run(&case, &named) {
-            data = named;
-            last = v;
-        }
+    if !named.is_empty()
+        && named.len() < data.len()
+        && let Some(v) = ck.run(&case, &named)
+    {
+        data = named;
+        last = v;
     }
 
     // Rows, in halving chunks.
@@ -219,7 +220,7 @@ fn sets_text(sets: &[ResultSet]) -> String {
 pub fn write_repro(dir: &Path, r: &Repro, sqawk: &Path) -> Result<()> {
     fs::create_dir_all(dir)?;
     fs::write(dir.join("query.sql"), r.case.sql())?;
-    crate::gen::write_csv_tables(dir, &r.tables)?;
+    crate::datagen::write_csv_tables(dir, &r.tables)?;
     let v = &r.verdict;
     fs::write(
         dir.join("sqawk.out"),

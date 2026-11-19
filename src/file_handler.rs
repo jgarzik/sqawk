@@ -9,11 +9,12 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::compress;
 use crate::config::AppConfig;
 use crate::csv_handler::{self, ReadOptions};
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::{delimiter_byte, ColumnDefinition, FileLayout, Table};
+use crate::table::{ColumnDefinition, FileLayout, Table, delimiter_byte};
 
 /// File operand that names standard input rather than a path on disk.
 pub const STDIN_SPEC: &str = "-";
@@ -49,6 +50,10 @@ pub struct FileHandler {
     /// Whether `-` may still be read. The REPL clears this: it reads its own
     /// commands from stdin, so a `.load -` would swallow the command stream.
     stdin_available: bool,
+
+    /// Tables loaded from several files (see [`FileHandler::load_files`]),
+    /// which cannot be written back.
+    multi_tables: std::collections::HashSet<String>,
 }
 
 impl FileHandler {
@@ -65,6 +70,7 @@ impl FileHandler {
             stdin_consumed: false,
             stdin_table: None,
             stdin_available: true,
+            multi_tables: std::collections::HashSet::new(),
         }
     }
 
@@ -80,7 +86,7 @@ impl FileHandler {
     }
 
     /// Read all of standard input.
-    fn read_stdin(&mut self) -> SqawkResult<Vec<u8>> {
+    fn stdin(&mut self) -> SqawkResult<std::io::StdinLock<'static>> {
         if !self.stdin_available {
             return Err(SqawkError::InvalidFileSpec(
                 "cannot read standard input here: the REPL reads its own commands from stdin"
@@ -93,10 +99,7 @@ impl FileHandler {
             ));
         }
         self.stdin_consumed = true;
-        let mut data = Vec::new();
-        std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut data)
-            .map_err(|e| SqawkError::open("standard input", e))?;
-        Ok(data)
+        Ok(std::io::stdin().lock())
     }
 
     /// Load a file into an in-memory table and add it to `db`
@@ -122,7 +125,16 @@ impl FileHandler {
         file_spec: &str,
     ) -> SqawkResult<Option<(String, String)>> {
         let (table_name, file_path) = parse_table_spec(file_spec)?;
+        self.load_named(db, table_name, file_path)
+    }
 
+    /// [`Self::load_file`] with the table name and path already split.
+    fn load_named(
+        &mut self,
+        db: &mut Database,
+        table_name: String,
+        file_path: PathBuf,
+    ) -> SqawkResult<Option<(String, String)>> {
         // A "-" operand reads standard input. It is parsed as CSV (comma,
         // header row) unless -F says otherwise, which matches what sqawk
         // itself writes to stdout, so `sqawk ... | sqawk ... -` round-trips.
@@ -177,20 +189,46 @@ impl FileHandler {
             header: !self.config.no_header() && predefined_columns.is_none(),
             comments: self.config.comments(),
             columns: predefined_columns.clone(),
+            // Standard input can never be written back.
+            keep_source: db.keep_source() && !from_stdin,
         };
 
-        let data = match &canonical {
-            None => self.read_stdin()?,
-            Some(real) => std::fs::read(real).map_err(|e| SqawkError::open(&file_path, e))?,
+        // gzip / zstd input is decoded as it is read (see compress.rs).
+        let table = match canonical {
+            None => {
+                let name = Path::new("standard input");
+                let (input, compression) =
+                    compress::decoder(self.stdin()?).map_err(|e| SqawkError::open(name, e))?;
+                let mut t = csv_handler::read_table_from(
+                    &table_name,
+                    input,
+                    name,
+                    None,
+                    delimiter_str,
+                    &opts,
+                    &file_path_str,
+                )?;
+                set_compression(&mut t, compression);
+                t
+            }
+            Some(real) => {
+                let file =
+                    std::fs::File::open(&real).map_err(|e| SqawkError::open(&file_path, e))?;
+                let (input, compression) =
+                    compress::decoder(file).map_err(|e| SqawkError::open(&file_path, e))?;
+                let mut t = csv_handler::read_table_from(
+                    &table_name,
+                    input,
+                    &file_path,
+                    Some(real),
+                    delimiter_str,
+                    &opts,
+                    &file_path_str,
+                )?;
+                set_compression(&mut t, compression);
+                t
+            }
         };
-        let table = csv_handler::read_table(
-            &table_name,
-            data,
-            canonical,
-            delimiter_str,
-            &opts,
-            &file_path_str,
-        )?;
 
         // A source with no header row yields a table with no columns, which
         // the compiler cannot project from. Empty input is routine for a
@@ -200,6 +238,37 @@ impl FileHandler {
                 "'{}' has no header row: expected a first line of column names",
                 file_path_str
             )));
+        }
+
+        // One column, though the header holds another common separator:
+        // probably the wrong delimiter.
+        if self.config.field_separator().is_none()
+            && opts.header
+            && table.column_count() == 1
+            && let Some(sep) = likely_separator(&table.columns()[0])
+        {
+            let flag = if sep == '\t' {
+                "'\\t'".to_string()
+            } else {
+                format!("'{sep}'")
+            };
+            let shown = if sep == '\t' {
+                "a tab".to_string()
+            } else {
+                format!("'{sep}'")
+            };
+            diag!(
+                "sqawk: warning: {} loaded as one column, but its header contains {} \
+                 (for {}-separated input use -F {})",
+                crate::error::display_path(&file_path),
+                shown,
+                if sep == '\t' {
+                    "tab".to_string()
+                } else {
+                    format!("'{sep}'")
+                },
+                flag
+            );
         }
 
         if from_stdin {
@@ -221,8 +290,106 @@ impl FileHandler {
         Ok(Some((table_name, file_path_str)))
     }
 
+    /// Load the command-line file operands into `db`.
+    ///
+    /// Each operand is one table, except that a table name given with
+    /// `NAME=` on several operands, or a `NAME=pattern` whose path does not
+    /// exist and holds `*`, `?` or `[` (expanded here, sorted, so it works
+    /// the same on every OS), makes one table of all those files, their
+    /// rows in operand order. Such a table needs the same header in every
+    /// file and cannot be written back.
+    pub fn load_files(&mut self, db: &mut Database, specs: &[String]) -> SqawkResult<()> {
+        // (table name, its files, whether they make a multi-file table), in
+        // order of first appearance.
+        let mut groups: Vec<(String, Vec<PathBuf>, bool)> = Vec::new();
+        for spec in specs {
+            let (name, path) = parse_table_spec(spec)?;
+            let explicit = spec.split_once('=').is_some_and(|(n, _)| n == name);
+            let pattern = is_pattern(&path);
+            if pattern && !explicit {
+                return Err(SqawkError::InvalidFileSpec(format!(
+                    "'{}': a file pattern needs a table name: NAME={}",
+                    spec, spec
+                )));
+            }
+            let paths = if pattern {
+                expand_pattern(&path)?
+            } else {
+                vec![path]
+            };
+            match groups.iter_mut().find(|(n, _, _)| *n == name) {
+                Some(g) if explicit => {
+                    g.1.extend(paths);
+                    g.2 = true;
+                }
+                _ => groups.push((name, paths, pattern)),
+            }
+        }
+        for (name, mut paths, multi) in groups {
+            if multi {
+                self.load_multi(db, &name, &paths)?;
+            } else {
+                self.load_named(db, name, paths.remove(0))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Load `paths` as the one table `name` (see [`Self::load_files`]).
+    fn load_multi(&mut self, db: &mut Database, name: &str, paths: &[PathBuf]) -> SqawkResult<()> {
+        if db.get_table(name).is_ok() {
+            return Err(SqawkError::TableAlreadyExists(name.to_string()));
+        }
+        let mut merged: Option<(Table, String)> = None;
+        let mut rows = Vec::new();
+        for (i, path) in paths.iter().enumerate() {
+            // Each part loads as a table of its own under a name no SQL
+            // can spell, then gives up its rows.
+            let part = format!("{name}\u{0}{i}");
+            let shown = path.to_string_lossy().into_owned();
+            self.load_named(db, part.clone(), path.clone())?;
+            let mut t = db.take_table(&part).expect("just loaded");
+            match &merged {
+                None => {
+                    rows.extend(t.take_rows());
+                    merged = Some((t, shown));
+                }
+                Some((first, first_shown)) => {
+                    if t.columns() != first.columns() {
+                        return Err(SqawkError::InvalidFileSpec(format!(
+                            "'{}' has columns {} but '{}' has {}: the files of table '{}' \
+                             must have the same columns",
+                            shown,
+                            t.columns().join(","),
+                            first_shown,
+                            first.columns().join(","),
+                            name
+                        )));
+                    }
+                    rows.extend(t.take_rows());
+                }
+            }
+        }
+        let (mut table, _) = merged
+            .ok_or_else(|| SqawkError::InvalidFileSpec(format!("no files for table '{name}'")))?;
+        table.take_rows();
+        table.set_name(name.to_string());
+        table.set_file_path(None);
+        table.replace_rows(rows);
+        table.mark_unmodified();
+        db.add_table(name.to_string(), table)?;
+        self.multi_tables.insert(name.to_string());
+        Ok(())
+    }
+
     /// Explain why `table_name` has no writeback target.
     fn unwritable_table_error(&self, table_name: &str) -> SqawkError {
+        if self.multi_tables.contains(table_name) {
+            return SqawkError::InvalidFileSpec(format!(
+                "table '{}' was read from several files and cannot be written back",
+                table_name
+            ));
+        }
         if self.stdin_table.as_deref() == Some(table_name) {
             return SqawkError::InvalidFileSpec(format!(
                 "table '{}' was read from standard input and cannot be written back; \
@@ -253,7 +420,9 @@ impl FileHandler {
                 csv_handler::check_writable(path)?;
                 Ok(true)
             }
-            None if self.stdin_table.as_deref() == Some(table_name) => {
+            None if self.stdin_table.as_deref() == Some(table_name)
+                || self.multi_tables.contains(table_name) =>
+            {
                 Err(self.unwritable_table_error(table_name))
             }
             None => Ok(false),
@@ -270,14 +439,14 @@ impl FileHandler {
     pub fn save_table(&self, db: &Database, table_name: &str) -> SqawkResult<()> {
         let table = db.get_table(table_name)?;
 
-        if self.config.verbose() {
+        if self.config.trace() {
             diag!("In FileHandler::save_table for table '{}'", table_name);
         }
 
         // Check if the table has an associated file path
         let file_path = match table.file_path() {
             Some(path) => {
-                if self.config.verbose() {
+                if self.config.trace() {
                     diag!(
                         "Table '{}' has file_path '{}'",
                         table_name,
@@ -288,7 +457,7 @@ impl FileHandler {
             }
             None => {
                 // Log debugging information
-                if self.config.verbose() {
+                if self.config.trace() {
                     diag!("Table '{}' has NO file_path", table_name);
                     diag!(
                         "  Table details - Name: {}, Columns: {}, Delimiter: '{}'",
@@ -304,10 +473,11 @@ impl FileHandler {
 
         // For tables created with CREATE TABLE, the file may not exist yet
         // Make sure parent directories exist
-        if let Some(parent) = file_path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(|e| SqawkError::write(file_path, e))?;
-            }
+        if let Some(parent) = file_path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| SqawkError::write(file_path, e))?;
         }
 
         // The rename in save_table would replace even a read-only file.
@@ -381,7 +551,7 @@ pub fn load_location(
             return Err(SqawkError::open(
                 given,
                 std::io::Error::new(std::io::ErrorKind::IsADirectory, "Is a directory"),
-            ))
+            ));
         }
         Ok(_) => true,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
@@ -396,8 +566,10 @@ pub fn load_location(
 
     if !existing {
         let mut table = Table::new_with_schema(table_name, schema, Some(real), Some(delimiter));
+        // A new `.gz` / `.zst` file is created compressed.
         table.set_file_layout(FileLayout {
             has_header: options.header,
+            compression: compress::Compression::from_extension(given),
             ..FileLayout::default()
         });
         return Ok((table, false));
@@ -408,9 +580,13 @@ pub fn load_location(
         header: options.header,
         comments: options.comments,
         columns: Some(schema.iter().map(|c| c.name.clone()).collect()),
+        keep_source: db.keep_source(),
     };
-    let data = std::fs::read(&real).map_err(|e| SqawkError::open(given, e))?;
-    let mut table = csv_handler::read_table(table_name, data, Some(real), delimiter, &opts, path)?;
+    let file = std::fs::File::open(&real).map_err(|e| SqawkError::open(given, e))?;
+    let (input, compression) = compress::decoder(file).map_err(|e| SqawkError::open(given, e))?;
+    let mut table =
+        csv_handler::read_table_from(table_name, input, given, Some(real), delimiter, &opts, path)?;
+    set_compression(&mut table, compression);
     table.set_declared_columns(schema);
     Ok((table, true))
 }
@@ -421,18 +597,88 @@ pub fn load_location(
 /// equal.
 fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
     let abs = std::path::absolute(path)?;
-    if let (Some(parent), Some(name)) = (abs.parent(), abs.file_name()) {
-        if let Ok(real_parent) = std::fs::canonicalize(parent) {
-            return Ok(real_parent.join(name));
-        }
+    if let (Some(parent), Some(name)) = (abs.parent(), abs.file_name())
+        && let Ok(real_parent) = std::fs::canonicalize(parent)
+    {
+        return Ok(real_parent.join(name));
     }
     Ok(abs)
 }
 
 /// Whether `path` names a tab-separated file: extension `.tsv` or `.tab`
 /// (any case).
+/// The separator a one-column header most likely means: the most frequent
+/// of `;`, `|` and tab in it, if any.
+fn likely_separator(header: &str) -> Option<char> {
+    [';', '|', '\t']
+        .into_iter()
+        .map(|c| (header.matches(c).count(), c))
+        .filter(|(n, _)| *n > 0)
+        .max_by_key(|(n, _)| *n)
+        .map(|(_, c)| c)
+}
+
+/// Whether `path` is a file pattern: it does not exist, and its name holds
+/// a GLOB wildcard.
+fn is_pattern(path: &Path) -> bool {
+    path.as_os_str() != STDIN_SPEC
+        && !path.exists()
+        && path.to_string_lossy().contains(['*', '?', '['])
+}
+
+/// The files a pattern names, sorted: wildcards (GLOB rules: `*`, `?`,
+/// `[...]`) in the file name, the directory taken literally.
+fn expand_pattern(pattern: &Path) -> SqawkResult<Vec<PathBuf>> {
+    let shown = pattern.to_string_lossy().into_owned();
+    let name = pattern
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let dir = match pattern.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    if dir.to_string_lossy().contains(['*', '?', '[']) || !name.contains(['*', '?', '[']) {
+        return Err(SqawkError::InvalidFileSpec(format!(
+            "'{shown}': wildcards are allowed in the file name only"
+        )));
+    }
+    let entries = std::fs::read_dir(&dir).map_err(|e| SqawkError::open(&dir, e))?;
+    let mut found: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| SqawkError::open(&dir, e))?;
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if crate::vm::glob::glob(&name, &file) && !entry.path().is_dir() {
+            found.push(match pattern.parent() {
+                Some(d) if !d.as_os_str().is_empty() => d.join(&file),
+                _ => PathBuf::from(&file),
+            });
+        }
+    }
+    if found.is_empty() {
+        return Err(SqawkError::InvalidFileSpec(format!(
+            "no file matches '{shown}'"
+        )));
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// Record on a just-loaded table how its file was compressed.
+fn set_compression(table: &mut Table, compression: compress::Compression) {
+    let mut layout = table.file_layout();
+    layout.compression = compression;
+    table.set_file_layout(layout);
+}
+
 pub(crate) fn has_tab_extension(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| {
+    // `t.tsv.gz` is tab-separated too.
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    let inner = name
+        .as_deref()
+        .map(compress::strip_extension)
+        .map(Path::new);
+    inner.and_then(Path::extension).is_some_and(|ext| {
         let ext = ext.to_string_lossy();
         ext.eq_ignore_ascii_case("tsv") || ext.eq_ignore_ascii_case("tab")
     })
@@ -479,9 +725,10 @@ pub fn parse_table_spec(file_spec: &str) -> SqawkResult<(String, PathBuf)> {
         return Ok((STDIN_TABLE.to_string(), PathBuf::from(STDIN_SPEC)));
     }
     let path = PathBuf::from(file_spec);
+    // `data.csv.gz` is the table `data`.
     let file_name = path
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
+        .map(|n| compress::strip_extension(&n.to_string_lossy()).to_string())
         .unwrap_or_default();
     let table_name = match file_name.rfind('.') {
         Some(pos) => file_name[..pos].to_string(),
