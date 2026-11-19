@@ -216,9 +216,7 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
 
     // Load all specified files into in-memory tables
     // Each file can specify its table name with table_name=file_path syntax
-    for file_spec in &args.files {
-        file_handler.load_file(&mut database, file_spec)?;
-    }
+    file_handler.load_files(&mut database, &args.files)?;
     database.check_table_definitions_used()?;
 
     // Log table loading results in verbose mode

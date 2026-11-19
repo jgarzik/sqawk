@@ -50,6 +50,10 @@ pub struct FileHandler {
     /// Whether `-` may still be read. The REPL clears this: it reads its own
     /// commands from stdin, so a `.load -` would swallow the command stream.
     stdin_available: bool,
+
+    /// Tables loaded from several files (see [`FileHandler::load_files`]),
+    /// which cannot be written back.
+    multi_tables: std::collections::HashSet<String>,
 }
 
 impl FileHandler {
@@ -66,6 +70,7 @@ impl FileHandler {
             stdin_consumed: false,
             stdin_table: None,
             stdin_available: true,
+            multi_tables: std::collections::HashSet::new(),
         }
     }
 
@@ -120,7 +125,16 @@ impl FileHandler {
         file_spec: &str,
     ) -> SqawkResult<Option<(String, String)>> {
         let (table_name, file_path) = parse_table_spec(file_spec)?;
+        self.load_named(db, table_name, file_path)
+    }
 
+    /// [`Self::load_file`] with the table name and path already split.
+    fn load_named(
+        &mut self,
+        db: &mut Database,
+        table_name: String,
+        file_path: PathBuf,
+    ) -> SqawkResult<Option<(String, String)>> {
         // A "-" operand reads standard input. It is parsed as CSV (comma,
         // header row) unless -F says otherwise, which matches what sqawk
         // itself writes to stdout, so `sqawk ... | sqawk ... -` round-trips.
@@ -245,8 +259,106 @@ impl FileHandler {
         Ok(Some((table_name, file_path_str)))
     }
 
+    /// Load the command-line file operands into `db`.
+    ///
+    /// Each operand is one table, except that a table name given with
+    /// `NAME=` on several operands, or a `NAME=pattern` whose path does not
+    /// exist and holds `*`, `?` or `[` (expanded here, sorted, so it works
+    /// the same on every OS), makes one table of all those files, their
+    /// rows in operand order. Such a table needs the same header in every
+    /// file and cannot be written back.
+    pub fn load_files(&mut self, db: &mut Database, specs: &[String]) -> SqawkResult<()> {
+        // (table name, its files, whether they make a multi-file table), in
+        // order of first appearance.
+        let mut groups: Vec<(String, Vec<PathBuf>, bool)> = Vec::new();
+        for spec in specs {
+            let (name, path) = parse_table_spec(spec)?;
+            let explicit = spec.split_once('=').is_some_and(|(n, _)| n == name);
+            let pattern = is_pattern(&path);
+            if pattern && !explicit {
+                return Err(SqawkError::InvalidFileSpec(format!(
+                    "'{}': a file pattern needs a table name: NAME={}",
+                    spec, spec
+                )));
+            }
+            let paths = if pattern {
+                expand_pattern(&path)?
+            } else {
+                vec![path]
+            };
+            match groups.iter_mut().find(|(n, _, _)| *n == name) {
+                Some(g) if explicit => {
+                    g.1.extend(paths);
+                    g.2 = true;
+                }
+                _ => groups.push((name, paths, pattern)),
+            }
+        }
+        for (name, mut paths, multi) in groups {
+            if multi {
+                self.load_multi(db, &name, &paths)?;
+            } else {
+                self.load_named(db, name, paths.remove(0))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Load `paths` as the one table `name` (see [`Self::load_files`]).
+    fn load_multi(&mut self, db: &mut Database, name: &str, paths: &[PathBuf]) -> SqawkResult<()> {
+        if db.get_table(name).is_ok() {
+            return Err(SqawkError::TableAlreadyExists(name.to_string()));
+        }
+        let mut merged: Option<(Table, String)> = None;
+        let mut rows = Vec::new();
+        for (i, path) in paths.iter().enumerate() {
+            // Each part loads as a table of its own under a name no SQL
+            // can spell, then gives up its rows.
+            let part = format!("{name}\u{0}{i}");
+            let shown = path.to_string_lossy().into_owned();
+            self.load_named(db, part.clone(), path.clone())?;
+            let mut t = db.take_table(&part).expect("just loaded");
+            match &merged {
+                None => {
+                    rows.extend(t.take_rows());
+                    merged = Some((t, shown));
+                }
+                Some((first, first_shown)) => {
+                    if t.columns() != first.columns() {
+                        return Err(SqawkError::InvalidFileSpec(format!(
+                            "'{}' has columns {} but '{}' has {}: the files of table '{}' \
+                             must have the same columns",
+                            shown,
+                            t.columns().join(","),
+                            first_shown,
+                            first.columns().join(","),
+                            name
+                        )));
+                    }
+                    rows.extend(t.take_rows());
+                }
+            }
+        }
+        let (mut table, _) = merged
+            .ok_or_else(|| SqawkError::InvalidFileSpec(format!("no files for table '{name}'")))?;
+        table.take_rows();
+        table.set_name(name.to_string());
+        table.set_file_path(None);
+        table.replace_rows(rows);
+        table.mark_unmodified();
+        db.add_table(name.to_string(), table)?;
+        self.multi_tables.insert(name.to_string());
+        Ok(())
+    }
+
     /// Explain why `table_name` has no writeback target.
     fn unwritable_table_error(&self, table_name: &str) -> SqawkError {
+        if self.multi_tables.contains(table_name) {
+            return SqawkError::InvalidFileSpec(format!(
+                "table '{}' was read from several files and cannot be written back",
+                table_name
+            ));
+        }
         if self.stdin_table.as_deref() == Some(table_name) {
             return SqawkError::InvalidFileSpec(format!(
                 "table '{}' was read from standard input and cannot be written back; \
@@ -277,7 +389,9 @@ impl FileHandler {
                 csv_handler::check_writable(path)?;
                 Ok(true)
             }
-            None if self.stdin_table.as_deref() == Some(table_name) => {
+            None if self.stdin_table.as_deref() == Some(table_name)
+                || self.multi_tables.contains(table_name) =>
+            {
                 Err(self.unwritable_table_error(table_name))
             }
             None => Ok(false),
@@ -462,6 +576,52 @@ fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
 
 /// Whether `path` names a tab-separated file: extension `.tsv` or `.tab`
 /// (any case).
+/// Whether `path` is a file pattern: it does not exist, and its name holds
+/// a GLOB wildcard.
+fn is_pattern(path: &Path) -> bool {
+    path.as_os_str() != STDIN_SPEC
+        && !path.exists()
+        && path.to_string_lossy().contains(['*', '?', '['])
+}
+
+/// The files a pattern names, sorted: wildcards (GLOB rules: `*`, `?`,
+/// `[...]`) in the file name, the directory taken literally.
+fn expand_pattern(pattern: &Path) -> SqawkResult<Vec<PathBuf>> {
+    let shown = pattern.to_string_lossy().into_owned();
+    let name = pattern
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let dir = match pattern.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    if dir.to_string_lossy().contains(['*', '?', '[']) || !name.contains(['*', '?', '[']) {
+        return Err(SqawkError::InvalidFileSpec(format!(
+            "'{shown}': wildcards are allowed in the file name only"
+        )));
+    }
+    let entries = std::fs::read_dir(&dir).map_err(|e| SqawkError::open(&dir, e))?;
+    let mut found: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| SqawkError::open(&dir, e))?;
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if crate::vm::glob::glob(&name, &file) && !entry.path().is_dir() {
+            found.push(match pattern.parent() {
+                Some(d) if !d.as_os_str().is_empty() => d.join(&file),
+                _ => PathBuf::from(&file),
+            });
+        }
+    }
+    if found.is_empty() {
+        return Err(SqawkError::InvalidFileSpec(format!(
+            "no file matches '{shown}'"
+        )));
+    }
+    found.sort();
+    Ok(found)
+}
+
 /// Record on a just-loaded table how its file was compressed.
 fn set_compression(table: &mut Table, compression: compress::Compression) {
     let mut layout = table.file_layout();

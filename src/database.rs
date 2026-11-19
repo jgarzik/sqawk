@@ -126,6 +126,14 @@ impl Database {
         }
         true
     }
+
+    /// Take a table out of the database while loading (outside any
+    /// transaction), e.g. to merge several files into one table.
+    pub fn take_table(&mut self, name: &str) -> Option<Table> {
+        self.lazy.remove(name);
+        self.modified.remove(name);
+        self.tables.remove(name)
+    }
 }
 
 /// Transactions and the modified-table set.

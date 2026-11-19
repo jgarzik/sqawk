@@ -160,7 +160,10 @@ effects of the ones before it.
   them. `parse_table_spec` splits a file operand `[NAME=]PATH` (NAME only when
   identifier-like; otherwise the table is named after the file stem; `-` is
   stdin, table `stdin`); `has_tab_extension` is the `.tsv`/`.tab` rule used
-  for loading and for `CREATE TABLE ... LOCATION`; `load_location` loads (or
+  for loading and for `CREATE TABLE ... LOCATION`; `load_files` loads the
+  operands, making one table of a repeated `NAME=` or a `NAME=pattern`
+  (expanded sorted with the GLOB matcher; same header required; refused by
+  `--write`); `load_location` loads (or
   starts) a LOCATION table under its declared columns
 - **`compress.rs`**: gzip / zstd by magic bytes (`decoder`, multi-member / multi-frame streams; flate2 and ruzstd, pure Rust), `strip_extension` for table names and the `.tsv` rule, `Compression::encode` for writeback; a table records its file's compression in `FileLayout`
 - **`csv_handler.rs`**: The single loader (`read_table`, built on the `csv`

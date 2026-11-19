@@ -838,9 +838,8 @@ sqawk -s "CREATE TABLE data (id INT, value FLOAT) LOCATION './output.csv';
           SELECT * FROM data;" seed.csv --write
 ```
 
-Note the trailing `seed.csv`. At least one input file is always required, even
-when every table in the query is created by the statement itself; `sqawk` with
-no file operand exits with a usage error.
+No input file is needed when the script creates every table it uses; the
+trailing `seed.csv` above only adds a table the script does not read.
 
 ### Table Naming
 
@@ -875,6 +874,22 @@ When working with multiple files:
 - Tables can be joined or queried independently
 - Column names should be qualified with table names to avoid ambiguity
 - Multiple SQL statements can operate on different tables
+
+Several files can also form **one table**. Give the same `NAME=` to several
+operands, or a `NAME=pattern` with `*`, `?` or `[...]` in the file name
+(expanded by sqawk itself, sorted by name, so it works the same in every
+shell and on Windows):
+
+```sh
+sqawk -s "SELECT COUNT(*) FROM logs" logs=jan.csv logs=feb.csv
+sqawk -s "SELECT host, COUNT(*) FROM logs GROUP BY host" 'logs=logs/2024-*.csv.gz'
+```
+
+The rows follow operand order (a pattern's files in name order). Every file
+must have the same header (same names, same order), and each may be
+compressed. A pattern needs a `NAME=` and must match at least one file. Such
+a table can be queried and changed in memory, but `--write` refuses to save
+it (nothing is written) since its rows have no single file to go back to.
 
 ### File Writeback Behavior
 

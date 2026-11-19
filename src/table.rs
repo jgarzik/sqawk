@@ -847,6 +847,18 @@ impl Table {
         self.file_path.as_ref()
     }
 
+    /// Change (or clear) the writeback target.
+    pub fn set_file_path(&mut self, path: Option<PathBuf>) {
+        self.file_path = path;
+    }
+
+    /// Move every row out of the table (its source bytes go with them).
+    pub fn take_rows(&mut self) -> Vec<Row> {
+        self.raw = None;
+        self.comments = CommentLines::default();
+        std::mem::take(&mut self.rows)
+    }
+
     /// Get the delimiter for this table
     ///
     /// Returns the delimiter used for this table.

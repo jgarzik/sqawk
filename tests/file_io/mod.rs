@@ -335,3 +335,75 @@ fn same_file_through_symlink_is_error() -> TestResult {
     assert!(stderr.contains("is already loaded as table a"), "{stderr}");
     Ok(())
 }
+
+// ============================================================================
+// SEVERAL FILES AS ONE TABLE
+// ============================================================================
+
+/// Repeating `NAME=` concatenates the files in operand order; a
+/// `NAME=pattern` expands sorted (wildcards in the file name only).
+#[test]
+fn several_files_form_one_table() -> TestResult {
+    let dir = create_temp_dir()?;
+    let p = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+    std::fs::write(p("b.csv"), "k,v\n2,b\n")?;
+    std::fs::write(p("a.csv"), "k,v\n1,a\n")?;
+    std::fs::write(p("c.txt"), "k,v\n9,c\n")?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("-s")
+        .arg("SELECT k, v FROM t; SELECT COUNT(*) AS n FROM g")
+        .arg(format!("t={}", p("b.csv")))
+        .arg(format!("t={}", p("a.csv")))
+        .arg(format!("g={}", p("*.csv")));
+    cmd.assert().success().stdout("k,v\n2,b\n1,a\nn\n2\n");
+    Ok(())
+}
+
+/// The files of one table must have the same header; a pattern needs a
+/// table name and must match something; a changed multi-file table cannot
+/// be written back (nothing is).
+#[test]
+fn several_files_errors() -> TestResult {
+    let dir = create_temp_dir()?;
+    let p = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+    std::fs::write(p("a.csv"), "k,v\n1,a\n")?;
+    std::fs::write(p("b.csv"), "k,w\n2,b\n")?;
+    std::fs::write(p("c.csv"), "k,v\n3,c\n")?;
+    let run = |args: Vec<String>, want: &str| {
+        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+        cmd.args(&args);
+        let out = cmd.assert().code(1).get_output().clone();
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(err.contains(want), "{args:?}: {err}");
+        assert_eq!(err.lines().count(), 1, "{err}");
+    };
+    run(
+        vec![
+            "-s".into(),
+            "SELECT 1".into(),
+            format!("t={}", p("a.csv")),
+            format!("t={}", p("b.csv")),
+        ],
+        "must have the same columns",
+    );
+    run(
+        vec!["-s".into(), "SELECT 1".into(), p("*.csv")],
+        "needs a table name",
+    );
+    run(
+        vec!["-s".into(), "SELECT 1".into(), format!("t={}", p("*.zzz"))],
+        "no file matches",
+    );
+    run(
+        vec![
+            "--write".into(),
+            "-s".into(),
+            "UPDATE t SET v = 'x'".into(),
+            format!("t={}", p("a.csv")),
+            format!("t={}", p("c.csv")),
+        ],
+        "several files and cannot be written back",
+    );
+    assert_eq!(std::fs::read_to_string(p("a.csv"))?, "k,v\n1,a\n");
+    Ok(())
+}
