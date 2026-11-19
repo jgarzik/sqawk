@@ -899,10 +899,10 @@ impl Repl {
     /// Print the CREATE TABLE form of `name`'s columns.
     fn print_schema(&self, name: &str) -> Result<()> {
         let column_types = self.executor.get_table_column_types(name)?;
-        outln!("CREATE TABLE {} (", name);
+        outln!("CREATE TABLE {} (", quote_ident(name));
         for (i, (column_name, data_type)) in column_types.iter().enumerate() {
             let sep = if i + 1 < column_types.len() { "," } else { "" };
-            outln!("  {} {}{}", column_name, data_type, sep);
+            outln!("  {} {}{}", quote_ident(column_name), data_type, sep);
         }
         outln!(");");
         Ok(())
@@ -1125,9 +1125,195 @@ impl Repl {
     }
 }
 
+/// SQLite's keywords (https://sqlite.org/lang_keywords.html), sorted: a
+/// column with one of these names must be quoted.
+const SQLITE_KEYWORDS: [&str; 147] = [
+    "ABORT",
+    "ACTION",
+    "ADD",
+    "AFTER",
+    "ALL",
+    "ALTER",
+    "ALWAYS",
+    "ANALYZE",
+    "AND",
+    "AS",
+    "ASC",
+    "ATTACH",
+    "AUTOINCREMENT",
+    "BEFORE",
+    "BEGIN",
+    "BETWEEN",
+    "BY",
+    "CASCADE",
+    "CASE",
+    "CAST",
+    "CHECK",
+    "COLLATE",
+    "COLUMN",
+    "COMMIT",
+    "CONFLICT",
+    "CONSTRAINT",
+    "CREATE",
+    "CROSS",
+    "CURRENT",
+    "CURRENT_DATE",
+    "CURRENT_TIME",
+    "CURRENT_TIMESTAMP",
+    "DATABASE",
+    "DEFAULT",
+    "DEFERRABLE",
+    "DEFERRED",
+    "DELETE",
+    "DESC",
+    "DETACH",
+    "DISTINCT",
+    "DO",
+    "DROP",
+    "EACH",
+    "ELSE",
+    "END",
+    "ESCAPE",
+    "EXCEPT",
+    "EXCLUDE",
+    "EXCLUSIVE",
+    "EXISTS",
+    "EXPLAIN",
+    "FAIL",
+    "FILTER",
+    "FIRST",
+    "FOLLOWING",
+    "FOR",
+    "FOREIGN",
+    "FROM",
+    "FULL",
+    "GENERATED",
+    "GLOB",
+    "GROUP",
+    "GROUPS",
+    "HAVING",
+    "IF",
+    "IGNORE",
+    "IMMEDIATE",
+    "IN",
+    "INDEX",
+    "INDEXED",
+    "INITIALLY",
+    "INNER",
+    "INSERT",
+    "INSTEAD",
+    "INTERSECT",
+    "INTO",
+    "IS",
+    "ISNULL",
+    "JOIN",
+    "KEY",
+    "LAST",
+    "LEFT",
+    "LIKE",
+    "LIMIT",
+    "MATCH",
+    "MATERIALIZED",
+    "NATURAL",
+    "NO",
+    "NOT",
+    "NOTHING",
+    "NOTNULL",
+    "NULL",
+    "NULLS",
+    "OF",
+    "OFFSET",
+    "ON",
+    "OR",
+    "ORDER",
+    "OTHERS",
+    "OUTER",
+    "OVER",
+    "PARTITION",
+    "PLAN",
+    "PRAGMA",
+    "PRECEDING",
+    "PRIMARY",
+    "QUERY",
+    "RAISE",
+    "RANGE",
+    "RECURSIVE",
+    "REFERENCES",
+    "REGEXP",
+    "REINDEX",
+    "RELEASE",
+    "RENAME",
+    "REPLACE",
+    "RESTRICT",
+    "RETURNING",
+    "RIGHT",
+    "ROLLBACK",
+    "ROW",
+    "ROWS",
+    "SAVEPOINT",
+    "SELECT",
+    "SET",
+    "TABLE",
+    "TEMP",
+    "TEMPORARY",
+    "THEN",
+    "TIES",
+    "TO",
+    "TRANSACTION",
+    "TRIGGER",
+    "UNBOUNDED",
+    "UNION",
+    "UNIQUE",
+    "UPDATE",
+    "USING",
+    "VACUUM",
+    "VALUES",
+    "VIEW",
+    "VIRTUAL",
+    "WHEN",
+    "WHERE",
+    "WINDOW",
+    "WITH",
+    "WITHOUT",
+];
+
+/// `name` as an SQL identifier: as is when it is a plain identifier that is
+/// not a keyword, else double-quoted with any `"` doubled (sqlite3's
+/// `.schema` quotes the same names).
+fn quote_ident(name: &str) -> std::borrow::Cow<'_, str> {
+    let plain = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && SQLITE_KEYWORDS
+            .binary_search(&name.to_ascii_uppercase().as_str())
+            .is_err();
+    if plain {
+        std::borrow::Cow::Borrowed(name)
+    } else {
+        std::borrow::Cow::Owned(format!("\"{}\"", name.replace('"', "\"\"")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifiers_are_quoted_when_needed() {
+        assert_eq!(quote_ident("id"), "id");
+        assert_eq!(quote_ident("_x9"), "_x9");
+        assert_eq!(quote_ident("first name"), "\"first name\"");
+        assert_eq!(quote_ident("9lives"), "\"9lives\"");
+        assert_eq!(quote_ident("Select"), "\"Select\"");
+        assert_eq!(quote_ident("a\"b"), "\"a\"\"b\"");
+        assert_eq!(quote_ident(""), "\"\"");
+        assert_eq!(quote_ident("ID:1"), "\"ID:1\"");
+        assert_eq!(quote_ident("name"), "name");
+        assert_eq!(quote_ident("order"), "\"order\"");
+        assert!(SQLITE_KEYWORDS.windows(2).all(|w| w[0] < w[1]));
+    }
 
     fn schema() -> Schema {
         vec![
