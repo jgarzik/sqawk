@@ -349,7 +349,7 @@ impl<'a> SqlCompiler<'a> {
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(
                     "Only SELECT queries and compound SELECTs are supported".to_string(),
-                ))
+                ));
             }
         };
         self.resolve(exit);
@@ -413,7 +413,7 @@ impl<'a> SqlCompiler<'a> {
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(
                     "Unsupported compound SELECT operand".to_string(),
-                ))
+                ));
             }
         };
         let all = match quantifier {
@@ -423,7 +423,7 @@ impl<'a> SqlCompiler<'a> {
                 return Err(SqawkError::UnsupportedSqlFeature(format!(
                     "{} {} is not supported",
                     op, q
-                )))
+                )));
             }
         };
         self.add_comment(&format!("{}{}", op, if all { " ALL" } else { "" }));

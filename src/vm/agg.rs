@@ -5,10 +5,10 @@ use std::collections::HashSet;
 
 use super::arith::{self, text_of};
 use super::bytecode::{
-    Register, AGG_AVG, AGG_COUNT, AGG_DISTINCT, AGG_GROUP_CONCAT, AGG_MAX, AGG_MIN, AGG_SUM,
-    AGG_TOTAL, AGG_TYPE_MASK,
+    AGG_AVG, AGG_COUNT, AGG_DISTINCT, AGG_GROUP_CONCAT, AGG_MAX, AGG_MIN, AGG_SUM, AGG_TOTAL,
+    AGG_TYPE_MASK, Register,
 };
-use super::engine::{compare_values, row_key, RowKey};
+use super::engine::{RowKey, compare_values, row_key};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Value;
 
@@ -141,10 +141,11 @@ impl AggAccumulator {
     pub(super) fn step(&mut self, value: Option<Value>, sep: Option<Value>) -> SqawkResult<()> {
         // DISTINCT: ignore a value already accumulated. NULLs are not
         // tracked -- every aggregate already skips them.
-        if let (Some(seen), Some(val)) = (self.seen.as_mut(), value.as_ref()) {
-            if !matches!(val, Value::Null) && !seen.insert(row_key(val)) {
-                return Ok(());
-            }
+        if let (Some(seen), Some(val)) = (self.seen.as_mut(), value.as_ref())
+            && !matches!(val, Value::Null)
+            && !seen.insert(row_key(val))
+        {
+            return Ok(());
         }
         match self.func_type {
             AGG_COUNT => {
@@ -217,7 +218,7 @@ impl AggAccumulator {
                 return Err(SqawkError::VmError(format!(
                     "Unknown aggregate function type: {}",
                     other
-                )))
+                )));
             }
         }
         Ok(())

@@ -11,7 +11,7 @@
 //!
 //! Known-wrong behaviour is NOT pinned here -- it lives in `tests/defects/`.
 
-use crate::helpers::{assert_query, assert_query_on, assert_query_on_fails, ONE};
+use crate::helpers::{ONE, assert_query, assert_query_on, assert_query_on_fails};
 
 #[test]
 fn select_star() -> Result<(), Box<dyn std::error::Error>> {
@@ -67,7 +67,10 @@ fn select_literal_expressions() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT UPPER('ab') || 'c', CAST('12' AS INTEGER) + 1, CASE WHEN 1 > 2 THEN 'x' ELSE 'y' END, SUBSTR('hello', 2, 3), -ABS(-4)",
-        concat!("UPPER('ab') || 'c',CAST('12' AS INTEGER) + 1,CASE WHEN 1 > 2 THEN 'x' ELSE 'y' END,\"SUBSTR('hello', 2, 3)\",-ABS(-4)", "\nABc,13,y,ell,-4"),
+        concat!(
+            "UPPER('ab') || 'c',CAST('12' AS INTEGER) + 1,CASE WHEN 1 > 2 THEN 'x' ELSE 'y' END,\"SUBSTR('hello', 2, 3)\",-ABS(-4)",
+            "\nABc,13,y,ell,-4"
+        ),
     )
 }
 
@@ -77,7 +80,10 @@ fn select_three_valued_predicates() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT NULL AND 0, NULL OR 1, NULL OR 0, 2 IN (1, NULL), 1 IN (1, NULL), NULL BETWEEN 1 AND 2, NULL LIKE 'a%'",
-        concat!("NULL AND 0,NULL OR 1,NULL OR 0,\"2 IN (1, NULL)\",\"1 IN (1, NULL)\",NULL BETWEEN 1 AND 2,NULL LIKE 'a%'", "\n0,1,,,1,,"),
+        concat!(
+            "NULL AND 0,NULL OR 1,NULL OR 0,\"2 IN (1, NULL)\",\"1 IN (1, NULL)\",NULL BETWEEN 1 AND 2,NULL LIKE 'a%'",
+            "\n0,1,,,1,,"
+        ),
     )
 }
 
@@ -555,7 +561,11 @@ fn join_implicit() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn join_three() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
-        &["tests/data/users.csv", "tests/data/orders.csv", "tests/data/products.csv"],
+        &[
+            "tests/data/users.csv",
+            "tests/data/orders.csv",
+            "tests/data/products.csv",
+        ],
         "SELECT users.name, products.name FROM users, orders, products WHERE users.id = orders.user_id AND orders.product_id = products.product_id",
         concat!(
             "name,name",
@@ -573,12 +583,7 @@ fn union() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT department FROM employees WHERE age < 26 UNION SELECT department FROM employees WHERE age > 44",
-        concat!(
-            "department",
-            "\nHR",
-            "\nMarketing",
-            "\nSales",
-        ),
+        concat!("department", "\nHR", "\nMarketing", "\nSales",),
     )
 }
 
@@ -587,12 +592,7 @@ fn union_all() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT department FROM employees WHERE age < 26 UNION ALL SELECT department FROM employees WHERE age > 44",
-        concat!(
-            "department",
-            "\nMarketing",
-            "\nHR",
-            "\nSales",
-        ),
+        concat!("department", "\nMarketing", "\nHR", "\nSales",),
     )
 }
 
@@ -601,10 +601,7 @@ fn intersect() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT department FROM employees WHERE age < 31 INTERSECT SELECT department FROM employees WHERE age > 31",
-        concat!(
-            "department",
-            "\nEngineering",
-        ),
+        concat!("department", "\nEngineering",),
     )
 }
 
@@ -613,11 +610,7 @@ fn except() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/employees.csv"],
         "SELECT department FROM employees WHERE age < 31 EXCEPT SELECT department FROM employees WHERE age > 31",
-        concat!(
-            "department",
-            "\nHR",
-            "\nMarketing",
-        ),
+        concat!("department", "\nHR", "\nMarketing",),
     )
 }
 
@@ -644,11 +637,7 @@ fn subquery_exists() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/users.csv", "tests/data/orders.csv"],
         "SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)",
-        concat!(
-            "name",
-            "\nJohn",
-            "\nJane",
-        ),
+        concat!("name", "\nJohn", "\nJane",),
     )
 }
 
@@ -1117,12 +1106,7 @@ fn outer_join_inner_baseline() -> Result<(), Box<dyn std::error::Error>> {
     assert_query(
         &["tests/data/customers.csv", "tests/data/purchases.csv"],
         "SELECT customers.name, purchases.item FROM customers INNER JOIN purchases ON customers.id = purchases.customer_id",
-        concat!(
-            "name,item",
-            "\nAnn,Book",
-            "\nAnn,Pen",
-            "\nBen,Desk",
-        ),
+        concat!("name,item", "\nAnn,Book", "\nAnn,Pen", "\nBen,Desk",),
     )
 }
 
@@ -2426,8 +2410,8 @@ fn substr_without_start_is_rejected() -> Result<(), Box<dyn std::error::Error>> 
 }
 
 #[test]
-fn unqualified_ambiguous_column_in_multi_table_is_rejected(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn unqualified_ambiguous_column_in_multi_table_is_rejected()
+-> Result<(), Box<dyn std::error::Error>> {
     // `id` exists in both tables. The multi-table resolver returned the first
     // match where NameCtx reports ambiguity, so the same name resolved
     // differently depending on which resolver the path reached.

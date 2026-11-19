@@ -131,7 +131,7 @@ fn test_cast_both_sides() -> Result<(), Box<dyn std::error::Error>> {
 // ---------------------------------------------------------------------------
 
 mod sqlite_semantics {
-    use crate::helpers::{assert_query_on, ONE};
+    use crate::helpers::{ONE, assert_query_on};
 
     type R = Result<(), Box<dyn std::error::Error>>;
 

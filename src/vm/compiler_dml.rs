@@ -168,7 +168,7 @@ impl<'a> SqlCompiler<'a> {
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(
                     "Only simple table references are supported in DELETE".to_string(),
-                ))
+                ));
             }
         };
 
@@ -287,7 +287,7 @@ impl<'a> SqlCompiler<'a> {
             _ => {
                 return Err(SqawkError::UnsupportedSqlFeature(
                     "Only simple table references are supported in UPDATE".to_string(),
-                ))
+                ));
             }
         };
 

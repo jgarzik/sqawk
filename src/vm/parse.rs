@@ -331,10 +331,10 @@ pub(crate) fn for_each_child<'a>(node: Node<'a>, f: &mut dyn FnMut(Node<'a>)) {
                 }
             }
             f(Node::SetExpr(&mut q.body));
-            if let Some(ob) = q.order_by.as_mut() {
-                if let OrderByKind::Expressions(exprs) = &mut ob.kind {
-                    order_by_children(exprs, f);
-                }
+            if let Some(ob) = q.order_by.as_mut()
+                && let OrderByKind::Expressions(exprs) = &mut ob.kind
+            {
+                order_by_children(exprs, f);
             }
             match q.limit_clause.as_mut() {
                 Some(LimitClause::LimitOffset {
@@ -983,16 +983,16 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        if let SelectItem::UnnamedExpr(Expr::Subquery(sub)) = &sel.projection[0] {
-            if let SetExpr::Select(inner) = sub.body.as_ref() {
-                out.extend(
-                    source
-                        .select_item_texts(inner)
-                        .expect("inner")
-                        .into_iter()
-                        .map(String::from),
-                );
-            }
+        if let SelectItem::UnnamedExpr(Expr::Subquery(sub)) = &sel.projection[0]
+            && let SetExpr::Select(inner) = sub.body.as_ref()
+        {
+            out.extend(
+                source
+                    .select_item_texts(inner)
+                    .expect("inner")
+                    .into_iter()
+                    .map(String::from),
+            );
         }
         out
     }

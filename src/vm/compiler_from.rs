@@ -81,10 +81,10 @@ fn classify_join(op: &JoinOperator) -> SqawkResult<(JoinKind, &JoinConstraint)> 
         JoinOperator::FullOuter(c) => (JoinKind::Full, c),
         JoinOperator::CrossJoin(c) => (JoinKind::Inner, c),
         JoinOperator::Semi(_) | JoinOperator::LeftSemi(_) | JoinOperator::RightSemi(_) => {
-            return unsupported("SEMI JOIN")
+            return unsupported("SEMI JOIN");
         }
         JoinOperator::Anti(_) | JoinOperator::LeftAnti(_) | JoinOperator::RightAnti(_) => {
-            return unsupported("ANTI JOIN")
+            return unsupported("ANTI JOIN");
         }
         JoinOperator::CrossApply => return unsupported("CROSS APPLY"),
         JoinOperator::OuterApply => return unsupported("OUTER APPLY"),
@@ -93,7 +93,7 @@ fn classify_join(op: &JoinOperator) -> SqawkResult<(JoinKind, &JoinConstraint)> 
         // the join order. Rejected rather than silently ignoring the hint.
         JoinOperator::StraightJoin(_) => return unsupported("STRAIGHT_JOIN"),
         JoinOperator::ArrayJoin | JoinOperator::LeftArrayJoin | JoinOperator::InnerArrayJoin => {
-            return unsupported("ARRAY JOIN")
+            return unsupported("ARRAY JOIN");
         }
     })
 }
@@ -578,12 +578,12 @@ impl<'a> SqlCompiler<'a> {
                 TableFactor::NestedJoin { .. } => {
                     return Err(SqawkError::UnsupportedSqlFeature(
                         "Parenthesized joins are not supported".into(),
-                    ))
+                    ));
                 }
                 _ => {
                     return Err(SqawkError::UnsupportedSqlFeature(
                         "Only table references are supported in FROM".into(),
-                    ))
+                    ));
                 }
             };
             if alias.as_ref().is_some_and(|a| !a.columns.is_empty()) {
@@ -755,13 +755,13 @@ impl<'a> SqlCompiler<'a> {
         // (Outer-join conjuncts were placed at their deepest table already.)
         for (lvl, level) in plan.levels.iter().enumerate() {
             for term in &level.on_terms {
-                if let Some(s) = expr_sources(term, &ctx) {
-                    if s.iter().any(|src| plan.level_of(*src) > lvl) {
-                        return Err(SqawkError::InvalidSqlQuery(format!(
-                            "ON clause refers to a table joined later: {}",
-                            term
-                        )));
-                    }
+                if let Some(s) = expr_sources(term, &ctx)
+                    && s.iter().any(|src| plan.level_of(*src) > lvl)
+                {
+                    return Err(SqawkError::InvalidSqlQuery(format!(
+                        "ON clause refers to a table joined later: {}",
+                        term
+                    )));
                 }
             }
         }

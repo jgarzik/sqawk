@@ -773,10 +773,11 @@ impl Repl {
         // produced rows: a trailing DML on `SELECT ...; DELETE ...` reports
         // too. It is reported even when zero, so a statement that matched
         // nothing still shows that it ran.
-        if self.show_changes && self.executor.last_statement_changed_rows() {
-            if let Ok(affected_rows) = self.executor.get_affected_row_count() {
-                outln!("{} rows affected", affected_rows);
-            }
+        if self.show_changes
+            && self.executor.last_statement_changed_rows()
+            && let Ok(affected_rows) = self.executor.get_affected_row_count()
+        {
+            outln!("{} rows affected", affected_rows);
         }
 
         // Display query statistics if enabled
@@ -1109,7 +1110,7 @@ impl Repl {
                 return Err(ReplError::Command(format!(
                     "unknown option for .stats: {} (usage: .stats [on|off])",
                     other
-                )))
+                )));
             }
         };
         self.note(format_args!(

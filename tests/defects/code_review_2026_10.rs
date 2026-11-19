@@ -19,7 +19,7 @@
 
 use std::fs;
 
-use crate::helpers::{assert_query_on, assert_query_on_fails, create_temp_dir, run_sql, ONE};
+use crate::helpers::{ONE, assert_query_on, assert_query_on_fails, create_temp_dir, run_sql};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 

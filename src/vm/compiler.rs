@@ -17,9 +17,9 @@ use sqlparser::ast::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::bytecode::{Instruction, OpCode, Program, AGG_COUNT, AGG_DISTINCT};
+use super::bytecode::{AGG_COUNT, AGG_DISTINCT, Instruction, OpCode, Program};
 use super::compiler_check::{check_create_table, check_delete, check_insert, check_update};
-use super::compiler_from::{expr_children, FromPlan};
+use super::compiler_from::{FromPlan, expr_children};
 use super::compiler_subquery::Sub;
 use super::compiler_window::window_call_children;
 use super::func;
@@ -1021,7 +1021,7 @@ impl<'a> SqlCompiler<'a> {
                         SelectItemQualifiedWildcardKind::Expr(_) => {
                             return Err(SqawkError::UnsupportedSqlFeature(
                                 "expr.* is not supported".into(),
-                            ))
+                            ));
                         }
                     };
                     let src = plan
@@ -1055,7 +1055,7 @@ impl<'a> SqlCompiler<'a> {
                 SelectItem::ExprWithAliases { .. } => {
                     return Err(SqawkError::UnsupportedSqlFeature(
                         "Multiple column aliases are not supported".into(),
-                    ))
+                    ));
                 }
             }
         }
@@ -1195,7 +1195,7 @@ impl<'a> SqlCompiler<'a> {
                     return Err(SqawkError::InvalidSqlQuery(format!(
                         "ESCAPE expression must be a single character, got {}",
                         other
-                    )))
+                    )));
                 }
             };
             self.emit_value_literal(base + 2, &lit)?;
@@ -1472,7 +1472,7 @@ impl<'a> SqlCompiler<'a> {
         match &func.args {
             FunctionArguments::Subquery(_) => return unsupported("A subquery argument"),
             FunctionArguments::List(list) if !list.clauses.is_empty() => {
-                return unsupported("A clause in the argument list")
+                return unsupported("A clause in the argument list");
             }
             _ => {}
         }
@@ -1696,7 +1696,7 @@ impl<'a> SqlCompiler<'a> {
                     Value::HexStringLiteral(_) => {
                         return Err(SqawkError::UnsupportedSqlFeature(
                             "blob literals are not supported".into(),
-                        ))
+                        ));
                     }
                     // Placeholders, dollar-quoted and other dialect
                     // literals used to become their SQL text.
@@ -1704,7 +1704,7 @@ impl<'a> SqlCompiler<'a> {
                         return Err(SqawkError::UnsupportedSqlFeature(format!(
                             "Literal {} is not supported",
                             other
-                        )))
+                        )));
                     }
                 };
                 self.emit_value_literal(dest, &literal)?;
@@ -2077,7 +2077,7 @@ impl<'a> SqlCompiler<'a> {
                 return Err(SqawkError::UnsupportedSqlFeature(format!(
                     "Unsupported expression: {}",
                     other
-                )))
+                )));
             }
         }
 
@@ -2201,15 +2201,14 @@ impl<'a> SqlCompiler<'a> {
         if name.0.is_empty() {
             return Err(SqawkError::InvalidSqlQuery("Empty table name".to_string()));
         }
-        if let [part] = name.0.as_slice() {
-            if let Some(ident) = part.as_ident() {
-                if self.cte_names.contains(&ident.value.to_ascii_lowercase()) {
-                    return Err(SqawkError::VmError(format!(
-                        "internal error: unresolved CTE {}",
-                        ident.value
-                    )));
-                }
-            }
+        if let [part] = name.0.as_slice()
+            && let Some(ident) = part.as_ident()
+            && self.cte_names.contains(&ident.value.to_ascii_lowercase())
+        {
+            return Err(SqawkError::VmError(format!(
+                "internal error: unresolved CTE {}",
+                ident.value
+            )));
         }
 
         // `t` or `main.t` (see `main_table_name`). Table names match
@@ -2416,12 +2415,12 @@ impl<'a> SqlCompiler<'a> {
         if Self::is_aggregate_call(expr) {
             return true;
         }
-        if let Expr::Function(f) = expr {
-            if f.over.is_some() {
-                return window_call_children(f)
-                    .into_iter()
-                    .any(|c| self.is_aggregate_expr(c));
-            }
+        if let Expr::Function(f) = expr
+            && f.over.is_some()
+        {
+            return window_call_children(f)
+                .into_iter()
+                .any(|c| self.is_aggregate_expr(c));
         }
         expr_children(expr)
             .is_some_and(|children| children.into_iter().any(|c| self.is_aggregate_expr(c)))

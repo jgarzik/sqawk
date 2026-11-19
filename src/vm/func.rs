@@ -10,10 +10,10 @@
 //! Semantics follow SQLite 3.45 unless a comment says otherwise. String
 //! functions count characters, not bytes.
 
-use super::arith::{self, text_of, text_to_num, to_num, Num};
+use super::arith::{self, Num, text_of, text_to_num, to_num};
 use super::bytecode::Register;
 use super::datetime;
-use super::engine::{compare_values, VmEngine};
+use super::engine::{VmEngine, compare_values};
 use super::printf;
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Value;
@@ -548,7 +548,7 @@ fn round(a: &[Register]) -> SqawkResult<Register> {
                 return Err(SqawkError::InvalidSqlQuery(format!(
                     "ROUND precision must be a number, got '{}'",
                     s
-                )))
+                )));
             }
         },
         Some(r) => int_arg(r),

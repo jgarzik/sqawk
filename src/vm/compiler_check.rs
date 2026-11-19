@@ -30,11 +30,7 @@ fn unsupported<T>(what: &str) -> SqawkResult<T> {
 
 /// Fail with "`what` is not supported" when `present`.
 fn reject(present: bool, what: &str) -> SqawkResult<()> {
-    if present {
-        unsupported(what)
-    } else {
-        Ok(())
-    }
+    if present { unsupported(what) } else { Ok(()) }
 }
 
 /// A transaction-control statement sqawk implements.
@@ -569,7 +565,7 @@ pub(crate) fn check_create_table(create: &CreateTable) -> SqawkResult<()> {
         CreateTableOptions::Options(_)
         | CreateTableOptions::Plain(_)
         | CreateTableOptions::TableProperties(_) => {
-            return unsupported("Table options other than WITH (DELIMITER / HEADER / COMMENTS)")
+            return unsupported("Table options other than WITH (DELIMITER / HEADER / COMMENTS)");
         }
     };
     for option in options {

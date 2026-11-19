@@ -23,8 +23,8 @@
 mod clifuzz;
 mod corpus;
 mod data;
+mod datagen;
 mod diff;
-mod gen;
 mod rng;
 mod run;
 mod stress;
@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
@@ -258,7 +258,7 @@ fn real_main() -> Result<i32> {
             if !(0.0..=1.0).contains(&edge_rate) || !(0.0..=1.0).contains(&ragged_rate) {
                 bail!("rates must be between 0 and 1");
             }
-            let opts = gen::GenOptions {
+            let opts = datagen::GenOptions {
                 output_dir,
                 rows,
                 edge_rate,
@@ -273,7 +273,7 @@ fn real_main() -> Result<i32> {
                     ragged_rate,
                 },
             };
-            gen::run(seed, &opts, cli.verbose)?;
+            datagen::run(seed, &opts, cli.verbose)?;
             Ok(0)
         }
         Command::Diff {

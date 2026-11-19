@@ -108,7 +108,7 @@ fn query(args: &[&str], sql: &str, files: &[PathBuf]) -> String {
 
 const TABLES: [&str; 5] = ["customers", "products", "orders", "order_items", "reviews"];
 
-/// Row counts for `rows` customers (see tsq/src/gen.rs).
+/// Row counts for `rows` customers (see tsq/src/datagen.rs).
 fn counts(rows: usize) -> [usize; 5] {
     [
         rows,

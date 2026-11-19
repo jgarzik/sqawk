@@ -6,7 +6,7 @@
 
 use super::agg::AggAccumulator;
 use super::arith::{self, ArithOp, Num};
-use super::bytecode::{spec_unescape, Instruction, KeyOrder, OpCode, Program, Register, AGG_SEP};
+use super::bytecode::{AGG_SEP, Instruction, KeyOrder, OpCode, Program, Register, spec_unescape};
 use super::{func, like};
 use crate::capacity::{
     DEFAULT_ACCUMULATOR_CAPACITY, DEFAULT_CURSOR_CAPACITY, DEFAULT_MODIFICATIONS_CAPACITY,
@@ -15,7 +15,7 @@ use crate::capacity::{
 };
 use crate::database::{Database, LazyTable};
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::{numeric_text, ColumnDefinition, Table, Value};
+use crate::table::{ColumnDefinition, Table, Value, numeric_text};
 use std::collections::HashMap;
 
 /// Data backing a cursor - either borrowed table or owned ephemeral data
@@ -229,17 +229,16 @@ impl<'a> Cursor<'a> {
             set: Some(set),
             ..
         } = &mut self.data
+            && !set.is_empty()
         {
-            if !set.is_empty() {
-                rows.extend(set.drain().map(|(_, row)| row));
-                rows.sort_by(|a, b| {
-                    a.iter()
-                        .zip(b)
-                        .map(|(x, y)| compare_values(x, y))
-                        .find(|o| o.is_ne())
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-            }
+            rows.extend(set.drain().map(|(_, row)| row));
+            rows.sort_by(|a, b| {
+                a.iter()
+                    .zip(b)
+                    .map(|(x, y)| compare_values(x, y))
+                    .find(|o| o.is_ne())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
         self.position = 0;
         self.null_row = false;
@@ -459,11 +458,7 @@ pub(super) fn compare_key(k: &KeyOrder, a: &Value, b: &Value) -> std::cmp::Order
         }
         (false, false) => {
             let o = compare_values(a, b);
-            if k.asc {
-                o
-            } else {
-                o.reverse()
-            }
+            if k.asc { o } else { o.reverse() }
         }
     }
 }
@@ -1264,7 +1259,7 @@ impl<'a> VmEngine<'a> {
                         return Err(SqawkError::VmError(format!(
                             "Unknown function: {}",
                             inst.p4.as_deref().unwrap_or("")
-                        )))
+                        )));
                     }
                 };
                 let start = inst.p1 as usize;
@@ -1394,7 +1389,7 @@ impl<'a> VmEngine<'a> {
                     CursorData::Table { .. } => {
                         return Err(SqawkError::VmError(
                             "WindowCompute: cursor is not an ephemeral table".into(),
-                        ))
+                        ));
                     }
                 }
                 Ok(ExecuteResult::Continue)
@@ -1573,7 +1568,7 @@ impl<'a> VmEngine<'a> {
                             _ => {
                                 return Err(SqawkError::InvalidSqlQuery(
                                     "ESCAPE expression must be a single character".into(),
-                                ))
+                                ));
                             }
                         }
                     }
@@ -2352,7 +2347,7 @@ impl<'a> VmEngine<'a> {
                         return Err(SqawkError::VmError(format!(
                             "Invalid comparison opcode: {:?}",
                             inst.opcode
-                        )))
+                        )));
                     }
                 };
                 Register::Integer(if truth { 1 } else { 0 })

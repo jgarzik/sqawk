@@ -194,7 +194,7 @@ Two suites carry the correctness contract:
 Build with `cargo build --release --workspace`; `--sqawk PATH` or
 `SQAWK=path` overrides the binary (default: the `sqawk` next to `tsq`). Data
 goes to temp dirs. Module map: `rng.rs` (ChaCha8, the only randomness),
-`data.rs` (tables, lossless CSV/TSV writer), `gen.rs` (`tsq gen`), `run.rs`
+`data.rs` (tables, lossless CSV/TSV writer), `datagen.rs` (`tsq gen`), `run.rs`
 (spawning sqawk: time limit, stdin, cwd/env, stdout kept / drained / closed
 early, Linux peak RSS from `/proc/<pid>/status`), `corpus.rs`, `wb.rs`
 (`tsq wb`), `clifuzz.rs` (`tsq cli`), `stress.rs` (`tsq stress`), and

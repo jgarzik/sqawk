@@ -158,8 +158,7 @@ fn test_repl_save_command() -> Result<(), Box<dyn std::error::Error>> {
     drop(temp_file); // Close the file
 
     // Commands to test the .save command
-    let test_commands =
-        "UPDATE sample SET age = 33 WHERE id = 1;\n.save\nUPDATE sample SET age = 34 WHERE id = 2;\n.save sample\n.exit\n";
+    let test_commands = "UPDATE sample SET age = 33 WHERE id = 1;\n.save\nUPDATE sample SET age = 34 WHERE id = 2;\n.save sample\n.exit\n";
 
     // Start the sqawk process with the temporary file
     let mut process = Command::new(env!("CARGO_BIN_EXE_sqawk"))

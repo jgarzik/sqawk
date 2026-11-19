@@ -3,8 +3,8 @@
 //! This file contains fundamental end-to-end tests for the sqawk application.
 
 use crate::helpers::{
-    create_custom_csv, create_temp_dir, get_people_file, run_test_case,
-    run_test_case_with_static_file, SqawkTestCase,
+    SqawkTestCase, create_custom_csv, create_temp_dir, get_people_file, run_test_case,
+    run_test_case_with_static_file,
 };
 
 use predicates::prelude::PredicateBooleanExt;

@@ -402,14 +402,14 @@ fn parser(ctx: &Ctx) -> bool {
     }
     let toks = tokens(ctx.sql);
     let u: Vec<String> = toks.iter().map(|t| upper(t)).collect();
-    let construct = u.iter().any(|t| t == "GLOB" || t == "REGEXP")
+
+    u.iter().any(|t| t == "GLOB" || t == "REGEXP")
         || u.windows(3).any(|w| w[0] == "LIMIT" && w[2] == ",")
         || u.windows(2).any(|w| w[0] == "REPLACE" && w[1] == "INTO")
         || u.windows(3)
             .any(|w| w[0] == "IN" && w[1] == "(" && w[2] == ")")
         || trim_two_args(&u)
-        || paren_depth(ctx.sql) > 47;
-    construct
+        || paren_depth(ctx.sql) > 47
 }
 
 /// `TRIM(x, y)` at the top level of the TRIM call.

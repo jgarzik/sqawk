@@ -95,10 +95,8 @@ pub(crate) fn text_to_num(s: &str) -> Num {
         return Num::Int(0);
     }
     let text = &s[start..end];
-    if !real {
-        if let Ok(i) = text.parse::<i64>() {
-            return Num::Int(i);
-        }
+    if !real && let Ok(i) = text.parse::<i64>() {
+        return Num::Int(i);
     }
     Num::Real(atof(text))
 }
@@ -204,11 +202,7 @@ pub(crate) fn bitwise(op: BitOp, a: &Register, b: &Register) -> Register {
                 ib = if ib > -64 { -ib } else { 64 };
             }
             if ib >= 64 {
-                if ia >= 0 || left {
-                    0
-                } else {
-                    -1
-                }
+                if ia >= 0 || left { 0 } else { -1 }
             } else if left {
                 ((ia as u64) << ib) as i64
             } else {

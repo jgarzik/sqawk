@@ -48,15 +48,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use rusqlite::types::Value;
 use rusqlite::Connection;
+use rusqlite::types::Value;
 
 use crate::data::Table;
-use crate::diff::oracle::{quote_ident, real_text, Oracle};
+use crate::datagen;
+use crate::diff::oracle::{Oracle, quote_ident, real_text};
 use crate::diff::render::raw_records;
-use crate::gen;
 use crate::rng::Rng;
-use crate::run::{crash_text, execute, Job};
+use crate::run::{Job, crash_text, execute};
 
 pub struct WbOptions {
     pub iterations: usize,
@@ -245,11 +245,7 @@ fn write_record(out: &mut Vec<u8>, fields: &[String], delim: u8, comments: bool,
 
 impl Model {
     fn eol(&self) -> &'static [u8] {
-        if self.crlf {
-            b"\r\n"
-        } else {
-            b"\n"
-        }
+        if self.crlf { b"\r\n" } else { b"\n" }
     }
 
     /// The bytes writeback produces for this table.
@@ -392,7 +388,7 @@ fn random_value(r: &mut Rng) -> (String, Option<Vec<u8>>) {
     let v = if roll < 0.35 {
         r.pick(CELLS).to_string()
     } else if roll < 0.55 {
-        r.pick(gen::EDGE_VALUES).to_string()
+        r.pick(datagen::EDGE_VALUES).to_string()
     } else if roll < 0.7 {
         r.range(-1000, 100_000).to_string()
     } else if roll < 0.8 {
@@ -490,7 +486,7 @@ fn build_file(
         raws.push(raw_row);
     }
     let edge_rate = if r.chance(0.5) { 0.15 } else { 0.0 };
-    gen::inject_edges(
+    datagen::inject_edges(
         std::slice::from_mut(&mut t),
         seed ^ r.range(0, i64::MAX) as u64,
         edge_rate,

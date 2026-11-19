@@ -32,7 +32,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use crate::helpers::{assert_query_on, assert_query_on_fails, create_temp_dir, run_sql, ONE};
+use crate::helpers::{ONE, assert_query_on, assert_query_on_fails, create_temp_dir, run_sql};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 

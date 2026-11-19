@@ -252,12 +252,11 @@ impl Database {
     /// Inside a transaction, the first call for a table saves a copy of it
     /// for ROLLBACK.
     pub fn get_table_mut(&mut self, name: &str) -> SqawkResult<&mut Table> {
-        if let Some(txn) = &mut self.transaction {
-            if !txn.originals.contains_key(name) {
-                if let Some(table) = self.tables.get(name) {
-                    txn.originals.insert(name.to_string(), Some(table.clone()));
-                }
-            }
+        if let Some(txn) = &mut self.transaction
+            && !txn.originals.contains_key(name)
+            && let Some(table) = self.tables.get(name)
+        {
+            txn.originals.insert(name.to_string(), Some(table.clone()));
         }
         self.tables
             .get_mut(name)

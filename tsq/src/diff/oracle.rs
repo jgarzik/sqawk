@@ -22,11 +22,11 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use rusqlite::Connection;
 use rusqlite::backup::Backup;
 use rusqlite::types::{Value, ValueRef};
-use rusqlite::Connection;
 
-use super::render::{record, ResultSet};
+use super::render::{ResultSet, record};
 use crate::data::Table;
 
 /// SQLite's `CAST(f AS TEXT)`: what sqawk prints for a real.
@@ -60,12 +60,11 @@ pub fn infer(conn: &Connection, s: &str) -> Value {
     if s.contains('.')
         && s.bytes()
             .all(|b| b.is_ascii_digit() || matches!(b, b'-' | b'+' | b'.' | b'e'))
+        && let Ok(f) = s.parse::<f64>()
+        && f.is_finite()
+        && real_text(conn, f) == s
     {
-        if let Ok(f) = s.parse::<f64>() {
-            if f.is_finite() && real_text(conn, f) == s {
-                return Value::Real(f);
-            }
-        }
+        return Value::Real(f);
     }
     Value::Text(s.to_string())
 }

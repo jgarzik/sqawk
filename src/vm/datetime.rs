@@ -495,23 +495,24 @@ fn parse_modifier(z: &[u8], p: &mut DateTime, idx: usize) -> SqawkResult<bool> {
             }
         }
         b'w' => {
-            if z.len() >= 8 && z[..8].eq_ignore_ascii_case(b"weekday ") {
-                if let Some(r) = atof_pure(&z[8..]) {
-                    if (0.0..7.0).contains(&r) && (r as i64) as f64 == r {
-                        let n = r as i64;
-                        compute_ymd_hms(p);
-                        p.valid_tz = false;
-                        p.valid_jd = false;
-                        compute_jd(p);
-                        let mut wd = ((p.ijd + 129_600_000) / 86_400_000) % 7;
-                        if wd > n {
-                            wd -= 7;
-                        }
-                        p.ijd += (n - wd) * 86_400_000;
-                        clear_ymd_hms_tz(p);
-                        rc = false;
-                    }
+            if z.len() >= 8
+                && z[..8].eq_ignore_ascii_case(b"weekday ")
+                && let Some(r) = atof_pure(&z[8..])
+                && (0.0..7.0).contains(&r)
+                && (r as i64) as f64 == r
+            {
+                let n = r as i64;
+                compute_ymd_hms(p);
+                p.valid_tz = false;
+                p.valid_jd = false;
+                compute_jd(p);
+                let mut wd = ((p.ijd + 129_600_000) / 86_400_000) % 7;
+                if wd > n {
+                    wd -= 7;
                 }
+                p.ijd += (n - wd) * 86_400_000;
+                clear_ymd_hms_tz(p);
+                rc = false;
             }
         }
         b's' => {

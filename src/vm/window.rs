@@ -15,8 +15,8 @@ use std::collections::VecDeque;
 
 use super::agg::AggAccumulator;
 use super::arith::text_of;
+use super::bytecode::{AGG_GROUP_CONCAT, AGG_MAX, AGG_MIN, AGG_TYPE_MASK, Register};
 use super::bytecode::{FrameBound, WindowDef, WindowFrame, WindowFunc, WindowFuncKind};
-use super::bytecode::{Register, AGG_GROUP_CONCAT, AGG_MAX, AGG_MIN, AGG_TYPE_MASK};
 use super::engine::{compare_rows, compare_values};
 use crate::error::{SqawkError, SqawkResult};
 use crate::table::Value;
@@ -161,7 +161,7 @@ fn evaluate(part: &[Vec<Value>], f: &WindowFunc, p: &Peers) -> SqawkResult<Vec<V
                 _ => {
                     return Err(SqawkError::InvalidSqlQuery(
                         "argument of ntile must be a positive integer".into(),
-                    ))
+                    ));
                 }
             };
             // The first `n % buckets` buckets hold one row more.
@@ -217,7 +217,7 @@ fn evaluate(part: &[Vec<Value>], f: &WindowFunc, p: &Peers) -> SqawkResult<Vec<V
                         _ => {
                             return Err(SqawkError::InvalidSqlQuery(
                                 "second argument to nth_value must be a positive integer".into(),
-                            ))
+                            ));
                         }
                     },
                 };
@@ -499,15 +499,15 @@ fn aggregate(
     let mut reg_end = offset(fr.end);
     // ROWS BETWEEN a FOLLOWING AND b FOLLOWING with b < a (or a PRECEDING
     // AND b PRECEDING with b > a): every frame is empty.
-    if fr.rows {
-        if let (Some(s), Some(e)) = (reg_start, reg_end) {
-            let empty = (is_following(fr.start) && is_following(fr.end) && e < s)
-                || (is_preceding(fr.start) && is_preceding(fr.end) && e > s);
-            if empty {
-                let v = FrameAcc::new(func_type, !unbounded_start).value()?;
-                out.fill(v);
-                return Ok(out);
-            }
+    if fr.rows
+        && let (Some(s), Some(e)) = (reg_start, reg_end)
+    {
+        let empty = (is_following(fr.start) && is_following(fr.end) && e < s)
+            || (is_preceding(fr.start) && is_preceding(fr.end) && e > s);
+        if empty {
+            let v = FrameAcc::new(func_type, !unbounded_start).value()?;
+            out.fill(v);
+            return Ok(out);
         }
     }
     if is_following(fr.start) && is_following(fr.end) {

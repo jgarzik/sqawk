@@ -50,10 +50,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+use crate::datagen;
 use crate::diff::tables;
-use crate::gen;
 use crate::rng::Rng;
-use crate::run::{crash_text, execute, Finished, Job, StdoutMode};
+use crate::run::{Finished, Job, StdoutMode, crash_text, execute};
 
 pub struct CliOptions {
     pub iterations: usize,
@@ -357,7 +357,7 @@ struct Case {
 /// The fixed data set, copied fresh into each iteration's directory.
 fn write_data(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir)?;
-    gen::write_csv_tables(dir, &tables::edge())?;
+    datagen::write_csv_tables(dir, &tables::edge())?;
     fs::write(dir.join("people.tsv"), "id\tname\n1\tann\n2\tbob\n")?;
     fs::write(dir.join("nohdr.txt"), "1,x\n2,y\n")?;
     fs::write(dir.join("cmt.csv"), "#c\nid,v\n1,a\n#x\n2,b\n")?;
@@ -931,7 +931,9 @@ fn build(r: &mut Rng, data: &Path, scratch: &Path) -> Result<Case> {
             2 => {
                 expect.writes = true;
                 args.push(os("-w"));
-                format!("DELETE FROM \"{table}\" WHERE rowid = 1; INSERT INTO \"{table}\" SELECT * FROM \"{table}\" LIMIT 1")
+                format!(
+                    "DELETE FROM \"{table}\" WHERE rowid = 1; INSERT INTO \"{table}\" SELECT * FROM \"{table}\" LIMIT 1"
+                )
             }
             _ => {
                 expect.writes = true;

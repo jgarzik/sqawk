@@ -264,13 +264,11 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
             // Print the result table in delimiter-separated format. Once the
             // reader of a pipe has gone away (`sqawk ... | head`), stop
             // printing but keep going: later statements and --write still run.
-            if stdout_open {
-                if let Err(e) = table.print_to_stdout(header) {
-                    if e.kind() != std::io::ErrorKind::BrokenPipe {
-                        return Err(SqawkError::write("standard output", e));
-                    }
-                    stdout_open = false;
+            if stdout_open && let Err(e) = table.print_to_stdout(header) {
+                if e.kind() != std::io::ErrorKind::BrokenPipe {
+                    return Err(SqawkError::write("standard output", e));
                 }
+                stdout_open = false;
             }
         }
         if result.is_empty() && config.verbose() {

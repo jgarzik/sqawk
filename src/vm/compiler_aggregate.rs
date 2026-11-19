@@ -14,11 +14,11 @@
 use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments, OrderByExpr, Select};
 
 use super::ast_compat::{func_args, group_by_exprs};
-use super::bytecode::{OpCode, AGG_DISTINCT, AGG_SEP, AGG_TYPE_MASK};
+use super::bytecode::{AGG_DISTINCT, AGG_SEP, AGG_TYPE_MASK, OpCode};
 use super::compiler::{NameCtx, OutCol, SqlCompiler};
-use super::compiler_from::{expr_children, reads_only_outer, FromPlan};
-use super::compiler_select::{term_position, Dest, OutputStage};
-use super::compiler_window::{window_call_children, WindowStage};
+use super::compiler_from::{FromPlan, expr_children, reads_only_outer};
+use super::compiler_select::{Dest, OutputStage, term_position};
+use super::compiler_window::{WindowStage, window_call_children};
 use crate::aggregate::AggregateFunction;
 use crate::error::{SqawkError, SqawkResult};
 
@@ -75,13 +75,13 @@ impl<'a> SqlCompiler<'a> {
             return;
         }
         // A window over grouped rows: `SUM(COUNT(*)) OVER ()`.
-        if let Expr::Function(f) = expr {
-            if f.over.is_some() {
-                for child in window_call_children(f) {
-                    Self::collect_aggregates(child, out);
-                }
-                return;
+        if let Expr::Function(f) = expr
+            && f.over.is_some()
+        {
+            for child in window_call_children(f) {
+                Self::collect_aggregates(child, out);
             }
+            return;
         }
         if let Some(children) = expr_children(expr) {
             for child in children {
@@ -115,7 +115,7 @@ impl<'a> SqlCompiler<'a> {
         match &func.args {
             FunctionArguments::Subquery(_) => return unsupported("A subquery argument"),
             FunctionArguments::List(list) if !list.clauses.is_empty() => {
-                return unsupported("ORDER BY / LIMIT inside the argument list")
+                return unsupported("ORDER BY / LIMIT inside the argument list");
             }
             _ => {}
         }
@@ -130,7 +130,7 @@ impl<'a> SqlCompiler<'a> {
                     return Err(SqawkError::InvalidSqlQuery(format!(
                         "Unsupported aggregate argument: {}",
                         call
-                    )))
+                    )));
                 }
             }
         }

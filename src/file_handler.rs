@@ -13,7 +13,7 @@ use crate::config::AppConfig;
 use crate::csv_handler::{self, ReadOptions};
 use crate::database::Database;
 use crate::error::{SqawkError, SqawkResult};
-use crate::table::{delimiter_byte, ColumnDefinition, FileLayout, Table};
+use crate::table::{ColumnDefinition, FileLayout, Table, delimiter_byte};
 
 /// File operand that names standard input rather than a path on disk.
 pub const STDIN_SPEC: &str = "-";
@@ -304,10 +304,11 @@ impl FileHandler {
 
         // For tables created with CREATE TABLE, the file may not exist yet
         // Make sure parent directories exist
-        if let Some(parent) = file_path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(|e| SqawkError::write(file_path, e))?;
-            }
+        if let Some(parent) = file_path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| SqawkError::write(file_path, e))?;
         }
 
         // The rename in save_table would replace even a read-only file.
@@ -381,7 +382,7 @@ pub fn load_location(
             return Err(SqawkError::open(
                 given,
                 std::io::Error::new(std::io::ErrorKind::IsADirectory, "Is a directory"),
-            ))
+            ));
         }
         Ok(_) => true,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
@@ -421,10 +422,10 @@ pub fn load_location(
 /// equal.
 fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
     let abs = std::path::absolute(path)?;
-    if let (Some(parent), Some(name)) = (abs.parent(), abs.file_name()) {
-        if let Ok(real_parent) = std::fs::canonicalize(parent) {
-            return Ok(real_parent.join(name));
-        }
+    if let (Some(parent), Some(name)) = (abs.parent(), abs.file_name())
+        && let Ok(real_parent) = std::fs::canonicalize(parent)
+    {
+        return Ok(real_parent.join(name));
     }
     Ok(abs)
 }

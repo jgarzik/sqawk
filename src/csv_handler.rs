@@ -159,7 +159,7 @@ pub fn read_table(
                                 record.len(),
                                 cols.len()
                             ),
-                        })
+                        });
                     }
                 }
             } else {
@@ -190,14 +190,14 @@ pub fn read_table(
 
     // csv-core takes a quote that is never closed as running to the end of
     // the input, so the rest of the file would load as one field.
-    if let Some((start, end)) = last {
-        if let Some(quote) = unclosed_quote(&body[start..end], opts.delimiter) {
-            return Err(SqawkError::CsvParseError {
-                file: source.to_string(),
-                line: lines.line_at(start + quote),
-                error: "unterminated quoted field".to_string(),
-            });
-        }
+    if let Some((start, end)) = last
+        && let Some(quote) = unclosed_quote(&body[start..end], opts.delimiter)
+    {
+        return Err(SqawkError::CsvParseError {
+            file: source.to_string(),
+            line: lines.line_at(start + quote),
+            error: "unterminated quoted field".to_string(),
+        });
     }
 
     let columns = match columns {
@@ -522,7 +522,7 @@ pub fn save_table(table: &Table, file_path: &Path) -> SqawkResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_table, unclosed_quote, ReadOptions};
+    use super::{ReadOptions, read_table, unclosed_quote};
     use crate::error::SqawkError;
     use crate::table::Table;
 

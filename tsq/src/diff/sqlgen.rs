@@ -30,7 +30,7 @@
 
 use std::rc::Rc;
 
-use super::ast::{expr, list, nest, opt, seq, tok, Node};
+use super::ast::{Node, expr, list, nest, opt, seq, tok};
 use super::schema::{Col, Kind, Props, Rel, Schema};
 use crate::rng::Rng;
 
@@ -1139,32 +1139,32 @@ impl<'s> Gen<'s> {
             return (mk('t', vec![nest(seq(parts))]), p);
         }
         // A key lookup returns at most one row.
-        if let Some(k) = src.rel.key {
-            if self.chance(0.2) {
-                let cs: Vec<&Col> = src.rel.cols.iter().filter(|c| c.props.is_num()).collect();
-                if !cs.is_empty() {
-                    let c = cs[self.r.below(cs.len())].name.clone();
-                    let (o, _) = self.expr(sc, W::I, 0);
-                    let kname = &src.rel.cols[k].name;
-                    let props = if w == W::I { Props::INT } else { Props::REAL };
-                    let col_props = src.rel.cols.iter().find(|x| x.name == c).unwrap().props;
-                    if w == W::R || col_props.kind == Kind::Int {
-                        return (
-                            mk(
-                                kind_char(&props),
-                                vec![nest(seq(vec![
-                                    tok(format!(
-                                        "(SELECT {a}.{c} FROM {} {a} WHERE {a}.{kname} = ",
-                                        src.rel.name,
-                                        a = src.alias
-                                    )),
-                                    o,
-                                    tok(")"),
-                                ]))],
-                            ),
-                            props,
-                        );
-                    }
+        if let Some(k) = src.rel.key
+            && self.chance(0.2)
+        {
+            let cs: Vec<&Col> = src.rel.cols.iter().filter(|c| c.props.is_num()).collect();
+            if !cs.is_empty() {
+                let c = cs[self.r.below(cs.len())].name.clone();
+                let (o, _) = self.expr(sc, W::I, 0);
+                let kname = &src.rel.cols[k].name;
+                let props = if w == W::I { Props::INT } else { Props::REAL };
+                let col_props = src.rel.cols.iter().find(|x| x.name == c).unwrap().props;
+                if w == W::R || col_props.kind == Kind::Int {
+                    return (
+                        mk(
+                            kind_char(&props),
+                            vec![nest(seq(vec![
+                                tok(format!(
+                                    "(SELECT {a}.{c} FROM {} {a} WHERE {a}.{kname} = ",
+                                    src.rel.name,
+                                    a = src.alias
+                                )),
+                                o,
+                                tok(")"),
+                            ]))],
+                        ),
+                        props,
+                    );
                 }
             }
         }
@@ -1290,11 +1290,11 @@ impl<'s> Gen<'s> {
                     ));
                 }
             }
-            if l.rel.name == right.rel.name {
-                if let Some(k) = l.rel.key {
-                    let n = &l.rel.cols[k].name;
-                    fk.push(format!("{}.{n} = {}.{n}", l.alias, right.alias));
-                }
+            if l.rel.name == right.rel.name
+                && let Some(k) = l.rel.key
+            {
+                let n = &l.rel.cols[k].name;
+                fk.push(format!("{}.{n} = {}.{n}", l.alias, right.alias));
             }
         }
         if !fk.is_empty() && (self.cfg.large || self.chance(0.7)) {
@@ -1861,10 +1861,11 @@ impl<'s> Gen<'s> {
                     items.push((expr('m', tok(c)), p));
                 }
             }
-            if top && self.chance(0.25) {
-                if let Some(w) = self.window_item(&sc, &tabs) {
-                    items.push(w);
-                }
+            if top
+                && self.chance(0.25)
+                && let Some(w) = self.window_item(&sc, &tabs)
+            {
+                items.push(w);
             }
         }
         let distinct = self.chance(0.18);

@@ -422,7 +422,7 @@ fn test_create_table_with_location_multiple_operations() -> Result<(), Box<dyn s
 // ---------------------------------------------------------------------------
 
 mod query_into_table {
-    use crate::helpers::{assert_query_on, assert_query_on_fails, ONE};
+    use crate::helpers::{ONE, assert_query_on, assert_query_on_fails};
 
     type R = Result<(), Box<dyn std::error::Error>>;
 

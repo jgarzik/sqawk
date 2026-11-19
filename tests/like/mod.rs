@@ -179,7 +179,7 @@ fn test_like_special_chars() -> Result<(), Box<dyn std::error::Error>> {
 // ---------------------------------------------------------------------------
 
 mod sqlite_semantics {
-    use crate::helpers::{assert_query_on, assert_query_on_fails, ONE};
+    use crate::helpers::{ONE, assert_query_on, assert_query_on_fails};
 
     type R = Result<(), Box<dyn std::error::Error>>;
 

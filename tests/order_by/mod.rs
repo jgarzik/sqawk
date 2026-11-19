@@ -153,7 +153,7 @@ fn test_order_by_with_projection() -> Result<(), Box<dyn std::error::Error>> {
 // ---------------------------------------------------------------------------
 
 mod nulls_placement {
-    use crate::helpers::{assert_query_on, ONE};
+    use crate::helpers::{ONE, assert_query_on};
 
     type R = Result<(), Box<dyn std::error::Error>>;
 
