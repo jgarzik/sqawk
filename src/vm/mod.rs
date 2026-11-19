@@ -11,7 +11,7 @@
 ///
 /// Reported by the REPL's `.version`, since which SQL dialect version is in
 /// use is the single most useful thing to know when a statement is rejected.
-pub const SQLPARSER_VERSION: &str = "0.62";
+pub const SQLPARSER_VERSION: &str = "0.64";
 
 mod agg;
 pub(crate) mod arith;
@@ -495,4 +495,23 @@ fn apply_modifications(
     }
 
     Ok(AppliedModifications { affected_rows })
+}
+
+#[cfg(test)]
+mod version_tests {
+    /// `.version` reports the sqlparser actually built in: the major and
+    /// minor version in Cargo.lock.
+    #[test]
+    fn sqlparser_version_matches_cargo_lock() {
+        let lock = include_str!("../../Cargo.lock");
+        let at = lock
+            .find("name = \"sqlparser\"")
+            .expect("sqlparser in Cargo.lock");
+        let key = "version = \"";
+        let rest = &lock[at..];
+        let rest = &rest[rest.find(key).unwrap() + key.len()..];
+        let version = &rest[..rest.find('"').unwrap()];
+        let minor: Vec<&str> = version.split('.').take(2).collect();
+        assert_eq!(super::SQLPARSER_VERSION, minor.join("."));
+    }
 }
