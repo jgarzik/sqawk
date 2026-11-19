@@ -184,8 +184,8 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
     .with_format(args.format)
     .with_null_text(args.null.clone());
 
-    // Debugging output (-v); its format is not stable.
-    if config.verbose() {
+    // -vv: the parsed arguments.
+    if config.trace() {
         diag!("Running in verbose mode");
         diag!("Arguments: {args:?}");
     }

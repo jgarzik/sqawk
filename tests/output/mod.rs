@@ -591,6 +591,10 @@ fn verbose_levels() -> Result<(), Box<dyn std::error::Error>> {
         assert!(v.contains(want), "-v lacks {want:?}:\n{v}");
     }
     assert!(!v.contains("Executing ["), "-v shows the trace:\n{v}");
+    assert!(
+        !v.contains("Arguments:") && !v.contains("In FileHandler"),
+        "-v shows internals:\n{v}"
+    );
     let vv = run("-vv")?;
     assert!(vv.contains("Executing ["), "-vv lacks the trace:\n{vv}");
     assert!(

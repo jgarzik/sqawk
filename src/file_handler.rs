@@ -439,14 +439,14 @@ impl FileHandler {
     pub fn save_table(&self, db: &Database, table_name: &str) -> SqawkResult<()> {
         let table = db.get_table(table_name)?;
 
-        if self.config.verbose() {
+        if self.config.trace() {
             diag!("In FileHandler::save_table for table '{}'", table_name);
         }
 
         // Check if the table has an associated file path
         let file_path = match table.file_path() {
             Some(path) => {
-                if self.config.verbose() {
+                if self.config.trace() {
                     diag!(
                         "Table '{}' has file_path '{}'",
                         table_name,
@@ -457,7 +457,7 @@ impl FileHandler {
             }
             None => {
                 // Log debugging information
-                if self.config.verbose() {
+                if self.config.trace() {
                     diag!("Table '{}' has NO file_path", table_name);
                     diag!(
                         "  Table details - Name: {}, Columns: {}, Delimiter: '{}'",
