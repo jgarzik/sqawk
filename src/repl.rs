@@ -1412,6 +1412,7 @@ mod tests {
                 "Depts".to_string(),
                 "dept".to_string(),
                 "Descr".to_string(),
+                "degrees".to_string(),
                 "delete".to_string(),
                 "dense_rank".to_string(),
                 "desc".to_string()

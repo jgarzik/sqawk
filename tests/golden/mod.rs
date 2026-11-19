@@ -2873,3 +2873,47 @@ fn ceil_floor_text_arguments() -> Result<(), Box<dyn std::error::Error>> {
         "a,b,c,d,e,f\n,,4.0,7,integer,-1.0",
     )
 }
+
+/// SQLite 3.45's math functions (expected output from sqlite3 itself): a
+/// non-number argument, or a result out of the domain (NaN), is NULL;
+/// LOG(x) is base 10 and LOG(b, x) base b; TRUNC returns an integer
+/// unchanged; MOD is a real remainder.
+#[test]
+fn math_functions_match_sqlite() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "SELECT sqrt(16) AS c0, sqrt(2) AS c1, sqrt(-1) AS c2, sqrt('9') AS c3, sqrt('x') AS c4, sqrt(NULL) AS c5, pow(2,10) AS c6, power(2,0.5) AS c7",
+        "c0,c1,c2,c3,c4,c5,c6,c7\n4.0,1.4142135623731,,3.0,,,1024.0,1.4142135623731",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT pow(0,-1) AS c0, pow(-8,1.0/3) AS c1, pow('2',3) AS c2, exp(1) AS c3, exp(1000) AS c4, ln(1) AS c5, ln(0) AS c6, ln(-1) AS c7",
+        "c0,c1,c2,c3,c4,c5,c6,c7\nInf,,8.0,2.71828182845905,Inf,0.0,,",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT log(100) AS c0, log(2,8) AS c1, log(1,5) AS c2, log(0.5,4) AS c3, log(2,'8x') AS c4, log('x',8) AS c5, log(2,NULL) AS c6, log10(1000) AS c7",
+        "c0,c1,c2,c3,c4,c5,c6,c7\n2.0,3.0,,,3.0,,,3.0",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT log2(1024) AS c0, mod(7,3) AS c1, mod(-7,3) AS c2, mod(7.5,2) AS c3, mod(1,0) AS c4, mod('9',4) AS c5, mod(9,NULL) AS c6, pi() AS c7",
+        "c0,c1,c2,c3,c4,c5,c6,c7\n10.0,1.0,-1.0,1.5,,1.0,,3.14159265358979",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT trunc(2.7) AS c0, trunc(-2.7) AS c1, trunc(5) AS c2, typeof(trunc(5)) AS c3, trunc(-0.5) AS c4, trunc('x') AS c5, sin(0) AS c6, cos(0) AS c7",
+        "c0,c1,c2,c3,c4,c5,c6,c7\n2.0,-2.0,5,integer,0.0,,0.0,1.0",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT tan(1) AS c0, asin(2) AS c1, acos(1) AS c2, atan(1) AS c3, atan2(1,1) AS c4, atan2(0,-1) AS c5, sinh(1) AS c6, cosh(1) AS c7",
+        "c0,c1,c2,c3,c4,c5,c6,c7\n1.5574077246549,,0.0,0.785398163397448,0.785398163397448,3.14159265358979,1.1752011936438,1.54308063481524",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT tanh(1) AS c0, asinh(1) AS c1, acosh(1) AS c2, acosh(0.5) AS c3, atanh(0.5) AS c4, atanh(1) AS c5, degrees(pi()) AS c6, radians(180) AS c7",
+        "c0,c1,c2,c3,c4,c5,c6,c7\n0.761594155955765,0.881373587019543,0.0,,0.549306144334055,Inf,180.0,3.14159265358979",
+    )?;
+    Ok(())
+}

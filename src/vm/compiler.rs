@@ -453,7 +453,7 @@ fn declared_column_name(ctx: &NameCtx<'_>, qualifier: Option<&str>, name: &str) 
 /// sqlparser lowers `CEIL`/`FLOOR` to [`sqlparser::ast::Expr::Ceil`] and
 /// [`sqlparser::ast::Expr::Floor`] rather than `Expr::Function`, carrying any
 /// second argument in `field` instead of an argument list. They therefore miss
-/// [`check_math_func_arity`] entirely, and `CEIL(1.2, 3)` used to return 2
+/// the function table's arity check (`func::check_arity`), and `CEIL(1.2, 3)` used to return 2
 /// while the `CEILING(1.2, 3)` spelling of the same call was rejected.
 fn check_ceil_floor_field(
     func_name: &str,

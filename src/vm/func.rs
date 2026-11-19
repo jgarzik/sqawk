@@ -83,6 +83,35 @@ static FUNCS: &[FuncDef] = &[
     f!("CEILING", 1, 1, ceil),
     f!("FLOOR", 1, 1, floor),
     f!("SIGN", 1, 1, sign),
+    f!("TRUNC", 1, 1, trunc),
+    // SQLite's math functions (SQLITE_ENABLE_MATH_FUNCTIONS)
+    f!("SQRT", 1, 1, |a| math1(a, f64::sqrt)),
+    f!("EXP", 1, 1, |a| math1(a, f64::exp)),
+    f!("LN", 1, 1, |a| log_fn(a, f64::ln)),
+    f!("LOG", 1, 2, |a| log_fn(a, f64::log10)),
+    f!("LOG10", 1, 1, |a| log_fn(a, f64::log10)),
+    f!("LOG2", 1, 1, |a| log_fn(a, f64::log2)),
+    f!("POW", 2, 2, |a| math2(a, f64::powf)),
+    f!("POWER", 2, 2, |a| math2(a, f64::powf)),
+    f!("MOD", 2, 2, |a| math2(a, |x, y| x % y)),
+    f!("ATAN2", 2, 2, |a| math2(a, f64::atan2)),
+    f!("PI", 0, 0, |_| Ok(Register::Float(std::f64::consts::PI))),
+    f!("SIN", 1, 1, |a| math1(a, f64::sin)),
+    f!("COS", 1, 1, |a| math1(a, f64::cos)),
+    f!("TAN", 1, 1, |a| math1(a, f64::tan)),
+    f!("ASIN", 1, 1, |a| math1(a, f64::asin)),
+    f!("ACOS", 1, 1, |a| math1(a, f64::acos)),
+    f!("ATAN", 1, 1, |a| math1(a, f64::atan)),
+    f!("SINH", 1, 1, |a| math1(a, f64::sinh)),
+    f!("COSH", 1, 1, |a| math1(a, f64::cosh)),
+    f!("TANH", 1, 1, |a| math1(a, f64::tanh)),
+    f!("ASINH", 1, 1, |a| math1(a, f64::asinh)),
+    f!("ACOSH", 1, 1, |a| math1(a, f64::acosh)),
+    f!("ATANH", 1, 1, |a| math1(a, f64::atanh)),
+    f!("DEGREES", 1, 1, |a| math1(a, |x| x
+        * (180.0 / std::f64::consts::PI))),
+    f!("RADIANS", 1, 1, |a| math1(a, |x| x
+        * (std::f64::consts::PI / 180.0))),
     // Multi-argument MIN / MAX (one argument is the aggregate).
     f!("MIN", 2, VARIADIC, min_scalar),
     f!("MAX", 2, VARIADIC, max_scalar),
@@ -608,6 +637,68 @@ fn ceil(a: &[Register]) -> SqawkResult<Register> {
 
 fn floor(a: &[Register]) -> SqawkResult<Register> {
     ceil_floor(a, false)
+}
+
+/// TRUNC(x): toward zero, SQLite's `ceilingFunc` with `trunc`.
+fn trunc(a: &[Register]) -> SqawkResult<Register> {
+    Ok(match math_num(&a[0]) {
+        None => Register::Null,
+        Some(Num::Int(i)) => Register::Integer(i),
+        Some(Num::Real(f)) => Register::Float(f.trunc()),
+    })
+}
+
+/// A math function's real result; NaN (out of the domain) is NULL, as
+/// SQLite stores a NaN result.
+fn real_result(x: f64) -> Register {
+    if x.is_nan() {
+        Register::Null
+    } else {
+        Register::Float(x)
+    }
+}
+
+/// A one-argument math function (SQLite's `math1Func`): NULL unless the
+/// argument is a number (see [`math_num`]).
+fn math1(a: &[Register], f: fn(f64) -> f64) -> SqawkResult<Register> {
+    Ok(match math_num(&a[0]) {
+        Some(x) => real_result(f(x.as_f64())),
+        None => Register::Null,
+    })
+}
+
+/// A two-argument math function (SQLite's `math2Func`).
+fn math2(a: &[Register], f: fn(f64, f64) -> f64) -> SqawkResult<Register> {
+    Ok(match (math_num(&a[0]), math_num(&a[1])) {
+        (Some(x), Some(y)) => real_result(f(x.as_f64(), y.as_f64())),
+        _ => Register::Null,
+    })
+}
+
+/// LN, LOG10, LOG2 and LOG (SQLite's `logFunc`): NULL for a non-number or
+/// an argument <= 0. `LOG(x)` is base 10 (`one`); `LOG(b, x)` is
+/// `ln(x) / ln(b)`, NULL when `ln(b) <= 0`. As in SQLite, the `x` of the
+/// two-argument form is read like arithmetic reads it (`'8x'` is 8, NULL
+/// is 0) rather than checked for being a number.
+fn log_fn(a: &[Register], one: fn(f64) -> f64) -> SqawkResult<Register> {
+    let Some(x) = math_num(&a[0]).map(Num::as_f64) else {
+        return Ok(Register::Null);
+    };
+    if x <= 0.0 {
+        return Ok(Register::Null);
+    }
+    let Some(arg) = a.get(1) else {
+        return Ok(real_result(one(x)));
+    };
+    let b = x.ln();
+    if b <= 0.0 {
+        return Ok(Register::Null);
+    }
+    let x = to_num(arg).map_or(0.0, Num::as_f64);
+    if x <= 0.0 {
+        return Ok(Register::Null);
+    }
+    Ok(real_result(x.ln() / b))
 }
 
 /// SIGN(x): -1, 0 or 1; NULL for NULL and for text that is not a number.

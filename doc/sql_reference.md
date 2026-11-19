@@ -224,6 +224,16 @@ blob too big". The length is checked before anything is allocated.
 | `CEIL(n)`, `CEILING(n)` | Round up |
 | `FLOOR(n)` | Round down |
 | `SIGN(n)` | -1, 0 or 1; NULL for text that is not a number |
+| `TRUNC(n)` | Round toward zero |
+| `SQRT(n)`, `EXP(n)` | Square root, e to the power n |
+| `LN(n)`, `LOG10(n)`, `LOG2(n)` | Natural, base-10, base-2 logarithm |
+| `LOG(n)`, `LOG(b, n)` | Base-10 logarithm (as in SQLite), or base `b` |
+| `POW(x, y)`, `POWER(x, y)` | x to the power y |
+| `MOD(x, y)` | Remainder of x / y, as a real (`MOD(7, 3)` is `1.0`) |
+| `PI()` | 3.14159265358979 |
+| `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, `ATAN2(y, x)` | Trigonometry, in radians |
+| `SINH`, `COSH`, `TANH`, `ASINH`, `ACOSH`, `ATANH` | Hyperbolic functions |
+| `DEGREES(n)`, `RADIANS(n)` | Radians to degrees and back |
 | `MIN(a, b, ...)`, `MAX(a, b, ...)` | Least / greatest argument; NULL if any is NULL |
 
 `ROUND(3.14159, 2)` is `3.14`. Halves round away from zero, judged on the
@@ -242,6 +252,15 @@ the integer 7, `' 4.5 '` the real 4.5), and any other text is NULL. With one arg
 
 `ROUND` returns a real, so a whole result prints with `.0` (see Real output):
 `ROUND(2.0, 2)` is `2.0`.
+
+The functions from `TRUNC` down are SQLite 3.45's math functions, with its
+rules: an argument that is NULL or not a number (text counts only when all
+of it is one) gives NULL, and so does a result outside the function's
+domain (`SQRT(-1)`, `LN(0)`, `ACOS(2)`, `MOD(1, 0)`); an overflow is `Inf`
+(`EXP(1000)`). `LOG(b, n)` is NULL when `b` <= 1 or `n` <= 0, and its `n`
+is read the way arithmetic reads text (`LOG(2, '8x')` is `3.0`), as in
+SQLite. Every result is a real except `TRUNC` of an integer, which is that
+integer.
 
 ### Arithmetic
 

@@ -570,7 +570,7 @@ impl<'s> Gen<'s> {
 
     fn real_func(&mut self, sc: &Scope, d: u32) -> Node {
         let dates = self.date_cols(sc);
-        match self.range(0, 10) {
+        match self.range(0, 12) {
             0 => {
                 let (x, _) = self.expr(sc, W::R, d - 1);
                 let n = self.range(0, 3);
@@ -619,6 +619,25 @@ impl<'s> Gen<'s> {
                 let (x, _) = self.expr(sc, W::R, d - 1);
                 mk('r', vec![tok("ROUND("), x, tok(")")])
             }
+            // SQLite's math functions; out of the domain is NULL in both.
+            9 => {
+                let f = self.pick(&[
+                    "SQRT", "EXP", "LN", "LOG", "LOG10", "LOG2", "SIN", "COS", "TAN", "ASIN",
+                    "ACOS", "ATAN", "SINH", "COSH", "TANH", "ASINH", "ACOSH", "ATANH", "DEGREES",
+                    "RADIANS", "TRUNC",
+                ]);
+                let w = self.pick(&[W::R, W::I]);
+                let (x, _) = self.expr(sc, w, d - 1);
+                mk('r', vec![tok(format!("{f}(")), x, tok(")")])
+            }
+            10 => {
+                let f = self.pick(&["POW", "POWER", "MOD", "ATAN2", "LOG"]);
+                let (x, _) = self.expr(sc, W::R, d - 1);
+                let w = self.pick(&[W::R, W::I]);
+                let (y, _) = self.expr(sc, w, d - 1);
+                mk('r', vec![tok(format!("{f}(")), x, tok(", "), y, tok(")")])
+            }
+            11 => mk('r', vec![tok("(PI() * 2)")]),
             _ => {
                 let (x, _) = self.expr(sc, W::R, d - 1);
                 let (y, _) = self.expr(sc, W::R, d - 1);
