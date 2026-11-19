@@ -99,7 +99,7 @@ jobs:
           persist-credentials: false
       # Read from the rust-version declared in Cargo.toml. That field claimed
       # 1.70 for a long time while the dependency tree had moved well past it,
-      # because nothing ever checked. Not pinned as @1.88: Dependabot would
+      # because nothing ever checked. Not pinned as @1.95: Dependabot would
       # propose bumping that ref to toolchains that do not exist yet.
       - name: Read rust-version
         id: msrv
@@ -110,6 +110,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Binaries only: rust-version is a promise to people building sqawk, and
       # dev-dependencies are not part of it. --workspace includes tsq/, which
-      # declares the same rust-version.
+      # inherits the same rust-version.
       - name: Check build at MSRV
         run: cargo check --locked --workspace

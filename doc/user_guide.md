@@ -100,7 +100,7 @@ To build from source:
 ### Installation Notes
 
 - Sqawk is designed to work on Linux, macOS, and Windows systems where Rust is supported
-- Building requires Rust 1.88 or newer
+- Building requires Rust 1.95 or newer
 - The binaries are self-contained with no runtime dependencies
 - Installing the crate provides the `sqawk` command. The source tree also
   contains `tsq`, a development-only generator of deterministic multi-table

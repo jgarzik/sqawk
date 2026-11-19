@@ -34,7 +34,7 @@ file's size, plus the result set (see
 cargo install --locked sqawk
 ```
 
-This installs the `sqawk` binary. Requires Rust 1.88 or newer. `--locked`
+This installs the `sqawk` binary. Requires Rust 1.95 or newer. `--locked`
 builds with the dependency versions sqawk was tested with.
 
 ## Quick Examples

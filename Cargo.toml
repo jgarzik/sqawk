@@ -62,9 +62,8 @@ edition = "2024"
 # Minimum supported Rust version.
 #
 # Verified by building with that toolchain, not inferred. The binding
-# constraints are transitive: `home` (via rustyline) and `psm` (via
-# sqlparser -> recursive -> stacker) both require 1.88.
-rust-version = "1.88"
+# constraint is rustyline 19, which uses `cfg_select!` (stable in 1.95).
+rust-version = "1.95"
 authors = ["Jeff Garzik <jgarzik@pobox.com>"]
 license = "MIT"
 repository = "https://github.com/jgarzik/sqawk"
