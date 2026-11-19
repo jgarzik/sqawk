@@ -247,16 +247,13 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
     // Process each SQL statement in the order specified on the command line
     // This allows operations like: UPDATE -> DELETE -> SELECT to see the effects
     for sql in &script {
-        // Execute the SQL statement against the in-memory tables
-        // The result may be a table (for SELECT) or None (for UPDATE, DELETE, INSERT)
-        let result = sql_executor.execute(sql)?;
-
-        // Output results to stdout (for SELECT queries).
-        //
-        // One result set per statement, each with its own header. They used to
-        // share a single buffer and schema, so `SELECT a; SELECT b` printed
-        // every row under the last statement's header.
-        for table in &result {
+        // Execute the SQL against the in-memory tables. Each statement's
+        // result set (SELECT; none for UPDATE, DELETE, INSERT) is printed as
+        // soon as that statement finishes, each with its own header, so the
+        // output of earlier statements survives a later error.
+        let mut printed = 0;
+        sql_executor.execute(sql, &mut |table| {
+            printed += 1;
             if config.verbose() {
                 let row_count = table.row_count();
                 diag!("Query returned {row_count} rows");
@@ -270,8 +267,9 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
                 }
                 stdout_open = false;
             }
-        }
-        if result.is_empty() && config.verbose() {
+            Ok(())
+        })?;
+        if printed == 0 && config.verbose() {
             diag!("Query executed successfully (no results to display)");
         }
     }

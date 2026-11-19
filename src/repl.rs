@@ -760,14 +760,14 @@ impl Repl {
             None
         };
 
-        let result = self.executor.execute(sql)?;
-
         // Every statement's result set, each with its own header, printed
-        // exactly as the command line prints it.
+        // exactly as the command line prints it: as soon as the statement
+        // finishes, so a later error on the line keeps the earlier output.
         let header = !self.config.no_output_header();
-        for table in &result {
+        self.executor.execute(sql, &mut |table| {
             let _ = table.print_to_stdout(header);
-        }
+            Ok(())
+        })?;
 
         // The change count is reported independently of whether the line also
         // produced rows: a trailing DML on `SELECT ...; DELETE ...` reports

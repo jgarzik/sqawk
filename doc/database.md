@@ -367,8 +367,11 @@ Sqawk supports two primary output modes:
    This is independent of the delimiter a source table was parsed with
 2. **File Writeback**: Modified tables (via INSERT, UPDATE, DELETE, ALTER TABLE, TRUNCATE) are written back to their source files when `--write` is specified, preserving that file's delimiter
 
-A statement's result set is built in memory as a table and then printed. For
-file writeback, the atomic write pattern described above is used.
+A statement's result set is built in memory as a table and printed as soon
+as that statement finishes, so when a later statement fails, the output of
+the ones before it has already been printed (the run still exits 1 and
+writes nothing back). For file writeback, the atomic write pattern described
+above is used.
 
 ## Storage
 

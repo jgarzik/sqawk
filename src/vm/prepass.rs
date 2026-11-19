@@ -853,15 +853,20 @@ impl Walker<'_> {
     /// Run a query (already walked) and return its result.
     fn run_query(&mut self, query: Query) -> SqawkResult<Table> {
         let source = Arc::clone(&self.source);
-        let result = super::execute_statements(
+        let mut last = None;
+        super::execute_statements(
             vec![Statement::Query(Box::new(query))],
             self.database,
             self.verbose,
             &source,
             true,
             &self.cte_names,
+            &mut |t| {
+                last = Some(t);
+                Ok(())
+            },
         )?;
-        result.tables.into_iter().next_back().ok_or_else(|| {
+        last.ok_or_else(|| {
             SqawkError::InvalidSqlQuery("Subquery in FROM produced no result".to_string())
         })
     }

@@ -58,31 +58,37 @@ impl SqlExecutor {
     /// # Arguments
     /// * `sql` - SQL statement to execute
     ///
-    /// # Returns
-    /// * One result table per statement that produced rows, in order. A
-    ///   multi-statement script yields one result set per statement; they are
-    ///   deliberately NOT merged, since each has its own column schema.
-    pub fn execute(&mut self, sql: &str) -> SqawkResult<Vec<crate::table::Table>> {
+    /// Each statement's result set, set to the output delimiter, goes to
+    /// `sink` as soon as that statement finishes, so the output of earlier
+    /// statements survives a later statement's error. The result sets are
+    /// deliberately NOT merged, since each has its own column schema.
+    pub fn execute(
+        &mut self,
+        sql: &str,
+        sink: &mut dyn FnMut(&crate::table::Table) -> SqawkResult<()>,
+    ) -> SqawkResult<()> {
         if self.config.verbose() {
             diag!("Executing SQL: {}", sql);
         }
 
         // Execute via VM engine (which also records the modified tables in
         // the database)
-        let result = crate::vm::execute_vm(sql, &mut self.database, self.config.verbose())?;
+        let delim = self.config.output_delimiter();
+        let result = crate::vm::execute_vm(
+            sql,
+            &mut self.database,
+            self.config.verbose(),
+            &mut |mut t| {
+                // Result tables print with the output delimiter
+                t.set_delimiter(delim.clone());
+                sink(&t)
+            },
+        )?;
 
         // Track affected rows from the last statement
         self.affected_rows = result.affected_rows;
         self.dml_executed = result.dml_executed;
-
-        // Result tables print with the output delimiter
-        let mut tables = result.tables;
-        let delim = self.config.output_delimiter();
-        for t in &mut tables {
-            t.set_delimiter(delim.clone());
-        }
-
-        Ok(tables)
+        Ok(())
     }
 
     /// Save all modified tables back to their source files

@@ -53,14 +53,15 @@ pub(crate) fn scalar_function_names() -> impl Iterator<Item = &'static str> {
     func::names()
 }
 
-/// Result of VM execution including both the result table and modified table names
+/// Receives each statement's result set as soon as that statement finishes,
+/// so a later statement's failure cannot swallow the output of earlier ones.
+/// A multi-statement script produces one result set per statement (each
+/// with its own header); an error from the sink stops the script.
+pub type ResultSink<'s> = dyn FnMut(Table) -> SqawkResult<()> + 's;
+
+/// Counts reported by a script's execution (its result sets went to the
+/// sink).
 pub struct VmExecutionResult {
-    /// One result table per statement that produced rows, in order.
-    ///
-    /// A multi-statement script produces one result set per statement; folding
-    /// them into a single table would print every statement's rows under one
-    /// header.
-    pub tables: Vec<Table>,
     /// Number of rows affected by the last DML statement (INSERT, UPDATE, DELETE)
     pub affected_rows: usize,
     /// Whether any statement in this script was a row-counting DML.
@@ -78,11 +79,12 @@ pub struct VmExecutionResult {
 /// 1. SQL parsing and bytecode generation
 /// 2. VM execution of bytecode instructions
 ///
-/// Returns both the result table and a set of modified table names.
+/// Each statement's result set goes to `sink` when the statement finishes.
 pub fn execute_vm(
     sql: &str,
     database: &mut Database,
     verbose: bool,
+    sink: &mut ResultSink<'_>,
 ) -> SqawkResult<VmExecutionResult> {
     if verbose {
         diag!("VM Engine: Executing SQL via bytecode: {}", sql);
@@ -136,6 +138,7 @@ pub fn execute_vm(
         &source,
         false,
         &Arc::default(),
+        sink,
     )
 }
 
@@ -145,7 +148,8 @@ pub fn execute_vm(
 /// result columns. `in_derived`: the statement is a derived table's or CTE's
 /// query, whose column references are named as written (see `SqlCompiler`).
 /// `cte_names`: for such a query, the CTE names of the enclosing statement
-/// (see `prepass::Prepared::cte_names`); empty at top level.
+/// (see `prepass::Prepared::cte_names`); empty at top level. `sink` receives
+/// each statement's result set as soon as the statement finishes.
 fn execute_statements(
     statements: Vec<sqlparser::ast::Statement>,
     database: &mut Database,
@@ -153,8 +157,8 @@ fn execute_statements(
     source: &Arc<parse::SqlSource>,
     in_derived: bool,
     cte_names: &Arc<HashSet<String>>,
+    sink: &mut ResultSink<'_>,
 ) -> SqawkResult<VmExecutionResult> {
-    let mut tables: Vec<Table> = Vec::new();
     let mut affected_rows: usize = 0;
     let mut dml_executed = false;
 
@@ -237,12 +241,11 @@ fn execute_statements(
         }
 
         if let Some(t) = result_table {
-            tables.push(t);
+            sink(t)?;
         }
     }
 
     Ok(VmExecutionResult {
-        tables,
         affected_rows,
         dml_executed,
     })
