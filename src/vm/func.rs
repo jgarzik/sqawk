@@ -577,8 +577,25 @@ pub(crate) fn round_decimal(x: f64, digits: i64) -> f64 {
 }
 
 /// CEIL / FLOOR: an integer is returned as is; a real stays a real.
+/// A math function's argument as a number, as SQLite's
+/// `sqlite3_value_numeric_type` reads it: text only when all of it (but
+/// surrounding whitespace) is a number, so `'4abc'` and `'abc'` are not;
+/// `None` for those and for NULL.
+fn math_num(r: &Register) -> Option<Num> {
+    match r {
+        Register::String(s) => match crate::table::numeric_text(s) {
+            Some(Value::Integer(i)) => Some(Num::Int(i)),
+            Some(Value::Float(f)) => Some(Num::Real(f)),
+            _ => None,
+        },
+        other => to_num(other),
+    }
+}
+
+/// CEIL / FLOOR (SQLite's `ceilingFunc`): an integer comes back unchanged,
+/// a real rounded; anything that is not a number is NULL.
 fn ceil_floor(a: &[Register], up: bool) -> SqawkResult<Register> {
-    Ok(match to_num(&a[0]) {
+    Ok(match math_num(&a[0]) {
         None => Register::Null,
         Some(Num::Int(i)) => Register::Integer(i),
         Some(Num::Real(f)) => Register::Float(if up { f.ceil() } else { f.floor() }),

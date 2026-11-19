@@ -2860,3 +2860,16 @@ fn in_empty_list() -> Result<(), Box<dyn std::error::Error>> {
         "a,b,c,d,e\n0,1,0,1,0",
     )
 }
+
+/// CEIL / FLOOR read a text argument only when all of it is a number
+/// (SQLite's sqlite3_value_numeric_type): other text gives NULL, and an
+/// integer spelled as text comes back an integer.
+#[test]
+fn ceil_floor_text_arguments() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "SELECT ceil('abc') AS a, ceil('4abc') AS b, floor(' 4.5 ') AS c, \
+         ceil('007') AS d, typeof(ceil('007')) AS e, ceiling('-1.5') AS f",
+        "a,b,c,d,e,f\n,,4.0,7,integer,-1.0",
+    )
+}

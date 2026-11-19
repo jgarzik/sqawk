@@ -237,7 +237,8 @@ than a silent `0`.
 
 `ABS` of an integer is an integer, and `ABS(-9223372036854775808)` is an
 `integer overflow` error. `CEIL` and `FLOOR` return an integer argument
-unchanged. With one argument, `MIN` and `MAX` are the aggregates.
+unchanged; text counts as a number only when all of it is one (`'007'` is
+the integer 7, `' 4.5 '` the real 4.5), and any other text is NULL. With one argument, `MIN` and `MAX` are the aggregates.
 
 `ROUND` returns a real, so a whole result prints with `.0` (see Real output):
 `ROUND(2.0, 2)` is `2.0`.
