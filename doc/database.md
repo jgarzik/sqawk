@@ -47,8 +47,9 @@ one lookup used by SELECT, INSERT column lists and UPDATE SET.
   joins, ORDER BY, MIN/MAX): two values that both read as numbers -- numbers,
   or text spelling a number such as `'007'` or `'1e3'` -- compare as numbers,
   text against text included (`'10' > '9'`); numbers sort before other text;
-  other text compares byte by byte. DISTINCT, GROUP BY and the compound
-  operators still keep text `'1'` and integer `1` apart. See
+  other text compares byte by byte, or under an explicit `COLLATE NOCASE` /
+  `RTRIM` (`src/vm/collate.rs`). DISTINCT, GROUP BY and the compound
+  operators keep text `'1'` and integer `1` apart. See
   [SQL Reference](sql_reference.md#type-coercion) for the exact rules
 
 ### Where Columns Come From
@@ -56,8 +57,9 @@ one lookup used by SELECT, INSERT column lists and UPDATE SET.
 A table's columns are defined in exactly one of these ways:
 
 1. **The file's header line** (the default for an input file): the first
-   line names the columns and is not data. On `--write` it is written back
-   as it was read.
+   line names the columns and is not data. An empty name becomes `columnN`
+   and a repeated one (ignoring case) gets `:1`, `:2`, ..., as sqlite3 names
+   them. On `--write` the line is written back as it was read.
 2. **`--no-header`**: every line of every input file is data and the
    columns are named `a`, `b`, `c`, ...; writeback emits no header line.
 3. **`--tabledef=table:col1,col2,...`**: the names are declared before the
@@ -98,14 +100,15 @@ Tables are loaded from delimiter-separated files at startup and can be modified 
    - The `--write` (or `-w`) flag is explicitly provided
    - The table was actually modified by one of those statements
    - The table has a file: a scratch table (CREATE TABLE without LOCATION,
-     CREATE TABLE ... AS) is skipped. A table read from standard input is an
-     error instead
+     CREATE TABLE ... AS) is skipped. A table read from standard input or
+     from several files is an error instead
 4. **Safe Execution**: Without the `--write` flag, source files remain untouched regardless of operations performed
 5. **Write Only Modified**: Only tables that were changed are written; unmodified tables are not rewritten
 6. **Check First**: Every target is checked before any file is written; a
    read-only file, or a directory that cannot take the temp file, fails the
    run with no file written
-7. **Format Preservation**: Original file formats and delimiters are preserved during writeback
+7. **Format Preservation**: The file's delimiter, layout and compression
+   (gzip / zstd) are kept on writeback
 
 ### Transactions
 
@@ -121,7 +124,7 @@ nothing, and one that changes a table copies it once. A transaction still
 open at the end of the run (or REPL session) is rolled back before writeback.
 Savepoints are not supported.
 
-This design ensures that users can experiment with data manipulations while maintaining the integrity of source files. The verbose mode (`-v`) provides additional confirmation about whether changes were saved or not.
+`-v` lists every file written.
 
 ## Architecture
 
@@ -133,7 +136,8 @@ The `Table` struct represents an in-memory table with:
 - Column metadata
 - Row data
 - Methods for accessing and manipulating rows
-- The source file's bytes and layout, for verbatim writeback (see Storage)
+- The source file's layout (`FileLayout`) and, when the run can write it
+  back, its bytes (`RawRows`, see Storage)
 
 ### SQL Execution: a bytecode VM
 
@@ -190,7 +194,8 @@ Every SELECT core runs one pipeline (`src/vm/compiler_select.rs`):
   (WHERE, GROUP BY, HAVING, an aggregate argument) it is an error.
 - The output stage computes the output columns, then ORDER BY (an ordinal, a
   SELECT alias, a projected expression, or else a hidden sort key such as an
-  unprojected column or aggregate), DISTINCT, and LIMIT/OFFSET. HAVING and
+  unprojected column or aggregate; a COLLATE on the term is the key's
+  collation), DISTINCT, and LIMIT/OFFSET. HAVING and
   sort-key expressions may name SELECT aliases. LIMIT and OFFSET accept any
   expression yielding an integer; a negative LIMIT means no limit.
 - Compound SELECTs (UNION [ALL], INTERSECT, EXCEPT, in any chain) take their
@@ -312,7 +317,9 @@ of an enclosing query fails to resolve (`no such column`).
 
 - `FileHandler` (`file_handler.rs`) resolves `[table_name=]path` operands
   (`parse_table_spec`: the prefix names the table only when it is
-  identifier-like), records each file's canonical absolute path (so the same
+  identifier-like; `.gz` / `.zst` is not part of the name), makes one table
+  of a repeated `NAME=` or a `NAME=pattern` (`load_files`), records each
+  file's canonical absolute path (so the same
   file cannot be loaded twice, and REPL `.cd` does not change what `.save`
   writes), chooses the delimiter (`-F`, else tab for `.tsv`/`.tab`, comma for
   everything else and stdin) and the header policy (the first line is the
@@ -320,10 +327,12 @@ of an enclosing query fails to resolve (`no such column`).
   under `--comments`), and routes writeback. `load_location` loads the file
   of `CREATE TABLE ... LOCATION` the same way, under the declared columns,
   with the `WITH` options in place of the command-line flags.
+- `compress.rs` recognizes gzip and zstd input by its magic bytes and
+  decodes it as a stream; writeback encodes in the same format.
 - `csv_handler.rs` does all parsing and writing. Every format is read by the
   `csv` crate with one configuration (RFC 4180 quoting, multi-line quoted
   fields, no trimming, ragged rows padded, an unclosed quote is an error,
-  header names must be non-empty and unique ignoring case). Untouched rows
+  empty and repeated header names renamed as above). Untouched rows
   are written back as their source bytes; changed and inserted rows by a
   small RFC 4180 record writer that also quotes fields with leading or
   trailing whitespace.
@@ -362,16 +371,18 @@ This ensures that TSV files remain TSV, colon-separated files remain colon-separ
 
 Sqawk supports two primary output modes:
 
-1. **Stdout Output**: Query results (SELECT) are written to standard output using
-   the `--output-delimiter` delimiter, else the `-F` delimiter, else comma.
-   This is independent of the delimiter a source table was parsed with
+1. **Stdout Output**: Query results (SELECT) are written to standard output
+   in the `--format` (csv by default, with the `--output-delimiter`
+   delimiter, else the `-F` delimiter, else comma; or tsv, json, jsonl,
+   markdown, table). This is independent of how a source table was parsed
 2. **File Writeback**: Modified tables (via INSERT, UPDATE, DELETE, ALTER TABLE, TRUNCATE) are written back to their source files when `--write` is specified, preserving that file's delimiter
 
 A statement's result rows are printed as the VM produces them (SQLite's
 step model: `ResultRow` hands one row to the output sink, `src/output.rs`),
 through a 64 KiB buffer flushed at the end of each statement. A result is
 never held whole in memory unless the query itself needs it (ORDER BY,
-DISTINCT, GROUP BY, window functions). When a statement fails, the rows it
+DISTINCT, GROUP BY, window functions), or the format needs column widths
+(markdown and table hold one result set). When a statement fails, the rows it
 and the statements before it produced have already been printed; the run
 still exits 1 and writes nothing back. For file writeback, the atomic write
 pattern described above is used.
@@ -379,14 +390,16 @@ pattern described above is used.
 ## Storage
 
 Every table holds its rows in memory as owned values (`Vec<Row>`). Files are
-parsed by the `csv` crate -- RFC 4180 quoting, quoted fields
-spanning lines, no trimming, UTF-8 byte order mark set aside -- and each
+decompressed when they are gzip or zstd and parsed by the `csv` crate -- RFC
+4180 quoting, quoted fields spanning lines, no trimming, UTF-8 byte order
+mark set aside -- and each
 cell's type is inferred with a rule that round-trips (see "Type inference"
 below), so an unmodified cell of a changed row keeps its text.
 
-A loaded table also keeps the file's bytes (`RawRows` in `table.rs`): the
-whole file in one buffer plus a start/end offset per row, parallel to the
-rows. That costs the file's size plus 16 bytes per row. A row keeps its
+When the run can write a table back (see below), the loaded table also
+keeps the file's bytes (`RawRows` in `table.rs`; decompressed, for a
+compressed file): the whole file in one buffer plus a start/end offset per
+row, parallel to the rows. That costs the file's size plus 16 bytes per row. A row keeps its
 offsets while no statement changes it -- an UPDATE that sets every column to
 an identical value (same type, same value) counts as no change -- and is
 written back as exactly those bytes. INSERT adds rows without source bytes;
@@ -453,12 +466,13 @@ table keeps its row order and `--write` does not reorder the user's file.
 
 ## Performance Considerations
 
-Sqawk's in-memory database is optimized for:
-
-- **Fast Loading**: Delimiter-separated files are parsed directly into memory
-- **Format Flexibility**: Support for CSV, TSV, and custom-delimited files
-- **Efficient Filtering**: WHERE clauses are applied in a single pass
-- **Zero Configuration**: No setup required, works directly with files in various formats
+- **Loading** streams the file (and its decompression) through the parser,
+  unless writeback needs the file's bytes
+- **Filtering**: WHERE conjuncts are tested at the outermost loop level that
+  has all their tables, and conjuncts that read no table before any is
+  opened
+- **Joins**: an equality with an outer table becomes a hash probe
+- **Output** streams row by row (see Output Modes)
 
 Memory: every table is resident for the whole run. A loaded table takes
 about four to five times its file's size -- each cell is a 24-byte `Value`,

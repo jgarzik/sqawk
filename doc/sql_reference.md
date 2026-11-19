@@ -87,6 +87,7 @@ SELECT col alias                -- alias without AS
 | `IS NULL`, `IS NOT NULL` | `col IS NULL` |
 | `LIKE`, `ILIKE` | `name LIKE 'A%'`, `code LIKE 'x\_%' ESCAPE '\'` |
 | `GLOB` | `name GLOB 'A*'`, `code GLOB '[0-9]?'`: case-sensitive; `*` any run, `?` one character, `[a-z]` / `[^a-z]` a set; `GLOB(p, x)` is `x GLOB p` |
+| `REGEXP`, `RLIKE` | `code REGEXP '^[A-Z]{3}[0-9]+$'` (see Regular Expressions) |
 | `IS [NOT]`, `IS [NOT] DISTINCT FROM` | `a IS b`, `a IS NOT DISTINCT FROM b` (NULL-safe `=`) |
 | `BETWEEN` | `col BETWEEN 1 AND 10` |
 | `IN` | `col IN (1, 2, 3)`; `col IN ()` is false, `col NOT IN ()` true |
@@ -101,13 +102,14 @@ level and group left to right (`2 = 1 < 2` is `2 = (1 < 2)`, `2 * 3 || 4` is
 | `OR` |
 | `AND` |
 | `NOT` |
-| `=` `==` `!=` `<>` `IS [NOT]` `IS [NOT] DISTINCT FROM` `IN` `LIKE` `BETWEEN` |
+| `=` `==` `!=` `<>` `IS [NOT]` `IS [NOT] DISTINCT FROM` `IN` `LIKE` `GLOB` `REGEXP` `BETWEEN` |
 | `<` `<=` `>` `>=` |
 | `&` `\|` `<<` `>>` |
 | `+` `-` |
 | `*` `/` `%` |
 | `\|\|` |
 | unary `-` `+` `~` |
+| `COLLATE` (postfix: `x COLLATE NOCASE`) |
 
 An expression may nest at most 1000 levels deep (SQLite's limit; a chain
 `a + b + ...` of n terms is n levels, parentheses add none). A deeper one is
@@ -894,7 +896,7 @@ one rule:
 - A number (or numeric-reading text) is less than text without one:
   `10 < 'abc'`, `'-x' > 10`.
 - Two texts without a numeric reading compare byte by byte (BINARY):
-  `'B' < 'a'`.
+  `'B' < 'a'`, unless a COLLATE says otherwise (see Collation).
 - Any NULL operand makes the comparison UNKNOWN (sorting puts NULLs first).
 
 `<` and `ORDER BY` therefore agree: a column sorts `9, 10, -x, abc`, and
@@ -924,7 +926,10 @@ Rows no statement changed are written back byte for byte, exactly as they
 were read; a changed or inserted row is written from its values, NULL as an
 empty field. The source file's delimiter, header line (or its absence), byte
 order mark, line endings, blank lines, `#` comment lines (under
-`--comments`) and permissions are kept.
+`--comments`), compression (a gzip or zstd file is written back compressed
+the same way) and permissions are kept. A table read from standard input
+or from several files (`NAME=` repeated, or a pattern) has no file to go
+back to: if it is modified, `--write` fails and writes nothing.
 
 Every target file is checked before any is written: a read-only file fails
 the run (`cannot write 'x.csv': file is read-only`) and no file is written.

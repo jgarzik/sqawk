@@ -58,13 +58,16 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 
 **Key Features:**
 
-- Process CSV, TSV, and custom-delimited files with SQL queries
+- Process CSV, TSV, and custom-delimited files with SQL queries, gzip and
+  zstd compressed or not, one file per table or several as one
 - No database setup or schema definition required
 - Automatic type inference and cross-file operations
 - Powerful SQL dialect including joins, sorting, filtering, and aggregations
 - Subqueries (scalar, `IN`, `EXISTS`, correlated) and derived tables
 - Common table expressions (`WITH`), including recursive ones
 - Set operations (UNION, INTERSECT, EXCEPT) and window functions
+- Regular expressions, GLOB, collations and SQLite's math functions
+- Results as CSV, TSV, JSON, JSON Lines, Markdown or an aligned table
 - Interactive REPL mode for SQL exploration and execution
 - Safe operation with explicit write-back control
 
@@ -185,12 +188,14 @@ When you run a Sqawk command:
 | `-i`, `--interactive` | Start the interactive REPL |
 | `-w`, `--write` | Write modified tables back to their files |
 | `-F SEP`, `--field-separator SEP` | Input field separator (one character, or `\t`); also the output delimiter unless `--output-delimiter` is given |
-| `--output-delimiter SEP` | Delimiter for query results (default: the `-F` separator, else comma) |
+| `--format FORMAT` | Result format: `csv` (default), `tsv`, `json`, `jsonl`, `markdown`, `table` |
+| `--null TEXT` | Text NULL prints as in csv, tsv, markdown and table output |
+| `--output-delimiter SEP` | Delimiter for csv results (default: the `-F` separator, else comma) |
 | `--no-output-header` | Omit the header line of every result set |
 | `--no-header` | Input files have no header row |
 | `--comments` | Skip lines starting with `#` (kept on `--write`) |
 | `--tabledef NAME:COL,...` | Name the columns of a headerless table |
-| `-v`, `--verbose` | Debugging output on stderr; its format is not stable |
+| `-v`, `--verbose` | Progress on stderr (tables loaded, row counts, timings, files written); `-vv` adds the bytecode trace |
 | `-h`, `--help` / `-V`, `--version` | Help / version |
 
 At least one `-s` or `-f` is required unless `-i` is given.
@@ -288,9 +293,12 @@ Welcome to Sqawk interactive mode!
 Enter SQL statements or commands, terminate with ';'.
 Type .help for available commands.
 sqawk> SELECT name, department FROM employees WHERE salary > 70000;
-name,department
-Alice,Engineering
-Charlie,Engineering
+┌─────────┬─────────────┐
+│ name    │ department  │
+├─────────┼─────────────┤
+│ Alice   │ Engineering │
+│ Charlie │ Engineering │
+└─────────┴─────────────┘
 sqawk> .tables
 Tables:
   employees
@@ -323,7 +331,8 @@ Things in that transcript worth calling out:
   (`BIGINT`, `VARCHAR(20)`, ...). See
   [Type coercion](sql_reference.md#type-coercion).
 - Row counts are only printed after `.changes on`; the default is off.
-- Query results print exactly as with `-s`: the header line, then the rows.
+- On a terminal, results print as an aligned table; `.mode csv` (or any
+  other format, see [Output Options](#output-options)) changes that.
 - An error is printed as `sqawk: <message>` on standard error and the
   session continues.
 
@@ -346,9 +355,10 @@ applies, no history is kept.
 reads commands from it line by line and prints no banner, no prompts and no
 status messages (`Changes display enabled`, `Changes not saved ...`,
 `Loaded table ...`: with `-v` they go to standard error). Standard output
-carries only what the commands produce -- query results, `.changes` row
-counts, and the output of `.tables`, `.schema`, `.print`, `.show`, `.help`
-and `.version`:
+carries only what the commands produce -- query results (CSV, exactly as
+`-s` prints them, unless `--format` or `.mode` says otherwise), `.changes`
+row counts, and the output of `.tables`, `.schema`, `.print`, `.show`,
+`.help` and `.version`:
 
 ```
 $ printf 'SELECT name FROM employees LIMIT 2;\n.tables\nSELECT COUNT(*) FROM employees' | sqawk -i employees.csv
@@ -411,9 +421,12 @@ Important notes about the write behavior:
   order are preserved. A row appended after a last line that had no line
   ending starts on a new line. Writing through a symlink updates the file it
   points to and leaves the link in place
+- A gzip or zstd file is written back compressed in the same format
 - The file is replaced atomically (a temp file renamed over it), so a file
   with several hard links is split from them: the file named on the command
   line gets the new contents, and the other links keep the old ones
+- A table read from standard input, or from several files as one table, has
+  no file to write: if it was modified, `--write` fails and writes nothing
 - NULL is written as an empty field
 - Without `--write`, your files remain untouched regardless of the SQL operations
 
@@ -573,7 +586,7 @@ Wrote 250000 rows of 'data' to data.csv
 
 Verbose output goes to standard error, so it never mixes with query results.
 
-The output is for debugging; its format is not stable, so do not parse it.
+The format of these lines is not stable, so do not parse them.
 A closed or failing stderr never stops a run.
 
 ### Errors and Exit Status
@@ -629,6 +642,8 @@ Sqawk supports various delimiter-separated file formats:
 - **CSV files**: Standard comma-separated values
 - **TSV files**: Tab-separated values
 - **Custom-delimited files**: Files with any single-character delimiter
+- **Compressed files**: any of these gzip or zstd compressed (see
+  [Compressed Files](#compressed-files))
 
 File format detection follows these rules:
 1. If a specific delimiter is provided with `-F`, it's used regardless of file extension
@@ -838,7 +853,7 @@ num,label
 2,bob
 $ sqawk -s "CREATE TABLE p (id INT, name TEXT) LOCATION 'people.csv';
             INSERT INTO p VALUES (3, 'carol');
-            SELECT * FROM p WHERE id > 1" seed.csv --write
+            SELECT * FROM p WHERE id > 1" --write
 id,name
 2,bob
 3,carol
@@ -857,7 +872,7 @@ $ cat pairs.txt
 2;bob
 $ sqawk -s "CREATE TABLE q (id INT, name TEXT) LOCATION 'pairs.txt'
               WITH (DELIMITER=';', HEADER=false);
-            SELECT name FROM q WHERE id = 2" seed.csv
+            SELECT name FROM q WHERE id = 2"
 name
 bob
 ```
@@ -867,7 +882,7 @@ and so is a file that is already loaded, as an input file or by another
 `CREATE TABLE ... LOCATION`:
 
 ```sh
-$ sqawk -s "CREATE TABLE p (id INT) LOCATION 'people.csv'" seed.csv
+$ sqawk -s "CREATE TABLE p (id INT) LOCATION 'people.csv'"
 sqawk: people.csv: line 1: header has 2 fields, but the table declares 1 columns
 $ sqawk -s "CREATE TABLE p (id INT, name TEXT) LOCATION 'people.csv'" people.csv
 sqawk: file people.csv is already loaded as table people
@@ -900,11 +915,10 @@ and the `--write` flag to save a new table to a file:
 ```sh
 sqawk -s "CREATE TABLE data (id INT, value FLOAT) LOCATION './output.csv';
           INSERT INTO data VALUES (1, 10.5), (2, 20.7);
-          SELECT * FROM data;" seed.csv --write
+          SELECT * FROM data;" --write
 ```
 
-No input file is needed when the script creates every table it uses; the
-trailing `seed.csv` above only adds a table the script does not read.
+No input file is needed when the script creates every table it uses.
 
 ### Table Naming
 
@@ -967,7 +981,8 @@ Sqawk follows a safe-by-default approach to file modification:
   - Original delimiter, header line (or its absence) and line endings are preserved
   - Column and row order remain the same
   - NULL is written as an empty field
-  - The file keeps its permissions; a symlink keeps pointing at the rewritten file
+  - The file keeps its permissions and its gzip / zstd compression; a symlink
+    keeps pointing at the rewritten file
   - Hard links to the file are broken: the file is replaced, not rewritten in place
 - A read-only target file fails the whole run before any file is written
 
@@ -980,18 +995,23 @@ sqawk -s "DELETE FROM data WHERE code NOT IN (SELECT code FROM lookup)" \
       data.csv lookup.csv --write
 ```
 
-`UPDATE ... FROM other_table` is **not** supported (it is an error). A
-cross-table update has to go through a correlated subquery in the SET
-expression:
+A cross-table update joins the other table with `UPDATE ... FROM`; rows
+with no match are left alone, and only `data.csv` is written:
+
+```sh
+sqawk -s "UPDATE data SET category = lookup.category
+          FROM lookup WHERE lookup.code = data.code" \
+      data.csv lookup.csv --write
+```
+
+A correlated subquery in the SET expression does the same for every row,
+setting NULL (an empty field) where no lookup row matches:
 
 ```sh
 sqawk -s "UPDATE data SET category =
             (SELECT category FROM lookup WHERE lookup.code = data.code)" \
       data.csv lookup.csv --write
 ```
-
-A row with no matching lookup row gets NULL (written back as an empty field);
-add `WHERE code IN (SELECT code FROM lookup)` to leave such rows untouched.
 
 ### Transactions
 
@@ -1109,7 +1129,7 @@ id,name,manager
 ```sh
 # Count without a table
 sqawk -s "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5)
-          SELECT i, i * i AS square FROM n" staff.csv
+          SELECT i, i * i AS square FROM n"
 
 # Walk the reporting chain from the top, breadth-first
 sqawk -s "WITH RECURSIVE chain(id, name, depth, path) AS (
@@ -1191,7 +1211,7 @@ from SQLite" in the [SQL reference](sql_reference.md)):
 - Dates are UTC unless converted with `'localtime'`: `DATE('now')`,
   `DATE(d, '+1 month')`, `STRFTIME('%Y', d)`.
 - Syntax that parses but is not implemented (`RETURNING`,
-  `UPDATE ... FROM`, ...) is an error, never silently ignored.
+  `DELETE ... USING`, ...) is an error, never silently ignored.
 
 ### System Files (--tabledef)
 
@@ -1217,10 +1237,14 @@ sqawk -s "SELECT DISTINCT * FROM data" data.csv > deduped.csv
 # Convert TSV to CSV: a .tsv is parsed as tab-separated, and stdout falls back
 # to comma because -F was not given
 sqawk -s "SELECT * FROM data" data.tsv > data.csv
+
+# Convert CSV to JSON Lines, or to a Markdown table for a report
+sqawk --format jsonl -s "SELECT * FROM data" data.csv > data.jsonl
+sqawk --format markdown -s "SELECT region, SUM(total) AS total FROM sales GROUP BY region" sales.csv
 ```
 
-The output delimiter is whatever `--output-delimiter` says, else `-F`, and
-comma when neither is given. It does not follow the input file's delimiter,
+In CSV output the delimiter is whatever `--output-delimiter` says, else
+`-F`, and comma when neither is given. It does not follow the input file's delimiter,
 which is what makes the conversion above work. `--no-output-header` drops
 the header line, for appending to an existing file:
 
@@ -1258,6 +1282,8 @@ Points to note:
 
 - Piped input is treated as **comma-separated**, matching what sqawk writes to
   stdout, so `sqawk ... | sqawk ... -` round-trips. `-F` overrides it
+- Compressed input is recognized and decompressed (`zcat` is not needed:
+  `sqawk ... - < data.csv.gz`)
 - Standard input can only be read once; a second `-` is an error
 - `--tabledef` works on stdin exactly as on a file, keyed by the table name
   (`--tabledef=stdin:col1,col2` for a bare `-`)
@@ -1285,15 +1311,25 @@ CREATE TABLE sales (
   amount TEXT
 );
 sqawk> SELECT COUNT(*) FROM sales;
-COUNT(*)
-1250
+┌──────────┐
+│ COUNT(*) │
+├──────────┤
+│     1250 │
+└──────────┘
 sqawk> SELECT c.name, SUM(s.amount) AS total
        FROM customers c JOIN sales s ON c.id = s.customer_id
        GROUP BY c.name ORDER BY total DESC LIMIT 3;
-name,total
-Enterprise Corp,58750.25
-Acme Inc,45620.75
-Globex,31004.1
+┌─────────────────┬──────────┐
+│ name            │ total    │
+├─────────────────┼──────────┤
+│ Enterprise Corp │ 58750.25 │
+│ Acme Inc        │ 45620.75 │
+│ Globex          │  31004.1 │
+└─────────────────┴──────────┘
+sqawk> .mode csv
+sqawk> SELECT COUNT(*) AS n FROM customers;
+n
+212
 sqawk> .exit
 ```
 
@@ -1354,14 +1390,17 @@ those rows too. Measured on a 66 MB CSV of one million 10-column rows:
 **Common Issues and Solutions:**
 
 1. **"no such table" error**:
-   - Check that the filename matches the table name in your SQL
+   - A table is named after its file without the extension (and without
+     `.gz` / `.zst`): `data.csv` is `data`, and the message says so when
+     the SQL names `data.csv`
    - If using custom table names, verify the syntax: `tablename=filename.csv`
-   - Ensure file paths are correct and files are accessible
+   - A name with `-` or other punctuation must be quoted: `"my-data"`
 
 2. **Delimiter issues**:
    - Use the `-F` option to specify the correct delimiter
    - For tab-delimited files, use `-F '\t'`
-   - Ensure consistent delimiters throughout your files
+   - A file that loads as one column with `;`, `|` or a tab in its header
+     gets a warning naming the `-F` to use
 
 3. **Unexpected results from comparisons**:
    - Types are inferred per value, so one column can hold numbers and text
@@ -1411,7 +1450,8 @@ those rows too. Measured on a 66 MB CSV of one million 10-column rows:
 9. **SQL syntax errors**:
    - Try running your query in interactive mode to get immediate feedback
    - The error message names the token where parsing failed, with its line
-     and column
+     and column, and in a script of several statements the number of the
+     statement that failed
    - Verify SQL statement syntax, particularly quotes, parentheses, and required clauses
 
 10. **Special characters in files**:

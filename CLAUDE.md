@@ -23,8 +23,9 @@ cargo test test_name_here
 # Run with verbose output
 cargo test -- --nocapture
 
-# Run the CLI directly
+# Run the CLI directly (file operands are optional)
 cargo run -- -s "SELECT * FROM data" data.csv
+cargo run -- --format table -s "SELECT 1 AS a"
 
 # Run in interactive REPL mode
 cargo run -- --interactive data.csv
@@ -34,6 +35,8 @@ cargo run -p tsq -- gen --seed 42 --rows 1000 --output-dir /tmp/sqawk-test
 cargo build --release --workspace
 target/release/tsq diff --seed 1 --queries 20000 --keep-going --shrink
 target/release/tsq corpus tsq/corpus/*.sql
+target/release/tsq wb --seed 1 --iterations 2000
+target/release/tsq cli --seed 1 --iterations 2000
 ```
 
 ## Architecture Overview
@@ -42,15 +45,15 @@ Sqawk is an SQL-based CLI tool for processing delimiter-separated files (CSV, TS
 
 ### Core Components
 
-- **`main.rs`**: Entry point orchestrating the pipeline: CLI parsing → file loading → SQL execution → output → optional writeback. Any error is printed once as `sqawk: <message>` (one line, exit 1); clap usage errors exit 2
-- **`cli.rs`**: clap arguments; `-s`/`-f` are merged into one ordered script by command-line position
+- **`main.rs`**: Entry point orchestrating the pipeline: CLI parsing → file loading → SQL execution → output → optional writeback. Any error is printed once as `sqawk: <message>` (one line, exit 1; `statement N: ` first when a script has several statements); clap usage errors exit 2
+- **`cli.rs`**: clap arguments; `-s`/`-f` are merged into one ordered script by command-line position; FILES are optional; `-v` is a count; `--format`, `--null`
 - **`config.rs`**: `AppConfig`, the parsed options (-v / -vv: `verbose()` progress, `trace()` bytecode; -F, --tabledef, --write, header/comment/output flags) passed to every component instead of global state
-- **`repl.rs`**: the interactive shell (`-i`). On a terminal: rustyline editor with prompt, multi-line statements, tab completion and history (`$XDG_STATE_HOME/sqawk/history` when that is absolute, else `~/.sqawk_history`, else on Windows `%APPDATA%\sqawk\history` or `%USERPROFILE%\.sqawk_history`); piped, it reads lines and prints only command output. Dot commands (`.tables`, `.schema`, `.save`, `.cd`, `.load`, ...) live here
-- **`error.rs`**: `SqawkError`; each `Display` is one complete line and no variant exposes a `source()` (that would print the cause twice). File I/O errors name the user's file (`SqawkError::open` / `write`), never a temp file
+- **`repl.rs`**: the interactive shell (`-i`). On a terminal: rustyline editor with prompt, multi-line statements, tab completion and history (`$XDG_STATE_HOME/sqawk/history` when that is absolute, else `~/.sqawk_history`, else on Windows `%APPDATA%\sqawk\history` or `%USERPROFILE%\.sqawk_history`); piped, it reads lines and prints only command output. Results print as a `table` on a terminal and CSV when piped, unless `--format`. Dot commands (`.tables`, `.schema`, `.save`, `.cd`, `.load`, `.mode`, `.headers`, `.nullvalue`, ...) live here
+- **`error.rs`**: `SqawkError`; each `Display` is one complete line and no variant exposes a `source()` (that would print the cause twice). File I/O errors name the user's file (`SqawkError::open` / `write`), never a temp file; `InStatement` prefixes the failing statement's number
 - **`diag.rs`**: `diag!` / `outln!` -- every stderr diagnostic (errors, `-v`) and REPL stdout line goes through them; write errors are ignored, so a closed stream never panics. Do not use `eprintln!`/`println!`
 - **`database.rs`**: Central store for in-memory tables; owns modification tracking (`mark_modified` / `is_modified` / `modified_tables`, which decide what `--write` saves) and transactions (`begin` / `commit` / `rollback`; a table's original is kept the first time a transaction changes it)
 - **`output.rs`**: `ResultSink` (`begin` / `row` / `end` / `abort`), which receives each statement's result rows as the VM produces them; `StdoutSink` prints them in a `Format` (csv / tsv / jsonl stream, json one array per result set, markdown / table hold one result set for widths; `OutputSettings`: format, delimiter, header flag, NULL text; 64 KiB buffer flushed per statement, a closed pipe silences the rest while statements and `--write` still run; `-v` row count after the rows), `CollectSink` gathers each result set into a `Table` (derived tables, CTEs)
-- **`table.rs`**: In-memory table representation with columns (name, type affinity, declared type name), rows, and projection capabilities
+- **`table.rs`**: In-memory table: columns (name, type affinity, declared type name), rows of `Value` (24 bytes; text a `CompactString`, inline up to 24 bytes), `FileLayout` (header, BOM, CRLF, comments, compression) and `RawRows` (source bytes for writeback)
 - **`sql_executor.rs`**: `SqlExecutor`, the facade `main.rs` and the REPL use: `execute` hands SQL text and a `ResultSink` to `vm::execute_vm`; it also saves modified tables (`save_modified_tables`, `save_table`), rolls back a transaction left open at exit (`finish`), and answers the REPL's table/column/row-count queries. It does no parsing itself
 
 ### SQL Execution (VM-based)
@@ -74,9 +77,10 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
   list, WHERE, HAVING, ORDER BY and SET clauses alike, plus `NameCtx`, which
   carries the FROM sources a name can resolve against
 - `compiler_select.rs`: the SELECT driver -- `compile_query`, compound
-  operators (UNION/INTERSECT/EXCEPT via keyed ephemeral tables) and the single
-  output stage (ORDER BY with hidden sort keys, DISTINCT, LIMIT/OFFSET) every
-  SELECT core ends in
+  operators (UNION/INTERSECT/EXCEPT via keyed ephemeral tables), VALUES as a
+  query core (`compile_values`, columns `column1..N`) and the single output
+  stage (ORDER BY with hidden sort keys, DISTINCT, LIMIT/OFFSET) every SELECT
+  core ends in
 - `compiler_aggregate.rs`: aggregates, GROUP BY, HAVING
 - `compiler_from.rs`: the FROM planner used by every SELECT -- tables, comma
   lists and join chains become nested loop levels (ON per level, WHERE after
@@ -102,10 +106,18 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
   compilation; INSERT/UPDATE/DELETE/Query/Select are destructured
   exhaustively so a new sqlparser field fails to compile until handled
 - `parse.rs`: `parse_sql`, the only SQL-to-AST entry point: parses with
-  `dialect.rs`'s `SqawkDialect` (Hive syntax, SQLite operator precedence),
-  rewrites compound SELECTs left-deep (equal precedence, left to right), and
-  enforces SQLite's limits (expression depth 1000, 500 compound terms) with an
-  iterative walk before anything recurses over the tree
+  `SqawkDialect`, rewrites hex literals, drops MATERIALIZED hints, rewrites
+  compound SELECTs left-deep (equal precedence, left to right), enforces
+  SQLite's limits (expression depth 1000, 500 compound terms) with an
+  iterative walk before anything recurses over the tree, and adds a quoting
+  hint to a parse error inside a name like `my-data`. `for_each_child` is the
+  one enumeration of a statement's queries, FROM items and expressions,
+  shared by the limit walk and the pre-pass
+- `dialect.rs`: `SqawkDialect`, sqlparser's Hive dialect with SQLite's
+  operator precedence; parses itself what sqlparser does not: SQLite's `IS`,
+  `<<` / `>>`, `[NOT] GLOB`, `[NOT] REGEXP` / `RLIKE`, `(VALUES ...)` and
+  `IN (VALUES ...)` as subqueries, prefix operators binding tightest;
+  `LIMIT offset, count` and `IN ()` are enabled
 - `prepass.rs`: runs before each statement compiles. Derived tables and CTEs
   become registered tables (`sqawk_derived_N`, `sqawk_cte_N`) and FROM items
   are rewritten to them. A non-recursive one is only compiled here and
@@ -118,10 +130,6 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
   one-part references sharing a CTE's name become `main.t`, and the compiler
   refuses any one-part CTE name left over (`SqlCompiler::cte_names`), so a
   missed rewrite cannot read the loaded table
-- `parse.rs`: `parse_sql` (SQLite precedence, hex literals, MATERIALIZED
-  hints dropped, compounds left-deep, depth / compound limits) and
-  `for_each_child`, the one enumeration of a statement's queries, FROM items
-  and expressions shared by the limit walk and the pre-pass
 - `ast_compat.rs`: thin accessors normalizing sqlparser AST shapes
 - `engine.rs`: Executes bytecode instructions. `step()` runs to the next
   `ResultRow` (`Step::Row`, the row read in place with `row()`) or the end
@@ -131,7 +139,9 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
   arithmetic with overflow to real, bitwise operators, CAST, truth values
 - `func.rs`: the scalar function table (`FuncDef`: name, arity, body) run by
   the `Function` opcode (SQLite's OP_Function); arity is checked at compile
-  time. Lazy functions (COALESCE, IFNULL, IIF, NULLIF) are compiled to jumps
+  time. Lazy functions (COALESCE, IFNULL, IIF, NULLIF) are compiled to jumps.
+  Includes SQLite's math functions (`math_num` reads arguments as
+  `sqlite3_value_numeric_type` does; NaN results are NULL) and RANDOM
 - `printf.rs`: SQLite's printf (a port of `sqlite3_str_vappendf`), used by
   PRINTF/FORMAT, QUOTE and the date functions
 - `datetime.rs`: DATE/TIME/DATETIME/STRFTIME/TIMEDIFF/... (a port of SQLite
@@ -165,7 +175,11 @@ effects of the ones before it.
   (expanded sorted with the GLOB matcher; same header required; refused by
   `--write`); `load_location` loads (or
   starts) a LOCATION table under its declared columns
-- **`compress.rs`**: gzip / zstd by magic bytes (`decoder`, multi-member / multi-frame streams; flate2 and ruzstd, pure Rust), `strip_extension` for table names and the `.tsv` rule, `Compression::encode` for writeback; a table records its file's compression in `FileLayout`
+- **`compress.rs`**: gzip / zstd input detected by magic bytes (`decoder`:
+  multi-member / multi-frame streams; flate2 and ruzstd, both pure Rust),
+  `strip_extension` for table names and the `.tsv` rule, `Compression::encode`
+  for writeback (gzip default level, zstd fastest); a table records its
+  file's compression in `FileLayout`
 - **`csv_handler.rs`**: The single loader (`read_table`, built on the `csv`
   crate) for every delimiter and for stdin, plus writeback. `.tsv`/`.tab` are
   tab-separated, everything else comma (unless `-F`); the first line is always
@@ -184,22 +198,27 @@ scalar functions are looked up in `src/vm/func.rs` and called through the
 `Function` opcode. Aggregates (including FILTER and GROUP_CONCAT's separator)
 are compiled in `src/vm/compiler_aggregate.rs` and executed by the
 `AggStep`/`AggFinal` opcodes over `src/vm/agg.rs` accumulators;
-`src/aggregate.rs` retains only the function-name lookup and arity. Semantics
+`src/aggregate.rs` holds the aggregate-name lookup and arity. Semantics
 follow SQLite 3.45; deliberate differences are listed in
 `doc/sql_reference.md` ("Differences from SQLite").
 
 ### Safe Writeback Model
 
-By default, all modifications remain in memory only. The `--write` flag must be explicitly provided to save changes back to source files. Only tables changed by INSERT/UPDATE/DELETE/ALTER/TRUNCATE are written, and rows a statement did not change are written back byte for byte. `CREATE TABLE t (cols) LOCATION 'file'` follows Hive external-table semantics (`file_handler::load_location`): an existing file is loaded under the declared columns (its header line skipped, checked against the column count and written back verbatim; `WITH (HEADER=false)` makes the first line data; `WITH (COMMENTS=true)` is `--comments`) and loading it is not a modification; a file that does not exist yet is written even with no DML after it (created with just the header). The delimiter is WITH (DELIMITER=...) if given, else tab for `.tsv`/`.tab`, else comma. A LOCATION file already loaded as another table is an error. Scratch tables (CREATE TABLE without LOCATION, CREATE TABLE AS) are never written. Every target is checked for writability before any file is written; a read-only file aborts the whole writeback. An open transaction is rolled back before writeback.
+By default, all modifications remain in memory only. The `--write` flag must be explicitly provided to save changes back to source files. Only tables changed by INSERT/UPDATE/DELETE/ALTER/TRUNCATE are written, and rows a statement did not change are written back byte for byte. `CREATE TABLE t (cols) LOCATION 'file'` follows Hive external-table semantics (`file_handler::load_location`): an existing file is loaded under the declared columns (its header line skipped, checked against the column count and written back verbatim; `WITH (HEADER=false)` makes the first line data; `WITH (COMMENTS=true)` is `--comments`) and loading it is not a modification; a file that does not exist yet is written even with no DML after it (created with just the header). The delimiter is WITH (DELIMITER=...) if given, else tab for `.tsv`/`.tab`, else comma. A LOCATION file already loaded as another table is an error. Scratch tables (CREATE TABLE without LOCATION, CREATE TABLE AS) are never written. A compressed file is written back compressed in the same format. A table read from stdin or from several files cannot be written back: if modified, `--write` refuses it. Every target is checked for writability before any file is written; a read-only file aborts the whole writeback. An open transaction is rolled back before writeback.
 
 ## Test Organization
 
-Tests are in `tests/` organized by functionality:
-- `basic/`, `comparison/`, `join/`, `join_on/`, `order_by/`, `update/`
+Tests are in `tests/` organized by functionality (one directory per area,
+listed in `tests/mod.rs`), for example:
+- `basic/`, `comparison/`, `join/`, `order_by/`, `update/`, `aggregate/`,
+  `window/`, `subquery/`, `ddl/`, `transaction/`
+- `delimiter/`, `file_io/` (table specs, multi-file tables, byte-exact
+  writeback), `compress/`, `headerless/`, `stdin/`, `output/` (streaming,
+  `--format`, `-v` levels), `repl/`
 - `unsupported/`: parsed-but-unimplemented syntax must error and modify nothing
-- `aggregate/`, `alias/`, `distinct/`, `group_by/`, `limit_offset/`
-- `delimiter/`, `file_io/`, `headerless/`, `stdin/`, `string_functions/`, `repl/`, `transaction/`
-- loader and writer unit tests live in `src/csv_handler.rs` (`#[cfg(test)]`)
+- loader and writer unit tests live in `src/csv_handler.rs` (`#[cfg(test)]`;
+  `streaming_matches_whole_file` checks the streaming loader against the
+  whole-file one)
 - `helpers/`: Test utilities
 - `common.rs`: Shared test helpers including REPL script runner
 
@@ -210,9 +229,10 @@ Two suites carry the correctness contract:
   suite uses `predicate::str::contains`, which is substring matching: a test
   expecting `"Engineering,3"` passes even when extra wrong rows are emitted and
   regardless of row order. Prefer `assert_query` for new tests.
-- `tests/defects/`: `#[ignore]`d tests encoding CORRECT behaviour for known
-  defects. Run with `cargo test --test mod defects -- --ignored`. Remove the
-  `#[ignore]` when a defect is fixed; the list only shrinks.
+- `tests/defects/`: tests encoding CORRECT behaviour for defects found by
+  audits and by tsq, kept as regression cover. A newly found defect gets an
+  `#[ignore]`d test here, un-ignored by its fix; `cargo test --test mod
+  defects -- --ignored` runs any still open.
 
 `tsq/` (the unpublished `tsq` crate) is the differential tester and fuzzer.
 Build with `cargo build --release --workspace`; `--sqawk PATH` or
@@ -244,9 +264,10 @@ agree on), `sqlgen.rs` (the generator, built on `ast.rs` shrinkable trees),
 - `tsq wb --seed N --iterations 2000 [--only N] [--kill-rate F]`:
   `--write` fuzzer. Random files (delimiters, LF/CRLF/mixed, BOM, ragged
   rows, blank and `#` lines under `--comments`, quoted / multi-line /
-  invalid-UTF-8 cells, gen's edge values, `--no-header`, `CREATE TABLE ...
-  LOCATION` files) and random UPDATE / DELETE / INSERT / ALTER / TRUNCATE /
-  SELECT with BEGIN / COMMIT / END / ROLLBACK, run statement by statement on
+  invalid-UTF-8 cells, gen's edge values, `--no-header`, gzip / zstd
+  files, `CREATE TABLE ... LOCATION` files) and random UPDATE (also UPDATE
+  ... FROM) / DELETE / INSERT / ALTER / TRUNCATE / SELECT with BEGIN /
+  COMMIT / END / ROLLBACK, run statement by statement on
   the oracle too. Each file must equal the oracle's final table rendered by
   the writeback rules (untouched rows = source bytes, tracked by rowid);
   read-only targets refuse with nothing written; SELECT output and a
@@ -254,9 +275,9 @@ agree on), `sqlgen.rs` (the generator, built on `ast.rs` shrinkable trees),
   large write leaves old or new content (temp `.tmp*` leftovers are counted,
   not failures). `WB SUMMARY {ok, bad, crash}`, must be bad 0 crash 0.
 - `tsq cli --seed N --iterations 2000 [--only N]`: CLI / REPL surface fuzz
-  (flag and operand combinations, piped REPL scripts, the retired
-  csvfuzz.py's malformed files and mutations, the retired fuzz.py's garbage
-  SQL, limit values and huge statements via `-f`, closed stdout). Oracle: exit 0/1/2 (or `.exit
+  (flag and operand combinations, piped REPL scripts, malformed files and
+  byte mutations of valid ones, garbage SQL, limit values and huge
+  statements via `-f`, closed stdout). Oracle: exit 0/1/2 (or `.exit
   N`), no panic / overflow text, one `sqawk: ` line per error (clap's usage
   format for 2), no hang, nothing created in cwd / HOME / XDG_STATE_HOME
   (temp dirs), no banner or prompt in piped REPL output. `CLI SUMMARY {ok,
