@@ -692,6 +692,16 @@ right: `A UNION ALL B INTERSECT C` is `(A UNION ALL B) INTERSECT C`.
 Parenthesize an operand to group differently. A compound may have at most
 500 terms (`too many terms in compound SELECT`).
 
+## VALUES
+
+`VALUES (1, 'a'), (2, 'b')` is a query wherever a SELECT may be: a statement
+of its own, a FROM item (`FROM (VALUES ...) AS v`), an operand of UNION /
+INTERSECT / EXCEPT, a CTE body, a scalar subquery (`(VALUES (5))`) and an
+`IN (VALUES ...)` list. Its columns are named `column1`, `column2`, ... as
+in SQLite, and every tuple must have as many values as the first ("all
+VALUES must have the same number of terms"). A VALUES statement also takes
+ORDER BY and LIMIT, which SQLite rejects there.
+
 ## INSERT
 
 ```sql

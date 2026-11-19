@@ -318,10 +318,12 @@ impl<'a> SqlCompiler<'a> {
 
         let schema = match &*query.body {
             SetExpr::Select(select) => self.compile_select_core(select, order_by, out)?,
-            body @ (SetExpr::SetOperation { .. } | SetExpr::Query(_)) if order_by.is_empty() => {
+            body @ (SetExpr::SetOperation { .. } | SetExpr::Query(_) | SetExpr::Values(_))
+                if order_by.is_empty() =>
+            {
                 self.compile_compound(body, out)?
             }
-            body @ (SetExpr::SetOperation { .. } | SetExpr::Query(_)) => {
+            body @ (SetExpr::SetOperation { .. } | SetExpr::Query(_) | SetExpr::Values(_)) => {
                 // Every arm feeds one sorter; its payload is the output row,
                 // and the keys are output columns of the leftmost SELECT.
                 let sorter = self.alloc_sorter();
@@ -390,6 +392,7 @@ impl<'a> SqlCompiler<'a> {
     fn compile_compound(&mut self, expr: &SetExpr, dest: Dest) -> SqawkResult<ResultSchema> {
         let (op, quantifier, left, right) = match expr {
             SetExpr::Select(select) => return self.compile_select_core(select, &[], dest),
+            SetExpr::Values(values) => return self.compile_values(values, dest),
             SetExpr::Query(q) => {
                 check_query(q)?;
                 if q.with.is_some()
@@ -854,6 +857,39 @@ impl<'a> SqlCompiler<'a> {
             None,
             "Insert row",
         );
+    }
+
+    /// A VALUES list as a query: one row per tuple, sent to `dest`, with
+    /// columns named `column1`, `column2`, ... as SQLite names them (types
+    /// from the first tuple). Every tuple must be as wide as the first.
+    /// The tuples are evaluated into the same registers one after another.
+    fn compile_values(
+        &mut self,
+        values: &sqlparser::ast::Values,
+        dest: Dest,
+    ) -> SqawkResult<ResultSchema> {
+        let ctx = NameCtx::empty();
+        let width = values.rows.first().map_or(0, |r| r.content.len());
+        let mut schema = ResultSchema::new();
+        if let Some(first) = values.rows.first() {
+            for (i, e) in first.content.iter().enumerate() {
+                schema.add_column(format!("column{}", i + 1), self.infer_expr_type(e, &ctx));
+            }
+        }
+        let start = self.allocate_registers(width.max(1));
+        for row in &values.rows {
+            if row.content.len() != width {
+                return Err(SqawkError::InvalidSqlQuery(
+                    "all VALUES must have the same number of terms".into(),
+                ));
+            }
+            for (i, e) in row.content.iter().enumerate() {
+                self.code_expr(e, &ctx, Some(start + i as i64))?;
+            }
+            self.emit_to_dest(start, width, dest);
+        }
+        self.program.set_result_schema(schema.clone());
+        Ok(schema)
     }
 
     /// Send the `n`-column row at `start` to `dest`.

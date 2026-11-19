@@ -3038,3 +3038,40 @@ fn regexp_errors() -> Result<(), Box<dyn std::error::Error>> {
         "regexp_extract: group 2 out of range (the pattern has 1)",
     )
 }
+
+/// VALUES is a query wherever a SELECT is: a statement, a FROM item, a
+/// compound operand, a CTE body, a subquery. Its columns are named
+/// column1, column2, ... (expected output from sqlite3).
+#[test]
+fn values_as_a_query() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "VALUES (1, 'a'), (2, NULL)",
+        "column1,column2\n1,a\n2,",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT column2, column1 * 10 AS x FROM (VALUES (1, 2), (3, 4)) AS v WHERE column1 > 1",
+        "column2,x\n4,30",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT 0 AS n UNION ALL VALUES (7) UNION ALL SELECT id FROM one",
+        "n\n0\n7\n1",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "WITH c(a, b) AS (VALUES (1, 2)) SELECT b, a FROM c",
+        "b,a\n2,1",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT (VALUES (5)) AS s, 9 IN (VALUES (8), (9)) AS i",
+        "s,i\n5,1",
+    )?;
+    assert_query_on_fails(
+        &[ONE],
+        "VALUES (1), (2, 3)",
+        "all VALUES must have the same number of terms",
+    )
+}

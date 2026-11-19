@@ -160,6 +160,10 @@ impl Dialect for SqawkDialect {
     /// (`-1 || 2` is `(-1) || 2`); sqlparser binds them at the `*` level.
     fn parse_prefix(&self, parser: &mut Parser) -> Option<Result<Expr, ParserError>> {
         use sqlparser::ast::UnaryOperator;
+        // `(VALUES ...)`: a subquery (sqlparser takes VALUES for a function).
+        if let Some(q) = values_subquery(parser, 0) {
+            return Some(q.map(Expr::Subquery));
+        }
         let op = match parser.peek_token_ref().token {
             Token::Minus => UnaryOperator::Minus,
             Token::Plus => UnaryOperator::Plus,
@@ -239,6 +243,29 @@ impl Dialect for SqawkDialect {
                     g
                 }
             }));
+        }
+        // `x [NOT] IN (VALUES ...)`: a subquery (sqlparser reads a list).
+        let not_in = word(parser, 0, Keyword::NOT) && word(parser, 1, Keyword::IN);
+        if not_in || word(parser, 0, Keyword::IN) {
+            let at = 1 + usize::from(not_in);
+            if matches!(&parser.peek_nth_token_ref(at + 1).token,
+                Token::Word(w) if w.keyword == Keyword::VALUES)
+            {
+                if left_spine_exceeds(expr, super::parse::MAX_EXPR_DEPTH) {
+                    return Some(Err(too_deep()));
+                }
+                for _ in 0..at {
+                    parser.advance_token();
+                }
+                return values_subquery(parser, 0).map(|q| {
+                    q.map(|q| Expr::In {
+                        expr: Box::new(expr.clone()),
+                        target: sqlparser::ast::InTarget::Subquery(q),
+                        negated: not_in,
+                        global: false,
+                    })
+                });
+            }
         }
         // `x [NOT] REGEXP p` / `RLIKE`: sqlparser reads a NULL keyword
         // first (for `NOT NULL`), so `x REGEXP NULL` lost its pattern.
@@ -355,4 +382,25 @@ fn left_spine_exceeds(mut expr: &Expr, max: usize) -> bool {
         };
     }
     true
+}
+
+/// `( VALUES ... )` starting `n` tokens ahead, parsed as a query (the
+/// parentheses consumed); None when the tokens are not that.
+fn values_subquery(
+    parser: &mut Parser,
+    n: usize,
+) -> Option<Result<Box<sqlparser::ast::Query>, ParserError>> {
+    let lparen = matches!(parser.peek_nth_token_ref(n).token, Token::LParen);
+    let values = matches!(&parser.peek_nth_token_ref(n + 1).token,
+        Token::Word(w) if w.keyword == Keyword::VALUES);
+    if !(lparen && values) {
+        return None;
+    }
+    for _ in 0..=n {
+        parser.advance_token();
+    }
+    Some(parser.parse_query().and_then(|q| {
+        parser.expect_token(&Token::RParen)?;
+        Ok(q)
+    }))
 }
