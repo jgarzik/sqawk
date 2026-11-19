@@ -2188,57 +2188,22 @@ impl<'a> VmEngine<'a> {
         std::mem::take(&mut self.results)
     }
 
-    /// Create a table from the results using the result schema
-    pub fn create_result_table(&self) -> SqawkResult<Option<Table>> {
+    /// Move the result rows out of the engine into a table named `result`.
+    /// With no rows, a non-empty result schema still gives an empty table
+    /// (its header is printed); an empty schema gives `None`.
+    pub fn create_result_table(&mut self) -> SqawkResult<Option<Table>> {
+        let rows = std::mem::take(&mut self.results);
         let schema = &self.program.result_schema;
-
-        // If we have no results but DO have a schema, create an empty table with headers
-        // This handles SELECT from empty tables
-        if self.results.is_empty() {
-            if !schema.is_empty() {
-                // Build column definitions from schema
-                let col_defs: Vec<ColumnDefinition> = schema
-                    .columns
-                    .iter()
-                    .map(|col| ColumnDefinition {
-                        name: col.name.clone(),
-                        data_type: col.data_type,
-                        decl_type: None,
-                    })
-                    .collect();
-                let table = Table::new_with_schema("result", col_defs, None, None);
-                return Ok(Some(table));
-            }
-            return Ok(None);
+        let width = match rows.first() {
+            Some(row) => row.len(),
+            None if !schema.is_empty() => schema.columns.len(),
+            None => return Ok(None),
+        };
+        let mut table =
+            Table::new_with_schema("result", result_column_defs(schema, width), None, None);
+        for row in rows {
+            table.add_row(row)?;
         }
-
-        // Build column definitions from schema, filling in generic names if schema is incomplete
-        let col_count = self.results[0].len();
-        let col_defs: Vec<ColumnDefinition> = (0..col_count)
-            .map(|i| {
-                if i < schema.columns.len() {
-                    ColumnDefinition {
-                        name: schema.columns[i].name.clone(),
-                        data_type: schema.columns[i].data_type,
-                        decl_type: None,
-                    }
-                } else {
-                    ColumnDefinition {
-                        name: format!("col{}", i),
-                        data_type: crate::table::DataType::Text,
-                        decl_type: None,
-                    }
-                }
-            })
-            .collect();
-
-        let mut table = Table::new_with_schema("result", col_defs, None, None);
-
-        // Add rows
-        for row in &self.results {
-            table.add_row(row.clone())?;
-        }
-
         Ok(Some(table))
     }
 
@@ -2435,4 +2400,26 @@ enum ExecuteResult {
     Jump(usize),
     /// Halt execution
     Halt,
+}
+
+/// The columns of a result `width` values wide: the schema's names and
+/// types, then `colN` (TEXT) for any position the schema does not cover.
+pub(crate) fn result_column_defs(
+    schema: &super::bytecode::ResultSchema,
+    width: usize,
+) -> Vec<ColumnDefinition> {
+    (0..width)
+        .map(|i| match schema.columns.get(i) {
+            Some(col) => ColumnDefinition {
+                name: col.name.clone(),
+                data_type: col.data_type,
+                decl_type: None,
+            },
+            None => ColumnDefinition {
+                name: format!("col{i}"),
+                data_type: crate::table::DataType::Text,
+                decl_type: None,
+            },
+        })
+        .collect()
 }
