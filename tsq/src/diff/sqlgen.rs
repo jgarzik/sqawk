@@ -2559,8 +2559,15 @@ impl<'s> Gen<'s> {
             card: q.card,
             fks: vec![],
         });
+        // SQLite declares a column made by `CAST(x AS REAL)` (or INTEGER)
+        // REAL (INT), and that affinity converts what later DML writes to
+        // it; sqawk's declared types convert nothing ("Differences",
+        // Column types). Such a table gets no DML.
+        let mut text = String::new();
+        q.node.render(&mut text);
+        let affinity = text.contains(" AS REAL)") || text.contains(" AS INTEGER)");
         let mut v = vec![seq(vec![tok(format!("CREATE TABLE {name} AS ")), q.node])];
-        if self.chance(0.3) {
+        if self.chance(0.3) && !affinity {
             v.push(self.dml_stmt(&rel));
         }
         v.push(self.show(&rel));
