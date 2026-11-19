@@ -393,9 +393,8 @@ fn paren_depth(sql: &str) -> usize {
     m
 }
 
-/// "Parser": `GLOB`, `LIMIT n, m`, `TRIM(s, chars)`, `REPLACE INTO`,
-/// `x IN ()` do not parse, `REGEXP` is rejected, parentheses nest at most
-/// 47 deep.
+/// "Parser": `GLOB`, `TRIM(s, chars)`, `REPLACE INTO` do not parse,
+/// `REGEXP` is rejected, parentheses nest at most 47 deep.
 fn parser(ctx: &Ctx) -> bool {
     if ctx.outcome != Outcome::SqawkErr {
         return false;
@@ -404,10 +403,7 @@ fn parser(ctx: &Ctx) -> bool {
     let u: Vec<String> = toks.iter().map(|t| upper(t)).collect();
 
     u.iter().any(|t| t == "GLOB" || t == "REGEXP")
-        || u.windows(3).any(|w| w[0] == "LIMIT" && w[2] == ",")
         || u.windows(2).any(|w| w[0] == "REPLACE" && w[1] == "INTO")
-        || u.windows(3)
-            .any(|w| w[0] == "IN" && w[1] == "(" && w[2] == ")")
         || trim_two_args(&u)
         || paren_depth(ctx.sql) > 47
 }
@@ -571,7 +567,11 @@ mod tests {
             Some("column_types")
         );
         assert_eq!(
-            r("SELECT 1 LIMIT 2, 3", Outcome::SqawkErr, "Expected: end"),
+            r(
+                "REPLACE INTO t VALUES (1)",
+                Outcome::SqawkErr,
+                "Expected: end"
+            ),
             Some("parser")
         );
         assert_eq!(

@@ -102,6 +102,16 @@ impl Dialect for SqawkDialect {
         HIVE.supports_from_first_insert()
     }
 
+    /// SQLite's `LIMIT offset, count`.
+    fn supports_limit_comma(&self) -> bool {
+        true
+    }
+
+    /// SQLite's `x IN ()` (false) and `x NOT IN ()` (true).
+    fn supports_in_empty_list(&self) -> bool {
+        true
+    }
+
     /// SQLite's `BEGIN DEFERRED | IMMEDIATE | EXCLUSIVE`.
     fn supports_start_transaction_modifier(&self) -> bool {
         true

@@ -973,7 +973,8 @@ impl<'s> Gen<'s> {
             let not = self.pick(&["", "NOT "]);
             if self.chance(0.7) {
                 let (x, _) = self.expr(sc, W::I, dm);
-                let n = self.range(1, 4);
+                // An empty list too: `x IN ()` is false, `NOT IN ()` true.
+                let n = self.range(0, 4);
                 let items: Vec<Node> = (0..n)
                     .map(|_| tok(self.pick(&["1", "2", "3", "NULL", "42", "-7", "0"])))
                     .collect();
@@ -982,7 +983,7 @@ impl<'s> Gen<'s> {
                     vec![
                         x,
                         tok(format!(" {not}IN (")),
-                        list(", ", 1, items),
+                        list(", ", 0, items),
                         tok(")"),
                     ],
                 ));
@@ -1715,10 +1716,17 @@ impl<'s> Gen<'s> {
             } else {
                 self.range(0, 6)
             };
-            let mut l = vec![tok(format!(" LIMIT {lim}"))];
-            if self.chance(0.4) {
-                l.push(tok(format!(" OFFSET {}", self.range(0, 4))));
-            }
+            let l = if self.chance(0.4) {
+                let off = self.range(0, 4);
+                // SQLite's `LIMIT offset, count` spelling, or OFFSET.
+                if self.chance(0.5) {
+                    vec![tok(format!(" LIMIT {off}, {lim}"))]
+                } else {
+                    vec![tok(format!(" LIMIT {lim}")), tok(format!(" OFFSET {off}"))]
+                }
+            } else {
+                vec![tok(format!(" LIMIT {lim}"))]
+            };
             parts.push(opt(seq(l)));
         }
         Some(opt(Node::Order(Box::new(seq(parts)))))

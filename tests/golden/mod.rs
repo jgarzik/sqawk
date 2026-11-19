@@ -2832,3 +2832,31 @@ fn derived_and_ctas_column_names_are_unique() -> Result<(), Box<dyn std::error::
         "a:b,c|d,e:f|g\n1,x,",
     )
 }
+
+/// `LIMIT offset, count` is SQLite's (and MySQL's) spelling of
+/// `LIMIT count OFFSET offset`: the first number is the offset.
+#[test]
+fn limit_offset_comma() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT id FROM employees ORDER BY id LIMIT 2, 3",
+        "id\n3\n4\n5",
+    )?;
+    assert_query(
+        &["tests/data/employees.csv"],
+        "SELECT id FROM employees ORDER BY id LIMIT 7, 5",
+        "id\n8",
+    )
+}
+
+/// `x IN ()` is false and `x NOT IN ()` true, even when x is NULL
+/// (SQLite).
+#[test]
+fn in_empty_list() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "SELECT 1 IN () AS a, 1 NOT IN () AS b, NULL IN () AS c, NULL NOT IN () AS d, \
+         (SELECT COUNT(*) FROM one WHERE id IN ()) AS e",
+        "a,b,c,d,e\n0,1,0,1,0",
+    )
+}
