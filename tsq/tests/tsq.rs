@@ -296,9 +296,9 @@ fn corpus_counts_match_the_python_harness() {
     );
     assert_eq!(
         run(&["hand1.sql", "hand2.sql", "hand3.sql"]),
-        "CORPUS SUMMARY {pass: 362, diff: 13, sqawk_err: 12, sqlite_err: 1, both_err: 35, crash: 0} \
+        "CORPUS SUMMARY {pass: 363, diff: 13, sqawk_err: 11, sqlite_err: 1, both_err: 35, crash: 0} \
          documented {bare_column: 7, column_types: 9, derived_correlated: 1, parser: 2, \
-         sqawk_extensions: 1, sum_avg_text: 2, unsupported_syntax: 2, update_snapshot: 1, upper_lower: 1} \
+         sqawk_extensions: 1, sum_avg_text: 2, unsupported_syntax: 1, update_snapshot: 1, upper_lower: 1} \
          oracle_timeouts 0 findings 0"
     );
 }

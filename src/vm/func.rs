@@ -76,6 +76,16 @@ static FUNCS: &[FuncDef] = &[
     f!("PRINTF", 1, VARIADIC, printf),
     f!("FORMAT", 1, VARIADIC, printf),
     f!("QUOTE", 1, 1, quote),
+    // Collation transforms, applied to both sides of a collated comparison
+    // or sort key (see collate.rs); not callable by name.
+    f!("COLLATE NOCASE", 1, 1, |a| collate(
+        a,
+        super::collate::Collation::NoCase
+    )),
+    f!("COLLATE RTRIM", 1, 1, |a| collate(
+        a,
+        super::collate::Collation::Rtrim
+    )),
     // GLOB(pattern, x) is `x GLOB pattern`.
     f!("GLOB", 2, 2, glob),
     // REGEXP(pattern, x) is `x REGEXP pattern` (see regexp.rs).
@@ -517,6 +527,15 @@ fn unicode(a: &[Register]) -> SqawkResult<Register> {
     Ok(match text_of(&a[0]).chars().next() {
         Some(c) if c != '\0' => Register::Integer(c as i64),
         _ => Register::Null,
+    })
+}
+
+/// A collation's transform of a text value (see `collate.rs`); any other
+/// value unchanged.
+fn collate(a: &[Register], coll: super::collate::Collation) -> SqawkResult<Register> {
+    Ok(match &a[0] {
+        Register::String(s) => Register::String(coll.fold(s).as_ref().into()),
+        other => other.clone(),
     })
 }
 

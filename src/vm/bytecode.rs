@@ -287,6 +287,8 @@ pub struct KeyOrder {
     pub col: usize,
     pub asc: bool,
     pub nulls_first: bool,
+    /// How text compares (`ORDER BY x COLLATE NOCASE`).
+    pub coll: super::collate::Collation,
 }
 
 impl KeyOrder {
@@ -296,18 +298,31 @@ impl KeyOrder {
             col,
             asc,
             nulls_first: nulls_first.unwrap_or(asc),
+            coll: super::collate::Collation::Binary,
         }
     }
 
+    /// This key compared under `coll`.
+    pub fn with_collation(mut self, coll: super::collate::Collation) -> Self {
+        self.coll = coll;
+        self
+    }
+
     /// This key in a SorterOpen / OpenEphemeral P4 spec: `col:asc|desc`,
-    /// plus `:nf` / `:nl` when NULL placement is not the default.
+    /// plus `:nf` / `:nl` when NULL placement is not the default, plus
+    /// `:nocase` / `:rtrim` for a collation other than BINARY.
     pub fn spec(&self) -> String {
         let dir = if self.asc { "asc" } else { "desc" };
-        match (self.asc, self.nulls_first) {
+        let mut s = match (self.asc, self.nulls_first) {
             (true, true) | (false, false) => format!("{}:{}", self.col, dir),
             (_, true) => format!("{}:{}:nf", self.col, dir),
             (_, false) => format!("{}:{}:nl", self.col, dir),
+        };
+        if self.coll != super::collate::Collation::Binary {
+            s.push(':');
+            s.push_str(self.coll.spec());
         }
+        s
     }
 
     /// Parse a comma-separated spec (see [`KeyOrder::spec`]).
@@ -317,12 +332,20 @@ impl KeyOrder {
                 let mut parts = k.split(':');
                 let col = parts.next()?.parse::<usize>().ok()?;
                 let asc = parts.next()? != "desc";
-                let nulls = match parts.next() {
-                    Some("nf") => Some(true),
-                    Some("nl") => Some(false),
-                    _ => None,
-                };
-                Some(KeyOrder::new(col, asc, nulls))
+                let mut nulls = None;
+                let mut coll = super::collate::Collation::Binary;
+                for p in parts {
+                    match p {
+                        "nf" => nulls = Some(true),
+                        "nl" => nulls = Some(false),
+                        other => {
+                            if let Some(c) = super::collate::Collation::from_spec(other) {
+                                coll = c;
+                            }
+                        }
+                    }
+                }
+                Some(KeyOrder::new(col, asc, nulls).with_collation(coll))
             })
             .collect()
     }

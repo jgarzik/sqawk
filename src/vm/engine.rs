@@ -459,7 +459,16 @@ pub(super) fn compare_key(k: &KeyOrder, a: &Value, b: &Value) -> std::cmp::Order
             }
         }
         (false, false) => {
-            let o = compare_values(a, b);
+            let o = match (k.coll, a, b) {
+                (super::collate::Collation::Binary, _, _) => compare_values(a, b),
+                (coll, a, b) => {
+                    let fold = |v: &Value| match v {
+                        Value::String(s) => Value::String(coll.fold(s).as_ref().into()),
+                        other => other.clone(),
+                    };
+                    compare_values(&fold(a), &fold(b))
+                }
+            };
             if k.asc { o } else { o.reverse() }
         }
     }

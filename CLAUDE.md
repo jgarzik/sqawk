@@ -139,6 +139,11 @@ SQL execution uses a bytecode VM inspired by SQLite's architecture:
 - `regexp.rs`: `REGEXP` (parsed in `dialect.rs`, compiled to `REGEXP(p, x)`)
   and DuckDB's `regexp_matches` / `regexp_replace` / `regexp_extract` on the
   `regex` crate, compiled patterns cached per thread
+- `collate.rs`: BINARY / NOCASE / RTRIM as key transforms (`COLLATE NOCASE`
+  function entries fold both sides of a comparison, BETWEEN, IN list;
+  `KeyOrder` carries the collation for ORDER BY; a collated GROUP BY key is
+  folded and the group's first original value carried after the keys);
+  `COLLATE` anywhere else is an error
 - `glob.rs`: the GLOB matcher, a port of SQLite's `patternCompare`;
   `x [NOT] GLOB p` is parsed in `dialect.rs` and compiled to the `GLOB(p, x)`
   function

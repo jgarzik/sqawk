@@ -28,6 +28,9 @@ struct Group<'g, 'a> {
     having: Option<&'g Expr>,
     outs: &'g [OutCol],
     keys: &'g [Expr],
+    /// The terms of collated keys without their COLLATE (see
+    /// `compile_select_grouped`), whose values follow the keys.
+    originals: &'g [Expr],
     aggs: &'g [Agg],
     stage: &'g OutputStage,
 }
@@ -203,6 +206,28 @@ impl<'a> SqlCompiler<'a> {
             keys.push(key);
         }
 
+        // A key with a COLLATE is sorted and compared as its collation's
+        // transform (see collate.rs); its term's own value from the group's
+        // first row is carried after the keys, and is what the term without
+        // the COLLATE reads (SQLite shows such a group's value from one of
+        // its rows).
+        let mut colls = Vec::with_capacity(keys.len());
+        let mut originals: Vec<Expr> = Vec::new();
+        for k in keys.iter_mut() {
+            let (term, coll) = super::collate::split(k)?;
+            match coll.and_then(|c| c.func_name().map(|_| c)) {
+                Some(c) => {
+                    colls.push(Some((c, originals.len())));
+                    originals.push(term.clone());
+                }
+                None => colls.push(None),
+            }
+            // BINARY (or no COLLATE) is the term itself.
+            if coll.is_some() && colls.last() == Some(&None) {
+                *k = term.clone();
+            }
+        }
+
         let st = self.output_stage(&outs, order_by, distinct, dest, Some(&ctx))?;
         // Windows over the grouped rows: each group's row goes to the window
         // stage, which feeds the output stage once all groups exist.
@@ -243,11 +268,13 @@ impl<'a> SqlCompiler<'a> {
             having: select.having.as_ref(),
             outs: &outs,
             keys: &keys,
+            originals: &originals,
             aggs: &aggs,
             stage: &st,
         };
 
         let nk = keys.len();
+        let no = originals.len();
         let na = aggs.len();
 
         if nk == 0 {
@@ -290,9 +317,10 @@ impl<'a> SqlCompiler<'a> {
 
         self.add_comment("GROUP BY query");
         let sorter_id = self.alloc_sorter();
-        // Sorter row: [keys.., then each aggregate's slots..].
+        // Sorter row: [keys.., collated keys' originals.., then each
+        // aggregate's slots..].
         let mut offsets = Vec::with_capacity(na);
-        let mut total = nk;
+        let mut total = nk + no;
         for agg in &aggs {
             offsets.push(total);
             total += agg.slots();
@@ -313,7 +341,24 @@ impl<'a> SqlCompiler<'a> {
         let row = self.allocate_registers(total);
         self.emit_scan(plan, &mut |c, ctx| {
             for (i, k) in keys.iter().enumerate() {
-                c.code_expr(k, ctx, Some(row + i as i64))?;
+                match colls[i] {
+                    Some((coll, x)) => {
+                        let orig = row + (nk + x) as i64;
+                        c.code_expr(&originals[x], ctx, Some(orig))?;
+                        let folded = c.fold_reg(orig, coll);
+                        c.emit(
+                            OpCode::Copy,
+                            folded,
+                            row + i as i64,
+                            0,
+                            None,
+                            "collated key",
+                        );
+                    }
+                    None => {
+                        c.code_expr(k, ctx, Some(row + i as i64))?;
+                    }
+                }
             }
             for (agg, &off) in aggs.iter().zip(&offsets) {
                 let base = row + off as i64;
@@ -343,7 +388,7 @@ impl<'a> SqlCompiler<'a> {
             "empty: no groups",
         );
 
-        let key_reg = self.allocate_registers(nk);
+        let key_reg = self.allocate_registers(nk + no);
         let acc = self.allocate_registers(na.max(1));
         self.emit_acc_reset(acc, na);
         let first = self.allocate_register();
@@ -380,7 +425,7 @@ impl<'a> SqlCompiler<'a> {
             self.emit(OpCode::AggReset, acc + j as i64, 0, 0, None, "");
         }
         self.resolve(update_key);
-        for i in 0..nk {
+        for i in 0..nk + no {
             self.emit(
                 OpCode::Copy,
                 row + i as i64,
@@ -479,10 +524,33 @@ impl<'a> SqlCompiler<'a> {
             ctx.bind_agg(&agg.call, fin + j as i64);
         }
         let mut cols = Vec::new();
+        let mut collated = 0;
         for (i, k) in g.keys.iter().enumerate() {
-            let reg = key_reg + i as i64;
+            // A collated key reads as its group's original value, not the
+            // transform it was compared by.
+            let reg = if matches!(super::collate::split(k), Ok((_, Some(_)))) {
+                collated += 1;
+                key_reg + (g.keys.len() + collated - 1) as i64
+            } else {
+                key_reg + i as i64
+            };
             ctx.bind_agg(k, reg);
             let col = match k {
+                Expr::Identifier(ident) => ctx.resolve_unqualified(&ident.value).ok(),
+                Expr::CompoundIdentifier(parts) if parts.len() >= 2 => ctx
+                    .resolve_qualified(&parts[parts.len() - 2].value, &parts[parts.len() - 1].value)
+                    .ok(),
+                _ => None,
+            };
+            if let Some(col) = col {
+                cols.push((col, reg));
+            }
+        }
+        let nk = g.keys.len() as i64;
+        for (x, term) in g.originals.iter().enumerate() {
+            let reg = key_reg + nk + x as i64;
+            ctx.bind_agg(term, reg);
+            let col = match term {
                 Expr::Identifier(ident) => ctx.resolve_unqualified(&ident.value).ok(),
                 Expr::CompoundIdentifier(parts) if parts.len() >= 2 => ctx
                     .resolve_qualified(&parts[parts.len() - 2].value, &parts[parts.len() - 1].value)

@@ -126,6 +126,24 @@ expression whose text is one character. The pattern
 may be any expression, such as another column. `ILIKE` (not in SQLite) folds
 Unicode case. A NULL value, pattern or escape gives NULL.
 
+### Collation
+
+`COLLATE BINARY` (the default), `COLLATE NOCASE` and `COLLATE RTRIM` work as
+in SQLite where they decide how text compares:
+
+- In a comparison (`=`, `<>`, `<`, ...), `BETWEEN` and an `IN` list:
+  `name = 'alice' COLLATE NOCASE`. The left operand's COLLATE wins, else
+  the right's.
+- On an ORDER BY term: `ORDER BY name COLLATE NOCASE`.
+- On a GROUP BY term: `GROUP BY name COLLATE NOCASE` puts `Alice` and
+  `ALICE` in one group; `name` in the SELECT list shows the value of the
+  group's first row.
+
+NOCASE folds only the ASCII letters A-Z; RTRIM ignores trailing spaces.
+Text with a numeric reading still compares as a number (see Type
+coercion), so a collation matters only between texts. A COLLATE written
+anywhere else is an error (see Unsupported syntax).
+
 ### CASE Expression
 
 ```sql
@@ -942,7 +960,11 @@ nothing is modified. That includes:
   list, `FILTER` or `DISTINCT` on a scalar function, `FILTER` on a window
   function
 - `CAST ... FORMAT`, `LIKE ANY`, blob literals (`X'00'`) and parameters
-- `COLLATE` (any collation, in expressions and `ORDER BY`)
+- `COLLATE` outside comparisons, BETWEEN, IN lists, ORDER BY and GROUP BY
+  (on a result column, a function argument, inside an operator such as
+  `a || b COLLATE NOCASE`, DISTINCT, window clauses), on a declared column,
+  and collations other than BINARY, NOCASE and RTRIM ("no such collation
+  sequence")
 - a RIGHT JOIN whose left side already contains an outer join, a FULL JOIN
   followed by further joins, parenthesized joins, and `INTERSECT ALL` /
   `EXCEPT ALL`

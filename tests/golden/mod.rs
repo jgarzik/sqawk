@@ -3075,3 +3075,70 @@ fn values_as_a_query() -> Result<(), Box<dyn std::error::Error>> {
         "all VALUES must have the same number of terms",
     )
 }
+
+const NAMES: (&str, &str) = ("n.csv", "name,v\nab,1\nAb,2\n\"AB \",3\nc,4\nb,5\n");
+
+/// COLLATE BINARY / NOCASE / RTRIM in comparisons, BETWEEN and IN lists,
+/// with SQLite's rule: the left operand's collation, else the right's.
+/// Expected output from sqlite3.
+#[test]
+fn collate_in_comparisons() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "SELECT 'a' = 'A' COLLATE NOCASE AS a, 'a' COLLATE NOCASE = 'A' AS b, \
+         'a' COLLATE BINARY = 'A' COLLATE NOCASE AS c, 'x ' = 'x' COLLATE RTRIM AS d, \
+         'B' > 'a' COLLATE NOCASE AS e, 'B' BETWEEN 'a' COLLATE NOCASE AND 'c' AS f, \
+         'AB' COLLATE NOCASE IN ('x', 'ab') AS g, (('A' COLLATE nocase)) = 'a' AS h",
+        "a,b,c,d,e,f,g,h\n1,1,0,1,1,1,1,1",
+    )?;
+    assert_query_on(
+        &[NAMES],
+        "SELECT v FROM n WHERE name = 'ab' COLLATE NOCASE ORDER BY v",
+        "v\n1\n2",
+    )
+}
+
+/// ORDER BY and GROUP BY terms with COLLATE; a group shows the value of
+/// its first row (expected output from sqlite3).
+#[test]
+fn collate_in_order_by_and_group_by() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[NAMES],
+        "SELECT name, v FROM n ORDER BY name COLLATE NOCASE, v",
+        "name,v\nab,1\nAb,2\n\"AB \",3\nb,5\nc,4",
+    )?;
+    assert_query_on(
+        &[NAMES],
+        "SELECT name FROM n ORDER BY 1 COLLATE NOCASE DESC, v",
+        "name\nc\nb\n\"AB \"\nab\nAb",
+    )?;
+    assert_query_on(
+        &[NAMES],
+        "SELECT name, COUNT(*) AS k, SUM(v) AS s FROM n GROUP BY name COLLATE NOCASE \
+         ORDER BY k DESC, s",
+        "name,k,s\nab,2,3\n\"AB \",1,3\nc,1,4\nb,1,5",
+    )?;
+    assert_query_on(
+        &[NAMES],
+        "SELECT name FROM n UNION ALL SELECT 'B' ORDER BY 1 COLLATE NOCASE, 1",
+        "name\nAb\nab\n\"AB \"\nB\nb\nc",
+    )
+}
+
+/// An unknown collation is SQLite's error; COLLATE where sqawk does not
+/// apply it (a result column, a function argument) is an error rather
+/// than silently ignored.
+#[test]
+fn collate_errors() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on_fails(
+        &[ONE],
+        "SELECT 'a' = 'b' COLLATE klingon",
+        "no such collation sequence: klingon",
+    )?;
+    assert_query_on_fails(
+        &[NAMES],
+        "SELECT DISTINCT name COLLATE NOCASE FROM n",
+        "COLLATE is not supported here, only in comparisons, BETWEEN, IN lists, ORDER BY and \
+         GROUP BY",
+    )
+}

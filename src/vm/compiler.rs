@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::bytecode::{AGG_COUNT, AGG_DISTINCT, Instruction, OpCode, Program};
+use super::collate::{self, Collation};
 use super::compiler_check::{check_create_table, check_delete, check_insert, check_update};
 use super::compiler_from::{FromPlan, expr_children};
 use super::compiler_subquery::Sub;
@@ -1223,9 +1224,17 @@ impl<'a> SqlCompiler<'a> {
         ctx: &NameCtx<'a>,
         dest: i64,
     ) -> SqawkResult<()> {
-        let x = self.code_expr(expr, ctx, None)?;
-        let lo = self.code_expr(low, ctx, None)?;
-        let hi = self.code_expr(high, ctx, None)?;
+        // Each half is a comparison of its own: x's collation, else the
+        // bound's.
+        let (expr, xc) = collate::split(expr)?;
+        let (low, lc) = collate::split(low)?;
+        let (high, hc) = collate::split(high)?;
+        let lo_coll = xc.or(lc).unwrap_or_default();
+        let hi_coll = xc.or(hc).unwrap_or_default();
+        let raw = self.code_expr(expr, ctx, None)?;
+        let x = self.fold_reg(raw, lo_coll);
+        let lo = self.code_collated(low, lo_coll, ctx)?;
+        let hi = self.code_collated(high, hi_coll, ctx)?;
         let ge = self.allocate_register();
         let le = self.allocate_register();
         self.emit(
@@ -1236,6 +1245,7 @@ impl<'a> SqlCompiler<'a> {
             None,
             &format!("r[{}] = r[{}] >= r[{}]", ge, x, lo),
         );
+        let x = self.fold_reg(raw, hi_coll);
         self.emit(
             OpCode::Le,
             x,
@@ -1251,6 +1261,38 @@ impl<'a> SqlCompiler<'a> {
         Ok(())
     }
 
+    /// Compile `e` and apply `coll`'s transform (see `collate.rs`): the
+    /// register to compare.
+    pub(crate) fn code_collated(
+        &mut self,
+        e: &Expr,
+        coll: Collation,
+        ctx: &NameCtx<'a>,
+    ) -> SqawkResult<i64> {
+        let r = self.code_expr(e, ctx, None)?;
+        Ok(self.fold_reg(r, coll))
+    }
+
+    /// `reg` with `coll`'s transform applied, in a new register; `reg`
+    /// itself for BINARY.
+    pub(crate) fn fold_reg(&mut self, reg: i64, coll: Collation) -> i64 {
+        match coll.func_name() {
+            None => reg,
+            Some(name) => {
+                let out = self.allocate_register();
+                self.emit(
+                    OpCode::Function,
+                    reg,
+                    1,
+                    out,
+                    Some(name.to_string()),
+                    &format!("r[{}] = {}(r[{}])", out, name, reg),
+                );
+                out
+            }
+        }
+    }
+
     /// Compile `expr [NOT] IN (list)` into `dest` (see [`Self::emit_in_step`]).
     fn compile_in_list(
         &mut self,
@@ -1264,13 +1306,19 @@ impl<'a> SqlCompiler<'a> {
             self.emit_empty_in(negated, dest);
             return Ok(());
         }
-        let x = self.code_expr(expr, ctx, None)?;
+        // Each item is compared under x's collation, else its own.
+        let (expr, xc) = collate::split(expr)?;
+        let raw = self.code_expr(expr, ctx, None)?;
         let item = self.allocate_register();
         let hit = self.allocate_register();
         self.emit(OpCode::Integer, 0, dest, 0, None, "IN list init");
         for value in list {
+            let (value, vc) = collate::split(value)?;
+            let coll = xc.or(vc).unwrap_or_default();
+            let x = self.fold_reg(raw, coll);
             self.code_expr(value, ctx, Some(item))?;
-            self.emit_in_step(x, item, hit, dest);
+            let it = self.fold_reg(item, coll);
+            self.emit_in_step(x, it, hit, dest);
         }
         if negated {
             self.emit(OpCode::Not, dest, dest, 0, None, "NOT IN");
@@ -1737,6 +1785,13 @@ impl<'a> SqlCompiler<'a> {
                 self.emit_call_refs("~", &[inner], ctx, dest)?;
             }
 
+            // COLLATE is applied by the sites that compare or sort (see
+            // collate.rs); as a value anywhere else it is an error.
+            Expr::Collate { .. } => {
+                collate::split(expr)?;
+                return Err(collate::unsupported());
+            }
+
             // `x [NOT] REGEXP p` (and RLIKE) is REGEXP(p, x), as the sqlite3
             // shell defines it.
             Expr::RLike {
@@ -1808,8 +1863,29 @@ impl<'a> SqlCompiler<'a> {
                         | BinaryOperator::NotEq
                 ) =>
             {
-                let left_reg = self.code_expr(left, ctx, None)?;
-                let right_reg = self.code_expr(right, ctx, None)?;
+                let comparison = !matches!(
+                    op,
+                    BinaryOperator::Plus
+                        | BinaryOperator::Minus
+                        | BinaryOperator::Multiply
+                        | BinaryOperator::Divide
+                        | BinaryOperator::Modulo
+                );
+                let (left_reg, right_reg) = if comparison {
+                    // The left operand's collation, else the right's.
+                    let (l, lc) = collate::split(left)?;
+                    let (r, rc) = collate::split(right)?;
+                    let coll = lc.or(rc).unwrap_or_default();
+                    (
+                        self.code_collated(l, coll, ctx)?,
+                        self.code_collated(r, coll, ctx)?,
+                    )
+                } else {
+                    (
+                        self.code_expr(left, ctx, None)?,
+                        self.code_expr(right, ctx, None)?,
+                    )
+                };
                 let opcode = match op {
                     BinaryOperator::Plus => OpCode::Add,
                     BinaryOperator::Minus => OpCode::Subtract,

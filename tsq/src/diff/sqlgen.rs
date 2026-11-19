@@ -1039,6 +1039,33 @@ impl<'s> Gen<'s> {
                 ],
             ));
         }
+        if c < 0.78 && self.chance(0.15) {
+            // A collated comparison of texts without a numeric reading (on
+            // which both engines compare text as text). The COLLATE goes on
+            // a whole, parenthesized operand.
+            let (l, _) = self.text_with(sc, dm, |p| p.letter);
+            let (r, _) = self.text_with(sc, 0, |p| p.letter);
+            let op = self.pick(&["=", "<>", "<", ">="]);
+            let coll = self.pick(&["NOCASE", "RTRIM", "BINARY"]);
+            let parts = if self.chance(0.5) {
+                vec![
+                    tok("("),
+                    l,
+                    tok(format!(") COLLATE {coll} {op} (")),
+                    r,
+                    tok(")"),
+                ]
+            } else {
+                vec![
+                    tok("("),
+                    l,
+                    tok(format!(") {op} (")),
+                    r,
+                    tok(format!(") COLLATE {coll}")),
+                ]
+            };
+            return b(mk('b', parts));
+        }
         if c < 0.78 {
             let (x, _) = self.expr(sc, W::T, dm);
             let not = self.pick(&["", "NOT "]);

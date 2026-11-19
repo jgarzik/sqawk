@@ -17,6 +17,7 @@ mod agg;
 pub(crate) mod arith;
 pub mod ast_compat;
 pub mod bytecode;
+mod collate;
 pub mod compiler;
 mod compiler_aggregate;
 mod compiler_check;

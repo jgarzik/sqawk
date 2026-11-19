@@ -201,20 +201,20 @@ pub(crate) fn compound_order_key(
     term: usize,
     schema: &ResultSchema,
 ) -> SqawkResult<KeyOrder> {
-    let pos = match term_position(&ob.expr, term, "ORDER", schema.columns.len())? {
+    let (expr, coll) = super::collate::split(&ob.expr)?;
+    let pos = match term_position(expr, term, "ORDER", schema.columns.len())? {
         Some(j) => j,
-        None => schema_position(schema, &ob.expr).ok_or_else(|| {
+        None => schema_position(schema, expr).ok_or_else(|| {
             SqawkError::InvalidSqlQuery(format!(
                 "{} ORDER BY term does not match any column in the result set",
                 ordinal(term + 1)
             ))
         })?,
     };
-    Ok(KeyOrder::new(
-        pos,
-        order_by_is_asc(ob),
-        ob.options.nulls_first,
-    ))
+    Ok(
+        KeyOrder::new(pos, order_by_is_asc(ob), ob.options.nulls_first)
+            .with_collation(coll.unwrap_or_default()),
+    )
 }
 
 /// The output column whose header `expr` names, if any.
@@ -651,20 +651,23 @@ impl<'a> SqlCompiler<'a> {
         let mut keys = Vec::with_capacity(order_by.len());
         let mut spec = Vec::with_capacity(order_by.len());
         for (i, ob) in order_by.iter().enumerate() {
-            let text = NameCtx::agg_key(&ob.expr);
-            let key = if let Some(j) = term_position(&ob.expr, i, "ORDER", n)? {
+            // A COLLATE on the term is the sort key's collation; the term
+            // without it is resolved as usual.
+            let (term, coll) = super::collate::split(&ob.expr)?;
+            let text = NameCtx::agg_key(term);
+            let key = if let Some(j) = term_position(term, i, "ORDER", n)? {
                 SortKey::Out(j)
-            } else if let Some(j) = alias_position(outs, &ob.expr) {
+            } else if let Some(j) = alias_position(outs, term) {
                 SortKey::Out(j)
             } else if let Some(j) = outs.iter().position(|o| NameCtx::agg_key(&o.expr) == text) {
                 SortKey::Out(j)
             } else if let Some(ctx) = ctx {
-                match bare_output_position(outs, &ob.expr, ctx) {
+                match bare_output_position(outs, term, ctx) {
                     Some(j) => SortKey::Out(j),
-                    None => SortKey::Expr(Box::new(ob.expr.clone())),
+                    None => SortKey::Expr(Box::new(term.clone())),
                 }
             } else {
-                SortKey::Out(schema_position(&schema, &ob.expr).ok_or_else(|| {
+                SortKey::Out(schema_position(&schema, term).ok_or_else(|| {
                     SqawkError::InvalidSqlQuery(format!(
                         "ORDER BY expression must appear in the SELECT list: {}",
                         ob.expr
@@ -672,7 +675,11 @@ impl<'a> SqlCompiler<'a> {
                 })?)
             };
             keys.push(key);
-            spec.push(KeyOrder::new(i, order_by_is_asc(ob), ob.options.nulls_first).spec());
+            spec.push(
+                KeyOrder::new(i, order_by_is_asc(ob), ob.options.nulls_first)
+                    .with_collation(coll.unwrap_or_default())
+                    .spec(),
+            );
         }
         let nk = keys.len();
 
