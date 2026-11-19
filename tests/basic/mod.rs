@@ -249,7 +249,7 @@ fn test_delete_with_where() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-s")
         .arg("SELECT * FROM people") // Check result after deletion
         .arg(file_path.to_str().unwrap())
-        .arg("-v"); // Verbose mode to see more details
+        .arg("-vv"); // Verbose mode to see more details
 
     // Verify deletion worked correctly
     cmd.assert()
@@ -297,7 +297,7 @@ fn test_delete_all() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-s")
         .arg("SELECT * FROM people") // Check result after deletion
         .arg(file_path.to_str().unwrap())
-        .arg("-v"); // Verbose mode to see more details
+        .arg("-vv"); // Verbose mode to see more details
 
     // Verify deletion worked correctly - should only show header, no rows
     cmd.assert()

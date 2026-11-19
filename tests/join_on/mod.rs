@@ -14,7 +14,7 @@ fn test_inner_join_on_basic() -> Result<(), Box<dyn std::error::Error>> {
         .arg("SELECT users.name, orders.product_id, orders.date FROM users INNER JOIN orders ON users.id = orders.user_id")
         .arg(get_users_file().to_str().unwrap())
         .arg(get_orders_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Check output
     cmd.assert()
@@ -55,7 +55,7 @@ fn test_inner_join_on_with_where() -> Result<(), Box<dyn std::error::Error>> {
         .arg("SELECT users.name, orders.product_id, orders.date FROM users INNER JOIN orders ON users.id = orders.user_id WHERE orders.product_id > 102")
         .arg(get_users_file().to_str().unwrap())
         .arg(get_orders_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Check output - should only include orders with product_id > 102
     cmd.assert()
@@ -92,7 +92,7 @@ fn test_three_way_inner_join_on() -> Result<(), Box<dyn std::error::Error>> {
         .arg(get_users_file().to_str().unwrap())
         .arg(get_orders_file().to_str().unwrap())
         .arg(get_products_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Check column aliases and content
     cmd.assert()
@@ -119,7 +119,7 @@ fn test_complex_operations_with_join_on() -> Result<(), Box<dyn std::error::Erro
         .arg(get_users_file().to_str().unwrap())
         .arg(get_orders_file().to_str().unwrap())
         .arg(get_products_file().to_str().unwrap())
-        .arg("-v");
+        .arg("-vv");
 
     // Verify the command executes successfully
     cmd.assert().success();

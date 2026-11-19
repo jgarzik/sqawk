@@ -542,16 +542,28 @@ sqawk -F: --no-header -s "SELECT a, f FROM passwd WHERE c >= 1000" /etc/passwd
 
 ### Verbose Mode (-v)
 
-`-v` (or `--verbose`) prints debugging output about what sqawk is doing:
+`-v` (or `--verbose`) reports what sqawk is doing; `-vv` adds the internals:
 
 ```sh
-sqawk -s "SELECT * FROM data WHERE id > 1000" data.csv -v
+sqawk -v -s "UPDATE data SET flag = 1 WHERE id > 1000" --write data.csv
 ```
 
+```
+Loaded 1 tables in 41.7 ms
+Table 'data': 250000 rows, 8 columns
+Executing SQL: UPDATE data SET flag = 1 WHERE id > 1000
+249000 rows affected
+Ran in 63.2 ms
+Wrote 250000 rows of 'data' to data.csv
+```
+
+- `-v`: the tables loaded (rows, columns) and the load time, each script's
+  SQL, row counts (rows returned by a query, rows affected by a change),
+  run time, and every file written
+- `-vv`: also the compiled bytecode of each statement and a trace of every
+  executed instruction, which on large inputs is a great deal of output
+
 Verbose output goes to standard error, so it never mixes with query results.
-It includes the tables loaded, each SQL statement, its compiled bytecode and
-every executed instruction, row counts, and whether changes were saved.
-Expect a lot of it on large inputs.
 
 The output is for debugging; its format is not stable, so do not parse it.
 A closed or failing stderr never stops a run.
@@ -1368,7 +1380,7 @@ those rows too. Measured on a 66 MB CSV of one million 10-column rows:
 8. **Changes not saved**:
    - Remember to use the `--write` flag to save changes
    - Only modified tables are written back
-   - Check verbose output (`-v`) to confirm which tables were modified
+   - Check verbose output (`-v`): it lists every file written
 
 9. **SQL syntax errors**:
    - Try running your query in interactive mode to get immediate feedback

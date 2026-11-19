@@ -44,7 +44,7 @@ Sqawk is an SQL-based CLI tool for processing delimiter-separated files (CSV, TS
 
 - **`main.rs`**: Entry point orchestrating the pipeline: CLI parsing → file loading → SQL execution → output → optional writeback. Any error is printed once as `sqawk: <message>` (one line, exit 1); clap usage errors exit 2
 - **`cli.rs`**: clap arguments; `-s`/`-f` are merged into one ordered script by command-line position
-- **`config.rs`**: `AppConfig`, the parsed options (-v, -F, --tabledef, --write, header/comment/output flags) passed to every component instead of global state
+- **`config.rs`**: `AppConfig`, the parsed options (-v / -vv: `verbose()` progress, `trace()` bytecode; -F, --tabledef, --write, header/comment/output flags) passed to every component instead of global state
 - **`repl.rs`**: the interactive shell (`-i`). On a terminal: rustyline editor with prompt, multi-line statements, tab completion and history (`$XDG_STATE_HOME/sqawk/history` when that is absolute, else `~/.sqawk_history`, else on Windows `%APPDATA%\sqawk\history` or `%USERPROFILE%\.sqawk_history`); piped, it reads lines and prints only command output. Dot commands (`.tables`, `.schema`, `.save`, `.cd`, `.load`, ...) live here
 - **`error.rs`**: `SqawkError`; each `Display` is one complete line and no variant exposes a `source()` (that would print the cause twice). File I/O errors name the user's file (`SqawkError::open` / `write`), never a temp file
 - **`diag.rs`**: `diag!` / `outln!` -- every stderr diagnostic (errors, `-v`) and REPL stdout line goes through them; write errors are ignored, so a closed stream never panics. Do not use `eprintln!`/`println!`

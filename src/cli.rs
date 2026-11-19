@@ -186,14 +186,17 @@ pub struct SqawkArgs {
 
     /// Print debugging information on standard error
     ///
-    /// Shows table loading, the compiled bytecode and each executed
-    /// instruction. The output is for debugging; its format is not stable.
+    /// `-v` reports the tables loaded (rows, columns, load time), each
+    /// statement's row count, run time and the files written; `-vv` adds the
+    /// compiled bytecode and a trace of every executed instruction. The
+    /// output is for people; its format is not stable.
     #[clap(
         short,
         long,
-        help = "Print debugging output on stderr (format is not stable)"
+        action = clap::ArgAction::Count,
+        help = "Report progress on stderr; -vv adds the bytecode trace (format is not stable)"
     )]
-    pub verbose: bool,
+    pub verbose: u8,
 
     /// Write changes back to input files (default is to not modify files)
     ///

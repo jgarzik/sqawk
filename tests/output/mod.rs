@@ -562,3 +562,40 @@ fn repl_mode_headers_nullvalue() -> Result<(), Box<dyn std::error::Error>> {
     assert!(out.contains("unknown mode: nope"), "{out:?}");
     Ok(())
 }
+
+/// `-v` reports tables, counts, timings and writes, without the bytecode
+/// trace; `-vv` adds the trace.
+#[test]
+fn verbose_levels() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = create_temp_dir()?;
+    let t = create_custom_csv(dir.path(), "t.csv", "k\n1\n2\n3\n")?;
+    let run = |flag: &str| -> Result<String, Box<dyn std::error::Error>> {
+        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+        cmd.arg(flag)
+            .arg("--write")
+            .arg("-s")
+            .arg("DELETE FROM t WHERE k = 2; SELECT k FROM t")
+            .arg(t.to_str().unwrap());
+        let out = cmd.assert().success().get_output().clone();
+        Ok(String::from_utf8(out.stderr)?)
+    };
+    let v = run("-v")?;
+    for want in [
+        "Loaded 1 tables in ",
+        "Table 't': 3 rows, 1 columns",
+        "1 rows affected",
+        "Query returned 2 rows",
+        "Ran in ",
+        "Wrote 2 rows of 't' to ",
+    ] {
+        assert!(v.contains(want), "-v lacks {want:?}:\n{v}");
+    }
+    assert!(!v.contains("Executing ["), "-v shows the trace:\n{v}");
+    let vv = run("-vv")?;
+    assert!(vv.contains("Executing ["), "-vv lacks the trace:\n{vv}");
+    assert!(
+        vv.contains("Table 't': 2 rows") || vv.contains("Table 't': 3 rows"),
+        "{vv}"
+    );
+    Ok(())
+}

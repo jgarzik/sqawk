@@ -34,7 +34,7 @@ pub struct SqawkTestCase {
     pub expected_stderr: Vec<String>,
     /// Whether the command is expected to succeed
     pub should_succeed: bool,
-    /// Whether to use verbose mode
+    /// Whether to run with -vv (the bytecode trace the tests look for)
     pub verbose: bool,
 }
 
@@ -99,7 +99,7 @@ fn run_test_case_with_file(
 
     // Add verbose flag if requested
     if test_case.verbose {
-        cmd.arg("-v");
+        cmd.arg("-vv");
     }
 
     // Not writing to files is now the default behavior, so no need for additional flags

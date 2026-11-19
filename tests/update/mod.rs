@@ -35,7 +35,7 @@ fn test_update_with_where() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-s")
         .arg("SELECT * FROM people") // Check result after update
         .arg(file_path.to_str().unwrap())
-        .arg("-v"); // Verbose mode to see more details
+        .arg("-vv"); // Verbose mode to see more details
 
     // Verify update worked correctly
     cmd.assert()
@@ -83,7 +83,7 @@ fn test_update_all_rows() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-s")
         .arg("SELECT * FROM people") // Check result after update
         .arg(file_path.to_str().unwrap())
-        .arg("-v"); // Verbose mode to see more details
+        .arg("-vv"); // Verbose mode to see more details
 
     // Verify update worked correctly - all ages should be 40
     cmd.assert()

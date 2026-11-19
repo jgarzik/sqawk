@@ -73,7 +73,10 @@ impl SqlExecutor {
 
         // Execute via VM engine (which also records the modified tables in
         // the database)
-        let result = crate::vm::execute_vm(sql, &mut self.database, self.config.verbose(), sink)?;
+        let result = crate::vm::execute_vm(sql, &mut self.database, self.config.trace(), sink)?;
+        if self.config.verbose() && result.dml_executed {
+            diag!("{} rows affected", result.affected_rows);
+        }
 
         // Track affected rows from the last statement
         self.affected_rows = result.affected_rows;
@@ -115,6 +118,18 @@ impl SqlExecutor {
         for table_name in &targets {
             // Use the file handler to write the table back to its source file
             self.file_handler.save_table(&self.database, table_name)?;
+            if self.config.verbose() {
+                let table = self.database.get_table(table_name)?;
+                diag!(
+                    "Wrote {} rows of '{}' to {}",
+                    table.row_count(),
+                    table_name,
+                    table
+                        .file_path()
+                        .map(|p| crate::error::display_path(p))
+                        .unwrap_or_default()
+                );
+            }
         }
 
         Ok(targets.len())

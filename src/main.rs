@@ -218,15 +218,25 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
 
     // Load all specified files into in-memory tables
     // Each file can specify its table name with table_name=file_path syntax
+    let load_start = std::time::Instant::now();
     file_handler.load_files(&mut database, &args.files)?;
     database.check_table_definitions_used()?;
 
-    // Log table loading results in verbose mode
+    // -v: what was loaded, and how long it took.
     if config.verbose() {
         let table_count = database.table_count();
-        diag!("Loaded {table_count} tables");
+        diag!(
+            "Loaded {table_count} tables in {:.1} ms",
+            load_start.elapsed().as_secs_f64() * 1000.0
+        );
         for table_name in database.table_names() {
-            diag!("Table '{table_name}' loaded");
+            if let Ok(t) = database.get_table(&table_name) {
+                diag!(
+                    "Table '{table_name}': {} rows, {} columns",
+                    t.row_count(),
+                    t.column_count()
+                );
+            }
         }
     }
 
@@ -265,9 +275,11 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
     // Process each SQL statement in the order specified on the command line
     // This allows operations like: UPDATE -> DELETE -> SELECT to see the effects
     for sql in &script {
+        let start = std::time::Instant::now();
         sql_executor.execute(sql, &mut out)?;
-        if out.take_result_sets() == 0 && config.verbose() {
-            diag!("Query executed successfully (no results to display)");
+        out.take_result_sets();
+        if config.verbose() {
+            diag!("Ran in {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
         }
     }
 

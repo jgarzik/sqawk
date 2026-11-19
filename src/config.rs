@@ -11,8 +11,8 @@
 /// This approach avoids global mutable state and makes dependencies explicit.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    /// Whether to show verbose output
-    verbose: bool,
+    /// `-v` count: 1 reports progress, 2 adds the bytecode trace
+    verbose: u8,
 
     /// Custom field separator for tables
     field_separator: Option<String>,
@@ -53,7 +53,7 @@ impl AppConfig {
     /// * `table_definitions` - Optional vector of table column definitions
     /// * `write_changes` - Whether to write changes back to files
     pub fn new(
-        verbose: bool,
+        verbose: u8,
         field_separator: Option<String>,
         table_definitions: Vec<String>,
         write_changes: bool,
@@ -140,9 +140,15 @@ impl AppConfig {
         self.comments
     }
 
-    /// Get the verbose flag
+    /// `-v`: report progress (tables loaded, row counts, timings, files
+    /// written).
     pub fn verbose(&self) -> bool {
-        self.verbose
+        self.verbose >= 1
+    }
+
+    /// `-vv`: also the compiled bytecode and the instruction trace.
+    pub fn trace(&self) -> bool {
+        self.verbose >= 2
     }
 
     /// Get the field separator
