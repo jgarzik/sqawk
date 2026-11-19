@@ -139,6 +139,29 @@ pub struct SqawkArgs {
     )]
     pub output_delimiter: Option<String>,
 
+    /// How query results are printed
+    ///
+    /// csv (the default; --output-delimiter applies), tsv, json (one array
+    /// of objects per result set), jsonl (one object per line), markdown,
+    /// or table (aligned, with box-drawing borders; the REPL's default on a
+    /// terminal).
+    #[clap(
+        long = "format",
+        value_name = "FORMAT",
+        value_enum,
+        help = "Result format: csv, tsv, json, jsonl, markdown, table (default csv)"
+    )]
+    pub format: Option<crate::output::Format>,
+
+    /// How NULL prints in csv, tsv, markdown and table output (JSON always
+    /// uses null). Default: an empty field.
+    #[clap(
+        long = "null",
+        value_name = "TEXT",
+        help = "Text for NULL in csv/tsv/markdown/table output"
+    )]
+    pub null: Option<String>,
+
     /// Omit the header line of every result set
     #[clap(
         long = "no-output-header",

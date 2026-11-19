@@ -69,8 +69,23 @@ pub type Result<T> = std::result::Result<T, ReplError>;
 
 /// Every dot-command, for completion.
 const DOT_COMMANDS: &[&str] = &[
-    ".cd", ".changes", ".exit", ".help", ".load", ".print", ".quit", ".save", ".schema", ".show",
-    ".stats", ".tables", ".version", ".write",
+    ".cd",
+    ".changes",
+    ".exit",
+    ".headers",
+    ".help",
+    ".load",
+    ".mode",
+    ".nullvalue",
+    ".print",
+    ".quit",
+    ".save",
+    ".schema",
+    ".show",
+    ".stats",
+    ".tables",
+    ".version",
+    ".write",
 ];
 
 /// Dot-commands whose argument is a table name.
@@ -503,8 +518,24 @@ enum ReplCommand {
     Show(Option<String>),
     /// Show statistics or toggle statistics mode
     Stats(Option<String>),
+    /// Show or set the result format
+    Mode(Option<String>),
+    /// Turn result headers on or off
+    Headers(Option<String>),
+    /// Show or set the text NULL prints as
+    NullValue(Option<String>),
     /// A malformed or unknown dot-command (the error message)
     Invalid(String),
+}
+
+/// The REPL's result format: `--format` if given, else a table on a
+/// terminal and CSV when piped (so scripts see what `-s` prints).
+fn default_format(given: Option<crate::output::Format>, terminal: bool) -> crate::output::Format {
+    given.unwrap_or(if terminal {
+        crate::output::Format::Table
+    } else {
+        crate::output::Format::Csv
+    })
 }
 
 /// REPL interface for interactive SQL entry
@@ -530,6 +561,8 @@ pub struct Repl {
     show_changes: bool,
     /// Whether to show query statistics
     show_stats: bool,
+    /// How results print (`.mode`, `.headers`, `.nullvalue`)
+    output: crate::output::OutputSettings,
 }
 
 impl Repl {
@@ -567,6 +600,12 @@ impl Repl {
             failed: false,
             show_changes: false,
             show_stats: false,
+            output: crate::output::OutputSettings {
+                format: default_format(app_config.format(), interactive),
+                delimiter: app_config.output_delimiter(),
+                header: !app_config.no_output_header(),
+                null: app_config.null_text().to_string(),
+            },
         }
     }
 
@@ -740,6 +779,9 @@ impl Repl {
                 "save" => ReplCommand::Save(arg),
                 "show" => ReplCommand::Show(arg),
                 "stats" => ReplCommand::Stats(arg),
+                "mode" => ReplCommand::Mode(arg),
+                "headers" => ReplCommand::Headers(arg),
+                "nullvalue" => ReplCommand::NullValue(parts.get(1).map(|a| a.to_string())),
                 _ => ReplCommand::Invalid(format!("unknown command: .{}", command)),
             }
         } else if scan_sql(input).has_tokens {
@@ -770,6 +812,15 @@ impl Repl {
                 Ok(())
             }
             ReplCommand::Version => self.show_version(),
+            ReplCommand::Mode(arg) => self.set_mode(arg.as_deref()),
+            ReplCommand::Headers(arg) => self.set_headers(arg.as_deref()),
+            ReplCommand::NullValue(arg) => {
+                match arg {
+                    Some(text) => self.output.null = text,
+                    None => outln!("{}", self.output.null),
+                }
+                Ok(())
+            }
             ReplCommand::Invalid(msg) => Err(ReplError::Command(msg)),
         }
     }
@@ -786,12 +837,7 @@ impl Repl {
         // Every statement's result set, each with its own header, printed
         // exactly as the command line prints it: row by row as the statement
         // runs, so a later error on the line keeps the earlier output.
-        let mut out = crate::output::StdoutSink::new(
-            &self.config.output_delimiter(),
-            !self.config.no_output_header(),
-            false,
-            true,
-        );
+        let mut out = crate::output::StdoutSink::new(self.output.clone(), false, true);
         self.executor.execute(sql, &mut out)?;
 
         // The change count is reported independently of whether the line also
@@ -883,8 +929,18 @@ impl Repl {
             if self.show_changes { "ON" } else { "OFF" }
         );
         outln!("  .exit ?CODE?          Exit the REPL with exit status CODE");
+        outln!(
+            "  .headers on|off       Show result headers (currently: {})",
+            if self.output.header { "ON" } else { "OFF" }
+        );
         outln!("  .help                 Show this help message");
         outln!("  .load [TABLE=]FILE    Load FILE into TABLE");
+        outln!(
+            "  .mode ?FORMAT?        Result format: {} (currently: {})",
+            crate::output::Format::NAMES.join(", "),
+            self.output.format.name()
+        );
+        outln!("  .nullvalue ?TEXT?     Text NULL prints as (csv, tsv, markdown, table)");
         outln!("  .print STRING...      Print literal STRING");
         outln!("  .quit                 Exit the REPL");
         outln!("  .save ?TABLE?         Save changes to all tables or a specific TABLE");
@@ -956,6 +1012,33 @@ impl Repl {
             ))
         })?;
         self.note(format_args!("Changed directory to {}", dir));
+        Ok(())
+    }
+
+    /// `.mode [FORMAT]`: print the result format, or set it.
+    fn set_mode(&mut self, arg: Option<&str>) -> Result<()> {
+        match arg.filter(|a| !a.is_empty()) {
+            None => outln!("{}", self.output.format.name()),
+            Some(name) => {
+                self.output.format = crate::output::Format::parse(name).ok_or_else(|| {
+                    ReplError::Command(format!(
+                        "unknown mode: {} (use {})",
+                        name,
+                        crate::output::Format::NAMES.join(", ")
+                    ))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `.headers on|off`: result headers (csv, tsv, table).
+    fn set_headers(&mut self, arg: Option<&str>) -> Result<()> {
+        self.output.header = match arg {
+            Some("on") => true,
+            Some("off") => false,
+            _ => return Err(ReplError::Command("usage: .headers on|off".to_string())),
+        };
         Ok(())
     }
 
@@ -1069,6 +1152,11 @@ impl Repl {
                 outln!(
                     "  Statistics:  {}",
                     if self.show_stats { "ON" } else { "OFF" }
+                );
+                outln!("  Mode:        {}", self.output.format.name());
+                outln!(
+                    "  Headers:     {}",
+                    if self.output.header { "ON" } else { "OFF" }
                 );
                 outln!(
                     "  Verbose:     {}",
@@ -1389,6 +1477,15 @@ mod tests {
         let (start, cands) = complete("SELECT * FROM employees WH");
         assert_eq!(start, 24);
         assert_eq!(cands, vec!["WHEN".to_string(), "WHERE".to_string()]);
+    }
+
+    /// A table on a terminal, CSV when piped, unless --format says.
+    #[test]
+    fn default_result_format() {
+        use crate::output::Format;
+        assert_eq!(default_format(None, true), Format::Table);
+        assert_eq!(default_format(None, false), Format::Csv);
+        assert_eq!(default_format(Some(Format::Json), true), Format::Json);
     }
 
     #[test]

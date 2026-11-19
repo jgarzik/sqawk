@@ -35,6 +35,13 @@ pub struct AppConfig {
 
     /// Omit the header line of every result set (`--no-output-header`)
     no_output_header: bool,
+
+    /// How results are printed (`--format`); None: CSV, or a table in the
+    /// REPL on a terminal.
+    format: Option<crate::output::Format>,
+
+    /// How NULL prints in csv, tsv, table and markdown output (`--null`)
+    null_text: String,
 }
 
 impl AppConfig {
@@ -58,6 +65,8 @@ impl AppConfig {
             write_changes,
             no_header: false,
             comments: false,
+            format: None,
+            null_text: String::new(),
             output_delimiter: None,
             no_output_header: false,
         }
@@ -79,6 +88,26 @@ impl AppConfig {
     }
 
     /// Set whether result sets are printed without their header line
+    pub fn with_format(mut self, format: Option<crate::output::Format>) -> Self {
+        self.format = format;
+        self
+    }
+
+    /// The `--format` given, if any.
+    pub fn format(&self) -> Option<crate::output::Format> {
+        self.format
+    }
+
+    pub fn with_null_text(mut self, null_text: Option<String>) -> Self {
+        self.null_text = null_text.unwrap_or_default();
+        self
+    }
+
+    /// How NULL prints (`--null`; empty by default).
+    pub fn null_text(&self) -> &str {
+        &self.null_text
+    }
+
     pub fn with_no_output_header(mut self, no_output_header: bool) -> Self {
         self.no_output_header = no_output_header;
         self

@@ -56,7 +56,7 @@ use config::AppConfig;
 use database::Database;
 use error::{SqawkError, SqawkResult};
 use file_handler::FileHandler;
-use output::StdoutSink;
+use output::{Format, OutputSettings, StdoutSink};
 use repl::Repl;
 use sql_executor::SqlExecutor;
 
@@ -180,7 +180,9 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
     .with_no_header(args.no_header)
     .with_comments(args.comments)
     .with_output_delimiter(args.output_delimiter.clone())
-    .with_no_output_header(args.no_output_header);
+    .with_no_output_header(args.no_output_header)
+    .with_format(args.format)
+    .with_null_text(args.null.clone());
 
     // Debugging output (-v); its format is not stable.
     if config.verbose() {
@@ -250,8 +252,12 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
     // error. Once the reader of a pipe has gone away (`sqawk ... | head`),
     // printing stops but later statements and --write still run.
     let mut out = StdoutSink::new(
-        &config.output_delimiter(),
-        !config.no_output_header(),
+        OutputSettings {
+            format: config.format().unwrap_or(Format::Csv),
+            delimiter: config.output_delimiter(),
+            header: !config.no_output_header(),
+            null: config.null_text().to_string(),
+        },
         config.verbose(),
         false,
     );

@@ -460,3 +460,105 @@ fn verbose_row_count_follows_the_rows() -> Result<(), Box<dyn std::error::Error>
     assert!(err.contains("Query returned 2 rows"), "{err}");
     Ok(())
 }
+
+// ============================================================================
+// --format AND --null
+// ============================================================================
+
+const FMT_DATA: &str = "id,name,score\n1,Alice,9.5\n2,\"Bob | \"\"B\"\"\",\n3,\"x\ny\",-1\n";
+
+fn format_output(format: &str, null: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
+    let dir = create_temp_dir()?;
+    let f = create_custom_csv(dir.path(), "f.csv", FMT_DATA)?;
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("sqawk");
+    cmd.arg("--format").arg(format);
+    if let Some(n) = null {
+        cmd.arg("--null").arg(n);
+    }
+    cmd.arg("-s")
+        .arg("SELECT * FROM f; SELECT 1 AS a WHERE 0")
+        .arg(f.to_str().unwrap());
+    let out = cmd.assert().success().get_output().clone();
+    Ok(String::from_utf8(out.stdout)?)
+}
+
+#[test]
+fn format_csv_tsv_and_null_text() -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        format_output("csv", Some("NULL"))?,
+        "id,name,score\n1,Alice,9.5\n2,\"Bob | \"\"B\"\"\",NULL\n3,\"x\ny\",-1\na\n"
+    );
+    assert_eq!(
+        format_output("tsv", None)?,
+        "id\tname\tscore\n1\tAlice\t9.5\n2\t\"Bob | \"\"B\"\"\"\t\n3\t\"x\ny\"\t-1\na\n"
+    );
+    Ok(())
+}
+
+/// JSON keeps numbers as numbers and NULL as null; an empty result is [].
+#[test]
+fn format_json_and_jsonl() -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        format_output("json", Some("ignored"))?,
+        "[\n  {\"id\": 1, \"name\": \"Alice\", \"score\": 9.5},\n  \
+         {\"id\": 2, \"name\": \"Bob | \\\"B\\\"\", \"score\": null},\n  \
+         {\"id\": 3, \"name\": \"x\\ny\", \"score\": -1}\n]\n[]\n"
+    );
+    assert_eq!(
+        format_output("jsonl", None)?,
+        "{\"id\": 1, \"name\": \"Alice\", \"score\": 9.5}\n\
+         {\"id\": 2, \"name\": \"Bob | \\\"B\\\"\", \"score\": null}\n\
+         {\"id\": 3, \"name\": \"x\\ny\", \"score\": -1}\n"
+    );
+    Ok(())
+}
+
+/// Markdown and table output align columns (numbers to the right), show
+/// line breaks as `\n`, and print an empty result's header.
+#[test]
+fn format_markdown_and_table() -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        format_output("markdown", Some("NULL"))?,
+        "| id  | name       | score |\n\
+         | --: | ---------- | ----: |\n\
+         |   1 | Alice      |   9.5 |\n\
+         |   2 | Bob \\| \"B\" |  NULL |\n\
+         |   3 | x\\ny       |    -1 |\n\
+         | a   |\n\
+         | --- |\n"
+    );
+    assert_eq!(
+        format_output("table", None)?,
+        "┌────┬───────────┬───────┐\n\
+         │ id │ name      │ score │\n\
+         ├────┼───────────┼───────┤\n\
+         │  1 │ Alice     │   9.5 │\n\
+         │  2 │ Bob | \"B\" │       │\n\
+         │  3 │ x\\ny      │    -1 │\n\
+         └────┴───────────┴───────┘\n\
+         ┌───┐\n\
+         │ a │\n\
+         ├───┤\n\
+         └───┘\n"
+    );
+    Ok(())
+}
+
+/// The REPL's `.mode`, `.headers` and `.nullvalue`; piped, it starts in
+/// CSV like -s.
+#[test]
+fn repl_mode_headers_nullvalue() -> Result<(), Box<dyn std::error::Error>> {
+    let out = crate::common::run_repl_script(
+        "SELECT 1 AS a, NULL AS b;\n.mode jsonl\nSELECT 2 AS a;\n.mode csv\n.headers off\n\
+         .nullvalue -\nSELECT 3 AS a, NULL AS b;\n.mode\n.mode nope\n",
+        &[],
+        None,
+        false,
+    );
+    assert!(
+        out.starts_with("a,b\n1,\n{\"a\": 2}\n3,-\ncsv\n"),
+        "{out:?}"
+    );
+    assert!(out.contains("unknown mode: nope"), "{out:?}");
+    Ok(())
+}

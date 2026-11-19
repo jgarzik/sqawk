@@ -441,16 +441,40 @@ Notes on field separators:
 
 ### Output Options
 
-Query results are written to stdout as a delimited file, one result set per
-statement, each starting with a header line of column names.
+Query results are written to stdout, one result set per statement, as rows
+are produced. By default each is a delimited file starting with a header
+line of column names; `--format` chooses another form:
 
+| `--format` | Output |
+|------------|--------|
+| `csv` (default) | Delimited records, RFC 4180 quoting; `--output-delimiter` applies |
+| `tsv` | Tab-separated records, quoted the same way |
+| `json` | One JSON array of objects per result set; numbers stay numbers, NULL is `null` |
+| `jsonl` | One JSON object per row, one per line (for `jq` and log tools) |
+| `markdown` | A Markdown table; columns of numbers right-aligned |
+| `table` | An aligned table with box-drawing borders; numbers right-aligned |
+
+csv, tsv and jsonl stream; json streams each array; markdown and table
+hold one result set at a time to size their columns. In markdown and table
+output a line break inside a value shows as `\n`.
+
+- `--null TEXT` prints NULL as TEXT in csv, tsv, markdown and table output
+  (default: empty); JSON always writes `null`
 - `--output-delimiter SEP` sets the delimiter between result fields. It
   follows the same rules as `-F` (one ASCII character other than a quote or
   line break, or `\t`). Without it, results use the `-F` separator when one
   is given, and comma otherwise
-- `--no-output-header` omits the header line of every result set
+- `--no-output-header` omits the header line of every result set (csv, tsv,
+  table)
 
-Both apply in the REPL too.
+All of these apply in the REPL too, where `.mode`, `.headers` and
+`.nullvalue` change them. The REPL prints a `table` on a terminal and CSV
+when its input is piped, unless `--format` says otherwise.
+
+```sh
+sqawk --format table -s "SELECT name, salary FROM employees ORDER BY salary DESC LIMIT 3" employees.csv
+sqawk --format jsonl -s "SELECT * FROM events WHERE level = 'error'" events.csv.gz | jq .msg
+```
 
 ```sh
 # Read a pipe-separated file, print tab-separated results without a header
