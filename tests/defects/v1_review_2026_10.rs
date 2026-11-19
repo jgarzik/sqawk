@@ -874,7 +874,7 @@ fn unclosed_quote_is_error() -> TestResult {
 /// Header `a,a` used to load with both columns reading as the first. Each
 /// column now has its own name (sqlite3's rule) and reads its own value.
 #[test]
-fn duplicate_header_is_error() -> TestResult {
+fn duplicate_header_columns_are_distinct() -> TestResult {
     crate::helpers::assert_query_on(
         &[("dh.csv", "a,a\n1,2\n")],
         "SELECT a, \"a:1\" FROM dh",
@@ -884,7 +884,7 @@ fn duplicate_header_is_error() -> TestResult {
 
 /// Header `a,A`: names are case-insensitive, so `A` is a repeat of `a`.
 #[test]
-fn case_insensitive_duplicate_header_is_error() -> TestResult {
+fn case_insensitive_duplicate_header_columns_are_distinct() -> TestResult {
     crate::helpers::assert_query_on(
         &[("dhc.csv", "a,A\n1,2\n")],
         "SELECT a, \"A:1\" FROM dhc",
@@ -894,7 +894,7 @@ fn case_insensitive_duplicate_header_is_error() -> TestResult {
 
 /// Header `a,,c` used to load with an empty column name; it is `column2`.
 #[test]
-fn empty_header_name_is_error() -> TestResult {
+fn empty_header_name_is_generated() -> TestResult {
     crate::helpers::assert_query_on(
         &[("eh.csv", "a,,c\n1,2,3\n")],
         "SELECT column2 FROM eh",
