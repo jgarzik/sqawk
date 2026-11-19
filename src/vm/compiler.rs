@@ -1892,13 +1892,19 @@ impl<'a> SqlCompiler<'a> {
                 op: UnaryOperator::Minus,
                 expr: inner,
             } => {
-                // A negated numeric literal is one literal, so that
+                // A negated numeric literal is one literal (parentheses
+                // around it do not count, as in SQLite's parser), so that
                 // -9223372036854775808 is the integer i64::MIN rather than
-                // the negation of an out-of-range (hence real) literal.
+                // the negation of an out-of-range (hence real) literal, and
+                // -0.0 is the real negative zero rather than 0 - 0.0.
+                let mut lit = &**inner;
+                while let Expr::Nested(e) = lit {
+                    lit = e;
+                }
                 if let Expr::Value(ValueWithSpan {
                     value: Value::Number(n, _),
                     ..
-                }) = &**inner
+                }) = lit
                 {
                     // Only a hex literal (0x8000000000000000) becomes a
                     // number token with a sign; its negation does not fit.
@@ -1909,6 +1915,10 @@ impl<'a> SqlCompiler<'a> {
                     }
                     if let Ok(i) = format!("-{}", n).parse::<i64>() {
                         self.emit_value_literal(dest, &TableValue::Integer(i))?;
+                        return Ok(dest);
+                    }
+                    if n.parse::<f64>().is_ok() {
+                        self.emit_real_literal(dest, &format!("-{n}"));
                         return Ok(dest);
                     }
                 }

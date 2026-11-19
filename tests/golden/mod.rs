@@ -2917,3 +2917,16 @@ fn math_functions_match_sqlite() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     Ok(())
 }
+
+/// A minus on a real literal is part of the literal, as in SQLite, so
+/// `-0.0` is negative zero (ATAN2 tells it apart); parentheses do not
+/// matter. A minus on anything else is `0 - x`.
+#[test]
+fn negated_real_literal_keeps_its_sign() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "SELECT atan2(0, -0.0) AS a, atan2(0, -(0.0)) AS b, atan2(0, x) AS c, \
+         atan2(0, -(-0.0)) AS d, -1.5 AS e, -(2.5e0) AS f FROM (SELECT -0.0 AS x)",
+        "a,b,c,d,e,f\n3.14159265358979,3.14159265358979,3.14159265358979,0.0,-1.5,-2.5",
+    )
+}
