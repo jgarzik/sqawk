@@ -263,8 +263,11 @@ single line.
 | `.cd DIRECTORY` | Change the working directory |
 | `.changes [on\|off]` | Show the number of rows changed by each statement |
 | `.exit [CODE]` | Exit the REPL, with exit status `CODE` when given |
+| `.headers on\|off` | Show result headers (csv, tsv, table) |
 | `.help` | List the available commands |
 | `.load [TABLE=]FILE` | Load `FILE`, optionally under the name `TABLE` |
+| `.mode [FORMAT]` | Show or set the result format: `csv`, `tsv`, `json`, `jsonl`, `markdown`, `table` |
+| `.nullvalue [TEXT]` | Show or set the text NULL prints as |
 | `.print STRING...` | Print a literal string |
 | `.quit` | Exit the REPL |
 | `.save [TABLE]` | Save changes to all modified tables, or just `TABLE` |

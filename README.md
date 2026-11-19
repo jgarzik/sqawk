@@ -22,6 +22,7 @@ Sqawk is an SQL-based command-line tool for processing delimiter-separated files
 - **File Formats** - CSV, TSV (`.tsv`/`.tab`), and custom delimiters (`-F`); gzip and zstd files (`.csv.gz`, `.tsv.zst`), recompressed by `--write`; headerless files via `--no-header` or `--tabledef`; `#` comment lines via `--comments`; untouched rows survive `--write` byte for byte
 - **Pipelines** - Reads standard input with a `-` file operand
 - **Safe by Default** - Files unchanged unless `--write` flag is specified
+- **Output formats** - CSV (default), TSV, JSON, JSON Lines, Markdown or an aligned table (`--format`)
 - **Interactive REPL** - Explore data interactively with `-i` flag
 
 Every input table is held in memory: plan on about four to five times the
