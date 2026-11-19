@@ -124,6 +124,15 @@ pub(crate) fn split_conjuncts(expr: &Expr, out: &mut Vec<Expr>) {
     }
 }
 
+/// Whether `expr` may contain a subquery: true for any shape
+/// `expr_children` does not enumerate (subqueries among them).
+fn may_hold_subquery(expr: &Expr) -> bool {
+    match expr_children(expr) {
+        Some(children) => children.into_iter().any(may_hold_subquery),
+        None => true,
+    }
+}
+
 /// The direct sub-expressions of `expr`, or `None` for a node whose meaning
 /// is not a pure function of its children and the current row (a subquery,
 /// a window function, anything not listed).
@@ -831,11 +840,20 @@ impl<'a> SqlCompiler<'a> {
                     expr_sources(&term, &ctx).or_else(|| self.compiled_term_sources(&term, &ctx));
                 match sources {
                     None => plan.levels[last].post_terms.push(term),
-                    // A conjunct reading no table of this FROM (a constant,
-                    // a test of an enclosing query's row, an uncorrelated
-                    // subquery) is tested once, before the nest: when it is
-                    // false no row can qualify, and in a correlated
-                    // subquery the scan is skipped for that outer row.
+                    // A conjunct holding a subquery is not a constant, as in
+                    // SQLite: it is tested in the outermost loop, after that
+                    // level's plain conjuncts, so a row they reject never
+                    // runs the subquery.
+                    Some(s)
+                        if s.is_empty() && !plan.levels.is_empty() && may_hold_subquery(&term) =>
+                    {
+                        plan.levels[0].on_terms.push(term)
+                    }
+                    // Any other conjunct reading no table of this FROM (a
+                    // constant, a test of an enclosing query's row) is
+                    // tested once, before the nest: when it is false no row
+                    // can qualify, and in a correlated subquery the scan is
+                    // skipped for that outer row.
                     Some(s) if s.is_empty() => plan.const_where.push(term),
                     Some(s) => {
                         let at = plan.max_level(&s);
@@ -1136,7 +1154,12 @@ impl<'a> SqlCompiler<'a> {
             ),
         }
         self.resolve(top);
-        for term in &level.on_terms {
+        // Plain conjuncts first, then those holding a subquery (SQLite's
+        // wherecode.c defers TERM_VARSELECT terms the same way), so a row a
+        // cheap test rejects never runs the subquery.
+        let (plain, deferred): (Vec<&Expr>, Vec<&Expr>) =
+            level.on_terms.iter().partition(|t| !may_hold_subquery(t));
+        for term in plain.into_iter().chain(deferred) {
             let r = self.code_expr(term, ctx, None)?;
             self.emit_jump_to(OpCode::IfZ, r, next, 0, None, "ON / WHERE");
         }

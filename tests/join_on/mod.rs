@@ -186,3 +186,20 @@ fn inner_on_conjunct_is_tested_at_its_own_table() -> Result<(), Box<dyn std::err
         "aid,v\n5,\n5,",
     )
 }
+
+/// A conjunct holding a subquery is tested after the level's plain
+/// conjuncts and is never hoisted ahead of the loop as a constant (SQLite's
+/// wherecode.c defers TERM_VARSELECT terms the same way): no b row passes
+/// `aid = 0`, so the overflowing SUM is never computed.
+#[test]
+fn subquery_conjunct_is_tested_after_plain_ones() -> Result<(), Box<dyn std::error::Error>> {
+    const A: (&str, &str) = ("a.csv", "k\n1\n1\n");
+    const B: (&str, &str) = ("b.csv", "aid,k\n5,1\n");
+    for sql in [
+        "SELECT 1 AS one FROM b WHERE b.aid = 0 AND (SELECT SUM(9223372036854775807) FROM a) > 0",
+        "SELECT 1 AS one FROM b WHERE (SELECT SUM(9223372036854775807) FROM a) > 0 AND b.aid = 0",
+    ] {
+        crate::helpers::assert_query_on(&[A, B], sql, "one")?;
+    }
+    Ok(())
+}
