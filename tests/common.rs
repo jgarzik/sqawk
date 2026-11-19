@@ -2,8 +2,6 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::Duration;
 
 /// Run a sqawk REPL script with the provided commands and return the output
 pub fn run_repl_script(
@@ -41,17 +39,13 @@ pub fn run_repl_script(
         .spawn()
         .expect("Failed to start sqawk process");
 
-    // Get handles to stdin and stdout
+    // Write the commands, then close stdin: end of input ends the REPL even
+    // when the script has no `.exit`.
     let mut stdin = process.stdin.take().expect("Failed to open stdin");
-    let _stdout = process.stdout.take().expect("Failed to open stdout");
-
-    // Give the process a moment to start up
-    thread::sleep(Duration::from_millis(100));
-
-    // Write commands to REPL
     stdin
         .write_all(commands.as_bytes())
         .expect("Failed to write to stdin");
+    drop(stdin);
 
     // Wait for process to complete
     let output = process
