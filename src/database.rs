@@ -32,6 +32,10 @@ pub struct Database {
 
     /// The open transaction, if any (BEGIN ... COMMIT / ROLLBACK).
     transaction: Option<Transaction>,
+
+    /// Whether loaded files keep their bytes for writeback (see
+    /// `ReadOptions::keep_source`).
+    keep_source: bool,
 }
 
 /// What ROLLBACK needs to put the database back as it was at BEGIN.
@@ -202,7 +206,20 @@ impl Database {
             lazy: HashMap::new(),
             modified: HashSet::new(),
             transaction: None,
+            keep_source: true,
         }
+    }
+
+    /// Whether files loaded from now on keep their bytes for writeback.
+    /// The command line turns this off when the run can never write back
+    /// (no `--write` and no REPL, whose `.write` / `.save` can).
+    pub fn set_keep_source(&mut self, keep: bool) {
+        self.keep_source = keep;
+    }
+
+    /// See [`set_keep_source`](Self::set_keep_source).
+    pub fn keep_source(&self) -> bool {
+        self.keep_source
     }
 
     /// Add a table to the database

@@ -191,6 +191,9 @@ fn run(args: SqawkArgs) -> SqawkResult<u8> {
 
     // Create a new Database instance to serve as the central store for tables
     let mut database = Database::new();
+    // Only --write and the REPL (.write, .save) can write a table back, so
+    // otherwise a loaded file's bytes would only cost memory.
+    database.set_keep_source(args.write || args.interactive);
 
     // Compile table definitions from the CLI arguments
     // This makes Database the source of truth for table schemas defined via CLI

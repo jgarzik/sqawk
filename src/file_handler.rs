@@ -177,6 +177,8 @@ impl FileHandler {
             header: !self.config.no_header() && predefined_columns.is_none(),
             comments: self.config.comments(),
             columns: predefined_columns.clone(),
+            // Standard input can never be written back.
+            keep_source: db.keep_source() && !from_stdin,
         };
 
         let data = match &canonical {
@@ -409,6 +411,7 @@ pub fn load_location(
         header: options.header,
         comments: options.comments,
         columns: Some(schema.iter().map(|c| c.name.clone()).collect()),
+        keep_source: db.keep_source(),
     };
     let data = std::fs::read(&real).map_err(|e| SqawkError::open(given, e))?;
     let mut table = csv_handler::read_table(table_name, data, Some(real), delimiter, &opts, path)?;

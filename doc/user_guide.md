@@ -1204,8 +1204,9 @@ Sqawk reads every input file whole and holds all of its tables in memory for
 the whole run, so the data must fit in RAM.
 
 **How much memory.** A loaded table takes roughly six to seven times its
-file's size: the parsed values, plus the file's own bytes, which are kept so
-that `--write` can reproduce untouched rows exactly. Rows are printed as a
+file's size: the parsed values, plus (under `--write` or `-i` only) the
+file's own bytes, kept so that writeback can reproduce untouched rows
+exactly. Rows are printed as a
 query produces them, so `SELECT * FROM big` needs little beyond the loaded
 table; a query that must see every row before its first output (ORDER BY,
 DISTINCT, GROUP BY, window functions) holds those rows too. Measured on an

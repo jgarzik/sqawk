@@ -412,6 +412,11 @@ pub struct Table {
     /// reproduces untouched rows byte-for-byte (see [`RawRows`]).
     raw: Option<Box<RawRows>>,
 
+    /// Loaded without its source bytes because the run cannot write it back
+    /// (see `ReadOptions::keep_source`); writing it is a bug, refused by
+    /// `write_source_layout`.
+    source_dropped: bool,
+
     /// Lower-cased column name -> index, built on the first
     /// [`Table::column_index`] of a wide table so that resolving every
     /// column of a wide table costs linear, not quadratic, time. Reset
@@ -650,6 +655,7 @@ impl Table {
             comments: CommentLines::default(),
             placeholder: false,
             raw: None,
+            source_dropped: false,
             name_index: OnceLock::new(),
         }
     }
@@ -694,6 +700,7 @@ impl Table {
             comments: CommentLines::default(),
             placeholder: false,
             raw: None,
+            source_dropped: false,
             name_index: OnceLock::new(),
         }
     }
@@ -990,6 +997,11 @@ impl Table {
     /// order mark, header, line endings) and comment lines, with every row
     /// that still has its source bytes written as those bytes.
     pub fn write_source_layout<W: std::io::Write>(&self, out: &mut W) -> std::io::Result<()> {
+        if self.source_dropped {
+            return Err(std::io::Error::other(
+                "internal error: the table was loaded without its source bytes",
+            ));
+        }
         let layout = self.file_layout();
         if layout.bom {
             out.write_all(b"\xef\xbb\xbf")?;
@@ -1002,6 +1014,12 @@ impl Table {
             Some(&self.comments),
             self.raw.as_deref(),
         )
+    }
+
+    /// Note that the table was loaded without its source bytes, so it must
+    /// never be written back.
+    pub fn mark_source_dropped(&mut self) {
+        self.source_dropped = true;
     }
 
     /// Record the source bytes of the header and rows (see [`RawRows`]).

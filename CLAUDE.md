@@ -153,9 +153,11 @@ effects of the ones before it.
   crate) for every delimiter and for stdin, plus writeback. `.tsv`/`.tab` are
   tab-separated, everything else comma (unless `-F`); the first line is always
   the header unless `--no-header`/`--tabledef`; `#` lines are comments only
-  under `--comments`. Each table keeps its file's bytes (`RawRows` in
-  `table.rs`: one buffer + per-row offsets), so untouched rows write back
-  byte-for-byte; every row mutation in `table.rs` keeps the offsets in sync
+  under `--comments`. Under `--write` or `-i` each table keeps its file's
+  bytes (`RawRows` in `table.rs`: one buffer + per-row offsets), so
+  untouched rows write back byte-for-byte; every row mutation in `table.rs`
+  keeps the offsets in sync. Otherwise (and for stdin) the bytes are dropped
+  (`ReadOptions::keep_source`) and writing the table is refused
 
 ### SQL Features
 
