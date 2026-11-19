@@ -13,17 +13,15 @@ use std::process::{Command, Output};
 
 /// The sqawk binary from the shared workspace target directory.
 ///
-/// sqawk is a different package, so `cargo_bin!` cannot name it. A test
-/// executable lives in `target/<profile>/deps/`, and the workspace's binaries
-/// in `target/<profile>/`. `cargo test --workspace` builds both packages
-/// before running any test.
+/// sqawk is a different package, so `cargo_bin!` cannot name it. The
+/// workspace's binaries share one directory, so sqawk is next to tsq (the
+/// same rule tsq's own `--sqawk` default uses). The test executable's own
+/// path says nothing: Cargo's build-dir layout puts it under
+/// `target/<profile>/build/tsq/<hash>/`. `cargo test --workspace` builds both
+/// packages before running any test.
 fn sqawk_path() -> PathBuf {
-    let exe = std::env::current_exe().expect("current test executable");
-    let profile_dir = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("test executable is in target/<profile>/deps");
-    let bin = profile_dir.join(format!("sqawk{}", std::env::consts::EXE_SUFFIX));
+    let bin = Path::new(env!("CARGO_BIN_EXE_tsq"))
+        .with_file_name(format!("sqawk{}", std::env::consts::EXE_SUFFIX));
     assert!(
         bin.exists(),
         "{} not found: run `cargo test --workspace`, or build sqawk first",

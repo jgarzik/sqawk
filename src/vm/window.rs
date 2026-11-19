@@ -133,17 +133,17 @@ fn evaluate(part: &[Vec<Value>], f: &WindowFunc, p: &Peers) -> SqawkResult<Vec<V
         }
         WindowFuncKind::DenseRank => {
             let mut rank = 0;
-            for i in 0..n {
-                if p.start[i] == i {
+            for (i, &start) in p.start[..n].iter().enumerate() {
+                if start == i {
                     rank += 1;
                 }
                 out.push(Value::Integer(rank));
             }
         }
         WindowFuncKind::PercentRank => {
-            for i in 0..n {
+            for &start in &p.start[..n] {
                 out.push(Value::Float(if n > 1 {
-                    p.start[i] as f64 / (n - 1) as f64
+                    start as f64 / (n - 1) as f64
                 } else {
                     0.0
                 }));
