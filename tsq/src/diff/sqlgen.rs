@@ -447,8 +447,11 @@ impl<'s> Gen<'s> {
     /// An integer expression without the i64 extremes, for SUM and ABS:
     /// their overflow is an error, and whether a query reaches it depends
     /// on what each engine's planner skips (SQLite omits unused LEFT JOINs
-    /// and empty branches; sqawk computes every derived table and CTE it
-    /// names), which is not a difference in answers.
+    /// and empty branches, flattens subqueries and reorders loops; sqawk
+    /// computes a derived table or CTE the first time a loop opens it),
+    /// which is not a difference in answers. Only the argument's own text is
+    /// checked: a derived column holding an extreme literal still gets
+    /// through.
     fn tame_int(&mut self, sc: &Scope, d: u32) -> Node {
         for _ in 0..6 {
             let (n, _) = self.expr(sc, W::I, d);
