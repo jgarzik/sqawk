@@ -86,6 +86,7 @@ SELECT col alias                -- alias without AS
 | `AND`, `OR`, `NOT` | `a > 1 AND b < 5` |
 | `IS NULL`, `IS NOT NULL` | `col IS NULL` |
 | `LIKE`, `ILIKE` | `name LIKE 'A%'`, `code LIKE 'x\_%' ESCAPE '\'` |
+| `GLOB` | `name GLOB 'A*'`, `code GLOB '[0-9]?'`: case-sensitive; `*` any run, `?` one character, `[a-z]` / `[^a-z]` a set; `GLOB(p, x)` is `x GLOB p` |
 | `IS [NOT]`, `IS [NOT] DISTINCT FROM` | `a IS b`, `a IS NOT DISTINCT FROM b` (NULL-safe `=`) |
 | `BETWEEN` | `col BETWEEN 1 AND 10` |
 | `IN` | `col IN (1, 2, 3)`; `col IN ()` is false, `col NOT IN ()` true |
@@ -949,7 +950,7 @@ sqawk aims to give SQLite's answers. Where it deliberately does not:
 | CTE body reading an outer-query column (`SELECT (WITH c AS (SELECT t.x) SELECT * FROM c) FROM t`) | Correlated | Rejected (`no such column`): a CTE is computed once, on first reference |
 | `ILIKE`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `TRIM(... FROM ...)` | Not available | Available |
 | `PRINTF` width or precision past the length limit | NULL, or the number wrapped to 31 bits | Error "string or blob too big" |
-| Parser | SQLite grammar | sqlparser's Hive dialect with SQLite's operator precedence: `GLOB`, `TRIM(s, chars)`, `REPLACE INTO` do not parse, `REGEXP` is rejected, and parentheses nest at most 47 deep |
+| Parser | SQLite grammar | sqlparser's Hive dialect with SQLite's operator precedence: `TRIM(s, chars)`, `REPLACE INTO` do not parse, `REGEXP` is rejected, and parentheses nest at most 47 deep |
 
 Not implemented: views, indexes, triggers,
-`RETURNING`, row values, `GLOB`, and blob values.
+`RETURNING`, row values, and blob values.

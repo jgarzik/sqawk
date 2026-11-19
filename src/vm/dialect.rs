@@ -139,10 +139,19 @@ impl Dialect for SqawkDialect {
     /// The levels sqlparser's `Precedence` cannot express: `< <= > >=` above
     /// `=`, and `||` above `*`. Everything else maps through `prec_value`.
     fn get_next_precedence(&self, parser: &Parser) -> Option<Result<u8, ParserError>> {
-        match parser.peek_token_ref().token {
+        match &parser.peek_token_ref().token {
             Token::Lt | Token::LtEq | Token::Gt | Token::GtEq => Some(Ok(PREC_CMP)),
             Token::StringConcat => Some(Ok(PREC_CONCAT)),
             Token::ShiftLeft | Token::ShiftRight => Some(Ok(PREC_BITWISE)),
+            // `[NOT] GLOB` binds like `[NOT] LIKE`.
+            Token::Word(w) if w.keyword == Keyword::GLOB => Some(Ok(PREC_EQ)),
+            Token::Word(w)
+                if w.keyword == Keyword::NOT
+                    && matches!(&parser.peek_nth_token_ref(1).token,
+                        Token::Word(w) if w.keyword == Keyword::GLOB) =>
+            {
+                Some(Ok(PREC_EQ))
+            }
             _ => None,
         }
     }
@@ -204,6 +213,33 @@ impl Dialect for SqawkDialect {
             );
         }
         let word = |parser: &Parser, n: usize, kw: Keyword| matches!(&parser.peek_nth_token_ref(n).token, Token::Word(w) if w.keyword == kw);
+        // `x [NOT] GLOB p`, with p parsed at the LIKE level; NOT GLOB is
+        // NOT (x GLOB p).
+        let not_glob = word(parser, 0, Keyword::NOT) && word(parser, 1, Keyword::GLOB);
+        if not_glob || word(parser, 0, Keyword::GLOB) {
+            if left_spine_exceeds(expr, super::parse::MAX_EXPR_DEPTH) {
+                return Some(Err(too_deep()));
+            }
+            parser.advance_token();
+            if not_glob {
+                parser.advance_token();
+            }
+            let glob = parser.parse_subexpr(PREC_EQ).map(|right| Expr::BinaryOp {
+                left: Box::new(expr.clone()),
+                op: BinaryOperator::Glob,
+                right: Box::new(right),
+            });
+            return Some(glob.map(|g| {
+                if not_glob {
+                    Expr::UnaryOp {
+                        op: sqlparser::ast::UnaryOperator::Not,
+                        expr: Box::new(Expr::Nested(Box::new(g))),
+                    }
+                } else {
+                    g
+                }
+            }));
+        }
         if !word(parser, 0, Keyword::IS) {
             return None;
         }

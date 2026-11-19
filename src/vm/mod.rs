@@ -30,6 +30,7 @@ mod datetime;
 pub mod dialect;
 pub mod engine;
 mod func;
+mod glob;
 pub(crate) mod like;
 pub mod parse;
 mod prepass;

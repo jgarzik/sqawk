@@ -1737,6 +1737,15 @@ impl<'a> SqlCompiler<'a> {
                 self.emit_call_refs("~", &[inner], ctx, dest)?;
             }
 
+            // `x GLOB p` is the function GLOB(p, x), as in SQLite.
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Glob,
+                right,
+            } => {
+                self.emit_call_refs("GLOB", &[right, left], ctx, dest)?;
+            }
+
             // Logical AND / OR with SQL three-valued logic: both operands are
             // evaluated and combined by the And / Or opcodes, so
             // `NULL AND 1` is NULL and `NULL OR 1` is 1. The old

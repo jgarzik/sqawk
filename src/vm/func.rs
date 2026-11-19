@@ -76,6 +76,8 @@ static FUNCS: &[FuncDef] = &[
     f!("PRINTF", 1, VARIADIC, printf),
     f!("FORMAT", 1, VARIADIC, printf),
     f!("QUOTE", 1, 1, quote),
+    // GLOB(pattern, x) is `x GLOB pattern`.
+    f!("GLOB", 2, 2, glob),
     // Numbers
     f!("ABS", 1, 1, abs),
     f!("ROUND", 1, 2, round),
@@ -511,6 +513,14 @@ fn unicode(a: &[Register]) -> SqawkResult<Register> {
         Some(c) if c != '\0' => Register::Integer(c as i64),
         _ => Register::Null,
     })
+}
+
+/// GLOB(pattern, x): whether x matches the GLOB pattern (see `glob.rs`);
+/// NULL if either is NULL.
+fn glob(a: &[Register]) -> SqawkResult<Register> {
+    null_in_null_out!(a);
+    let m = super::glob::glob(&text_of(&a[0]), &text_of(&a[1]));
+    Ok(Register::Integer(m as i64))
 }
 
 /// PRINTF(format, ...) / FORMAT: SQLite's printf (see `printf.rs`). A NULL

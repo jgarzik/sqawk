@@ -2967,3 +2967,27 @@ fn random_is_a_fresh_integer_per_call() -> Result<(), Box<dyn std::error::Error>
         "same\n0",
     )
 }
+
+/// GLOB and NOT GLOB (SQLite): case-sensitive, `*` any run, `?` one
+/// character, `[...]` a set with ranges, `[^...]` its complement; an
+/// unclosed set matches nothing; NULL in gives NULL. GLOB(p, x) is
+/// `x GLOB p`. Expected output from sqlite3 3.45.1.
+#[test]
+fn glob_matches_like_sqlite() -> Result<(), Box<dyn std::error::Error>> {
+    assert_query_on(
+        &[ONE],
+        "SELECT 'abc' GLOB 'a*' AS c0, 'abc' GLOB 'A*' AS c1, 'abc' GLOB '?b?' AS c2, 'abc' GLOB 'a?' AS c3, 'abc' NOT GLOB 'a*' AS c4, 'a.c' GLOB '*.c' AS c5, 'b' GLOB '[a-c]' AS c6, 'd' GLOB '[a-c]' AS c7, 'd' GLOB '[^a-c]' AS c8",
+        "c0,c1,c2,c3,c4,c5,c6,c7,c8\n1,0,1,0,0,1,1,0,1",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT ']' GLOB '[]]' AS c0, '-' GLOB '[a-]' AS c1, 'x' GLOB '[abc' AS c2, '' GLOB '*' AS c3, '' GLOB '?' AS c4, NULL GLOB '*' AS c5, 'a' GLOB NULL AS c6, 12 GLOB '1*' AS c7, 1.5 GLOB '1.?' AS c8",
+        "c0,c1,c2,c3,c4,c5,c6,c7,c8\n1,1,0,1,0,,,1,1",
+    )?;
+    assert_query_on(
+        &[ONE],
+        "SELECT 'héllo' GLOB 'h?llo' AS c0, 'aXbXc' GLOB '*X*X*' AS c1, 'ab' GLOB '*[b]' AS c2, glob('a*', 'abc') AS c3, 'a*b' GLOB 'a[*]b' AS c4, 'abc' GLOB 'a*' = 1 AND 1 GLOB 1 AS c5, NOT 'x' GLOB 'y' AS c6",
+        "c0,c1,c2,c3,c4,c5,c6\n1,1,1,1,1,1,1",
+    )?;
+    Ok(())
+}

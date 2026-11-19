@@ -172,6 +172,21 @@ const LIKE_PATS: &[&str] = &[
     "'S%'",
     "'%n'",
 ];
+const GLOB_PATS: &[&str] = &[
+    "'a*'",
+    "'*a*'",
+    "'?'",
+    "'*e?'",
+    "'B*'",
+    "'*'",
+    "'[A-M]*'",
+    "'*[^a-z]'",
+    "'r?d*'",
+    "'*[0-9]'",
+    "'S*'",
+    "'*n'",
+    "'[]a]*'",
+];
 const PRINTF_FMTS: &[(&str, &str)] = &[
     ("'%5d|%s|%.2f'", "its"),
     ("'%d'", "i"),
@@ -1027,6 +1042,10 @@ impl<'s> Gen<'s> {
         if c < 0.78 {
             let (x, _) = self.expr(sc, W::T, dm);
             let not = self.pick(&["", "NOT "]);
+            if self.chance(0.3) {
+                let pat = self.pick(GLOB_PATS);
+                return b(mk('b', vec![x, tok(format!(" {not}GLOB {pat}"))]));
+            }
             let pat = self.pick(LIKE_PATS);
             return b(mk('b', vec![x, tok(format!(" {not}LIKE {pat}"))]));
         }

@@ -393,7 +393,7 @@ fn paren_depth(sql: &str) -> usize {
     m
 }
 
-/// "Parser": `GLOB`, `TRIM(s, chars)`, `REPLACE INTO` do not parse,
+/// "Parser": `TRIM(s, chars)`, `REPLACE INTO` do not parse,
 /// `REGEXP` is rejected, parentheses nest at most 47 deep.
 fn parser(ctx: &Ctx) -> bool {
     if ctx.outcome != Outcome::SqawkErr {
@@ -402,7 +402,7 @@ fn parser(ctx: &Ctx) -> bool {
     let toks = tokens(ctx.sql);
     let u: Vec<String> = toks.iter().map(|t| upper(t)).collect();
 
-    u.iter().any(|t| t == "GLOB" || t == "REGEXP")
+    u.iter().any(|t| t == "REGEXP")
         || u.windows(2).any(|w| w[0] == "REPLACE" && w[1] == "INTO")
         || trim_two_args(&u)
         || paren_depth(ctx.sql) > 47
